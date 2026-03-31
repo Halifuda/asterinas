@@ -8,6 +8,7 @@
 //! until the refactored implementation is ready to take over deliberately.
 
 mod boot_sector;
+mod io;
 mod super_block;
 
 #[cfg(ktest)]

@@ -9,10 +9,10 @@
 
 use core::mem::size_of;
 
-use aster_block::{BlockDevice, BLOCK_SIZE};
+use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::super_block::ExfatSuperBlock;
+use super::{io::read_metadata_bytes, super_block::ExfatSuperBlock};
 use crate::prelude::*;
 
 pub(super) const BOOT_SIGNATURE: u16 = 0xAA55;
@@ -142,10 +142,12 @@ pub(super) fn verify_primary_boot_region_checksum(
 ) -> Result<()> {
     let bytes_per_sector = 1usize << boot_sector.sector_size_bits;
     let boot_region = read_main_boot_region(block_device, bytes_per_sector)?;
-    let checksum_sector = read_volume_bytes(
+
+    let mut checksum_sector = vec![0; bytes_per_sector];
+    read_metadata_bytes(
         block_device,
         EXFAT_CHECKSUM_SECTOR_INDEX * bytes_per_sector,
-        bytes_per_sector,
+        &mut checksum_sector,
     )?;
 
     // exFAT checksum calculation skips the mutable checksum fields so the
@@ -172,36 +174,10 @@ fn read_main_boot_region(
     block_device: &dyn BlockDevice,
     bytes_per_sector: usize,
 ) -> Result<Vec<u8>> {
-    read_volume_bytes(
-        block_device,
-        0,
-        EXFAT_BOOT_REGION_SECTORS * bytes_per_sector,
-    )
-}
+    let mut boot_region = vec![0; EXFAT_BOOT_REGION_SECTORS * bytes_per_sector];
+    read_metadata_bytes(block_device, 0, &mut boot_region)?;
 
-fn read_volume_bytes(block_device: &dyn BlockDevice, offset: usize, len: usize) -> Result<Vec<u8>> {
-    let read_end = offset
-        .checked_add(len)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata read overflow"))?;
-    // Expand the request to whole device blocks so the checksum path can read
-    // arbitrary boot-region slices without relying on device-specific alignment.
-    let aligned_start = offset / BLOCK_SIZE * BLOCK_SIZE;
-    let aligned_blocks = read_end
-        .div_ceil(BLOCK_SIZE)
-        .checked_sub(aligned_start / BLOCK_SIZE)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata read underflow"))?;
-    let aligned_len = aligned_blocks
-        .checked_mul(BLOCK_SIZE)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata read overflow"))?;
-
-    let mut aligned_buf = vec![0; aligned_len];
-    block_device.read_bytes(aligned_start, &mut aligned_buf)?;
-
-    let start_offset = offset - aligned_start;
-    let end_offset = start_offset
-        .checked_add(len)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata slice overflow"))?;
-    Ok(aligned_buf[start_offset..end_offset].to_vec())
+    Ok(boot_region)
 }
 
 pub(super) fn persistent_volume_flags(boot_sector: &ExfatBootSector) -> u32 {

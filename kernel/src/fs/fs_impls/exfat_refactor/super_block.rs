@@ -4,9 +4,12 @@
     reason = "Superblock geometry is staged before mount integration."
 )]
 
+use core::ops::Range;
+
 use super::boot_sector::{
     persistent_volume_flags, ExfatBootSector, EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS,
 };
+use crate::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ExfatSuperBlock {
@@ -64,5 +67,138 @@ impl From<ExfatBootSector> for ExfatSuperBlock {
             cluster_search_ptr: EXFAT_FIRST_CLUSTER,
             used_clusters: !0,
         }
+    }
+}
+
+impl ExfatSuperBlock {
+    pub(super) fn sector_size(&self) -> usize {
+        self.sector_size as usize
+    }
+
+    pub(super) fn cluster_size(&self) -> usize {
+        self.cluster_size as usize
+    }
+
+    pub(super) fn cluster_size_in_sectors(&self) -> u32 {
+        self.sect_per_cluster
+    }
+
+    pub(super) fn is_valid_cluster(&self, cluster: u32) -> bool {
+        cluster >= EXFAT_RESERVED_CLUSTERS && cluster <= self.num_clusters
+    }
+
+    pub(super) fn is_cluster_range_valid(&self, range: Range<u32>) -> bool {
+        let Some(range_end_limit) = self.num_clusters.checked_add(1) else {
+            return false;
+        };
+
+        range.start >= EXFAT_RESERVED_CLUSTERS
+            && range.start <= range.end
+            && range.end <= range_end_limit
+    }
+
+    pub(super) fn cluster_to_byte_offset(&self, cluster: u32) -> Result<usize> {
+        let sector = self.cluster_to_sector(cluster)?;
+        let byte_offset = sector
+            .checked_mul(self.sector_size as u64)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "cluster byte offset overflow"))?;
+
+        usize::try_from(byte_offset)
+            .map_err(|_| Error::with_message(Errno::EINVAL, "cluster byte offset overflow"))
+    }
+
+    pub(super) fn cluster_to_sector(&self, cluster: u32) -> Result<u64> {
+        let cluster_index = self.cluster_data_index(cluster)?;
+        // Translate by whole-cluster strides from the data-region base.
+        let sector_offset = cluster_index
+            .checked_mul(self.sect_per_cluster as u64)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "cluster sector offset overflow"))?;
+
+        self.data_start_sector
+            .checked_add(sector_offset)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "cluster sector offset overflow"))
+    }
+
+    fn cluster_data_index(&self, cluster: u32) -> Result<u64> {
+        if !self.is_valid_cluster(cluster) {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "invalid data-region cluster",
+            ));
+        }
+
+        Ok((cluster - EXFAT_RESERVED_CLUSTERS) as u64)
+    }
+}
+
+#[cfg(ktest)]
+mod tests {
+    use ostd::prelude::ktest;
+
+    use super::EXFAT_RESERVED_CLUSTERS;
+    use crate::fs::fs_impls::exfat_refactor::{
+        boot_sector::{read_primary_boot_sector, read_primary_super_block},
+        test_support::load_exfat_disk,
+    };
+
+    #[ktest]
+    fn cluster_translation_matches_super_block_geometry() {
+        // Confirms cluster translation helpers agree with the geometry derived
+        // from the boot sector for the root directory cluster.
+        let disk = load_exfat_disk();
+        let boot_sector = read_primary_boot_sector(&disk).unwrap();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let root_cluster = boot_sector.root_cluster;
+        let expected_sector = u64::from(boot_sector.cluster_offset)
+            + u64::from(root_cluster - EXFAT_RESERVED_CLUSTERS)
+                * u64::from(1u32 << boot_sector.sector_per_cluster_bits);
+        let expected_byte_offset = expected_sector * u64::from(super_block.sector_size);
+
+        assert_eq!(super_block.sector_size(), super_block.sector_size as usize);
+        assert_eq!(
+            super_block.cluster_size(),
+            super_block.cluster_size as usize
+        );
+        assert_eq!(
+            super_block.cluster_size_in_sectors(),
+            super_block.sect_per_cluster
+        );
+        assert_eq!(
+            super_block.cluster_to_sector(root_cluster).unwrap(),
+            expected_sector
+        );
+        assert_eq!(
+            super_block.cluster_to_byte_offset(root_cluster).unwrap(),
+            expected_byte_offset as usize
+        );
+    }
+
+    #[ktest]
+    fn cluster_translation_rejects_invalid_clusters() {
+        // Confirms geometry helpers reject reserved or out-of-range cluster
+        // numbers instead of silently translating them into data offsets.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let invalid_cluster = super_block.num_clusters.checked_add(1).unwrap();
+
+        assert!(!super_block.is_valid_cluster(0));
+        assert!(!super_block.is_valid_cluster(1));
+        assert!(!super_block.is_valid_cluster(invalid_cluster));
+        assert!(super_block.cluster_to_sector(0).is_err());
+        assert!(super_block.cluster_to_byte_offset(invalid_cluster).is_err());
+    }
+
+    #[ktest]
+    fn cluster_range_validation_uses_half_open_semantics() {
+        // Confirms range validation accepts the canonical half-open data range
+        // and rejects ranges that cross reserved or one-past-the-end bounds.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let range_end = super_block.num_clusters.checked_add(1).unwrap();
+
+        assert!(super_block.is_cluster_range_valid(EXFAT_RESERVED_CLUSTERS..range_end));
+        assert!(super_block.is_cluster_range_valid(range_end..range_end));
+        assert!(!super_block.is_cluster_range_valid(0..range_end));
+        assert!(!super_block.is_cluster_range_valid(EXFAT_RESERVED_CLUSTERS..range_end + 1));
     }
 }
