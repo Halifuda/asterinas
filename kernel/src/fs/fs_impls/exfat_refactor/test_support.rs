@@ -56,6 +56,12 @@ impl Debug for ExfatMemoryDisk {
 
 impl BlockDevice for ExfatMemoryDisk {
     fn enqueue(&self, bio: SubmittedBio) -> core::prelude::v1::Result<(), BioEnqueueError> {
+        if !matches!(bio.type_(), BioType::Read | BioType::Write) {
+            // The fixture only models data-transfer BIOs so unsupported types
+            // fail loudly instead of pretending to succeed.
+            return Err(BioEnqueueError::Refused);
+        }
+
         // BIO sector identifiers are fixed 512-byte logical sectors regardless of
         // the exFAT volume's own sector geometry.
         let start_device_ofs = bio.sid_range().start.to_raw() as usize * BIO_SECTOR_SIZE;
@@ -73,7 +79,7 @@ impl BlockDevice for ExfatMemoryDisk {
                     .writer()
                     .skip(current_device_ofs)
                     .write(&mut seg.inner_dma().reader().unwrap()),
-                _ => 0,
+                _ => unreachable!("unsupported BIO types are rejected above"),
             };
             current_device_ofs += size;
         }

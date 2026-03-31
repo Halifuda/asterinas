@@ -26,6 +26,7 @@ pub(super) const VOLUME_DIRTY: u16 = 0x0002;
 const EXFAT_BOOT_REGION_SECTORS: usize = 11;
 const EXFAT_CHECKSUM_SECTOR_INDEX: usize = 11;
 const EXFAT_FAT_OFFSET_MIN: u32 = 24;
+const EXFAT_MAX_CLUSTER_SIZE_BITS: u8 = 25;
 const EXFAT_NAME: [u8; 8] = *b"EXFAT   ";
 const EXFAT_VOLUME_FLAG_MASK: u16 = VOLUME_DIRTY | MEDIA_FAILURE;
 const FAT_ENTRY_SIZE: u64 = size_of::<u32>() as u64;
@@ -90,7 +91,11 @@ pub(super) fn validate_primary_boot_sector(boot_sector: &ExfatBootSector) -> Res
         return_errno_with_message!(Errno::EINVAL, "bogus sector size bits");
     }
 
-    if boot_sector.sector_size_bits + boot_sector.sector_per_cluster_bits > 25 {
+    let cluster_size_bits = boot_sector
+        .sector_size_bits
+        .checked_add(boot_sector.sector_per_cluster_bits)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "bogus sector size bits per cluster"))?;
+    if cluster_size_bits > EXFAT_MAX_CLUSTER_SIZE_BITS {
         return_errno_with_message!(Errno::EINVAL, "bogus sector size bits per cluster");
     }
 

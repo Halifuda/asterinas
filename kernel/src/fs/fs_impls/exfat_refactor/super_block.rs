@@ -35,8 +35,12 @@ impl From<ExfatBootSector> for ExfatSuperBlock {
     fn from(boot_sector: ExfatBootSector) -> Self {
         let sector_size = 1u32 << boot_sector.sector_size_bits;
         let sect_per_cluster = 1u32 << boot_sector.sector_per_cluster_bits;
-        let cluster_size_bits =
-            u32::from(boot_sector.sector_size_bits + boot_sector.sector_per_cluster_bits);
+        let cluster_size_bits = u32::from(
+            boot_sector
+                .sector_size_bits
+                .checked_add(boot_sector.sector_per_cluster_bits)
+                .expect("validated boot sector must cap cluster size bits"),
+        );
         let cluster_size = 1u32 << cluster_size_bits;
         let fat1_start_sector = u64::from(boot_sector.fat_offset);
         // A single-FAT volume aliases the second start sector to the primary
@@ -49,7 +53,10 @@ impl From<ExfatBootSector> for ExfatSuperBlock {
 
         Self {
             num_sectors: boot_sector.vol_length,
-            num_clusters: boot_sector.cluster_count + EXFAT_RESERVED_CLUSTERS,
+            num_clusters: boot_sector
+                .cluster_count
+                .checked_add(EXFAT_RESERVED_CLUSTERS)
+                .expect("validated boot sector must cap cluster count"),
             sector_size,
             cluster_size,
             cluster_size_bits,
@@ -65,7 +72,7 @@ impl From<ExfatBootSector> for ExfatSuperBlock {
             // Allocation scanning starts at the first allocatable cluster and
             // advances from there once mount-time allocation is wired in.
             cluster_search_ptr: EXFAT_FIRST_CLUSTER,
-            used_clusters: !0,
+            used_clusters: u32::MAX,
         }
     }
 }
