@@ -13,7 +13,7 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 ## 1. Global Rules
 
 1. Every agent must obey the repository-level `AGENTS.md`.
-2. Any code written by a creator must fully comply with the coding guidelines in the repository-level `AGENTS.md`. This is a hard requirement, not a best-effort preference.
+2. Any code written by a creator or reviewer must fully comply with the coding guidelines in the repository-level `AGENTS.md`. This is a hard requirement, not a best-effort preference.
 3. `kernel/` code must remain safe Rust. No agent may introduce `unsafe` into `kernel/src/fs/fs_impls/exfat_refactor/`.
 4. The main agent is the only scheduler. Subagents do not self-assign work or widen scope.
 5. The main agent is the only agent allowed to modify `COMPONENT_INDEX.md` or to change a component's official state or owner.
@@ -25,7 +25,7 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 11. All code and artifact edits must stay inside the workspace at `/home/halifuda/asterinas` and inside the write scope assigned by the main agent. No agent may modify external dependencies, toolchain sources, container image contents, home-directory tools, caches, or any code outside the workspace, even if the external bug appears obvious. If an external bug is suspected, the agent must collect evidence and hand it to the main agent for user review instead of patching it.
 12. The designer must still state test obligations, but `#[ktest]` authoring and other test-writing are checker-owned by default. Creators must ignore test-authoring obligations in the spec unless the main agent explicitly overrides this rule.
 13. Kernel build or run authority is role-restricted for efficiency:
-    - the main agent, architect, designer, and advisor must not execute kernel build, test, or QEMU run commands;
+    - the main agent, architect, designer, advisor, and reviewer must not execute kernel build, test, or QEMU run commands;
     - the creator may execute compile-only kernel commands when needed for owned code, but must not execute kernel runtime or test commands such as `cargo osdk test`, `make ktest`, or direct QEMU runs;
     - the checker owns kernel test execution and other runtime verification commands.
     Ordinary read, search, and artifact-inspection commands remain allowed for every role.
@@ -37,6 +37,7 @@ The workflow is intentionally process-heavy because both goals matter. The proce
     - prefer comments that explain why the code is structured this way, what assumption is being protected, or what subtle case it handles;
     - when a doc comment is warranted, it must follow the repository style rules in `AGENTS.md` and the coding-guidelines book.
 17. Every checker-owned `#[ktest]` should carry a short comment that states the scenario or property being validated, because tests are read as executable specification and their purpose should be obvious without reverse-engineering the setup.
+18. Every active workflow step writes its own handoff artifact. No role should append new step results into an older role's file or into a file from a previous phase. File boundaries are role boundaries.
 
 ## 2. Roles
 
@@ -47,8 +48,7 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 - Maintains [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md).
 - Maintains environment continuity information so the project can survive machine switches, new threads, or interrupted sessions with minimal rediscovery work.
 - Assigns component ownership and decides when a handoff is mature enough to advance.
-- Decides when to spawn checker/advisor passes.
-- Accepts or rejects architect, designer, creator, checker, and advisor artifacts.
+- Accepts or rejects architect, designer, creator, checker, advisor, and reviewer artifacts.
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
 - Resolves conflicts between specification, implementation, and existing code constraints.
 - Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
@@ -67,22 +67,29 @@ The workflow is intentionally process-heavy because both goals matter. The proce
   - Modular specification: dependencies, provided interfaces, hidden internals, touched files.
   - Functional specification: accepted inputs, produced outputs, state transitions, invariants, and error cases.
   - Concurrency specification: lock ordering, atomicity, serialization assumptions, and concurrent access rules.
-- Must separate what belongs to the first creator pass from what belongs to the later concurrency pass whenever concurrency work is non-trivial.
+- Must explicitly split the component into:
+  - serial implementation obligations for the first creator pass,
+  - serial-phase checker-owned test obligations,
+  - concurrency implementation obligations for the later creator pass,
+  - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required.
 - Must state test obligations for the checker, not as creator-owned work.
 - Must make the component implementable without creator guesswork.
 
 ### Creator
 
-- Implements exactly one specified component or one advisor-defined fix batch.
+- Implements exactly one specified component pass or one advisor-defined repair batch.
 - Must fully comply with the coding guidelines in the repository-root `AGENTS.md`.
 - Follows the spec, repository style, and all safety constraints.
 - Must add comments where the implemented intent or boundary would otherwise be non-obvious, but must not pad the code with paraphrasing comments.
 - Must treat comments as part of correctness documentation: add them when they protect a hidden assumption, a layout invariant, or a non-obvious boundary, and omit them when the code already reads plainly.
-- Must implement in staged passes. The normal first pass covers modular and functional obligations only; the later pass covers concurrency obligations incrementally on top of the earlier checked code, unless the main agent explicitly records that the concurrency obligations are empty or trivial.
+- Must implement in staged passes:
+  - serial pass first,
+  - serial repair batches as needed,
+  - concurrency pass second,
+  - concurrency repair batches as needed.
 - Must ignore spec sections that require writing or updating ktests, because test authoring is checker-owned by default.
 - Should ask the main agent to split work further when the designer spec still spans too many modules or behaviors for one bounded pass.
 - May run compile-only kernel commands, but must not run kernel tests or QEMU-backed runtime commands.
-- Should add concise comments only where the implemented code is not self-explanatory. Do not add comments that merely paraphrase straightforward code.
 - Must not silently extend scope, redesign interfaces, or postpone important details with vague TODOs.
 
 ### Checker
@@ -91,20 +98,52 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 - Owns test authoring for verification: may add, refine, or repair ktests and other test-only coverage needed to validate the component or capture a regression.
 - May use code review, targeted tests, focused fault hunting, and test-writing to turn missing coverage into executable checks.
 - Must keep checker-authored ktests understandable. Each ktest should carry a short comment describing the scenario and expected behavior unless that intent is already unmistakable from the test name and body.
-- When the main agent explicitly assigns comment-only cleanup, the checker may adjust comments in nearby production and test code, but must not change observable behavior in the same pass.
 - Reports concrete failures, missing tests, spec mismatches, regression risks, and any test additions or updates it made.
 - Must check and record whether the current environment appears to have KVM acceleration available before relying on performance-sensitive test expectations.
 - Owns kernel runtime verification commands for this workflow.
-- Must keep checker-authored tests readable. Each `#[ktest]` should include a brief comment that says what scenario or contract it is checking.
 - Should default to test-only code changes. It must not modify production implementation except when the main agent explicitly permits a checker-owned fix.
+- Serves three distinct checkpoints:
+  - serial-pass validation,
+  - concurrency-pass validation when the designer requires it,
+  - final post-review validation after the reviewer finishes quality edits.
 
 ### Advisor
 
-- Converts checker findings and spec obligations into an actionable repair plan.
+- Converts checker findings into an actionable repair plan for the creator.
+- Operates only after checker phases in the serial or concurrency loops.
 - Tells the creator what to change, why it is required, and what counts as done.
+- Does not own reviewer findings, because reviewer edits are direct.
 - May be the same agent as the checker, but the output artifact must still be advisory rather than exploratory.
 
-## 3. Artifact Layout
+### Reviewer
+
+- Performs a code-quality review after the implementation and checker or advisor loops are complete.
+- Checks the code against repository coding guidelines, Rust engineering style, readability, API boundaries, type-level invariant expression, visibility hygiene, and comment quality.
+- May directly modify production or test code to fix code-quality issues inside the owned scope.
+- Must not widen component scope, redesign the feature, or replace checker-owned behavioral verification.
+- Must not run kernel build, test, or QEMU commands.
+- Must leave a reviewer report that explains findings, edits made, and any remaining concerns that need a final checker pass.
+
+## 3. Required Step Sequence
+
+Every component follows the same ordered workflow unless the main agent explicitly records a justified deviation:
+
+1. Basic serial implementation by the creator.
+2. Serial implementation test writing and verification by the checker.
+3. Advisor repair plan based on checker findings, followed by repeated `creator -> checker -> advisor` serial repair cycles until the checker passes the serial phase.
+4. Concurrency implementation by the creator against the designer's concurrency specification.
+5. Concurrency test writing and verification by the checker, but only when the designer explicitly requires concurrency-specific testing. If the designer records that no dedicated concurrency tests are required, the workflow may move directly from step 4 to step 7. A simple big-lock implementation still belongs to the concurrency phase if that is what the spec calls for.
+6. Advisor repair plan based on concurrency-phase checker findings, followed by repeated `creator -> checker -> advisor` concurrency repair cycles until the checker passes the concurrency phase or the phase is explicitly waived.
+7. Code-quality review by the reviewer, including direct quality edits when needed.
+8. Final checker pass after the reviewer finishes.
+
+Consequences:
+
+- Advisor only reacts to checker findings from the serial or concurrency loops.
+- Reviewer does not produce advisor work; reviewer fixes are followed directly by a checker pass.
+- A component is not ready for acceptance until the final checker pass after review is complete.
+
+## 4. Artifact Layout
 
 All planning and handoff artifacts live under:
 
@@ -131,31 +170,51 @@ Each component gets its own directory once the architect creates it:
 .agents/components/<component-id>/
   00_architect.md
   01_designer_spec.md
-  02_creator_log.md
-  03_checker_report.md
-  04_advisor_actions.md
-  10_creator_log.md
-  11_checker_report.md
-  12_advisor_actions.md
-  ...
+  10_creator_serial.md
+  11_checker_serial.md
+  12_advisor_serial.md
+  13_creator_serial_repair.md
+  14_checker_serial_repair.md
+  15_advisor_serial_repair.md
+  20_creator_concurrency.md
+  21_checker_concurrency.md
+  22_advisor_concurrency.md
+  23_creator_concurrency_repair.md
+  24_checker_concurrency_repair.md
+  25_advisor_concurrency_repair.md
+  30_reviewer_report.md
+  31_checker_final.md
 ```
 
 Rules:
 
 1. The main agent creates the component directory and assigns ownership.
 2. Artifact prefixes are two-digit chronological sequence numbers chosen by the main agent.
-3. The first cycle should normally use `00_architect.md`, `01_designer_spec.md`, `02_creator_log.md`, `03_checker_report.md`, and `04_advisor_actions.md`.
-4. Later implementation or repair cycles should continue with the next available decade so filesystem sort order matches chronology. For example: `10_creator_log.md`, `11_checker_report.md`, `12_advisor_actions.md`, then `20_*` for the next cycle.
-5. Each subagent writes only its own artifact unless the main agent explicitly instructs otherwise.
-6. Later passes create new numbered artifacts instead of appending to closed artifacts from earlier cycles. During one active pass, the owning agent may append to its current artifact while work is in progress.
-7. Creators edit implementation files plus the currently assigned `*_creator_log.md`, but do not overwrite design or review artifacts.
-8. Checkers may edit test code and the currently assigned `*_checker_report.md`, but should not edit production implementation unless the main agent explicitly instructs otherwise.
-9. No subagent may modify artifacts owned by another role, and no subagent may update `COMPONENT_INDEX.md`.
-10. Main-agent handoff notes should summarize environment facts, validated commands, current component states, open blockers, and the next recommended action so a future session can resume with minimal rediscovery.
+3. Each workflow step owns one file. The file name must reveal both the role and the phase.
+4. The baseline phase slots are:
+   - `00` architect,
+   - `01` designer,
+   - `10` serial creator,
+   - `11` serial checker,
+   - `12` serial advisor,
+   - `20` concurrency creator,
+   - `21` concurrency checker,
+   - `22` concurrency advisor,
+   - `30` reviewer,
+   - `31` final checker.
+5. Repair cycles within a phase continue numerically inside that decade, for example `13`, `14`, `15` for one serial repair loop and `23`, `24`, `25` for one concurrency repair loop. If more than one repair loop is needed in the same phase, continue the numbering monotonically within the same decade.
+6. Later passes create new numbered artifacts instead of appending to closed artifacts from earlier steps. During one active step, the owning agent may append only to its current artifact while work is in progress.
+7. Each subagent writes only its own artifact unless the main agent explicitly instructs otherwise.
+8. Creators edit implementation files plus the currently assigned `creator` artifact, but do not overwrite design, checker, advisor, or reviewer artifacts.
+9. Checkers may edit test code and the currently assigned `checker` artifact, but should not edit production implementation unless the main agent explicitly instructs otherwise.
+10. Advisors edit only their own advisory artifact.
+11. Reviewers may edit code plus the currently assigned reviewer artifact, but do not edit checker or advisor artifacts.
+12. No subagent may modify artifacts owned by another role, and no subagent may update `COMPONENT_INDEX.md`.
+13. Main-agent handoff notes should summarize environment facts, validated commands, current component states, open blockers, and the next recommended action so a future session can resume with minimal rediscovery.
 
-## 4. Workflow States
+## 5. Workflow States
 
-Each component moves through these states:
+Each component moves through these high-level states:
 
 1. `Planned`
    The component is listed in `COMPONENT_INDEX.md` with dependencies and a size budget.
@@ -163,31 +222,38 @@ Each component moves through these states:
    `00_architect.md` exists and defines scope, order, and readiness for design.
 3. `Specified`
    `01_designer_spec.md` exists and is complete in modular, functional, and concurrency dimensions.
-4. `Implementing`
-   A creator is actively modifying code for the currently assigned implementation pass and maintaining the current `*_creator_log.md`.
-5. `Implemented`
-   The code change and creator self-check are complete.
-6. `Checked`
-   The current `*_checker_report.md` exists for the current implementation pass.
-7. `Advised`
-   The current `*_advisor_actions.md` turns findings into a bounded repair set.
-8. `Accepted`
+4. `SerialImplementing`
+   A creator is actively implementing the first serial pass or a serial repair batch.
+5. `SerialChecked`
+   The current serial checker artifact exists and the serial phase is either passing or awaiting an advisor decision.
+6. `ConcurrencyImplementing`
+   A creator is actively implementing the concurrency pass or a concurrency repair batch.
+7. `ConcurrencyChecked`
+   The current concurrency checker artifact exists and the concurrency phase is either passing or awaiting an advisor decision.
+8. `Reviewing`
+   The reviewer is actively checking or editing code quality.
+9. `FinalChecked`
+   The post-review checker artifact exists.
+10. `Accepted`
    The main agent judges the component complete enough to become a dependency of later work.
+11. `Blocked`
+   Progress is paused because an unresolved dependency, protocol violation, or environment issue prevents safe advancement.
 
 Normal flow is:
 
 ```text
 Planned -> Architected -> Specified
-  -> Implementing (modular/functional pass) -> Implemented -> Checked
-  -> Advised or ready for concurrency pass
-  -> Implementing (concurrency pass) -> Implemented -> Checked
-  -> Advised as needed -> Implementing -> Implemented -> Checked -> Accepted
+  -> SerialImplementing -> SerialChecked
+  -> SerialImplementing -> SerialChecked (repeat as needed)
+  -> ConcurrencyImplementing -> ConcurrencyChecked
+  -> ConcurrencyImplementing -> ConcurrencyChecked (repeat as needed)
+  -> Reviewing -> FinalChecked -> Accepted
 ```
 
-The main agent may skip the dedicated concurrency pass only if it explicitly records that the component's concurrency obligations are empty, trivial, or intentionally deferred to a later accepted component.
-If checker finds no actionable issue in the final required pass, the main agent may move directly from `Checked` to `Accepted`.
+The main agent may skip the dedicated concurrency checker phase only if the designer explicitly records that no concurrency-specific tests are required for the component.
+The main agent may skip the dedicated concurrency creator phase only if the designer explicitly records that the concurrency obligations are empty, trivial, or intentionally deferred to a later accepted component.
 
-## 5. Gate Conditions
+## 6. Gate Conditions
 
 ### Architect -> Designer
 
@@ -208,8 +274,10 @@ The designer handoff is valid only if it states:
 - functional behavior including failure cases,
 - state changes and maintained invariants,
 - concurrency and atomicity rules,
-- which obligations belong to the first modular or functional implementation pass and which belong to the later concurrency pass,
-- checker-owned tests or observable checks that should pass,
+- which obligations belong to the serial creator pass,
+- which checker-owned tests belong to the serial phase,
+- which obligations belong to the concurrency creator pass,
+- whether the concurrency phase requires checker-owned concurrent tests or explicitly does not,
 - explicit non-goals for this component.
 
 ### Creator -> Checker
@@ -218,24 +286,27 @@ The creator handoff is valid only if it states:
 
 - which files changed,
 - which spec revision it implemented,
-- which implementation pass it completed, for example modular or functional pass, concurrency pass, or advisor-defined repair batch,
+- which pass it completed, for example serial implementation, serial repair batch, concurrency implementation, or concurrency repair batch,
 - any approved deviation,
 - which self-checks were run,
-- which spec obligations remain intentionally deferred to a later pass,
+- which obligations remain intentionally deferred to a later pass,
 - known limitations that remain in scope.
 
-### Checker -> Advisor
+### Checker -> Advisor or Main Agent
 
 The checker handoff is valid only if it states:
 
 - confirmed behaviors,
 - failing behaviors,
 - tests added, updated, or still missing,
-- whether the check covered the modular or functional pass, the concurrency pass, or a repair batch,
+- whether the check covered the serial phase, the concurrency phase, or the final post-review phase,
 - whether KVM appeared available and whether the observed run used KVM or fell back to TCG when that mattered to interpretation,
 - spec clauses that were violated or left unverified,
 - regression risk,
 - recommended next owner.
+
+If the current checker pass is a serial or concurrency pass and it still has blocking findings, the next owner should normally be `advisor`.
+If the current checker pass is the final post-review pass and it has no blocking findings, the next owner should normally be `main-agent`.
 
 ### Advisor -> Creator
 
@@ -243,10 +314,22 @@ The advisor handoff is valid only if it states:
 
 - a numbered repair list,
 - the reason each repair is needed,
-- which spec clause or checker finding it addresses,
-- what evidence will mark the repair complete.
+- which checker finding it addresses,
+- what evidence will mark the repair complete,
+- whether the repair belongs to the serial loop or the concurrency loop.
 
-## 6. Specification Quality Bar
+### Reviewer -> Checker
+
+The reviewer handoff is valid only if it states:
+
+- what code-quality issues were reviewed,
+- what edits were made directly,
+- which guidelines or style principles those edits address,
+- any residual quality concerns left for later components,
+- the exact files touched,
+- that the next owner is the final checker.
+
+## 7. Specification Quality Bar
 
 Every designer specification must be detailed enough that a creator can implement without inventing hidden policy.
 
@@ -258,20 +341,22 @@ Minimum required sections:
 4. Functional rules in precondition/action/postcondition form.
 5. Error handling and invariants.
 6. Concurrency and atomicity constraints.
-7. Checker-owned test obligations.
-8. Pass boundaries when modular or functional work and concurrency work should not land in the same creator pass.
+7. Serial-phase checker-owned test obligations.
+8. Concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required.
+9. Pass boundaries when serial work and concurrency work should not land in the same creator pass.
 
 If any of these are missing, the component is not ready for implementation.
 
-## 7. Checker Policy
+## 8. Checker Policy
 
 Checker passes should be inserted:
 
-- after the modular or functional pass first reaches `Implemented`,
-- after the concurrency pass reaches `Implemented`,
-- after any fix batch that changes behavior,
-- before promoting a component to a dependency for later components,
-- when architect or main agent suspects the component boundary is wrong.
+- after the serial pass first reaches a creator handoff,
+- after every serial repair batch that changes behavior,
+- after the concurrency pass first reaches a creator handoff when the designer requires concurrency validation,
+- after every concurrency repair batch that changes behavior,
+- after the reviewer completes quality edits,
+- before promoting a component to a dependency for later components.
 
 Checker output should prefer precise findings over narrative summary.
 When behavior-changing code lacks adequate coverage, the checker should normally add or request targeted ktests instead of leaving the obligation purely narrative.
@@ -279,7 +364,23 @@ When test runtime or machine capability matters, the checker should also record 
 When checker reruns multiple verification commands, it should execute kernel test commands sequentially instead of in parallel.
 When the checker writes or moves `#[ktest]` code, it should prefer the closest relevant module plus a small shared test-support module for fixtures, instead of centralizing every test in `mod.rs`.
 
-## 8. Refactor Policy
+## 9. Reviewer Policy
+
+Reviewer passes should focus on static code quality rather than re-running behavioral verification.
+
+The reviewer should check at least:
+
+1. checked arithmetic and boundary validation,
+2. whether invariants are expressed through types or interfaces where practical,
+3. visibility hygiene and module boundaries,
+4. comment and doc-comment quality,
+5. Rust readability and control-flow clarity,
+6. whether test fixtures hide mistakes instead of surfacing them.
+
+The reviewer may directly edit code, but those edits must stay within the accepted component scope.
+Behavior-changing reviewer edits are allowed only when they are clearly in service of code-quality correctness and the final checker can re-validate them.
+
+## 10. Refactor Policy
 
 The default refactor strategy is a parallel in-tree implementation:
 
@@ -289,13 +390,14 @@ The default refactor strategy is a parallel in-tree implementation:
 4. Validation for the refactor should rely first on targeted ktests and dedicated integration tests, not on replacing the legacy default mount path early.
 5. Switching the registered filesystem type from legacy `exfat` to `exfat_refactor` is a deliberate project milestone, not an incidental side effect of ongoing work.
 
-## 9. Acceptance Policy
+## 11. Acceptance Policy
 
 A component may be marked `Accepted` only when:
 
 1. Its artifacts exist and are internally consistent.
 2. Its implementation matches the latest accepted designer spec or approved advisor change set.
-3. Blocking findings are resolved or consciously deferred by the main agent.
-4. The component is stable enough to become a dependency for later components.
+3. Blocking findings from checker and reviewer work are resolved or consciously deferred by the main agent.
+4. The final post-review checker pass reports no blocking findings.
+5. The component is stable enough to become a dependency for later components.
 
 Acceptance does not mean the whole filesystem is done. It means later components may build on it without reopening its core contract by default.

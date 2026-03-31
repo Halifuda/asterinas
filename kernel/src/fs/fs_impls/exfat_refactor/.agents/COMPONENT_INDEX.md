@@ -10,10 +10,12 @@ Allowed states:
 - `Planned`
 - `Architected`
 - `Specified`
-- `Implementing`
-- `Implemented`
-- `Checked`
-- `Advised`
+- `SerialImplementing`
+- `SerialChecked`
+- `ConcurrencyImplementing`
+- `ConcurrencyChecked`
+- `Reviewing`
+- `FinalChecked`
 - `Accepted`
 - `Blocked`
 

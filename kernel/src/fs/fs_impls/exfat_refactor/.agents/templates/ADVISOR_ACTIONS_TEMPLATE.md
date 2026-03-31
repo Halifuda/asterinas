@@ -10,22 +10,23 @@
 - Author:
 - Date:
 - Based on checker artifact:
+- Loop kind: `serial` or `concurrency`
 
-## Repair Plan
+## Summary
 
-Use numbered items. Each item must be directly actionable by one creator pass.
+Summarize why this repair batch is needed and what phase it belongs to.
 
-1. Change:
-   Reason:
-   Source:
-   Done when:
+## Required Repairs
 
-Add more items as needed.
+### Repair 1
 
-## Deferred Issues
+- Change required:
+- Why this is needed:
+- Checker finding addressed:
+- Completion evidence:
 
-List any issue intentionally deferred beyond this fix batch and explain why.
+Repeat as needed.
 
-## Retest Plan
+## Out Of Scope
 
-State what the checker should rerun after the creator finishes.
+List what the creator must not change during this repair batch.

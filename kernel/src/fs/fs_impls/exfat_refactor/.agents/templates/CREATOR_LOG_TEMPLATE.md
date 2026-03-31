@@ -6,10 +6,11 @@
 
 - Component ID:
 - Title:
-- Status: `Implementing` or `Implemented`
+- Status: `SerialImplementing` or `ConcurrencyImplementing`
 - Author:
 - Date:
 - Implemented spec:
+- Pass kind: `serial implementation`, `serial repair`, `concurrency implementation`, or `concurrency repair`
 
 ## Planned File Ownership
 
@@ -18,7 +19,7 @@
 
 ## Implementation Notes
 
-Describe what was implemented and how it maps back to the specification.
+Describe what was implemented and how it maps back to the specification or advisor repair list.
 Call out any non-obvious comments that were added to document assumptions or boundaries.
 
 ## Approved Deviations
@@ -34,4 +35,4 @@ Write `None` if there was no deviation.
 
 ## Remaining Risks
 
-List only risks still relevant to this component.
+List only risks still relevant to this pass.

@@ -6,10 +6,11 @@
 
 - Component ID:
 - Title:
-- Status: `Checked`
+- Status: `SerialChecked`, `ConcurrencyChecked`, or `FinalChecked`
 - Author:
 - Date:
 - Checked implementation:
+- Pass kind: `serial`, `concurrency`, or `post-review final`
 
 ## Scope of Review
 

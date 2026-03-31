@@ -20,44 +20,48 @@
 
 - Dependencies:
 - Interfaces provided:
-- Files/modules touched:
+- Files or modules touched:
 - Hidden implementation details:
 
 ## Functional Specification
 
-For each externally visible operation, write a precondition/action/postcondition rule.
-
-### Operation
-
-- Name:
-- Inputs:
-- Preconditions:
-- Actions:
-- Outputs:
-- Postconditions:
-- Error cases:
-
-Repeat the operation block as needed.
+Describe the component's externally relevant behavior in precondition or action or postcondition form.
 
 ## Invariants
 
-List the invariants this component establishes or preserves.
+List the invariants that later passes may rely on.
 
 ## Concurrency Specification
 
 - Shared state:
-- Locking or serialization assumptions:
-- Required atomicity:
+- Lock ordering:
+- Atomicity requirements:
 - Forbidden interleavings:
-- Behavior under concurrent readers/writers:
+- Allowed simplifications such as a temporary big lock:
 
-## Tests and Observability
+## Pass Split
 
-- Checker-owned unit or kernel tests expected:
-- Observable behaviors the checker should verify:
-Note any test comments that are important for readability when the scenario is not obvious from the test body alone.
+### Serial Creator Pass
 
-## Creator Notes
+- Required implementation obligations:
+- Explicit non-goals:
 
-State any constraints the creator must not silently reinterpret.
-Do not assign test-writing work to the creator unless the main agent has explicitly overridden the default checker-owned test policy.
+### Serial Checker Pass
+
+- Required checker-owned tests:
+- Observable properties that must pass before leaving the serial loop:
+
+### Concurrency Creator Pass
+
+- Required implementation obligations:
+- Explicit non-goals:
+
+### Concurrency Checker Pass
+
+- Required checker-owned concurrency tests:
+- Write `No dedicated concurrency tests required` if the concurrency spec does not need them.
+- Observable properties that must pass before leaving the concurrency loop:
+
+## Acceptance Notes
+
+List anything the reviewer should pay special attention to later.
