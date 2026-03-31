@@ -6,3 +6,9 @@
 //! but it is not registered as a filesystem type yet.
 //! The legacy `exfat` module remains the active implementation and test baseline
 //! until the refactored implementation is ready to take over deliberately.
+
+mod boot_sector;
+mod super_block;
+
+#[cfg(ktest)]
+mod test_support;
