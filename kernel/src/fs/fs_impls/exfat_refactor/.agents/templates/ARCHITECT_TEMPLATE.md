@@ -22,6 +22,8 @@ Explain why this component can be implemented at this stage without depending on
 
 - Depends on:
 - Blocks:
+- Can run in parallel with:
+- Recommended parallel wave:
 - Stable pre-existing interfaces used:
 
 ## exFAT Concepts Covered

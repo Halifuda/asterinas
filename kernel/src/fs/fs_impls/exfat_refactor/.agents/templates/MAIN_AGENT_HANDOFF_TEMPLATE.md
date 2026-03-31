@@ -4,6 +4,7 @@
 
 ## Metadata
 
+- Fancy nickname:
 - Date:
 - Author:
 - Workspace:
@@ -49,3 +50,7 @@ List the assumptions that a future main agent must preserve, verify, or revisit.
 - Read `COMPONENT_INDEX.md`.
 - Read the latest main-agent handoff note.
 - Verify the environment summary above still matches reality.
+
+## File Naming
+
+Use a filename in the form `<fancy-nickname>-YYYYMMDD-HHMM-<summary>.md`.

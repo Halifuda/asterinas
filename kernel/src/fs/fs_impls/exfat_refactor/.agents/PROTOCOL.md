@@ -52,13 +52,16 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
 - Resolves conflicts between specification, implementation, and existing code constraints.
 - Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
+- Should prefer scheduling whole dependency-safe parallel waves when architect artifacts expose them, instead of advancing only one ready component by default.
 
 ### Architect
 
 - Starts from exFAT prior knowledge and external documentation.
 - Identifies exFAT components and their dependency graph.
 - Splits components into an implementation order that is dependency-safe and operationally sensible.
+- Must make parallelism visible instead of leaving the plan as a single linear chain whenever independent components exist.
 - Emits one architect handoff per component, small enough for a designer and creator to execute without hidden scope explosion.
+- Must name the component's ready-now parallel siblings or recommended parallel wave so the main agent can schedule them deliberately.
 
 ### Designer
 
@@ -142,6 +145,7 @@ Consequences:
 - Advisor only reacts to checker findings from the serial or concurrency loops.
 - Reviewer does not produce advisor work; reviewer fixes are followed directly by a checker pass.
 - A component is not ready for acceptance until the final checker pass after review is complete.
+- Architect and main-agent should still seek parallelism at the component-selection level whenever dependencies allow it.
 
 ## 4. Artifact Layout
 
@@ -161,7 +165,7 @@ The main agent may also maintain continuity notes under:
 
 ```text
 .agents/main-agent/
-  YYYYMMDD-HHMM-handoff.md
+  <fancy-nickname>-YYYYMMDD-HHMM-<summary>.md
 ```
 
 Each component gets its own directory once the architect creates it:
@@ -211,6 +215,7 @@ Rules:
 11. Reviewers may edit code plus the currently assigned reviewer artifact, but do not edit checker or advisor artifacts.
 12. No subagent may modify artifacts owned by another role, and no subagent may update `COMPONENT_INDEX.md`.
 13. Main-agent handoff notes should summarize environment facts, validated commands, current component states, open blockers, and the next recommended action so a future session can resume with minimal rediscovery.
+14. Main-agent handoff file names must start with a memorable fancy nickname so later sessions are easy to spot in filesystem listings. The recommended pattern is `<fancy-nickname>-YYYYMMDD-HHMM-<summary>.md`.
 
 ## 5. Workflow States
 
@@ -261,6 +266,8 @@ The architect handoff is valid only if it states:
 
 - the component goal,
 - the dependency set,
+- any components that can be scheduled in parallel with this one once the same prerequisite set is satisfied,
+- the recommended parallel wave or an explicit statement that no useful same-wave parallelism exists,
 - the reason this order is safe,
 - the code budget,
 - the concrete files or modules expected to change,
