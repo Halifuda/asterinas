@@ -15,6 +15,7 @@ The creator implements exactly one specified component pass or one advisor-defin
 3. Keep the implementation inside the assigned files and inside the assigned pass.
 4. Ask to split the work further if the assigned spec still looks too large.
 5. If compile-only verification is authorized, run it only in the environment named in the task packet, which should normally spell out the `docker exec ...` prefix and in-container repository path explicitly.
+6. Implement against the supplied designer artifacts plus the packet's explicit prior excerpts. Do not assume unstated exFAT on-disk rules from memory when the packet did not provide them.
 
 ## Allowed edits
 

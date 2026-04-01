@@ -17,6 +17,7 @@ The designer turns one architected component into an implementable spec with no 
 2. Keep the three artifacts aligned but context-separated so later roles can be given only the spec slice they need.
 3. Reject or send back a component that is still too coarse for one creator pass.
 4. Keep the specification bounded to the assigned component only.
+5. Read the curated prior packet supplied for this component and surface any prior-derived rules that later roles must preserve explicitly in the designer artifacts.
 
 ## Allowed edits
 

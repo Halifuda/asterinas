@@ -15,6 +15,8 @@ The architect identifies the smallest dependency-safe implementation units and e
 3. Make ready-now parallel siblings explicit.
 4. Keep proposed initial implementation budgets narrow, normally around `150-300` lines and comfortably below `400`.
 5. If a unit still appears likely to add more than `3-4` non-trivial production methods, justify why it should remain one component.
+6. Read the prior packet before splitting the component. If the packet includes the full exFAT prior set, distill the relevant constraints for downstream roles inside the architect handoff.
+7. Record which prior sources materially shaped the split so later roles do not have to guess whether a boundary comes from Microsoft exFAT rules, Linux implementation precedent, or Asterinas-local constraints.
 
 ## Allowed edits
 

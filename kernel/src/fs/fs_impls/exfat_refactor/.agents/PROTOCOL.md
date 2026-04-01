@@ -55,6 +55,18 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
     - serial or final checkers should normally receive `01_designer_core.md` plus `03_designer_ktest.md`,
     - concurrency checkers should normally receive the full designer set.
     The main agent may deviate only when the packet records why the extra context is necessary.
+24. exFAT prior knowledge must also be packet-scoped. The main agent must not assume subagents will discover or remember the relevant normative material on their own. For exFAT planning or implementation work, the main agent should curate prior inputs from:
+    - `Microsoft-exFAT-spec.md`,
+    - `linux-exFAT-implementation-summary.md`,
+    - `ASTERINAS_ARCHITECT_PRIORS.md`.
+    The packet must say whether the role receives the full prior set, a narrowed excerpt set, or a prior summary derived by an earlier role.
+25. Prior delivery is role-sensitive by default:
+    - architect normally receives the full prior set unless the main agent records a tighter equivalent packet;
+    - designer normally receives only the prior sections relevant to the assigned component, plus any architect-derived prior summary;
+    - creator normally receives only designer-derived constraints and any explicitly cited prior excerpts needed to avoid mis-implementing an on-disk or API rule;
+    - checker normally receives the relevant prior excerpts and designer-derived test obligations needed to validate behavior against the intended exFAT rule;
+    - reviewer normally does not need exFAT normative priors beyond the packet materials, but always remains bound by repository coding guidelines and `AGENTS.md`.
+26. If a role packet for architect, designer, creator, or checker omits prior material that appears necessary to do the assigned work safely, the subagent should stop and report the missing prior input instead of silently substituting its own memory.
 
 ## 2. Roles
 
@@ -71,6 +83,9 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must treat subagent overreach as a process defect even when the underlying edit looks reasonable. Scheduler-owned state changes only become official after the main agent reviews and records them.
 - Must specify the execution environment explicitly for any subagent that may run commands, including whether commands must be run through Docker and what repository path inside the container should be used.
 - Should assume that command-running subagents are mutually interfering unless their workspaces and runtime state are explicitly isolated.
+- Must curate and forward the relevant exFAT prior material rather than assuming each role should read all priors by default.
+- Should minimize prior context by role, but not below the level needed to avoid semantic guesswork.
+- May ask the architect to derive a narrower prior summary for downstream roles when that is cheaper and safer than repeated main-agent manual excerpting.
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
 - Resolves conflicts between specification, implementation, and existing code constraints.
 - Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
@@ -79,6 +94,8 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 ### Architect
 
 - Starts from exFAT prior knowledge and external documentation.
+- Must read the prior packet supplied by the main agent before splitting components.
+- If the architect receives the full prior set, it should distill the relevant normative constraints for downstream roles inside the architect handoff instead of forcing every later role to reread every prior source.
 - Identifies exFAT components and their dependency graph.
 - Splits components into an implementation order that is dependency-safe and operationally sensible.
 - Must make parallelism visible instead of leaving the plan as a single linear chain whenever independent components exist.
@@ -95,6 +112,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 ### Designer
 
 - Produces the full specification for one component.
+- Must read the component-relevant prior packet supplied by the main agent, plus any architect-derived prior summary.
 - Must reject or send back an architected component that is still too coarse to specify without creator guesswork or that would bundle several independent behavior families into one creator pass.
 - Must produce three designer artifacts for new components:
   - `01_designer_core.md`
@@ -111,6 +129,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
   - concurrency creator obligations belong in `02_designer_async.md`,
   - checker-owned test obligations belong in `03_designer_ktest.md`.
 - Must state test obligations for the checker, not as creator-owned work.
+- Must explicitly surface any prior-derived exFAT rules that the creator or checker cannot be expected to infer safely from local code alone.
 - Must make the component implementable without creator guesswork.
 
 ### Creator
@@ -125,6 +144,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
   - serial repair batches as needed,
   - concurrency pass second,
   - concurrency repair batches as needed.
+- Must treat the packet's prior excerpts and designer-derived constraints as authoritative for exFAT semantics. It should not assume unstated on-disk rules from memory when the packet did not provide them.
 - Must ignore spec sections that require writing or updating ktests, because test authoring is checker-owned by default.
 - Should ask the main agent to split work further when the designer spec still spans too many modules or behaviors for one bounded pass.
 - May run compile-only kernel commands, but must not run kernel tests or QEMU-backed runtime commands.
@@ -133,6 +153,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 ### Checker
 
 - Verifies code against the designer specification, existing tests, and observable behavior.
+- Must use the supplied prior excerpts when deciding whether behavior matches exFAT semantics, rather than relying only on local implementation precedent.
 - Owns test authoring for verification: may add, refine, or repair ktests and other test-only coverage needed to validate the component or capture a regression.
 - May use code review, targeted tests, focused fault hunting, and test-writing to turn missing coverage into executable checks.
 - Must keep checker-authored ktests understandable. Each ktest should carry a short comment describing the scenario and expected behavior unless that intent is already unmistakable from the test name and body.
@@ -159,6 +180,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Checks the code against repository coding guidelines, Rust engineering style, readability, API boundaries, type-level invariant expression, visibility hygiene, and comment quality.
 - May directly modify production or test code to fix code-quality issues inside the owned scope.
 - Must not widen component scope, redesign the feature, or replace checker-owned behavioral verification.
+- Normally relies on packet materials, repository coding guidelines, and `AGENTS.md` rather than on the full exFAT prior corpus.
 - Must not run kernel build, test, or QEMU commands.
 - Must leave a reviewer report that explains findings, edits made, and any remaining concerns that need a final checker pass.
 
@@ -312,6 +334,7 @@ The architect handoff is valid only if it states:
 
 - the component goal,
 - the dependency set,
+- the prior sources or prior-derived constraints that materially shaped the split,
 - any components that can be scheduled in parallel with this one once the same prerequisite set is satisfied,
 - the recommended parallel wave or an explicit statement that no useful same-wave parallelism exists,
 - the reason this order is safe,
@@ -328,6 +351,7 @@ The designer handoff is valid only if it states:
   - functional behavior including failure cases,
   - state changes and maintained invariants,
   - which obligations belong to the serial creator pass,
+  - the prior-derived rules that the creator must preserve,
   - explicit non-goals for this component;
 - in `02_designer_async.md`:
   - concurrency and atomicity rules,
@@ -336,6 +360,7 @@ The designer handoff is valid only if it states:
 - in `03_designer_ktest.md`:
   - which checker-owned tests belong to the serial phase,
   - whether the concurrency phase requires checker-owned concurrent tests or explicitly does not,
+  - any prior-derived semantic cases the checker must validate,
   - the smallest representative final-checker rerun surface.
 
 ### Creator -> Checker

@@ -15,6 +15,7 @@ The checker validates one assigned pass, owns targeted test writing, and records
 3. Default to test-only edits unless the task packet explicitly authorizes a production-code fix.
 4. Keep new `#[ktest]` coverage small, local, and scenario-labeled.
 5. Use the exact containerized command form named in the task packet. If the packet says `docker exec codex-asterinas-dev ...`, do not replace it with a host-side command.
+6. Validate behavior against the supplied prior excerpts and designer obligations, not merely against local implementation precedent.
 
 ## Allowed edits
 

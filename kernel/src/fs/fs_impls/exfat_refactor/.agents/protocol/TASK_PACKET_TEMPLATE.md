@@ -34,6 +34,16 @@ The packet should be small enough that the subagent does not need the full sched
 - Artifacts, code paths, or test outputs the subagent must rely on.
 - When the component uses split designer artifacts, list exactly which designer files this role is allowed to see.
 
+## Prior Inputs
+
+- State whether this role receives:
+  - the full exFAT prior set,
+  - selected excerpts from `Microsoft-exFAT-spec.md`,
+  - selected excerpts from `linux-exFAT-implementation-summary.md`,
+  - selected excerpts from `ASTERINAS_ARCHITECT_PRIORS.md`,
+  - or only prior-derived constraints from an earlier artifact.
+- If excerpts are used, list the exact files or sections.
+
 ## Allowed Commands
 
 - For example: read-only shell commands, compile-only commands, or sequential ktest commands.
