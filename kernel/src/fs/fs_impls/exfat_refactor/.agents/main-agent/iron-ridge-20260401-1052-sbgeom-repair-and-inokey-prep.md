@@ -7,9 +7,10 @@
 - Fancy nickname: `iron-ridge`
 - Date: 2026-04-01 10:52 CST
 - Author: main-agent
+- Covered hours: approximately `2.8` hours, from `2026-04-01 10:52 CST` to `2026-04-01 13:40 CST`
 - Workspace: `/home/halifuda/asterinas`
 - Container or environment: Docker container `codex-asterinas-dev`
-- Status: Updated after the `EXR-CHAIN-03B` and `EXR-FILESET-04B` acceptance wave, plus the prior-informed redesign and audit follow-up
+- Status: Updated through the `EXR-SBGEOM-15` repair closure, helper-surface protocol tightening, and `EXR-INOKEY-05A` prep
 
 ## Environment Summary
 
@@ -19,15 +20,15 @@
 - KVM status: current exFAT checker evidence still says `no-kvm`, so observed ktest runs are TCG-backed.
 - Validated commands:
   - `docker exec codex-asterinas-dev bash -lc 'test -e /dev/kvm && ls -l /dev/kvm || echo no-kvm'`
-  - `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test exfat_chain_walks_contiguous_chain_and_reports_offsets'`
-  - `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test fileset::tests::fileset_valid_construction_round_trip_serialization'`
+  - `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test cluster_translation_rejects_invalid_clusters'`
+  - `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test cluster_range_validation_uses_half_open_semantics'`
 - Known environment blockers:
   - No `/dev/kvm` inside the current container.
   - Shared-worktree and shared-container command execution is not parallel-safe; build, OSDK, and QEMU-producing work should be treated as serial unless explicit isolation is prepared first.
 
 ## Current Project State
 
-- Current goal: Continue the refactor under the tightened subagent-dispatch protocol after landing the first chain and file-record value layers, while folding prior-informed review feedback back into the plan.
+- Current goal: Continue the refactor under the tightened subagent-dispatch protocol after landing the first chain and file-record value layers, with the superblock geometry cleanup accepted and the next implementation wave narrowed around `EXR-INOKEY-05A`.
 - Current phase: `CHAIN`, `FILESET`, and the superblock-geometry repair are now accepted. The next ready-now implementation slice is `EXR-INOKEY-05A` under the revised task-board narrowing.
 - Active or next component:
   - immediate implementation wave: `EXR-INOKEY-05A`
@@ -51,6 +52,7 @@
 - The workflow protocol has been split into a main-agent scheduler protocol plus role-scoped subagent packet rules under `.agents/protocol/`.
 - Task packets must now declare read scope, write scope, forbidden files, stop condition, and explicit execution environment.
 - Command-producing subagent work is treated as serial by default in the current shared checkout and shared container model.
+- The protocol now also requires main-agent handoffs to be maintained during the wave, to record covered hours, and to end with explicit next-main-agent tasks. It also now treats semantically overlapping helper surfaces as a design smell unless a canonical helper and a clear justification are recorded.
 - A narrow cleanup component, `EXR-BOOTTYPE-14`, was added and accepted to type the validated boot-sector boundary via `ValidatedBootSector`.
 - The component graph was tightened:
   - `EXR-FATVAL-03A`
@@ -71,6 +73,7 @@
   - `EXR-INODE-05B` is metadata-only and must not absorb `PageCacheBackend`.
   - Page-cache backend behavior is promoted into its own planned slice, `EXR-PGCACHE-11B`.
 - `EXR-SBGEOM-15` is now accepted. It fixes the old `ClusterCount + 2` confusion by keeping `num_clusters` as the raw data-cluster count, introducing explicit bound helpers, making those helpers canonical in `super_block.rs` and `fat.rs`, and rerunning the focused geometry ktests under `no-kvm` TCG.
+- Cluster ids `0` and `1` are now called out explicitly as reserved in the refactor code comments, so the local code no longer relies on readers remembering that fact only from the Microsoft spec.
 
 ## Open Risks And Assumptions
 
@@ -85,6 +88,13 @@
 1. Start `EXR-INOKEY-05A` with delegated architect and designer packets, again using `fork_context: false` and the revised dependency on `EXR-CHAIN-03B`.
 2. Prepare `EXR-INODE-05B` and `EXR-PGCACHE-11B` together at the planning level so page-cache ownership does not slide back into the inode shell by accident.
 3. Keep checker and final-checker runtime verification serial; do not let multiple command-producing subagents overlap in the current container.
+
+## Next Main-Agent Tasks
+
+1. Launch the `EXR-INOKEY-05A` architect pass with a packet that includes the relevant Microsoft, Linux, and Asterinas priors, especially the opened-inode-table and on-disk-location identity context.
+2. After `EXR-INOKEY-05A` is architected, delegate the split designer artifacts and keep the creator-facing scope narrow enough that the component does not absorb inode metadata or page-cache behavior.
+3. Keep `EXR-INODE-05B` and `EXR-PGCACHE-11B` coupled at the planning stage so page-cache ownership remains explicit.
+4. Do not forget the deferred `UPCASE/NameHash` debt when `EXR-UPCASE-07A/07B` begins; the current `fileset.rs` hash is knowingly provisional.
 
 ## Resume Checklist
 

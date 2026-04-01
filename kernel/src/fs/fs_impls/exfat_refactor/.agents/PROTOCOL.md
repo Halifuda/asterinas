@@ -68,6 +68,10 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
     - reviewer normally does not need exFAT normative priors beyond the packet materials, but always remains bound by repository coding guidelines and `AGENTS.md`.
 26. If a role packet for architect, designer, creator, or checker omits prior material that appears necessary to do the assigned work safely, the subagent should stop and report the missing prior input instead of silently substituting its own memory.
 27. Helper APIs should have distinct jobs. Do not keep multiple helpers that encode the same invariant or boundary in slightly different forms unless each one clearly matches a different dominant call-site convention and removes repeated, error-prone arithmetic. The designer should name the canonical helper surface explicitly, the creator should avoid introducing redundant wrappers, and the reviewer should call out overlapping helpers that weaken readability.
+28. Main-agent handoff writing is continuous, not end-loaded:
+    - the main agent should start the active handoff note as soon as a work wave begins and keep it updated as decisions land;
+    - before ending the wave, the main agent must reconsider whether the filename summary suffix still reflects the final scope and rename the handoff if needed;
+    - a finalized handoff must record its approximate covered hours and the explicit next main-agent tasks so the next main agent can resume directly from the note without extra user briefing.
 
 ## 2. Roles
 
@@ -90,6 +94,9 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
 - Resolves conflicts between specification, implementation, and existing code constraints.
 - Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
+- Must treat the active handoff as a living document during the wave instead of writing it only at the end.
+- Must refresh the handoff filename summary before closing the wave if the work drifted from the original summary.
+- Must end each finalized handoff with explicit next-main-agent tasks, not just general project context.
 - Should prefer scheduling whole dependency-safe parallel waves when architect artifacts expose them, instead of advancing only one ready component by default.
 
 ### Architect
@@ -228,6 +235,17 @@ The main agent may also maintain continuity notes under:
 .agents/main-agent/
   <fancy-nickname>-YYYYMMDD-HHMM-<summary>.md
 ```
+
+Finalized main-agent handoffs should include at least:
+
+- `Fancy nickname`
+- `Date`
+- `Covered hours`
+- environment continuity
+- current project state
+- recent decisions
+- open risks and assumptions
+- `Next Main-Agent Tasks`
 
 Each component gets its own directory once the architect creates it:
 
