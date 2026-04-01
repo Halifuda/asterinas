@@ -134,7 +134,7 @@ impl ExfatChain {
                 let destination = self.current.checked_add(steps).ok_or_else(|| {
                     Error::with_message(Errno::EINVAL, "contiguous chain offset overflow")
                 })?;
-                if !super_block.is_valid_cluster(destination) {
+                if !super_block.is_data_cluster_id(destination) {
                     return Err(Error::with_message(
                         Errno::EINVAL,
                         "invalid contiguous chain destination cluster",
@@ -209,7 +209,7 @@ fn validate_contiguous_chain(
     let end_exclusive = current
         .checked_add(cluster_count)
         .ok_or_else(|| Error::with_message(Errno::EINVAL, "contiguous chain range overflow"))?;
-    if super_block.is_cluster_range_valid(current..end_exclusive) {
+    if super_block.is_data_cluster_range(current..end_exclusive) {
         Ok(())
     } else {
         Err(Error::with_message(
@@ -230,7 +230,7 @@ fn count_clusters_from_head(
     loop {
         match read_next_fat_value(block_device, super_block, cluster)? {
             FatValue::Next(next_cluster) => {
-                if cluster_count == super_block.num_clusters {
+                if cluster_count == super_block.data_cluster_count() {
                     return Err(Error::with_message(
                         Errno::EIO,
                         "missing terminal EndOfChain marker",
@@ -323,7 +323,7 @@ fn fat_entry_byte_offset(super_block: &ExfatSuperBlock, cluster: ClusterId) -> R
 }
 
 fn validate_source_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) -> Result<()> {
-    if super_block.is_valid_cluster(cluster) {
+    if super_block.is_data_cluster_id(cluster) {
         Ok(())
     } else {
         Err(Error::with_message(
@@ -334,7 +334,7 @@ fn validate_source_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) ->
 }
 
 fn validate_next_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) -> Result<()> {
-    if super_block.is_valid_cluster(cluster) {
+    if super_block.is_data_cluster_id(cluster) {
         Ok(())
     } else {
         Err(Error::with_message(

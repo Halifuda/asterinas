@@ -14,6 +14,7 @@ use crate::prelude::*;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ExfatSuperBlock {
     pub(super) num_sectors: u64,
+    // BPB ClusterCount is the number of data clusters, not a one-past-end id.
     pub(super) num_clusters: u32,
     pub(super) sector_size: u32,
     pub(super) cluster_size: u32,
@@ -54,10 +55,7 @@ impl From<ValidatedBootSector> for ExfatSuperBlock {
 
         Self {
             num_sectors: boot_sector.vol_length,
-            num_clusters: boot_sector
-                .cluster_count
-                .checked_add(EXFAT_RESERVED_CLUSTERS)
-                .expect("validated boot sector must cap cluster count"),
+            num_clusters: boot_sector.cluster_count,
             sector_size,
             cluster_size,
             cluster_size_bits,
@@ -79,6 +77,18 @@ impl From<ValidatedBootSector> for ExfatSuperBlock {
 }
 
 impl ExfatSuperBlock {
+    /// Returns the raw BPB `ClusterCount`, which counts usable data clusters.
+    pub(super) fn data_cluster_count(&self) -> u32 {
+        self.num_clusters
+    }
+
+    /// Returns the exclusive upper bound of legal data-cluster ids, i.e. `ClusterCount + 2`.
+    pub(super) fn data_cluster_end_exclusive(&self) -> u32 {
+        self.num_clusters
+            .checked_add(EXFAT_RESERVED_CLUSTERS)
+            .expect("validated boot sector must cap cluster count")
+    }
+
     pub(super) fn sector_size(&self) -> usize {
         self.sector_size as usize
     }
@@ -91,14 +101,14 @@ impl ExfatSuperBlock {
         self.sect_per_cluster
     }
 
-    pub(super) fn is_valid_cluster(&self, cluster: u32) -> bool {
-        cluster >= EXFAT_RESERVED_CLUSTERS && cluster <= self.num_clusters
+    /// Returns whether `cluster` lies in the legal data-region id range `2..ClusterCount + 2`.
+    pub(super) fn is_data_cluster_id(&self, cluster: u32) -> bool {
+        cluster >= EXFAT_RESERVED_CLUSTERS && cluster < self.data_cluster_end_exclusive()
     }
 
-    pub(super) fn is_cluster_range_valid(&self, range: Range<u32>) -> bool {
-        let Some(range_end_limit) = self.num_clusters.checked_add(1) else {
-            return false;
-        };
+    /// Returns whether `range` stays within the half-open legal data-cluster range.
+    pub(super) fn is_data_cluster_range(&self, range: Range<u32>) -> bool {
+        let range_end_limit = self.data_cluster_end_exclusive();
 
         range.start >= EXFAT_RESERVED_CLUSTERS
             && range.start <= range.end
@@ -128,7 +138,7 @@ impl ExfatSuperBlock {
     }
 
     fn cluster_data_index(&self, cluster: u32) -> Result<u64> {
-        if !self.is_valid_cluster(cluster) {
+        if !self.is_data_cluster_id(cluster) {
             return Err(Error::with_message(
                 Errno::EINVAL,
                 "invalid data-region cluster",
@@ -185,13 +195,17 @@ mod tests {
     fn cluster_translation_rejects_invalid_clusters() {
         // Confirms geometry helpers reject reserved or out-of-range cluster
         // numbers instead of silently translating them into data offsets.
+        // The exclusive upper bound is `ClusterCount + 2`.
         let disk = load_exfat_disk();
         let super_block = read_primary_super_block(&disk).unwrap();
-        let invalid_cluster = super_block.num_clusters.checked_add(1).unwrap();
+        let invalid_cluster = super_block.data_cluster_count() + EXFAT_RESERVED_CLUSTERS;
 
-        assert!(!super_block.is_valid_cluster(0));
-        assert!(!super_block.is_valid_cluster(1));
-        assert!(!super_block.is_valid_cluster(invalid_cluster));
+        assert_eq!(super_block.data_cluster_count(), super_block.num_clusters);
+        assert_eq!(invalid_cluster, super_block.data_cluster_end_exclusive());
+        assert!(!super_block.is_data_cluster_id(0));
+        assert!(!super_block.is_data_cluster_id(1));
+        assert!(!super_block.is_data_cluster_id(invalid_cluster));
+        assert!(super_block.is_data_cluster_id(invalid_cluster - 1));
         assert!(super_block.cluster_to_sector(0).is_err());
         assert!(super_block.cluster_to_byte_offset(invalid_cluster).is_err());
     }
@@ -202,11 +216,13 @@ mod tests {
         // and rejects ranges that cross reserved or one-past-the-end bounds.
         let disk = load_exfat_disk();
         let super_block = read_primary_super_block(&disk).unwrap();
-        let range_end = super_block.num_clusters.checked_add(1).unwrap();
+        let range_end = super_block.data_cluster_end_exclusive();
 
-        assert!(super_block.is_cluster_range_valid(EXFAT_RESERVED_CLUSTERS..range_end));
-        assert!(super_block.is_cluster_range_valid(range_end..range_end));
-        assert!(!super_block.is_cluster_range_valid(0..range_end));
-        assert!(!super_block.is_cluster_range_valid(EXFAT_RESERVED_CLUSTERS..range_end + 1));
+        assert!(super_block.is_data_cluster_range(EXFAT_RESERVED_CLUSTERS..range_end));
+        assert!(super_block.is_data_cluster_range(range_end..range_end));
+        assert!(!super_block.is_data_cluster_range(0..range_end));
+        assert!(!super_block.is_data_cluster_range(
+            EXFAT_RESERVED_CLUSTERS..range_end + 1
+        ));
     }
 }

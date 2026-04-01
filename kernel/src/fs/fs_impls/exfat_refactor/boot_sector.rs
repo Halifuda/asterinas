@@ -17,6 +17,7 @@ use crate::prelude::*;
 
 pub(super) const BOOT_SIGNATURE: u16 = 0xAA55;
 pub(super) const EXFAT_FIRST_CLUSTER: u32 = 2;
+// Cluster ids `0` and `1` are reserved; the first data-region cluster is `2`.
 pub(super) const EXFAT_RESERVED_CLUSTERS: u32 = 2;
 pub(super) const EXFAT_MAX_SECT_SIZE_BITS: u8 = 12;
 pub(super) const EXFAT_MIN_SECT_SIZE_BITS: u8 = 9;
