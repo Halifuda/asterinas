@@ -3,7 +3,7 @@
     not(ktest),
     expect(
         dead_code,
-        reason = "FAT helpers are staged before chain integration."
+        reason = "Chain helpers are staged before chain integration."
     )
 )]
 
@@ -20,6 +20,238 @@ const FAT_ENTRY_SIZE: u64 = size_of::<u32>() as u64;
 const FREE_CLUSTER_VALUE: ClusterId = 0;
 const BAD_CLUSTER_VALUE: ClusterId = 0xFFFF_FFF7;
 const END_OF_CHAIN_VALUE: ClusterId = 0xFFFF_FFFF;
+
+/// Describes how a cluster chain is traversed.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(super) enum ChainMode {
+    Contiguous,
+    FatBacked,
+}
+
+/// Stores the current chain position and the remaining cluster count.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(super) struct ExfatChain {
+    current: ClusterId,
+    cluster_count: u32,
+    mode: ChainMode,
+}
+
+impl ExfatChain {
+    /// Creates a chain state from a known or counted cluster length.
+    pub(super) fn new(
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        current: ClusterId,
+        num_clusters: Option<u32>,
+        mode: ChainMode,
+    ) -> Result<Self> {
+        if current == 0 {
+            if matches!(num_clusters, Some(cluster_count) if cluster_count != 0) {
+                return Err(Error::with_message(
+                    Errno::EINVAL,
+                    "empty chain must not have a non-zero cluster count",
+                ));
+            }
+
+            return Ok(Self {
+                current,
+                cluster_count: 0,
+                mode,
+            });
+        }
+
+        validate_source_cluster(super_block, current)?;
+
+        let cluster_count = match num_clusters {
+            Some(0) => {
+                return Err(Error::with_message(
+                    Errno::EINVAL,
+                    "non-empty chain must have a positive cluster count",
+                ));
+            }
+            Some(cluster_count) => {
+                if matches!(mode, ChainMode::Contiguous) {
+                    validate_contiguous_chain(super_block, current, cluster_count)?;
+                }
+
+                cluster_count
+            }
+            None => {
+                if !matches!(mode, ChainMode::FatBacked) {
+                    return Err(Error::with_message(
+                        Errno::EINVAL,
+                        "unknown-length contiguous chains are unsupported",
+                    ));
+                }
+
+                count_clusters_from_head(block_device, super_block, current)?
+            }
+        };
+
+        Ok(Self {
+            current,
+            cluster_count,
+            mode,
+        })
+    }
+
+    /// Returns the current cluster identifier.
+    pub(super) fn current_cluster(&self) -> ClusterId {
+        self.current
+    }
+
+    /// Returns the remaining cluster count, inclusive of the current cluster.
+    pub(super) fn cluster_count(&self) -> u32 {
+        self.cluster_count
+    }
+
+    /// Returns the chain traversal mode.
+    pub(super) fn mode(&self) -> ChainMode {
+        self.mode
+    }
+
+    /// Returns whether the chain contains no clusters.
+    pub(super) fn is_empty(&self) -> bool {
+        self.cluster_count == 0
+    }
+
+    /// Walks the chain by the given number of cluster steps.
+    pub(super) fn walk(
+        &self,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        steps: u32,
+    ) -> Result<Self> {
+        if steps >= self.cluster_count {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "invalid walking steps for exFAT chain",
+            ));
+        }
+
+        let destination_cluster = match self.mode {
+            ChainMode::Contiguous => {
+                let destination = self.current.checked_add(steps).ok_or_else(|| {
+                    Error::with_message(Errno::EINVAL, "contiguous chain offset overflow")
+                })?;
+                if !super_block.is_valid_cluster(destination) {
+                    return Err(Error::with_message(
+                        Errno::EINVAL,
+                        "invalid contiguous chain destination cluster",
+                    ));
+                }
+
+                destination
+            }
+            ChainMode::FatBacked => {
+                let mut destination = self.current;
+                for _ in 0..steps {
+                    match read_next_fat_value(block_device, super_block, destination)? {
+                        FatValue::Next(next_cluster) => destination = next_cluster,
+                        FatValue::Free | FatValue::Bad | FatValue::EndOfChain => {
+                            return Err(Error::with_message(
+                                Errno::EIO,
+                                "malformed FAT chain traversal",
+                            ));
+                        }
+                    }
+                }
+
+                destination
+            }
+        };
+
+        Ok(Self {
+            current: destination_cluster,
+            cluster_count: self.cluster_count - steps,
+            mode: self.mode,
+        })
+    }
+
+    /// Walks to the cluster that contains the requested byte offset.
+    pub(super) fn walk_to_cluster_at_offset(
+        &self,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        offset: usize,
+    ) -> Result<(Self, usize)> {
+        let cluster_size = super_block.cluster_size();
+        let steps = offset / cluster_size;
+        let intra_cluster_offset = offset % cluster_size;
+        let steps = u32::try_from(steps)
+            .map_err(|_| Error::with_message(Errno::EINVAL, "invalid walking steps for chain"))?;
+        let chain = self.walk(block_device, super_block, steps)?;
+
+        Ok((chain, intra_cluster_offset))
+    }
+
+    /// Returns the first byte offset of the current cluster.
+    pub(super) fn physical_cluster_start_offset(
+        &self,
+        super_block: &ExfatSuperBlock,
+    ) -> Result<usize> {
+        if self.is_empty() {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "empty chain has no physical cluster offset",
+            ));
+        }
+
+        super_block.cluster_to_byte_offset(self.current)
+    }
+}
+
+fn validate_contiguous_chain(
+    super_block: &ExfatSuperBlock,
+    current: ClusterId,
+    cluster_count: u32,
+) -> Result<()> {
+    let end_exclusive = current
+        .checked_add(cluster_count)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "contiguous chain range overflow"))?;
+    if super_block.is_cluster_range_valid(current..end_exclusive) {
+        Ok(())
+    } else {
+        Err(Error::with_message(
+            Errno::EINVAL,
+            "invalid contiguous chain range",
+        ))
+    }
+}
+
+fn count_clusters_from_head(
+    block_device: &dyn BlockDevice,
+    super_block: &ExfatSuperBlock,
+    current: ClusterId,
+) -> Result<u32> {
+    let mut cluster_count = 1u32;
+    let mut cluster = current;
+
+    loop {
+        match read_next_fat_value(block_device, super_block, cluster)? {
+            FatValue::Next(next_cluster) => {
+                if cluster_count == super_block.num_clusters {
+                    return Err(Error::with_message(
+                        Errno::EIO,
+                        "missing terminal EndOfChain marker",
+                    ));
+                }
+
+                cluster = next_cluster;
+                cluster_count = cluster_count.checked_add(1).ok_or_else(|| {
+                    Error::with_message(Errno::EIO, "missing terminal EndOfChain marker")
+                })?;
+            }
+            FatValue::EndOfChain => return Ok(cluster_count),
+            FatValue::Free | FatValue::Bad => {
+                return Err(Error::with_message(
+                    Errno::EIO,
+                    "malformed FAT chain contents",
+                ));
+            }
+        }
+    }
+}
 
 /// Describes a decoded FAT entry.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -116,12 +348,10 @@ fn validate_next_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) -> R
 mod tests {
     use ostd::prelude::ktest;
 
-    use super::{read_next_fat_value, ClusterId, FatValue};
+    use super::{read_next_fat_value, ChainMode, ClusterId, ExfatChain, FatValue};
     use crate::fs::fs_impls::exfat_refactor::{
-        boot_sector::read_primary_super_block,
-        io::read_metadata_bytes,
-        super_block::ExfatSuperBlock,
-        test_support::load_exfat_disk,
+        boot_sector::read_primary_super_block, io::read_metadata_bytes,
+        super_block::ExfatSuperBlock, test_support::load_exfat_disk,
     };
 
     fn read_raw_fat_entry(
@@ -145,6 +375,16 @@ mod tests {
         let offset = super_block.fat1_start_sector as usize * super_block.sector_size()
             + cluster as usize * core::mem::size_of::<ClusterId>();
         disk.write_bytes(offset, &raw_value.to_le_bytes());
+    }
+
+    fn write_fat_chain(
+        disk: &crate::fs::fs_impls::exfat_refactor::test_support::ExfatMemoryDisk,
+        super_block: &ExfatSuperBlock,
+        start: ClusterId,
+        next: ClusterId,
+    ) {
+        write_raw_fat_entry(disk, super_block, start, next);
+        write_raw_fat_entry(disk, super_block, next, u32::MAX);
     }
 
     #[ktest]
@@ -199,5 +439,111 @@ mod tests {
         write_raw_fat_entry(&disk, &super_block, cluster, 1);
 
         assert!(read_next_fat_value(&disk, &super_block, cluster).is_err());
+    }
+
+    #[ktest]
+    fn exfat_chain_accepts_empty_chain_without_fat_reads() {
+        // Confirms empty chains are represented explicitly and do not need FAT
+        // traversal to become observable.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+
+        let chain = ExfatChain::new(&disk, &super_block, 0, Some(0), ChainMode::FatBacked).unwrap();
+
+        assert!(chain.is_empty());
+        assert_eq!(chain.current_cluster(), 0);
+        assert_eq!(chain.cluster_count(), 0);
+        assert_eq!(chain.mode(), ChainMode::FatBacked);
+        assert!(chain.physical_cluster_start_offset(&super_block).is_err());
+    }
+
+    #[ktest]
+    fn exfat_chain_walks_contiguous_chain_and_reports_offsets() {
+        // Confirms contiguous traversal uses arithmetic only and preserves the
+        // intra-cluster byte offset when mapping a byte position.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let start_cluster = super_block.root_dir;
+        let next_cluster = start_cluster + 1;
+        let chain = ExfatChain::new(
+            &disk,
+            &super_block,
+            start_cluster,
+            Some(2),
+            ChainMode::Contiguous,
+        )
+        .unwrap();
+
+        let walked = chain.walk(&disk, &super_block, 1).unwrap();
+        let (offset_chain, offset_in_cluster) = chain
+            .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 13)
+            .unwrap();
+
+        assert_eq!(chain.current_cluster(), start_cluster);
+        assert_eq!(chain.cluster_count(), 2);
+        assert_eq!(chain.mode(), ChainMode::Contiguous);
+        assert_eq!(
+            chain.physical_cluster_start_offset(&super_block).unwrap(),
+            super_block.cluster_to_byte_offset(start_cluster).unwrap()
+        );
+        assert_eq!(walked.current_cluster(), next_cluster);
+        assert_eq!(walked.cluster_count(), 1);
+        assert_eq!(offset_chain.current_cluster(), next_cluster);
+        assert_eq!(offset_in_cluster, 13);
+    }
+
+    #[ktest]
+    fn exfat_chain_counts_and_walks_unknown_length_fat_chain() {
+        // Confirms FAT-backed chains can be counted from the head and walked
+        // after the count is inferred from the on-disk FAT entries.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let start_cluster = super_block.root_dir;
+        let next_cluster = start_cluster + 1;
+
+        write_fat_chain(&disk, &super_block, start_cluster, next_cluster);
+
+        let chain = ExfatChain::new(
+            &disk,
+            &super_block,
+            start_cluster,
+            None,
+            ChainMode::FatBacked,
+        )
+        .unwrap();
+        let walked = chain.walk(&disk, &super_block, 1).unwrap();
+        let (offset_chain, offset_in_cluster) = chain
+            .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 7)
+            .unwrap();
+
+        assert_eq!(chain.current_cluster(), start_cluster);
+        assert_eq!(chain.cluster_count(), 2);
+        assert_eq!(chain.mode(), ChainMode::FatBacked);
+        assert_eq!(walked.current_cluster(), next_cluster);
+        assert_eq!(walked.cluster_count(), 1);
+        assert_eq!(offset_chain.current_cluster(), next_cluster);
+        assert_eq!(offset_in_cluster, 7);
+    }
+
+    #[ktest]
+    fn exfat_chain_rejects_invalid_step_counts() {
+        // Confirms walking past the end of the chain is rejected before any
+        // caller can observe a wrapped or truncated destination.
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let start_cluster = super_block.root_dir;
+        let chain = ExfatChain::new(
+            &disk,
+            &super_block,
+            start_cluster,
+            Some(1),
+            ChainMode::Contiguous,
+        )
+        .unwrap();
+
+        assert!(chain.walk(&disk, &super_block, 1).is_err());
+        assert!(chain
+            .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size())
+            .is_err());
     }
 }
