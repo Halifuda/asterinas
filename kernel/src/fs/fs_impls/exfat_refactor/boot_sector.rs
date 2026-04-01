@@ -57,18 +57,38 @@ pub(super) struct ExfatBootSector {
     pub(super) signature: u16,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ValidatedBootSector(ExfatBootSector);
+
+impl ValidatedBootSector {
+    pub(super) fn into_inner(self) -> ExfatBootSector {
+        self.0
+    }
+
+    fn bytes_per_sector(&self) -> usize {
+        1usize << self.0.sector_size_bits
+    }
+}
+
 pub(super) fn read_primary_super_block(block_device: &dyn BlockDevice) -> Result<ExfatSuperBlock> {
     let boot_sector = read_primary_boot_sector(block_device)?;
-    validate_primary_boot_sector(&boot_sector)?;
-    verify_primary_boot_region_checksum(block_device, &boot_sector)?;
-    Ok(ExfatSuperBlock::from(boot_sector))
+    let validated_boot_sector = validate_primary_boot_sector(boot_sector)?;
+    verify_primary_boot_region_checksum(block_device, &validated_boot_sector)?;
+    Ok(ExfatSuperBlock::from(validated_boot_sector))
 }
 
 pub(super) fn read_primary_boot_sector(block_device: &dyn BlockDevice) -> Result<ExfatBootSector> {
     Ok(block_device.read_val(0)?)
 }
 
-pub(super) fn validate_primary_boot_sector(boot_sector: &ExfatBootSector) -> Result<()> {
+pub(super) fn validate_primary_boot_sector(
+    boot_sector: ExfatBootSector,
+) -> Result<ValidatedBootSector> {
+    validate_primary_boot_sector_fields(&boot_sector)?;
+    Ok(ValidatedBootSector(boot_sector))
+}
+
+fn validate_primary_boot_sector_fields(boot_sector: &ExfatBootSector) -> Result<()> {
     if boot_sector.signature != BOOT_SIGNATURE {
         return_errno_with_message!(Errno::EINVAL, "invalid boot record signature");
     }
@@ -143,9 +163,9 @@ pub(super) fn validate_primary_boot_sector(boot_sector: &ExfatBootSector) -> Res
 
 pub(super) fn verify_primary_boot_region_checksum(
     block_device: &dyn BlockDevice,
-    boot_sector: &ExfatBootSector,
+    validated_boot_sector: &ValidatedBootSector,
 ) -> Result<()> {
-    let bytes_per_sector = 1usize << boot_sector.sector_size_bits;
+    let bytes_per_sector = validated_boot_sector.bytes_per_sector();
     let boot_region = read_main_boot_region(block_device, bytes_per_sector)?;
 
     let mut checksum_sector = vec![0; bytes_per_sector];
@@ -197,11 +217,12 @@ mod tests {
     use zerocopy::IntoBytes;
 
     use super::{
-        read_primary_boot_sector, read_primary_super_block, ExfatBootSector,
-        EXFAT_RESERVED_CLUSTERS,
+        read_primary_boot_sector, read_primary_super_block, validate_primary_boot_sector,
+        verify_primary_boot_region_checksum, ExfatBootSector, EXFAT_RESERVED_CLUSTERS,
     };
     use crate::fs::fs_impls::exfat_refactor::{
-        super_block::ExfatSuperBlock, test_support::load_exfat_disk,
+        super_block::ExfatSuperBlock,
+        test_support::load_exfat_disk,
     };
 
     fn assert_super_block_matches_boot_sector(
@@ -247,6 +268,23 @@ mod tests {
         let super_block = read_primary_super_block(&disk).unwrap();
 
         assert_super_block_matches_boot_sector(super_block, boot_sector);
+    }
+
+    #[ktest]
+    fn validated_boot_sector_is_required_for_superblock_normalization() {
+        // Confirms the typed validation boundary is exercised explicitly before
+        // checksum verification and superblock normalization.
+        let disk = load_exfat_disk();
+        let boot_sector = read_primary_boot_sector(&disk).unwrap();
+        let validated_boot_sector = validate_primary_boot_sector(boot_sector).unwrap();
+
+        verify_primary_boot_region_checksum(&disk, &validated_boot_sector).unwrap();
+        let super_block = ExfatSuperBlock::from(validated_boot_sector);
+        let expected_root_dir = boot_sector.root_cluster;
+        let expected_num_sectors = boot_sector.vol_length;
+
+        assert_eq!(super_block.root_dir, expected_root_dir);
+        assert_eq!(super_block.num_sectors, expected_num_sectors);
     }
 
     #[ktest]

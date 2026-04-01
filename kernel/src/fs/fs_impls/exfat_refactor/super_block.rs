@@ -7,7 +7,7 @@
 use core::ops::Range;
 
 use super::boot_sector::{
-    persistent_volume_flags, ExfatBootSector, EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS,
+    persistent_volume_flags, ValidatedBootSector, EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS,
 };
 use crate::prelude::*;
 
@@ -31,8 +31,9 @@ pub(super) struct ExfatSuperBlock {
     pub(super) used_clusters: u32,
 }
 
-impl From<ExfatBootSector> for ExfatSuperBlock {
-    fn from(boot_sector: ExfatBootSector) -> Self {
+impl From<ValidatedBootSector> for ExfatSuperBlock {
+    fn from(validated_boot_sector: ValidatedBootSector) -> Self {
+        let boot_sector = validated_boot_sector.into_inner();
         let sector_size = 1u32 << boot_sector.sector_size_bits;
         let sect_per_cluster = 1u32 << boot_sector.sector_per_cluster_bits;
         let cluster_size_bits = u32::from(
