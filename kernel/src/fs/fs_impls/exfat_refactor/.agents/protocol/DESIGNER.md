@@ -18,6 +18,7 @@ The designer turns one architected component into an implementable spec with no 
 3. Reject or send back a component that is still too coarse for one creator pass.
 4. Keep the specification bounded to the assigned component only.
 5. Read the curated prior packet supplied for this component and surface any prior-derived rules that later roles must preserve explicitly in the designer artifacts.
+6. Do not specify multiple tiny helper APIs with overlapping semantics unless the packet records why each one is needed and which helper is the canonical surface for ordinary callers.
 
 ## Allowed edits
 

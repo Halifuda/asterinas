@@ -67,6 +67,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
     - checker normally receives the relevant prior excerpts and designer-derived test obligations needed to validate behavior against the intended exFAT rule;
     - reviewer normally does not need exFAT normative priors beyond the packet materials, but always remains bound by repository coding guidelines and `AGENTS.md`.
 26. If a role packet for architect, designer, creator, or checker omits prior material that appears necessary to do the assigned work safely, the subagent should stop and report the missing prior input instead of silently substituting its own memory.
+27. Helper APIs should have distinct jobs. Do not keep multiple helpers that encode the same invariant or boundary in slightly different forms unless each one clearly matches a different dominant call-site convention and removes repeated, error-prone arithmetic. The designer should name the canonical helper surface explicitly, the creator should avoid introducing redundant wrappers, and the reviewer should call out overlapping helpers that weaken readability.
 
 ## 2. Roles
 
@@ -131,6 +132,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must state test obligations for the checker, not as creator-owned work.
 - Must explicitly surface any prior-derived exFAT rules that the creator or checker cannot be expected to infer safely from local code alone.
 - Must make the component implementable without creator guesswork.
+- Must avoid specifying helper surfaces with overlapping meanings unless the spec also explains why more than one form is necessary and which one is canonical at ordinary call sites.
 
 ### Creator
 
@@ -149,6 +151,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Should ask the main agent to split work further when the designer spec still spans too many modules or behaviors for one bounded pass.
 - May run compile-only kernel commands, but must not run kernel tests or QEMU-backed runtime commands.
 - Must not silently extend scope, redesign interfaces, or postpone important details with vague TODOs.
+- Should prefer one canonical helper surface over several trivially derivable wrappers when the extra wrappers do not remove real caller risk or complexity.
 
 ### Checker
 
@@ -183,6 +186,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Normally relies on packet materials, repository coding guidelines, and `AGENTS.md` rather than on the full exFAT prior corpus.
 - Must not run kernel build, test, or QEMU commands.
 - Must leave a reviewer report that explains findings, edits made, and any remaining concerns that need a final checker pass.
+- Should flag helper duplication when multiple small APIs express the same invariant without serving clearly different caller shapes.
 
 ## 3. Required Step Sequence
 
