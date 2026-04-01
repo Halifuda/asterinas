@@ -16,6 +16,8 @@ The creator implements exactly one specified component pass or one advisor-defin
 4. Ask to split the work further if the assigned spec still looks too large.
 5. If compile-only verification is authorized, run it only in the environment named in the task packet, which should normally spell out the `docker exec ...` prefix and in-container repository path explicitly.
 6. Implement against the supplied designer artifacts plus the packet's explicit prior excerpts. Do not assume unstated exFAT on-disk rules from memory when the packet did not provide them.
+7. When the packet authorizes a temporary staging surface, leave the required short code comment in place and record the same future owner or removal condition in the creator artifact.
+8. Do not add a short helper or field-exposing accessor unless the packet or designer artifact already proves why another component needs that helper now.
 
 ## Allowed edits
 

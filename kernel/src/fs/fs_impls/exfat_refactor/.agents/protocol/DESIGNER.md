@@ -19,6 +19,8 @@ The designer turns one architected component into an implementable spec with no 
 4. Keep the specification bounded to the assigned component only.
 5. Read the curated prior packet supplied for this component and surface any prior-derived rules that later roles must preserve explicitly in the designer artifacts.
 6. Do not specify multiple tiny helper APIs with overlapping semantics unless the packet records why each one is needed and which helper is the canonical surface for ordinary callers.
+7. If the component needs a temporary staging surface, record why it exists, which later component should absorb or remove it, and what code comment must mark it as temporary.
+8. Do not specify a short helper or field-exposing accessor unless the artifact also names the expected caller or boundary that proves the helper is needed now.
 
 ## Allowed edits
 

@@ -19,7 +19,11 @@ Every ordinary subagent must follow these rules:
 10. Follow the repository-root `AGENTS.md` and the role-specific protocol file that accompanied your task packet.
 11. If the task requires running commands, use only the execution environment and command shape named in the task packet. Do not guess whether commands should run on the host or inside Docker.
 12. Treat the task packet's prior inputs as the only authorized exFAT prior corpus for that step unless the packet explicitly allows a broader prior set.
-13. If the assigned work appears to require missing prior material, stop and report the gap instead of silently substituting your own memory or unrelated documents.
+13. When the task packet includes multiple exFAT prior sources, follow the packet's stated precedence. If the packet does not restate one, use the default precedence from the main protocol: Microsoft exFAT rules first, Linux exFAT implementation summary second, Asterinas-local priors third as integration-only context.
+14. If the assigned work appears to require missing prior material, stop and report the gap instead of silently substituting your own memory or unrelated documents.
+15. Do not treat the legacy Asterinas `exfat` implementation as the semantic target of the refactor. Use it only as local integration context unless the task packet explicitly records a required divergence or compatibility constraint.
+16. If the packet authorizes a temporary staging surface, keep it explicitly temporary in both code comments and role artifacts by naming the future owner or removal condition. Do not hide staging work behind vague `TODO` markers.
+17. Do not invent short helper wrappers or field-exposing accessors unless the packet or referenced artifact already states why another component needs that helper now.
 
 Subagent authority is strictly local.
 Seeing the larger workflow does not authorize scheduler actions.

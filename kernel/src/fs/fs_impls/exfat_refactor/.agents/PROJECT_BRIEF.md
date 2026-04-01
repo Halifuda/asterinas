@@ -18,6 +18,7 @@ The main question is not only whether agents can produce code, but whether they 
 
 The current implementation strategy is to keep the legacy `exfat` module intact while building the refactored implementation in parallel under `exfat_refactor`.
 That lets the project use the old code as a stable baseline while the new design is developed with cleaner boundaries.
+That legacy baseline is a migration and regression reference, not the semantic target of the refactor. For exFAT rules and design choices, Microsoft exFAT and the Linux exFAT implementation remain the primary authorities; Asterinas-local precedent matters mainly for Rust interfaces, repository constraints, and integration boundaries.
 
 ## 2. Why The Workflow Starts From The Very Beginning
 

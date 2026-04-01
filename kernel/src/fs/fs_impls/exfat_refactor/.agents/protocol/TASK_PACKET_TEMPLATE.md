@@ -43,6 +43,26 @@ The packet should be small enough that the subagent does not need the full sched
   - selected excerpts from `ASTERINAS_ARCHITECT_PRIORS.md`,
   - or only prior-derived constraints from an earlier artifact.
 - If excerpts are used, list the exact files or sections.
+- State the intended precedence among those prior inputs. Unless the packet records a justified exception, use:
+  - `Microsoft-exFAT-spec.md` for normative exFAT semantics,
+  - `linux-exFAT-implementation-summary.md` for preferred implementation guidance when the spec leaves design room,
+  - `ASTERINAS_ARCHITECT_PRIORS.md` for local interface, style, and testing constraints only.
+- If the assigned work must deliberately diverge from Microsoft- or Linux-derived behavior because of an Asterinas interface constraint, record that exception explicitly here instead of letting the subagent infer it from legacy code.
+
+## Temporary Interfaces And Exit Plan
+
+- List any staging-only wrapper, placeholder owner, or temporary surface that this role may introduce or preserve.
+- For each one, state:
+  - why it exists in the current component,
+  - which later component or owner should absorb or remove it,
+  - what short code comment must mark it as temporary.
+- If no temporary interface is authorized, say so explicitly.
+
+## Helper Justification
+
+- List the helper APIs this role is allowed to add or preserve.
+- For every short helper or field-exposing accessor, name the expected cross-module caller, trust boundary, or repeated error-prone pattern that justifies the helper.
+- If no such proof exists yet, say that the helper must not be added.
 
 ## Allowed Commands
 

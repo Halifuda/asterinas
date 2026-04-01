@@ -14,6 +14,8 @@ The reviewer performs bounded code-quality review after implementation and check
 2. Keep edits bounded; do not redesign the component.
 3. Leave behavioral verification to the checker.
 4. Default to repository coding guidelines, `AGENTS.md`, and packet materials rather than to the full exFAT prior corpus unless the packet explicitly asks for semantic review against prior excerpts.
+5. Remove or inline short helpers that lack a packet-backed reason to exist, especially field-exposing accessors with no proven cross-module caller.
+6. Ensure every temporary staging surface in scope is explicitly marked as temporary in code comments and echoed in the reviewer report with its future owner or removal condition.
 
 ## Allowed edits
 

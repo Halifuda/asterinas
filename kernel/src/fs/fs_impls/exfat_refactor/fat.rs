@@ -95,21 +95,6 @@ impl ExfatChain {
         })
     }
 
-    /// Returns the current cluster identifier.
-    pub(super) fn current_cluster(&self) -> ClusterId {
-        self.current
-    }
-
-    /// Returns the remaining cluster count, inclusive of the current cluster.
-    pub(super) fn cluster_count(&self) -> u32 {
-        self.cluster_count
-    }
-
-    /// Returns the chain traversal mode.
-    pub(super) fn mode(&self) -> ChainMode {
-        self.mode
-    }
-
     /// Returns whether the chain contains no clusters.
     pub(super) fn is_empty(&self) -> bool {
         self.cluster_count == 0
@@ -451,9 +436,9 @@ mod tests {
         let chain = ExfatChain::new(&disk, &super_block, 0, Some(0), ChainMode::FatBacked).unwrap();
 
         assert!(chain.is_empty());
-        assert_eq!(chain.current_cluster(), 0);
-        assert_eq!(chain.cluster_count(), 0);
-        assert_eq!(chain.mode(), ChainMode::FatBacked);
+        assert_eq!(chain.current, 0);
+        assert_eq!(chain.cluster_count, 0);
+        assert_eq!(chain.mode, ChainMode::FatBacked);
         assert!(chain.physical_cluster_start_offset(&super_block).is_err());
     }
 
@@ -479,16 +464,16 @@ mod tests {
             .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 13)
             .unwrap();
 
-        assert_eq!(chain.current_cluster(), start_cluster);
-        assert_eq!(chain.cluster_count(), 2);
-        assert_eq!(chain.mode(), ChainMode::Contiguous);
+        assert_eq!(chain.current, start_cluster);
+        assert_eq!(chain.cluster_count, 2);
+        assert_eq!(chain.mode, ChainMode::Contiguous);
         assert_eq!(
             chain.physical_cluster_start_offset(&super_block).unwrap(),
             super_block.cluster_to_byte_offset(start_cluster).unwrap()
         );
-        assert_eq!(walked.current_cluster(), next_cluster);
-        assert_eq!(walked.cluster_count(), 1);
-        assert_eq!(offset_chain.current_cluster(), next_cluster);
+        assert_eq!(walked.current, next_cluster);
+        assert_eq!(walked.cluster_count, 1);
+        assert_eq!(offset_chain.current, next_cluster);
         assert_eq!(offset_in_cluster, 13);
     }
 
@@ -516,12 +501,12 @@ mod tests {
             .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 7)
             .unwrap();
 
-        assert_eq!(chain.current_cluster(), start_cluster);
-        assert_eq!(chain.cluster_count(), 2);
-        assert_eq!(chain.mode(), ChainMode::FatBacked);
-        assert_eq!(walked.current_cluster(), next_cluster);
-        assert_eq!(walked.cluster_count(), 1);
-        assert_eq!(offset_chain.current_cluster(), next_cluster);
+        assert_eq!(chain.current, start_cluster);
+        assert_eq!(chain.cluster_count, 2);
+        assert_eq!(chain.mode, ChainMode::FatBacked);
+        assert_eq!(walked.current, next_cluster);
+        assert_eq!(walked.cluster_count, 1);
+        assert_eq!(offset_chain.current, next_cluster);
         assert_eq!(offset_in_cluster, 7);
     }
 

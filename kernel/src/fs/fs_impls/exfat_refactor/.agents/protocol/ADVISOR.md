@@ -13,6 +13,7 @@ The advisor converts checker findings into a bounded repair batch for the creato
 1. Turn failures into explicit change requirements.
 2. State what must change, why, and what will count as done.
 3. Keep the advice within the checked component and current phase.
+4. Preserve temporary-surface and helper-justification failures explicitly; do not collapse them into generic cleanup language.
 
 ## Allowed edits
 

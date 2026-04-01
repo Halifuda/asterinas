@@ -10,6 +10,7 @@ It complements:
 - `linux-exFAT-implementation-summary.md`, which provides a mature implementation reference model.
 
 This file focuses on the current Asterinas codebase, its FS/VFS contracts, and the practical testing environment that shapes implementable component boundaries.
+It is intentionally not the normative source for exFAT semantics. Unless a task packet records a justified local exception, Microsoft exFAT rules take precedence, Linux exFAT remains the preferred implementation reference, and this file only constrains local integration, code organization, and testing reality.
 
 ## 1. Why This File Exists
 
@@ -24,6 +25,7 @@ An architect for this project must also understand:
 5. how filesystem behavior is actually tested in this repository.
 
 Without this local context, a component plan can easily become structurally correct in theory but misaligned with the real Asterinas integration surface.
+The inverse failure mode is also forbidden: this file must not be used to pull the refactor back toward reproducing legacy Asterinas exFAT semantics when Microsoft and Linux priors support a cleaner or more correct design.
 
 ## 2. Repository-Level Constraints That Matter To The Architect
 
@@ -50,7 +52,7 @@ The legacy Asterinas exFAT implementation is split into these files:
 - `mod.rs`: filesystem registration plus exFAT ktests.
 
 Architecturally, this means the current legacy implementation is already organized by major exFAT concerns, but the boundaries are still coarse.
-Refactor components in `exfat_refactor` should usually treat these legacy files as a baseline to learn from, not as files that must be edited in place.
+Refactor components in `exfat_refactor` should usually treat these legacy files as a baseline to learn from, not as files that must be edited in place or as the semantic target to preserve by default.
 
 ## 4. Asterinas FS/VFS Contracts exFAT Must Satisfy
 

@@ -2,16 +2,18 @@
 
 #![cfg_attr(
     not(ktest),
-    expect(dead_code, reason = "File-record helpers are staged before later refactor passes consume them.")
+    expect(
+        dead_code,
+        reason = "File-record helpers are staged before later refactor passes consume them."
+    )
 )]
 
 use core::ops::Range;
 
-use crate::prelude::*;
-
 use super::dentry::{
-    DENTRY_SIZE, ExfatDentry, ExfatFileDentry, ExfatNameDentry, ExfatStreamDentry,
+    ExfatDentry, ExfatFileDentry, ExfatNameDentry, ExfatStreamDentry, DENTRY_SIZE,
 };
+use crate::prelude::*;
 
 const EXFAT_FILE: u8 = 0x85;
 const EXFAT_STREAM: u8 = 0xC0;
@@ -31,7 +33,8 @@ impl ExfatDentrySet {
         Ok(dentry_set)
     }
 
-    /// Creates a validated file-record set from trusted primary metadata and raw name units.
+    /// Temporary ktest-side builder until a later writeback component owns file-record synthesis.
+    #[cfg(ktest)]
     pub(super) fn from_trusted_metadata(
         mut file_dentry: ExfatFileDentry,
         mut stream_dentry: ExfatStreamDentry,
@@ -80,22 +83,12 @@ impl ExfatDentrySet {
         }
     }
 
-    /// Replaces the file primary entry.
-    pub(super) fn set_file_dentry(&mut self, file_dentry: ExfatFileDentry) {
-        self.dentries[Self::FILE_INDEX] = ExfatDentry::File(file_dentry);
-    }
-
     /// Returns the stream primary entry by value.
     pub(super) fn stream_dentry(&self) -> ExfatStreamDentry {
         match self.dentries[Self::STREAM_INDEX] {
             ExfatDentry::Stream(stream) => stream,
             _ => unreachable!("validated set always stores a stream primary second"),
         }
-    }
-
-    /// Replaces the stream primary entry.
-    pub(super) fn set_stream_dentry(&mut self, stream_dentry: ExfatStreamDentry) {
-        self.dentries[Self::STREAM_INDEX] = ExfatDentry::Stream(stream_dentry);
     }
 
     /// Returns the raw UTF-16 name units gathered from the name dentries.
@@ -112,7 +105,8 @@ impl ExfatDentrySet {
         raw_name_units
     }
 
-    /// Returns the current bytes of the validated set in on-disk order.
+    /// Temporary ktest-side serializer until a later writeback component owns file-record output.
+    #[cfg(ktest)]
     pub(super) fn to_le_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.dentries.len() * DENTRY_SIZE);
         for dentry in &self.dentries {
@@ -126,7 +120,8 @@ impl ExfatDentrySet {
         self.file_dentry().checksum == calculate_checksum(&self.dentries)
     }
 
-    /// Recomputes and stores the file-record checksum.
+    /// Temporary ktest-side mutator until a later writeback component owns checksum updates.
+    #[cfg(ktest)]
     pub(super) fn update_checksum(&mut self) {
         let mut file_dentry = self.file_dentry();
         file_dentry.checksum = calculate_checksum(&self.dentries);
@@ -227,9 +222,7 @@ impl ExfatDentrySet {
 fn is_benign_secondary(dentry: &ExfatDentry) -> bool {
     matches!(
         dentry,
-        ExfatDentry::GenericSecondary(_)
-            | ExfatDentry::VendorExt(_)
-            | ExfatDentry::VendorAlloc(_)
+        ExfatDentry::GenericSecondary(_) | ExfatDentry::VendorExt(_) | ExfatDentry::VendorAlloc(_)
     )
 }
 
@@ -242,7 +235,8 @@ fn logical_name_units(raw_name_units: &[u16]) -> &[u16] {
 }
 
 fn name_dentries_from_units(name_units: &[u16]) -> Vec<ExfatDentry> {
-    let mut name_dentries = Vec::with_capacity(name_units.len().div_ceil(EXFAT_FILE_NAME_LEN).max(1));
+    let mut name_dentries =
+        Vec::with_capacity(name_units.len().div_ceil(EXFAT_FILE_NAME_LEN).max(1));
 
     if name_units.is_empty() {
         name_dentries.push(ExfatDentry::Name(ExfatNameDentry {
@@ -389,8 +383,8 @@ mod tests {
     #[ktest]
     fn fileset_valid_construction_round_trip_serialization() {
         let raw_name_units = vec![
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
         ];
 
         let set = ExfatDentrySet::from_trusted_metadata(
@@ -415,16 +409,16 @@ mod tests {
     fn fileset_raw_name_aggregation() {
         let mut first_units = [0u16; EXFAT_FILE_NAME_LEN];
         first_units[..EXFAT_FILE_NAME_LEN].copy_from_slice(&[
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F,
         ]);
 
         let mut second_units = [0u16; EXFAT_FILE_NAME_LEN];
         second_units[..5].copy_from_slice(&[0x0050, 0x0051, 0x0052, 0x0053, 0x0054]);
 
         let raw_name_units = vec![
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
         ];
 
         let entries = vec![

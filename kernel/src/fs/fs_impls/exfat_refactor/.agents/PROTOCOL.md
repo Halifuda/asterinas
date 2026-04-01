@@ -60,18 +60,33 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
     - `linux-exFAT-implementation-summary.md`,
     - `ASTERINAS_ARCHITECT_PRIORS.md`.
     The packet must say whether the role receives the full prior set, a narrowed excerpt set, or a prior summary derived by an earlier role.
+    These prior sources are not equal in authority:
+    - `Microsoft-exFAT-spec.md` is the normative source for on-disk rules and required exFAT semantics.
+    - `linux-exFAT-implementation-summary.md` is the preferred implementation reference when the Microsoft specification leaves design room, operational ambiguity, or under-specified engineering tradeoffs.
+    - `ASTERINAS_ARCHITECT_PRIORS.md` is local integration context only: repository constraints, Rust and VFS interfaces, test reality, and existing ownership boundaries. It must not override Microsoft- or Linux-derived exFAT semantics, and it must not be used as a reason to preserve legacy Asterinas exFAT behavior by default.
 25. Prior delivery is role-sensitive by default:
     - architect normally receives the full prior set unless the main agent records a tighter equivalent packet;
     - designer normally receives only the prior sections relevant to the assigned component, plus any architect-derived prior summary;
     - creator normally receives only designer-derived constraints and any explicitly cited prior excerpts needed to avoid mis-implementing an on-disk or API rule;
     - checker normally receives the relevant prior excerpts and designer-derived test obligations needed to validate behavior against the intended exFAT rule;
     - reviewer normally does not need exFAT normative priors beyond the packet materials, but always remains bound by repository coding guidelines and `AGENTS.md`.
+    Whenever a packet includes more than one prior source, it should also state the intended precedence explicitly or inherit the default precedence above.
 26. If a role packet for architect, designer, creator, or checker omits prior material that appears necessary to do the assigned work safely, the subagent should stop and report the missing prior input instead of silently substituting its own memory.
-27. Helper APIs should have distinct jobs. Do not keep multiple helpers that encode the same invariant or boundary in slightly different forms unless each one clearly matches a different dominant call-site convention and removes repeated, error-prone arithmetic. The designer should name the canonical helper surface explicitly, the creator should avoid introducing redundant wrappers, and the reviewer should call out overlapping helpers that weaken readability.
-28. Main-agent handoff writing is continuous, not end-loaded:
+27. Legacy Asterinas `kernel/src/fs/fs_impls/exfat/` code is a compatibility and integration reference, not the semantic target of the refactor. Agents may study it to understand existing interfaces, current gaps, and migration constraints, but must not treat "how legacy Asterinas exFAT currently does it" as the default answer for exFAT on-disk semantics, component boundaries, or policy choices when Microsoft and Linux priors support a cleaner or more correct refactor design. Any deliberate divergence from Microsoft- or Linux-derived behavior that is forced by Asterinas interfaces must be recorded explicitly in the architect or designer artifact.
+28. Helper APIs should have distinct jobs. Do not keep multiple helpers that encode the same invariant or boundary in slightly different forms unless each one clearly matches a different dominant call-site convention and removes repeated, error-prone arithmetic. The designer should name the canonical helper surface explicitly, the creator should avoid introducing redundant wrappers, and the reviewer should call out overlapping helpers that weaken readability.
+29. Main-agent handoff writing is continuous, not end-loaded:
     - the main agent should start the active handoff note as soon as a work wave begins and keep it updated as decisions land;
     - before ending the wave, the main agent must reconsider whether the filename summary suffix still reflects the final scope and rename the handoff if needed;
     - a finalized handoff must record its approximate covered hours and the explicit next main-agent tasks so the next main agent can resume directly from the note without extra user briefing.
+30. Temporary staging interfaces are allowed only when the workflow names them explicitly. If a role introduces or preserves a temporary wrapper, placeholder owner, or other staging-only surface so that one component can land before its eventual owner exists, then:
+    - the code must carry a short comment that says the surface is temporary and names the future owner, absorbing component, or removal condition;
+    - the corresponding architect, designer, or creator artifact must record the same temporary status and exit plan;
+    - vague `TODO` markers without an owner or exit condition are not enough.
+31. Every helper function needs a stated reason to exist. This applies most strongly to short helpers and field-exposing accessors:
+    - if a helper only forwards to another helper, returns a stored field unchanged, or exposes one delegated method, the designer must justify the external caller shape, trust boundary, or repeated error-prone pattern that makes the helper worth keeping;
+    - if that proof is missing, the creator must not add the helper and should keep the data private until a real caller exists;
+    - checker, advisor, and reviewer must treat unjustified helpers as defects rather than harmless style choices;
+    - tests inside the same module do not count as proof that a production helper belongs in the API surface.
 
 ## 2. Roles
 
@@ -89,6 +104,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must specify the execution environment explicitly for any subagent that may run commands, including whether commands must be run through Docker and what repository path inside the container should be used.
 - Should assume that command-running subagents are mutually interfering unless their workspaces and runtime state are explicitly isolated.
 - Must curate and forward the relevant exFAT prior material rather than assuming each role should read all priors by default.
+- Must preserve the prior-precedence rule when curating packets: Microsoft spec first, Linux implementation summary second, Asterinas-local priors third as integration-only context.
 - Should minimize prior context by role, but not below the level needed to avoid semantic guesswork.
 - May ask the architect to derive a narrower prior summary for downstream roles when that is cheaper and safer than repeated main-agent manual excerpting.
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
@@ -104,6 +120,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Starts from exFAT prior knowledge and external documentation.
 - Must read the prior packet supplied by the main agent before splitting components.
 - If the architect receives the full prior set, it should distill the relevant normative constraints for downstream roles inside the architect handoff instead of forcing every later role to reread every prior source.
+- Must treat Microsoft exFAT rules as normative and Linux exFAT as the preferred implementation reference; it must not preserve legacy Asterinas exFAT structure or behavior by inertia when those sources support a cleaner split.
 - Identifies exFAT components and their dependency graph.
 - Splits components into an implementation order that is dependency-safe and operationally sensible.
 - Must make parallelism visible instead of leaving the plan as a single linear chain whenever independent components exist.
@@ -121,6 +138,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 
 - Produces the full specification for one component.
 - Must read the component-relevant prior packet supplied by the main agent, plus any architect-derived prior summary.
+- Must preserve the same prior precedence used by the architect. It must not turn local Asterinas precedent into semantic authority unless the packet explicitly records that a local interface constraint forces it.
 - Must reject or send back an architected component that is still too coarse to specify without creator guesswork or that would bundle several independent behavior families into one creator pass.
 - Must produce three designer artifacts for new components:
   - `01_designer_core.md`
@@ -140,6 +158,8 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must explicitly surface any prior-derived exFAT rules that the creator or checker cannot be expected to infer safely from local code alone.
 - Must make the component implementable without creator guesswork.
 - Must avoid specifying helper surfaces with overlapping meanings unless the spec also explains why more than one form is necessary and which one is canonical at ordinary call sites.
+- Must mark any temporary staging surface explicitly in the artifact, including why it exists now, which later component should absorb or remove it, and what code comment the creator must leave behind.
+- Must justify every helper surface it asks for. If a short helper only exposes stored data or delegates to another helper, the spec must name the expected cross-module caller or boundary that needs that helper; otherwise the helper should not be specified yet.
 
 ### Creator
 
@@ -154,16 +174,20 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
   - concurrency pass second,
   - concurrency repair batches as needed.
 - Must treat the packet's prior excerpts and designer-derived constraints as authoritative for exFAT semantics. It should not assume unstated on-disk rules from memory when the packet did not provide them.
+- Must not treat legacy Asterinas exFAT code as a semantic fallback when the packet's Microsoft- or Linux-derived constraints point elsewhere.
 - Must ignore spec sections that require writing or updating ktests, because test authoring is checker-owned by default.
 - Should ask the main agent to split work further when the designer spec still spans too many modules or behaviors for one bounded pass.
 - May run compile-only kernel commands, but must not run kernel tests or QEMU-backed runtime commands.
 - Must not silently extend scope, redesign interfaces, or postpone important details with vague TODOs.
 - Should prefer one canonical helper surface over several trivially derivable wrappers when the extra wrappers do not remove real caller risk or complexity.
+- Must leave an explicit code comment on any temporary staging surface that the packet authorized, and the creator artifact must record the same future owner or removal condition.
+- Must not add a helper that merely exposes a stored field or delegated method unless the packet or designer artifact already proved why another component needs that helper now.
 
 ### Checker
 
 - Verifies code against the designer specification, existing tests, and observable behavior.
 - Must use the supplied prior excerpts when deciding whether behavior matches exFAT semantics, rather than relying only on local implementation precedent.
+- Must not accept a behavior only because it matches legacy Asterinas exFAT when the packet's higher-priority priors indicate a different intended rule.
 - Owns test authoring for verification: may add, refine, or repair ktests and other test-only coverage needed to validate the component or capture a regression.
 - May use code review, targeted tests, focused fault hunting, and test-writing to turn missing coverage into executable checks.
 - Must keep checker-authored ktests understandable. Each ktest should carry a short comment describing the scenario and expected behavior unless that intent is already unmistakable from the test name and body.
@@ -171,6 +195,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must check and record whether the current environment appears to have KVM acceleration available before relying on performance-sensitive test expectations.
 - Owns kernel runtime verification commands for this workflow.
 - Should default to test-only code changes. It must not modify production implementation except when the main agent explicitly permits a checker-owned fix.
+- Must treat an undocumented temporary staging surface or an unjustified production helper as a real defect when the assigned scope includes that code.
 - Serves three distinct checkpoints:
   - serial-pass validation,
   - concurrency-pass validation when the designer requires it,
@@ -183,6 +208,7 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Tells the creator what to change, why it is required, and what counts as done.
 - Does not own reviewer findings, because reviewer edits are direct.
 - May be the same agent as the checker, but the output artifact must still be advisory rather than exploratory.
+- Must preserve helper-justification and temporary-surface defects explicitly when converting checker findings into a repair batch, rather than collapsing them into vague cleanup language.
 
 ### Reviewer
 
@@ -194,6 +220,8 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 - Must not run kernel build, test, or QEMU commands.
 - Must leave a reviewer report that explains findings, edits made, and any remaining concerns that need a final checker pass.
 - Should flag helper duplication when multiple small APIs express the same invariant without serving clearly different caller shapes.
+- Should remove or inline short helpers that have no packet-backed justification, especially field-exposing accessors with no proven cross-module caller.
+- Must ensure temporary staging surfaces look temporary in both code comments and reviewer report language, including the stated future owner or removal condition.
 
 ## 3. Required Step Sequence
 
