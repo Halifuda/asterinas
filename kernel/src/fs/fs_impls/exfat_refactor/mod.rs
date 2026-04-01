@@ -10,6 +10,7 @@
 mod boot_sector;
 mod dentry;
 mod fat;
+mod fileset;
 mod io;
 mod super_block;
 
