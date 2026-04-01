@@ -91,6 +91,15 @@ docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osd
 
 This path has already been exercised successfully.
 
+When the main agent delegates test execution to a checker, the task packet should repeat the containerized command shape explicitly instead of assuming the checker will remember it.
+For example, the packet should say that commands must use:
+
+```bash
+docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test ...'
+```
+
+rather than a host-side `cargo osdk test ...` invocation.
+
 ## 5. How Test Selection Actually Works
 
 `cargo osdk test [TESTNAME]` does not need to run the entire ktest population.
@@ -208,6 +217,10 @@ For most component work, a small filtered run is faster and gives clearer feedba
 
 Do not run multiple `cargo osdk test`, `make ktest`, or other QEMU-producing commands in parallel from this workflow.
 Tooling-level directory conflicts can produce misleading failures that are unrelated to the component under review.
+
+More generally, in the current workflow the repository checkout and Docker container are shared mutable execution state.
+That means command-producing subagent work should be treated as serial by default, not only QEMU-backed tests.
+If the main agent wants true parallel command execution, it should first arrange isolated worktrees, isolated build directories, and isolated container or runtime state.
 
 ### Expect the first run to be expensive
 

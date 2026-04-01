@@ -12,7 +12,11 @@ The project has two goals:
 - [`PROJECT_BRIEF.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/PROJECT_BRIEF.md) records the original project framing, role intent, and why the workflow is structured this way.
 - [`ASTERINAS_ARCHITECT_PRIORS.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/ASTERINAS_ARCHITECT_PRIORS.md) records the Asterinas-local knowledge an architect should treat as prior context before splitting components.
 - [`TESTING_GUIDE.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/TESTING_GUIDE.md) records how exFAT ktests should be written, selected, and executed in the validated container workflow.
-- [`PROTOCOL.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/PROTOCOL.md) is the normative workflow.
+- [`PROTOCOL.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/PROTOCOL.md) is the main-agent-owned normative workflow.
+- `protocol/` contains the scoped documents that should actually be forwarded to ordinary subagents:
+  - `COMMON_SUBAGENT.md`
+  - role-specific files such as `ARCHITECT.md`, `CREATOR.md`, and `CHECKER.md`
+  - `TASK_PACKET_TEMPLATE.md` for per-task read or write scopes and stop conditions
 - [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md) is the scheduler-owned task board.
 - `templates/` contains the required handoff formats for each agent role.
 - Component artifacts use chronological two-digit prefixes grouped by phase:

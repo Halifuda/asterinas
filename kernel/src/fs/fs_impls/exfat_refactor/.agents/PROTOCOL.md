@@ -10,6 +10,10 @@ The project has two explicit goals:
 
 The workflow is intentionally process-heavy because both goals matter. The process is part of the experiment, not overhead to be ignored.
 
+This file is the main-agent-owned scheduler protocol.
+It is the authoritative workflow reference, but it is not the default document that should be forwarded wholesale to ordinary subagents.
+Ordinary subagent dispatch should instead use the scoped files under `.agents/protocol/` plus a task-specific packet that limits read scope, write scope, and stop conditions.
+
 ## 1. Global Rules
 
 1. Every agent must obey the repository-level `AGENTS.md`.
@@ -18,7 +22,7 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 4. The main agent is the only scheduler. Subagents do not self-assign work or widen scope.
 5. The main agent is the only agent allowed to modify `COMPONENT_INDEX.md` or to change a component's official state or owner.
 6. No component may enter implementation before its architect handoff and designer specification both exist.
-7. Each component should normally produce less than 500 lines of initial implementation. Exceeding 1000 lines requires explicit approval from the main agent.
+7. Each component should normally produce about `150-300` lines of initial implementation and should stay comfortably below `400` lines. A component that still fits under `500` lines may nevertheless be too large if it bundles several independent behaviors, policy decisions, or non-trivial methods into one pass. Exceeding `500` lines requires an explicit main-agent decision that records why a smaller split would be worse.
 8. A component must depend only on already-accepted components or on stable pre-existing kernel interfaces.
 9. The legacy `kernel/src/fs/fs_impls/exfat/` implementation remains the active registered filesystem and regression baseline until the main agent explicitly schedules a takeover.
 10. `exfat_refactor` should be compiled in-tree but should not register itself as the `exfat` filesystem type during the exploratory refactor phase.
@@ -38,6 +42,13 @@ The workflow is intentionally process-heavy because both goals matter. The proce
     - when a doc comment is warranted, it must follow the repository style rules in `AGENTS.md` and the coding-guidelines book.
 17. Every checker-owned `#[ktest]` should carry a short comment that states the scenario or property being validated, because tests are read as executable specification and their purpose should be obvious without reverse-engineering the setup.
 18. Every active workflow step writes its own handoff artifact. No role should append new step results into an older role's file or into a file from a previous phase. File boundaries are role boundaries.
+19. Subagent protocol delivery must be role-scoped and task-scoped:
+    - the main agent should normally send ordinary subagents only the relevant files from `.agents/protocol/` plus the current component artifacts and task packet;
+    - the main agent should not forward this full scheduler protocol to ordinary subagents unless the delegated task is itself a main-agent continuity or protocol-maintenance task;
+    - every task packet must define the subagent's read set, write set, forbidden files, and stop condition.
+20. A subagent does not acquire scheduler authority just because it can see what the next sensible workflow step might be. Even when a later step appears obvious, the subagent must stop at its assigned role boundary and leave state transitions, acceptance, and task-board edits to the main agent.
+21. Any delegated step that runs project commands must receive an explicit execution environment in its task packet. The main agent must not assume the subagent will remember to enter Docker, choose the correct working directory, or infer the approved command prefix on its own.
+22. In the current shared-worktree and shared-container workflow, command-producing delegated work is not parallel-safe by default. If a delegated step may create or mutate build artifacts, OSDK state, Cargo state, boot images, or QEMU runtime state, the main agent should schedule it serially unless a genuinely isolated worktree and execution environment were prepared first.
 
 ## 2. Roles
 
@@ -46,9 +57,14 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 - Owns scheduling, delegation, and acceptance decisions.
 - Owns the workflow itself: protocol enforcement, gate enforcement, and rollback or rework decisions.
 - Maintains [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md).
+- Owns the role-scoped protocol packets under `.agents/protocol/` and decides which subset is forwarded to each subagent.
 - Maintains environment continuity information so the project can survive machine switches, new threads, or interrupted sessions with minimal rediscovery work.
 - Assigns component ownership and decides when a handoff is mature enough to advance.
 - Accepts or rejects architect, designer, creator, checker, advisor, and reviewer artifacts.
+- Must reject architect outputs that are only line-budget compliant but still too wide in responsibility, method count, or policy surface.
+- Must treat subagent overreach as a process defect even when the underlying edit looks reasonable. Scheduler-owned state changes only become official after the main agent reviews and records them.
+- Must specify the execution environment explicitly for any subagent that may run commands, including whether commands must be run through Docker and what repository path inside the container should be used.
+- Should assume that command-running subagents are mutually interfering unless their workspaces and runtime state are explicitly isolated.
 - Enforces workspace-only edits, pass boundaries, and role-specific command authority.
 - Resolves conflicts between specification, implementation, and existing code constraints.
 - Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
@@ -60,12 +76,20 @@ The workflow is intentionally process-heavy because both goals matter. The proce
 - Identifies exFAT components and their dependency graph.
 - Splits components into an implementation order that is dependency-safe and operationally sensible.
 - Must make parallelism visible instead of leaving the plan as a single linear chain whenever independent components exist.
+- Must optimize for narrow implementation units, not merely for superficial compliance with a line budget.
+- Must prefer splitting one area into several components when the work would otherwise introduce multiple unrelated methods, multiple policy decisions, or mixed trust boundaries in one pass.
+- Must treat labels such as `chain`, `dentry`, or `inode` as umbrella areas rather than automatically valid component boundaries. If such an area contains separable concerns, the architect must emit smaller subcomponents instead of one broad handoff.
+- Must explicitly justify any component that is expected to:
+  - add more than roughly `3-4` non-trivial production methods,
+  - touch more than one primary behavior family,
+  - or span more than one meaningful trust or validation boundary.
 - Emits one architect handoff per component, small enough for a designer and creator to execute without hidden scope explosion.
 - Must name the component's ready-now parallel siblings or recommended parallel wave so the main agent can schedule them deliberately.
 
 ### Designer
 
 - Produces the full specification for one component.
+- Must reject or send back an architected component that is still too coarse to specify without creator guesswork or that would bundle several independent behavior families into one creator pass.
 - Must supply three specification layers:
   - Modular specification: dependencies, provided interfaces, hidden internals, touched files.
   - Functional specification: accepted inputs, produced outputs, state transitions, invariants, and error cases.
