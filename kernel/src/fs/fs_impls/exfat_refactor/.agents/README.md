@@ -21,13 +21,14 @@ The project has two goals:
 - `templates/` contains the required handoff formats for each agent role.
 - Component artifacts use chronological two-digit prefixes grouped by phase:
   - `00` architect
-  - `01` designer
+  - `01`-`03` designer split (`core`, `async`, `ktest`)
   - `10`-series serial implementation loop
   - `20`-series concurrency loop
   - `30`-series reviewer and final checker
 - `templates/MAIN_AGENT_HANDOFF_TEMPLATE.md` is the checkpoint handoff format for cross-thread or cross-machine continuity.
 - `templates/REVIEWER_REPORT_TEMPLATE.md` is the dedicated code-quality review handoff format.
 - `EXR-BOOT-01` and `EXR-IO-02` were created before the step-by-step handoff redesign. Their historical artifact names remain valid as legacy records, but new components should follow the newer phase-grouped naming scheme from `PROTOCOL.md`.
+- Components that already use a single `01_designer_spec.md` remain valid legacy records. New components should use the split designer artifact set defined in `PROTOCOL.md`.
 - Main-agent checkpoint notes should use a memorable fancy nickname in the filename, following the pattern `<fancy-nickname>-YYYYMMDD-HHMM-<summary>.md`.
 
 All agents working on `exfat_refactor` must follow both the repository-level `AGENTS.md` and this directory-local protocol.

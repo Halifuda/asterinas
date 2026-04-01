@@ -10,14 +10,17 @@ The designer turns one architected component into an implementable spec with no 
 
 ## Required behavior
 
-1. Write modular, functional, and concurrency specifications.
-2. Split obligations into serial creator work, serial checker work, concurrency creator work, and concurrency checker work.
+1. Write three bounded designer artifacts:
+   - `01_designer_core.md` for modular and functional specification,
+   - `02_designer_async.md` for concurrency and async obligations,
+   - `03_designer_ktest.md` for checker-owned serial and async test obligations.
+2. Keep the three artifacts aligned but context-separated so later roles can be given only the spec slice they need.
 3. Reject or send back a component that is still too coarse for one creator pass.
 4. Keep the specification bounded to the assigned component only.
 
 ## Allowed edits
 
-- The assigned designer specification file.
+- The assigned designer artifact files.
 
 ## Forbidden edits
 
@@ -27,5 +30,5 @@ The designer turns one architected component into an implementable spec with no 
 
 ## Stop condition
 
-Stop after writing the assigned designer artifact.
+Stop after writing the assigned designer artifact set.
 Do not implement, test, or schedule follow-up work.

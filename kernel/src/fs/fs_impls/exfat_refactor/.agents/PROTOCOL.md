@@ -21,13 +21,13 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 3. `kernel/` code must remain safe Rust. No agent may introduce `unsafe` into `kernel/src/fs/fs_impls/exfat_refactor/`.
 4. The main agent is the only scheduler. Subagents do not self-assign work or widen scope.
 5. The main agent is the only agent allowed to modify `COMPONENT_INDEX.md` or to change a component's official state or owner.
-6. No component may enter implementation before its architect handoff and designer specification both exist.
+6. No component may enter implementation before its architect handoff and required designer artifacts both exist. For new components, that normally means the full designer set: `01_designer_core.md`, `02_designer_async.md`, and `03_designer_ktest.md`. Legacy single-file `01_designer_spec.md` artifacts remain valid only for components already created before this split.
 7. Each component should normally produce about `150-300` lines of initial implementation and should stay comfortably below `400` lines. A component that still fits under `500` lines may nevertheless be too large if it bundles several independent behaviors, policy decisions, or non-trivial methods into one pass. Exceeding `500` lines requires an explicit main-agent decision that records why a smaller split would be worse.
 8. A component must depend only on already-accepted components or on stable pre-existing kernel interfaces.
 9. The legacy `kernel/src/fs/fs_impls/exfat/` implementation remains the active registered filesystem and regression baseline until the main agent explicitly schedules a takeover.
 10. `exfat_refactor` should be compiled in-tree but should not register itself as the `exfat` filesystem type during the exploratory refactor phase.
 11. All code and artifact edits must stay inside the workspace at `/home/halifuda/asterinas` and inside the write scope assigned by the main agent. No agent may modify external dependencies, toolchain sources, container image contents, home-directory tools, caches, or any code outside the workspace, even if the external bug appears obvious. If an external bug is suspected, the agent must collect evidence and hand it to the main agent for user review instead of patching it.
-12. The designer must still state test obligations, but `#[ktest]` authoring and other test-writing are checker-owned by default. Creators must ignore test-authoring obligations in the spec unless the main agent explicitly overrides this rule.
+12. The designer must still state test obligations, but `#[ktest]` authoring and other test-writing are checker-owned by default. Creators must ignore test-authoring obligations in the spec unless the main agent explicitly overrides this rule. For new components, those obligations should live in `03_designer_ktest.md` rather than inside the creator-facing designer files.
 13. Kernel build or run authority is role-restricted for efficiency:
     - the main agent, architect, designer, advisor, and reviewer must not execute kernel build, test, or QEMU run commands;
     - the creator may execute compile-only kernel commands when needed for owned code, but must not execute kernel runtime or test commands such as `cargo osdk test`, `make ktest`, or direct QEMU runs;
@@ -49,6 +49,12 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 20. A subagent does not acquire scheduler authority just because it can see what the next sensible workflow step might be. Even when a later step appears obvious, the subagent must stop at its assigned role boundary and leave state transitions, acceptance, and task-board edits to the main agent.
 21. Any delegated step that runs project commands must receive an explicit execution environment in its task packet. The main agent must not assume the subagent will remember to enter Docker, choose the correct working directory, or infer the approved command prefix on its own.
 22. In the current shared-worktree and shared-container workflow, command-producing delegated work is not parallel-safe by default. If a delegated step may create or mutate build artifacts, OSDK state, Cargo state, boot images, or QEMU runtime state, the main agent should schedule it serially unless a genuinely isolated worktree and execution environment were prepared first.
+23. For new components, designer context must be role-scoped as well as task-scoped:
+    - serial creators should normally receive only `01_designer_core.md`,
+    - concurrency creators should normally receive `01_designer_core.md` plus `02_designer_async.md`,
+    - serial or final checkers should normally receive `01_designer_core.md` plus `03_designer_ktest.md`,
+    - concurrency checkers should normally receive the full designer set.
+    The main agent may deviate only when the packet records why the extra context is necessary.
 
 ## 2. Roles
 
@@ -90,15 +96,20 @@ Ordinary subagent dispatch should instead use the scoped files under `.agents/pr
 
 - Produces the full specification for one component.
 - Must reject or send back an architected component that is still too coarse to specify without creator guesswork or that would bundle several independent behavior families into one creator pass.
-- Must supply three specification layers:
-  - Modular specification: dependencies, provided interfaces, hidden internals, touched files.
-  - Functional specification: accepted inputs, produced outputs, state transitions, invariants, and error cases.
-  - Concurrency specification: lock ordering, atomicity, serialization assumptions, and concurrent access rules.
-- Must explicitly split the component into:
-  - serial implementation obligations for the first creator pass,
-  - serial-phase checker-owned test obligations,
-  - concurrency implementation obligations for the later creator pass,
-  - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required.
+- Must produce three designer artifacts for new components:
+  - `01_designer_core.md`
+    - modular specification: dependencies, provided interfaces, hidden internals, touched files;
+    - functional specification: accepted inputs, produced outputs, state transitions, invariants, error cases, and explicit serial-pass non-goals.
+  - `02_designer_async.md`
+    - concurrency specification: lock ordering, atomicity, serialization assumptions, concurrent access rules, and whether a dedicated concurrency creator pass is required or explicitly empty.
+  - `03_designer_ktest.md`
+    - serial-phase checker-owned test obligations,
+    - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required,
+    - the smallest expected final-checker rerun surface.
+- Must keep creator-facing context narrow:
+  - serial creator obligations belong in `01_designer_core.md`,
+  - concurrency creator obligations belong in `02_designer_async.md`,
+  - checker-owned test obligations belong in `03_designer_ktest.md`.
 - Must state test obligations for the checker, not as creator-owned work.
 - Must make the component implementable without creator guesswork.
 
@@ -197,7 +208,9 @@ Each component gets its own directory once the architect creates it:
 ```text
 .agents/components/<component-id>/
   00_architect.md
-  01_designer_spec.md
+  01_designer_core.md
+  02_designer_async.md
+  03_designer_ktest.md
   10_creator_serial.md
   11_checker_serial.md
   12_advisor_serial.md
@@ -214,6 +227,11 @@ Each component gets its own directory once the architect creates it:
   31_checker_final.md
 ```
 
+Legacy note:
+
+- Existing components that already use `01_designer_spec.md` remain valid historical records and do not need to be renamed retroactively.
+- New components should use the split designer artifact set above.
+
 Rules:
 
 1. The main agent creates the component directory and assigns ownership.
@@ -221,7 +239,9 @@ Rules:
 3. Each workflow step owns one file. The file name must reveal both the role and the phase.
 4. The baseline phase slots are:
    - `00` architect,
-   - `01` designer,
+   - `01` designer core,
+   - `02` designer async,
+   - `03` designer ktest,
    - `10` serial creator,
    - `11` serial checker,
    - `12` serial advisor,
@@ -250,7 +270,9 @@ Each component moves through these high-level states:
 2. `Architected`
    `00_architect.md` exists and defines scope, order, and readiness for design.
 3. `Specified`
-   `01_designer_spec.md` exists and is complete in modular, functional, and concurrency dimensions.
+   The required designer artifact set exists and is complete.
+   For new components, this means `01_designer_core.md`, `02_designer_async.md`, and `03_designer_ktest.md`.
+   For legacy components, the older `01_designer_spec.md` remains acceptable.
 4. `SerialImplementing`
    A creator is actively implementing the first serial pass or a serial repair batch.
 5. `SerialChecked`
@@ -301,15 +323,20 @@ The architect handoff is valid only if it states:
 
 The designer handoff is valid only if it states:
 
-- module boundaries and interface surface,
-- functional behavior including failure cases,
-- state changes and maintained invariants,
-- concurrency and atomicity rules,
-- which obligations belong to the serial creator pass,
-- which checker-owned tests belong to the serial phase,
-- which obligations belong to the concurrency creator pass,
-- whether the concurrency phase requires checker-owned concurrent tests or explicitly does not,
-- explicit non-goals for this component.
+- in `01_designer_core.md`:
+  - module boundaries and interface surface,
+  - functional behavior including failure cases,
+  - state changes and maintained invariants,
+  - which obligations belong to the serial creator pass,
+  - explicit non-goals for this component;
+- in `02_designer_async.md`:
+  - concurrency and atomicity rules,
+  - which obligations belong to the concurrency creator pass,
+  - whether the concurrency creator pass is required, empty, or intentionally deferred;
+- in `03_designer_ktest.md`:
+  - which checker-owned tests belong to the serial phase,
+  - whether the concurrency phase requires checker-owned concurrent tests or explicitly does not,
+  - the smallest representative final-checker rerun surface.
 
 ### Creator -> Checker
 
@@ -366,15 +393,21 @@ Every designer specification must be detailed enough that a creator can implemen
 
 Minimum required sections:
 
-1. Scope and non-goals.
-2. Dependencies and provided interfaces.
-3. Data/control flow.
-4. Functional rules in precondition/action/postcondition form.
-5. Error handling and invariants.
-6. Concurrency and atomicity constraints.
-7. Serial-phase checker-owned test obligations.
-8. Concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required.
-9. Pass boundaries when serial work and concurrency work should not land in the same creator pass.
+1. `01_designer_core.md`
+   - scope and non-goals,
+   - dependencies and provided interfaces,
+   - data/control flow,
+   - functional rules in precondition/action/postcondition form,
+   - error handling and invariants,
+   - pass boundaries for the serial creator.
+2. `02_designer_async.md`
+   - concurrency and atomicity constraints,
+   - whether async or concurrency implementation is required now, empty, or deferred,
+   - pass boundaries for the concurrency creator.
+3. `03_designer_ktest.md`
+   - serial-phase checker-owned test obligations,
+   - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required,
+   - the smallest expected final-checker rerun surface.
 
 If any of these are missing, the component is not ready for implementation.
 

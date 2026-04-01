@@ -32,6 +32,7 @@ The packet should be small enough that the subagent does not need the full sched
 ## Required Inputs
 
 - Artifacts, code paths, or test outputs the subagent must rely on.
+- When the component uses split designer artifacts, list exactly which designer files this role is allowed to see.
 
 ## Allowed Commands
 
