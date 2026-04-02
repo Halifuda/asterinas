@@ -2,6 +2,9 @@
 
 # Main Agent Handoff Template
 
+Treat this file as the editable record of the current main-agent wave.
+Update it during the wave, rewrite it when needed for clarity, and leave the next main agent a concise but complete state record.
+
 ## Metadata
 
 - Fancy nickname:
@@ -32,6 +35,15 @@
 ## Recent Decisions
 
 List the decisions that materially shape future work.
+Record both implementation-side and protocol-side decisions here.
+If this wave changed scheduler-facing docs such as `PROTOCOL.md`, `README.md`, `TESTING_GUIDE.md`, `templates/`, or packet-shaping rules, summarize those changes here before ending the wave.
+
+## Wave Record
+
+- Scheduling or planning changes made in this wave:
+- Components or passes advanced, accepted, repaired, blocked, or deferred in this wave:
+- Protocol, template, or packet-shaping changes made in this wave:
+- Important facts intentionally removed from earlier drafts because they are no longer relevant:
 
 ## Open Risks And Assumptions
 
@@ -45,11 +57,12 @@ List the assumptions that a future main agent must preserve, verify, or revisit.
 
 ## Resume Checklist
 
-- Read `PROJECT_BRIEF.md`.
+- Read `README.md`.
 - Read `PROTOCOL.md`.
 - Read `COMPONENT_INDEX.md`.
 - Read the latest main-agent handoff note.
 - Verify the environment summary above still matches reality.
+- Confirm this handoff already reflects the material implementation and protocol changes from this wave before committing or handing off.
 
 ## File Naming
 

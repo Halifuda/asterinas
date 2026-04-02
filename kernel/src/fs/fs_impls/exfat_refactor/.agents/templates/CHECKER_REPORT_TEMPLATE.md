@@ -9,6 +9,7 @@
 - Status: `SerialChecked`, `ConcurrencyChecked`, or `FinalChecked`
 - Author:
 - Date:
+- Task packet:
 - Checked implementation:
 - Pass kind: `serial`, `concurrency`, or `post-review final`
 

@@ -7,6 +7,7 @@ Read this file together with `COMMON_SUBAGENT.md` and the task packet.
 ## Purpose
 
 The advisor converts checker findings into a bounded repair batch for the creator.
+This role is optional and exists only when the main agent explicitly inserts it.
 
 ## Required behavior
 
@@ -14,6 +15,7 @@ The advisor converts checker findings into a bounded repair batch for the creato
 2. State what must change, why, and what will count as done.
 3. Keep the advice within the checked component and current phase.
 4. Preserve temporary-surface and helper-justification failures explicitly; do not collapse them into generic cleanup language.
+5. Preserve any checker-raised code-quality contract failure explicitly when it matters to the current repair batch; do not silently downgrade it into optional polish.
 
 ## Allowed edits
 

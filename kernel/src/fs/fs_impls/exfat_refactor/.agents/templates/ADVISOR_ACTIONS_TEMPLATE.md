@@ -9,6 +9,7 @@
 - Status: `Advised`
 - Author:
 - Date:
+- Task packet:
 - Based on checker artifact:
 - Loop kind: `serial` or `concurrency`
 

@@ -9,6 +9,7 @@
 - Status: `Specified`
 - Author:
 - Date:
+- Task packet:
 - Based on architect artifact:
 
 ## Scope

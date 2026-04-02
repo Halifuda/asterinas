@@ -6,6 +6,16 @@ This document summarizes the in-tree Linux exFAT implementation under `fs/exfat/
 - `structs` and `functions`: the key runtime and on-disk building blocks
 - `interfaces`: how the driver connects to VFS, block I/O, NLS/Unicode, and user space
 
+This file is intentionally not a full semantic rewrite of Linux `fs/exfat/`.
+Use it as a high-level map first, then drop to the local Linux source tree at `/home/halifuda/linux/fs/exfat/` when a task depends on exact control flow, update ordering, locking, or data-path edge cases.
+
+## How To Use This Summary
+
+- Use this file to answer "which Linux subsystem owns this concern?" before opening source files.
+- If a task needs exact mutation order, read/write sequencing, truncate behavior, rename corner cases, or mount-time state transitions, treat the relevant source files below as authoritative and read them directly.
+- Do not keep expanding this summary with line-by-line behavior that is easier to recover from the indexed Linux source tree.
+- When handing work to another main agent, prefer citing a topic from the code index below plus the exact Linux files or functions to inspect, rather than pasting a long prose re-summary.
+
 ## Source Map
 
 | File | Main role |
@@ -22,6 +32,31 @@ This document summarizes the in-tree Linux exFAT implementation under `fs/exfat/
 | `fs/exfat/cache.c` | Per-inode cluster-chain extent cache |
 | `fs/exfat/nls.c` | UTF-16/NLS/UTF-8 conversion and upcase table handling |
 | `fs/exfat/misc.c` | Time conversion, checksum helpers, error policy, buffer updates |
+
+## Topic-To-Code Index
+
+Use this section when the high-level summary is not enough and you need to jump directly into the Linux implementation.
+
+| Topic | Start here | Then inspect | Why this topic should usually drop to code |
+| --- | --- | --- | --- |
+| Mount bootstrap and remount | `super.c` | `exfat_read_boot_sector()`, `exfat_verify_boot_region()`, `__exfat_fill_super()`, `__exfat_remount()` | Bring-up order and volume-state transitions are sequencing-sensitive. |
+| Superblock runtime state and dirty flag | `super.c`, `exfat_fs.h` | `exfat_set_volume_dirty()`, mount option parsing, `struct exfat_sb_info` fields | Policy and persistent state are spread across mount and shutdown paths. |
+| Upcase table and charset behavior | `nls.c`, `super.c` | `exfat_create_upcase_table()`, `exfat_load_default_upcase_table()`, `exfat_nls_to_utf16()`, `exfat_utf16_to_nls()` | Name normalization depends on both mount policy and volume metadata. |
+| Case-insensitive lookup and dentry hashing | `namei.c`, `nls.c` | `exfat_d_hash()`, `exfat_d_cmp()`, UTF-8 variants, `exfat_lookup()` | Hashing, comparison, and path normalization interact tightly. |
+| Directory record parsing and dentry-set validation | `dir.c` | `exfat_get_dentry()`, `exfat_get_dentry_set()`, `exfat_validate_entry()`, `exfat_find_dir_entry()` | File-record state machines are easier to verify in code than in prose. |
+| Empty-slot search and directory growth | `dir.c`, `fatent.c` | `exfat_find_empty_entry()`, `exfat_search_empty_slot()`, directory cluster extension helpers | Create paths depend on both directory scanning and allocation side effects. |
+| Namespace mutation: create or unlink or mkdir or rmdir | `namei.c`, `dir.c` | `exfat_create()`, `exfat_unlink()`, `exfat_mkdir()`, `exfat_rmdir()` | Mutation logic crosses name conversion, dentry-set writes, and allocation. |
+| Rename and entry-set relocation | `namei.c`, `dir.c` | `exfat_rename()`, destination empty-slot handling, entry-set rewrite helpers | Rename is one of the highest-risk multi-step metadata operations. |
+| FAT entry decoding and chain walking | `fatent.c` | `exfat_ent_get()`, `exfat_get_next_cluster()`, `exfat_count_num_clusters()` | Loop handling and special FAT values matter for correctness. |
+| Allocation bitmap scanning and free-space accounting | `balloc.c` | `exfat_load_bitmap()`, `exfat_find_free_bitmap()`, `exfat_count_used_clusters()`, `exfat_trim_fs()` | Bitmap ownership, search hints, and discard behavior are operational details. |
+| Transition from contiguous to FAT-chain allocation | `fatent.c` | `exfat_alloc_cluster()`, contiguous-run materialization logic, `__exfat_free_cluster()` | This is subtle enough that summary prose is usually insufficient. |
+| Cluster cache and logical-to-physical mapping | `cache.c`, `inode.c` | `exfat_cache_lookup()`, `exfat_cache_add()`, `exfat_get_cluster()`, `exfat_map_cluster()` | Performance behavior and mapping invariants depend on code-level interaction. |
+| Inode hashing and opened-inode identity | `inode.c`, `exfat_fs.h` | `exfat_iget()`, `exfat_hash_inode()`, `exfat_unhash_inode()`, `struct exfat_inode_info` | Linux keys inodes by dentry location, which is easy to misremember. |
+| `valid_size` versus `i_size` and zero-fill rules | `file.c`, `inode.c` | `exfat_extend_valid_size()`, `exfat_file_write_iter()`, `exfat_get_block()`, `__exfat_write_inode()` | Read/write correctness here depends on exact partial-block and writeback ordering. |
+| Buffered reads, direct I/O, and page-cache mapping | `file.c`, `inode.c` | `exfat_file_read_iter()` or generic wrappers, `exfat_direct_IO()`, `exfat_get_block()`, `exfat_aops` | The interaction is VFS-heavy and should be checked at source level. |
+| Truncate, shrink, and free-tail ordering | `file.c`, `inode.c`, `fatent.c` | `__exfat_truncate()`, inode writeback path, tail-cluster free helpers | Order of metadata update versus free matters for crash consistency assumptions. |
+| Inode writeback and dentry-set rewrite | `inode.c`, `dir.c`, `misc.c` | `__exfat_write_inode()`, `exfat_update_dir_chksum()`, time conversion helpers | Several on-disk fields must stay synchronized across helpers. |
+| Time encoding, checksums, and misc helpers | `misc.c` | `exfat_get_entry_time()`, `exfat_set_entry_time()`, checksum helpers | Small helper families often encode hidden exFAT-specific conventions. |
 
 ## High-Level Architecture
 
@@ -288,3 +323,12 @@ dir.c
   - `hint_femp` for empty-slot reuse
   - `hint_bmap` for last cluster reached during block mapping or readdir
 - The volume upcase table is both a correctness dependency and a performance dependency, because name hashing and comparison use it on every lookup path.
+
+## Escalation Heuristic
+
+If a future main agent finds that this summary feels too vague, the default response should not be "write a much longer summary."
+Instead:
+
+1. Identify the topic from the code index above.
+2. Read the named Linux source files and functions in `/home/halifuda/linux/fs/exfat/`.
+3. Only if the same topic keeps recurring across multiple components should a new short topic note or tighter index entry be added here.

@@ -9,6 +9,7 @@
 - Status: `SerialImplementing` or `ConcurrencyImplementing`
 - Author:
 - Date:
+- Task packet:
 - Implemented spec:
 - Pass kind: `serial implementation`, `serial repair`, `concurrency implementation`, or `concurrency repair`
 
@@ -27,10 +28,10 @@ Call out any non-obvious comments that were added to document assumptions or bou
 List any main-agent-approved deviation from the latest specification.
 Write `None` if there was no deviation.
 
-## Self-Checks
+## Optional Self-Checks
 
-- Commands run:
-- Compile checks run:
+- Commands run, if any:
+- Compile checks run, if any:
 - Manual reasoning checks:
 
 ## Remaining Risks

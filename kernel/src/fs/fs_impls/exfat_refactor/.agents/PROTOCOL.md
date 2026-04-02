@@ -2,541 +2,196 @@
 
 # exFAT Refactor Multi-Agent Protocol
 
-This file defines how the main agent and subagents collaborate on the exFAT multi-agent project.
-The project has two explicit goals:
+This file is the main-agent-owned scheduler protocol for the `exfat_refactor` workspace.
+It defines what the main agent controls: delegation, gates, parallel scheduling, and acceptance.
+It is intentionally narrower than the old all-in-one protocol.
 
-1. Refactor the exFAT implementation into clearer, better-specified, dependency-safe components.
-2. Explore how far LLM agents can reliably automate filesystem engineering work without losing control of correctness, scope, and implementation detail.
+Use the surrounding documents as follows:
 
-The workflow is intentionally process-heavy because both goals matter. The process is part of the experiment, not overhead to be ignored.
+- [`README.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/README.md):
+  workspace map and project framing
+- `protocol/`:
+  role-scoped rules that ordinary subagents should actually receive
+- `templates/`:
+  required artifact content and handoff formats
+- `subagent-tasks/`:
+  archived task packets that were actually sent
 
-This file is the main-agent-owned scheduler protocol.
-It is the authoritative workflow reference, but it is not the default document that should be forwarded wholesale to ordinary subagents.
-Ordinary subagent dispatch should instead use the scoped files under `.agents/protocol/` plus a task-specific packet that limits read scope, write scope, and stop conditions.
+Ordinary subagents should normally receive only the relevant `protocol/` files plus a task packet, not this full scheduler document.
+Because this file no longer repeats role-level detail, ordinary subagent packets should not forward `PROTOCOL.md` at all unless the delegated task is itself main-agent continuity or protocol-maintenance work.
 
-## 1. Global Rules
+## 1. Scheduler Rules
 
 1. Every agent must obey the repository-level `AGENTS.md`.
-2. Any code written by a creator or reviewer must fully comply with the coding guidelines in the repository-level `AGENTS.md`. This is a hard requirement, not a best-effort preference.
-3. `kernel/` code must remain safe Rust. No agent may introduce `unsafe` into `kernel/src/fs/fs_impls/exfat_refactor/`.
-4. The main agent is the only scheduler. Subagents do not self-assign work or widen scope.
-5. The main agent is the only agent allowed to modify `COMPONENT_INDEX.md` or to change a component's official state or owner.
-6. No component may enter implementation before its architect handoff and required designer artifacts both exist. For new components, that normally means the full designer set: `01_designer_core.md`, `02_designer_async.md`, and `03_designer_ktest.md`. Legacy single-file `01_designer_spec.md` artifacts remain valid only for components already created before this split.
-7. Each component should normally produce about `150-300` lines of initial implementation and should stay comfortably below `400` lines. A component that still fits under `500` lines may nevertheless be too large if it bundles several independent behaviors, policy decisions, or non-trivial methods into one pass. Exceeding `500` lines requires an explicit main-agent decision that records why a smaller split would be worse.
-8. A component must depend only on already-accepted components or on stable pre-existing kernel interfaces.
-9. The legacy `kernel/src/fs/fs_impls/exfat/` implementation remains the active registered filesystem and regression baseline until the main agent explicitly schedules a takeover.
-10. `exfat_refactor` should be compiled in-tree but should not register itself as the `exfat` filesystem type during the exploratory refactor phase.
-11. All code and artifact edits must stay inside the workspace at `/home/halifuda/asterinas` and inside the write scope assigned by the main agent. No agent may modify external dependencies, toolchain sources, container image contents, home-directory tools, caches, or any code outside the workspace, even if the external bug appears obvious. If an external bug is suspected, the agent must collect evidence and hand it to the main agent for user review instead of patching it.
-12. The designer must still state test obligations, but `#[ktest]` authoring and other test-writing are checker-owned by default. Creators must ignore test-authoring obligations in the spec unless the main agent explicitly overrides this rule. For new components, those obligations should live in `03_designer_ktest.md` rather than inside the creator-facing designer files.
-13. Kernel build or run authority is role-restricted for efficiency:
-    - the main agent, architect, designer, advisor, and reviewer must not execute kernel build, test, or QEMU run commands;
-    - the creator may execute compile-only kernel commands when needed for owned code, but must not execute kernel runtime or test commands such as `cargo osdk test`, `make ktest`, or direct QEMU runs;
-    - the checker owns kernel test execution and other runtime verification commands.
-    Ordinary read, search, and artifact-inspection commands remain allowed for every role.
-14. Kernel verification commands must be run sequentially in this workflow. Do not run multiple `cargo osdk test`, `make ktest`, or other QEMU-producing commands in parallel, because tooling-level concurrency failures can obscure component results.
-15. Checker-owned `#[ktest]` code should normally be colocated with the module it validates. Use `#[cfg(ktest)] mod tests` in the nearest relevant module by default. A shared `test_support.rs` or similar test-only module is allowed for reusable fixtures, but unrelated tests should not be dumped into `mod.rs` unless the main agent records a reason.
-16. Comment discipline is mandatory but selective. Follow the repository coding guidelines rather than a blanket quota:
-    - add comments when the intent, invariant, boundary, or tradeoff is not obvious from the code itself;
-    - do not add comments that merely paraphrase the code;
-    - prefer comments that explain why the code is structured this way, what assumption is being protected, or what subtle case it handles;
-    - when a doc comment is warranted, it must follow the repository style rules in `AGENTS.md` and the coding-guidelines book.
-17. Every checker-owned `#[ktest]` should carry a short comment that states the scenario or property being validated, because tests are read as executable specification and their purpose should be obvious without reverse-engineering the setup.
-18. Every active workflow step writes its own handoff artifact. No role should append new step results into an older role's file or into a file from a previous phase. File boundaries are role boundaries.
-19. Subagent protocol delivery must be role-scoped and task-scoped:
-    - the main agent should normally send ordinary subagents only the relevant files from `.agents/protocol/` plus the current component artifacts and task packet;
-    - the main agent should not forward this full scheduler protocol to ordinary subagents unless the delegated task is itself a main-agent continuity or protocol-maintenance task;
-    - every task packet must define the subagent's read set, write set, forbidden files, and stop condition.
-20. A subagent does not acquire scheduler authority just because it can see what the next sensible workflow step might be. Even when a later step appears obvious, the subagent must stop at its assigned role boundary and leave state transitions, acceptance, and task-board edits to the main agent.
-21. Any delegated step that runs project commands must receive an explicit execution environment in its task packet. The main agent must not assume the subagent will remember to enter Docker, choose the correct working directory, or infer the approved command prefix on its own.
-22. In the current shared-worktree and shared-container workflow, command-producing delegated work is not parallel-safe by default. If a delegated step may create or mutate build artifacts, OSDK state, Cargo state, boot images, or QEMU runtime state, the main agent should schedule it serially unless a genuinely isolated worktree and execution environment were prepared first.
-23. For new components, designer context must be role-scoped as well as task-scoped:
-    - serial creators should normally receive only `01_designer_core.md`,
-    - concurrency creators should normally receive `01_designer_core.md` plus `02_designer_async.md`,
-    - serial or final checkers should normally receive `01_designer_core.md` plus `03_designer_ktest.md`,
-    - concurrency checkers should normally receive the full designer set.
-    The main agent may deviate only when the packet records why the extra context is necessary.
-24. exFAT prior knowledge must also be packet-scoped. The main agent must not assume subagents will discover or remember the relevant normative material on their own. For exFAT planning or implementation work, the main agent should curate prior inputs from:
-    - `Microsoft-exFAT-spec.md`,
-    - `linux-exFAT-implementation-summary.md`,
-    - `ASTERINAS_ARCHITECT_PRIORS.md`.
-    The packet must say whether the role receives the full prior set, a narrowed excerpt set, or a prior summary derived by an earlier role.
-    These prior sources are not equal in authority:
-    - `Microsoft-exFAT-spec.md` is the normative source for on-disk rules and required exFAT semantics.
-    - `linux-exFAT-implementation-summary.md` is the preferred implementation reference when the Microsoft specification leaves design room, operational ambiguity, or under-specified engineering tradeoffs.
-    - `ASTERINAS_ARCHITECT_PRIORS.md` is local integration context only: repository constraints, Rust and VFS interfaces, test reality, and existing ownership boundaries. It must not override Microsoft- or Linux-derived exFAT semantics, and it must not be used as a reason to preserve legacy Asterinas exFAT behavior by default.
-25. Prior delivery is role-sensitive by default:
-    - architect normally receives the full prior set unless the main agent records a tighter equivalent packet;
-    - designer normally receives only the prior sections relevant to the assigned component, plus any architect-derived prior summary;
-    - creator normally receives only designer-derived constraints and any explicitly cited prior excerpts needed to avoid mis-implementing an on-disk or API rule;
-    - checker normally receives the relevant prior excerpts and designer-derived test obligations needed to validate behavior against the intended exFAT rule;
-    - reviewer normally does not need exFAT normative priors beyond the packet materials, but always remains bound by repository coding guidelines and `AGENTS.md`.
-    Whenever a packet includes more than one prior source, it should also state the intended precedence explicitly or inherit the default precedence above.
-26. If a role packet for architect, designer, creator, or checker omits prior material that appears necessary to do the assigned work safely, the subagent should stop and report the missing prior input instead of silently substituting its own memory.
-27. Legacy Asterinas `kernel/src/fs/fs_impls/exfat/` code is a compatibility and integration reference, not the semantic target of the refactor. Agents may study it to understand existing interfaces, current gaps, and migration constraints, but must not treat "how legacy Asterinas exFAT currently does it" as the default answer for exFAT on-disk semantics, component boundaries, or policy choices when Microsoft and Linux priors support a cleaner or more correct refactor design. Any deliberate divergence from Microsoft- or Linux-derived behavior that is forced by Asterinas interfaces must be recorded explicitly in the architect or designer artifact.
-28. Helper APIs should have distinct jobs. Do not keep multiple helpers that encode the same invariant or boundary in slightly different forms unless each one clearly matches a different dominant call-site convention and removes repeated, error-prone arithmetic. The designer should name the canonical helper surface explicitly, the creator should avoid introducing redundant wrappers, and the reviewer should call out overlapping helpers that weaken readability.
-29. Main-agent handoff writing is continuous, not end-loaded:
-    - the main agent should start the active handoff note as soon as a work wave begins and keep it updated as decisions land;
-    - before ending the wave, the main agent must reconsider whether the filename summary suffix still reflects the final scope and rename the handoff if needed;
-    - a finalized handoff must record its approximate covered hours and the explicit next main-agent tasks so the next main agent can resume directly from the note without extra user briefing.
-30. Temporary staging interfaces are allowed only when the workflow names them explicitly. If a role introduces or preserves a temporary wrapper, placeholder owner, or other staging-only surface so that one component can land before its eventual owner exists, then:
-    - the code must carry a short comment that says the surface is temporary and names the future owner, absorbing component, or removal condition;
-    - the corresponding architect, designer, or creator artifact must record the same temporary status and exit plan;
-    - vague `TODO` markers without an owner or exit condition are not enough.
-31. Every helper function needs a stated reason to exist. This applies most strongly to short helpers and field-exposing accessors:
-    - if a helper only forwards to another helper, returns a stored field unchanged, or exposes one delegated method, the designer must justify the external caller shape, trust boundary, or repeated error-prone pattern that makes the helper worth keeping;
-    - if that proof is missing, the creator must not add the helper and should keep the data private until a real caller exists;
-    - checker, advisor, and reviewer must treat unjustified helpers as defects rather than harmless style choices;
-    - tests inside the same module do not count as proof that a production helper belongs in the API surface.
+2. `kernel/src/fs/fs_impls/exfat_refactor/` must remain safe Rust. No agent may introduce `unsafe` there.
+3. The main agent is the only scheduler. Only the main agent may change official component state, ownership, or [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md).
+4. No component may enter implementation before its architect handoff and required designer artifacts exist. For new components, that normally means `01_designer_core.md` plus `03_designer_ktest.md`; `02_designer_async.md` is required only when the component has meaningful concurrency, serialization, atomicity, lock-ordering, or async-facing obligations that later roles cannot safely infer from the core spec alone.
+5. Components must stay narrow. A creator pass should normally land about `150-300` lines of initial implementation and stay comfortably below `400`; exceeding `500` lines requires an explicit main-agent decision that records why a smaller split would be worse.
+6. A component may depend only on accepted components or stable pre-existing kernel interfaces.
+7. The legacy `kernel/src/fs/fs_impls/exfat/` remains the active registered filesystem and regression baseline until the main agent explicitly schedules takeover. `exfat_refactor` may compile in tree, but it must not silently become the registered `exfat` type during exploratory refactor work.
+8. All edits must stay inside `/home/halifuda/asterinas` and inside the task packet write scope. No agent may patch external tools, home-directory state, or other workspaces.
+9. Test authoring is checker-owned by default. Designers must still state test obligations, but creators should ignore test-writing obligations unless the task packet explicitly overrides that default.
+10. Role command authority is strict:
+    - main agent, architect, designer, advisor, and reviewer must not run kernel build, test, or QEMU commands;
+    - creator passes are command-free by default;
+    - creator compile-only commands are rare packet-scoped exceptions, not a default step;
+    - checker owns kernel test execution and other runtime verification commands.
+11. In the shared worktree and shared container, there is one serialized command lane by default. Unless the main agent prepared a genuinely isolated environment, do not run multiple command-producing verification lanes in parallel.
+12. Checker execution is lock-guarded:
+    - command-free checker work may happen before execution in the same pass;
+    - before any build, `cargo osdk test`, `make ktest`, or QEMU-producing command, the checker must atomically create `.agents/locks/checker-execution.lock/`;
+    - after acquiring that directory, the checker must write one metadata file, `.agents/locks/checker-execution.lock/owner.toml`;
+    - `owner.toml` should record the component, checker phase, command, pid if available, and start time;
+    - if the lock already exists, the checker waits quietly and retries;
+    - the retry interval must be at least `60` seconds unless the task packet requires a longer interval;
+    - only the main agent may decide a lock is stale and clear it.
+13. Command-free work should fill the parallel lanes whenever dependencies and write sets allow it. Architect, designer, reviewer, most advisor work, creator passes, checker preparation work, and packet preparation should not sit idle just because the command lane is busy.
+14. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
+15. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
+16. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
+17. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
+18. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
+19. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.
+20. Prior knowledge is also packet-scoped. The main agent must curate which parts of these prior layers each role receives:
+    - `Microsoft-exFAT-spec.md`
+    - `linux-exFAT-implementation-summary.md`
+    - `ASTERINAS_ARCHITECT_PRIORS.md`
+    - `ASTERINAS_CODE_QUALITY_PRIORS.md`
+21. Prior precedence is fixed unless a packet records a justified exception:
+    - Microsoft spec for normative on-disk semantics
+    - Linux summary for preferred implementation guidance when the spec leaves room
+    - Asterinas architect priors for local integration constraints
+    - Asterinas code-quality priors for engineering-quality constraints
+22. Role packets should be sliced aggressively:
+    - architect gets semantic priors plus boundary-level local and quality slices;
+    - designer gets only the semantic and integration material needed to specify the component plus design-level quality slices;
+    - creator gets the designer-derived constraints plus only the semantic or integration excerpts needed to avoid semantic drift, plus `Q-CREATE`;
+    - checker gets the relevant semantic excerpts, designer test obligations, required integration facts, and `Q-CHECK`;
+    - reviewer normally receives the broadest quality slice and semantic priors only when semantic drift is in review scope.
+23. If a delegated role appears to require prior material that the packet did not supply, the subagent must stop and report the missing input instead of silently substituting memory or unrelated files.
+24. Legacy Asterinas `exfat` code is an integration reference, not the semantic target of the refactor. If local Asterinas interfaces force a divergence from Microsoft- or Linux-derived behavior, the architect or designer artifact must record that explicitly.
+25. Temporary staging surfaces are allowed only when the packet or referenced artifact names them explicitly and gives an exit plan. The code comment and role artifact must both name the future owner, absorbing component, or removal condition.
+26. Short helpers and field-exposing accessors need explicit justification. If the packet or referenced artifact cannot name the cross-module caller, trust boundary, or repeated error-prone pattern that requires the helper now, the helper should not be added.
+27. The advisor role is optional. The main agent may send a checker finding list directly back into a creator repair batch when the scope is already narrow and obvious.
+28. Main-agent handoff writing is continuous. The active handoff is the editable record of the current wave rather than a final append-only summary written at the end.
+29. Every material wave action by the main agent must be reflected in the active handoff during that same wave. This includes at least:
+    - component-planning and scheduling decisions,
+    - implementation or repair waves the main agent drove or accepted,
+    - checker or reviewer outcomes that change what happens next,
+    - protocol, template, README, testing-guide, or packet-shaping changes.
+30. The active handoff may be rewritten, condensed, or reorganized during the wave so the final note stays readable, but it must not drop decisions or state that a future main agent would need to resume safely.
+31. Before a wave is considered complete or committed, the main agent must ensure the active handoff already reflects the final shape of that wave, and the finalized note must end with explicit next-main-agent tasks.
 
-## 2. Roles
+## 2. Role Ownership
 
-### Main Agent
+This section only names scheduler-level ownership.
+Ordinary subagents should follow the corresponding files under `protocol/` for role detail.
 
-- Owns scheduling, delegation, and acceptance decisions.
-- Owns the workflow itself: protocol enforcement, gate enforcement, and rollback or rework decisions.
-- Maintains [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md).
-- Owns the role-scoped protocol packets under `.agents/protocol/` and decides which subset is forwarded to each subagent.
-- Maintains environment continuity information so the project can survive machine switches, new threads, or interrupted sessions with minimal rediscovery work.
-- Assigns component ownership and decides when a handoff is mature enough to advance.
-- Accepts or rejects architect, designer, creator, checker, advisor, and reviewer artifacts.
-- Must reject architect outputs that are only line-budget compliant but still too wide in responsibility, method count, or policy surface.
-- Must treat subagent overreach as a process defect even when the underlying edit looks reasonable. Scheduler-owned state changes only become official after the main agent reviews and records them.
-- Must specify the execution environment explicitly for any subagent that may run commands, including whether commands must be run through Docker and what repository path inside the container should be used.
-- Should assume that command-running subagents are mutually interfering unless their workspaces and runtime state are explicitly isolated.
-- Must curate and forward the relevant exFAT prior material rather than assuming each role should read all priors by default.
-- Must preserve the prior-precedence rule when curating packets: Microsoft spec first, Linux implementation summary second, Asterinas-local priors third as integration-only context.
-- Should minimize prior context by role, but not below the level needed to avoid semantic guesswork.
-- May ask the architect to derive a narrower prior summary for downstream roles when that is cheaper and safer than repeated main-agent manual excerpting.
-- Enforces workspace-only edits, pass boundaries, and role-specific command authority.
-- Resolves conflicts between specification, implementation, and existing code constraints.
-- Produces periodic main-agent handoff notes when the project reaches a meaningful checkpoint or when environment assumptions change.
-- Must treat the active handoff as a living document during the wave instead of writing it only at the end.
-- Must refresh the handoff filename summary before closing the wave if the work drifted from the original summary.
-- Must end each finalized handoff with explicit next-main-agent tasks, not just general project context.
-- Should prefer scheduling whole dependency-safe parallel waves when architect artifacts expose them, instead of advancing only one ready component by default.
+- Main agent:
+  owns scheduling, acceptance, packet curation, continuity, task-board updates, and lock-stale decisions.
+- Architect:
+  splits work into dependency-safe components and must expose parallel-ready waves instead of only a single linear chain.
+- Designer:
+  produces the bounded spec set for one component: `01_designer_core.md`, optional `02_designer_async.md`, and `03_designer_ktest.md`.
+- Creator:
+  implements exactly one specified pass or one bounded repair batch; default mode is command-free.
+- Checker:
+  validates behavior, owns targeted test writing, and owns lock-guarded execution of build and runtime verification commands.
+- Advisor:
+  condenses checker findings into a bounded repair batch when the main agent decides the extra pass is worth it.
+- Reviewer:
+  performs static code-quality review and may directly edit in-scope code, but does not own runtime verification.
 
-### Architect
+## 3. Workflow Gates
 
-- Starts from exFAT prior knowledge and external documentation.
-- Must read the prior packet supplied by the main agent before splitting components.
-- If the architect receives the full prior set, it should distill the relevant normative constraints for downstream roles inside the architect handoff instead of forcing every later role to reread every prior source.
-- Must treat Microsoft exFAT rules as normative and Linux exFAT as the preferred implementation reference; it must not preserve legacy Asterinas exFAT structure or behavior by inertia when those sources support a cleaner split.
-- Identifies exFAT components and their dependency graph.
-- Splits components into an implementation order that is dependency-safe and operationally sensible.
-- Must make parallelism visible instead of leaving the plan as a single linear chain whenever independent components exist.
-- Must optimize for narrow implementation units, not merely for superficial compliance with a line budget.
-- Must prefer splitting one area into several components when the work would otherwise introduce multiple unrelated methods, multiple policy decisions, or mixed trust boundaries in one pass.
-- Must treat labels such as `chain`, `dentry`, or `inode` as umbrella areas rather than automatically valid component boundaries. If such an area contains separable concerns, the architect must emit smaller subcomponents instead of one broad handoff.
-- Must explicitly justify any component that is expected to:
-  - add more than roughly `3-4` non-trivial production methods,
-  - touch more than one primary behavior family,
-  - or span more than one meaningful trust or validation boundary.
-- Emits one architect handoff per component, small enough for a designer and creator to execute without hidden scope explosion.
-- Must name the component's ready-now parallel siblings or recommended parallel wave so the main agent can schedule them deliberately.
-
-### Designer
-
-- Produces the full specification for one component.
-- Must read the component-relevant prior packet supplied by the main agent, plus any architect-derived prior summary.
-- Must preserve the same prior precedence used by the architect. It must not turn local Asterinas precedent into semantic authority unless the packet explicitly records that a local interface constraint forces it.
-- Must reject or send back an architected component that is still too coarse to specify without creator guesswork or that would bundle several independent behavior families into one creator pass.
-- Must produce three designer artifacts for new components:
-  - `01_designer_core.md`
-    - modular specification: dependencies, provided interfaces, hidden internals, touched files;
-    - functional specification: accepted inputs, produced outputs, state transitions, invariants, error cases, and explicit serial-pass non-goals.
-  - `02_designer_async.md`
-    - concurrency specification: lock ordering, atomicity, serialization assumptions, concurrent access rules, and whether a dedicated concurrency creator pass is required or explicitly empty.
-  - `03_designer_ktest.md`
-    - serial-phase checker-owned test obligations,
-    - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required,
-    - the smallest expected final-checker rerun surface.
-- Must keep creator-facing context narrow:
-  - serial creator obligations belong in `01_designer_core.md`,
-  - concurrency creator obligations belong in `02_designer_async.md`,
-  - checker-owned test obligations belong in `03_designer_ktest.md`.
-- Must state test obligations for the checker, not as creator-owned work.
-- Must explicitly surface any prior-derived exFAT rules that the creator or checker cannot be expected to infer safely from local code alone.
-- Must make the component implementable without creator guesswork.
-- Must avoid specifying helper surfaces with overlapping meanings unless the spec also explains why more than one form is necessary and which one is canonical at ordinary call sites.
-- Must mark any temporary staging surface explicitly in the artifact, including why it exists now, which later component should absorb or remove it, and what code comment the creator must leave behind.
-- Must justify every helper surface it asks for. If a short helper only exposes stored data or delegates to another helper, the spec must name the expected cross-module caller or boundary that needs that helper; otherwise the helper should not be specified yet.
-
-### Creator
-
-- Implements exactly one specified component pass or one advisor-defined repair batch.
-- Must fully comply with the coding guidelines in the repository-root `AGENTS.md`.
-- Follows the spec, repository style, and all safety constraints.
-- Must add comments where the implemented intent or boundary would otherwise be non-obvious, but must not pad the code with paraphrasing comments.
-- Must treat comments as part of correctness documentation: add them when they protect a hidden assumption, a layout invariant, or a non-obvious boundary, and omit them when the code already reads plainly.
-- Must implement in staged passes:
-  - serial pass first,
-  - serial repair batches as needed,
-  - concurrency pass second,
-  - concurrency repair batches as needed.
-- Must treat the packet's prior excerpts and designer-derived constraints as authoritative for exFAT semantics. It should not assume unstated on-disk rules from memory when the packet did not provide them.
-- Must not treat legacy Asterinas exFAT code as a semantic fallback when the packet's Microsoft- or Linux-derived constraints point elsewhere.
-- Must ignore spec sections that require writing or updating ktests, because test authoring is checker-owned by default.
-- Should ask the main agent to split work further when the designer spec still spans too many modules or behaviors for one bounded pass.
-- May run compile-only kernel commands, but must not run kernel tests or QEMU-backed runtime commands.
-- Must not silently extend scope, redesign interfaces, or postpone important details with vague TODOs.
-- Should prefer one canonical helper surface over several trivially derivable wrappers when the extra wrappers do not remove real caller risk or complexity.
-- Must leave an explicit code comment on any temporary staging surface that the packet authorized, and the creator artifact must record the same future owner or removal condition.
-- Must not add a helper that merely exposes a stored field or delegated method unless the packet or designer artifact already proved why another component needs that helper now.
-
-### Checker
-
-- Verifies code against the designer specification, existing tests, and observable behavior.
-- Must use the supplied prior excerpts when deciding whether behavior matches exFAT semantics, rather than relying only on local implementation precedent.
-- Must not accept a behavior only because it matches legacy Asterinas exFAT when the packet's higher-priority priors indicate a different intended rule.
-- Owns test authoring for verification: may add, refine, or repair ktests and other test-only coverage needed to validate the component or capture a regression.
-- May use code review, targeted tests, focused fault hunting, and test-writing to turn missing coverage into executable checks.
-- Must keep checker-authored ktests understandable. Each ktest should carry a short comment describing the scenario and expected behavior unless that intent is already unmistakable from the test name and body.
-- Reports concrete failures, missing tests, spec mismatches, regression risks, and any test additions or updates it made.
-- Must check and record whether the current environment appears to have KVM acceleration available before relying on performance-sensitive test expectations.
-- Owns kernel runtime verification commands for this workflow.
-- Should default to test-only code changes. It must not modify production implementation except when the main agent explicitly permits a checker-owned fix.
-- Must treat an undocumented temporary staging surface or an unjustified production helper as a real defect when the assigned scope includes that code.
-- Serves three distinct checkpoints:
-  - serial-pass validation,
-  - concurrency-pass validation when the designer requires it,
-  - final post-review validation after the reviewer finishes quality edits.
-
-### Advisor
-
-- Converts checker findings into an actionable repair plan for the creator.
-- Operates only after checker phases in the serial or concurrency loops.
-- Tells the creator what to change, why it is required, and what counts as done.
-- Does not own reviewer findings, because reviewer edits are direct.
-- May be the same agent as the checker, but the output artifact must still be advisory rather than exploratory.
-- Must preserve helper-justification and temporary-surface defects explicitly when converting checker findings into a repair batch, rather than collapsing them into vague cleanup language.
-
-### Reviewer
-
-- Performs a code-quality review after the implementation and checker or advisor loops are complete.
-- Checks the code against repository coding guidelines, Rust engineering style, readability, API boundaries, type-level invariant expression, visibility hygiene, and comment quality.
-- May directly modify production or test code to fix code-quality issues inside the owned scope.
-- Must not widen component scope, redesign the feature, or replace checker-owned behavioral verification.
-- Normally relies on packet materials, repository coding guidelines, and `AGENTS.md` rather than on the full exFAT prior corpus.
-- Must not run kernel build, test, or QEMU commands.
-- Must leave a reviewer report that explains findings, edits made, and any remaining concerns that need a final checker pass.
-- Should flag helper duplication when multiple small APIs express the same invariant without serving clearly different caller shapes.
-- Should remove or inline short helpers that have no packet-backed justification, especially field-exposing accessors with no proven cross-module caller.
-- Must ensure temporary staging surfaces look temporary in both code comments and reviewer report language, including the stated future owner or removal condition.
-
-## 3. Required Step Sequence
-
-Every component follows the same ordered workflow unless the main agent explicitly records a justified deviation:
-
-1. Basic serial implementation by the creator.
-2. Serial implementation test writing and verification by the checker.
-3. Advisor repair plan based on checker findings, followed by repeated `creator -> checker -> advisor` serial repair cycles until the checker passes the serial phase.
-4. Concurrency implementation by the creator against the designer's concurrency specification.
-5. Concurrency test writing and verification by the checker, but only when the designer explicitly requires concurrency-specific testing. If the designer records that no dedicated concurrency tests are required, the workflow may move directly from step 4 to step 7. A simple big-lock implementation still belongs to the concurrency phase if that is what the spec calls for.
-6. Advisor repair plan based on concurrency-phase checker findings, followed by repeated `creator -> checker -> advisor` concurrency repair cycles until the checker passes the concurrency phase or the phase is explicitly waived.
-7. Code-quality review by the reviewer, including direct quality edits when needed.
-8. Final checker pass after the reviewer finishes.
-
-Consequences:
-
-- Advisor only reacts to checker findings from the serial or concurrency loops.
-- Reviewer does not produce advisor work; reviewer fixes are followed directly by a checker pass.
-- A component is not ready for acceptance until the final checker pass after review is complete.
-- Architect and main-agent should still seek parallelism at the component-selection level whenever dependencies allow it.
-
-## 4. Artifact Layout
-
-All planning and handoff artifacts live under:
-
-```text
-kernel/src/fs/fs_impls/exfat_refactor/.agents/
-```
-
-The main agent owns the index:
-
-```text
-.agents/COMPONENT_INDEX.md
-```
-
-The main agent may also maintain continuity notes under:
-
-```text
-.agents/main-agent/
-  <fancy-nickname>-YYYYMMDD-HHMM-<summary>.md
-```
-
-Finalized main-agent handoffs should include at least:
-
-- `Fancy nickname`
-- `Date`
-- `Covered hours`
-- environment continuity
-- current project state
-- recent decisions
-- open risks and assumptions
-- `Next Main-Agent Tasks`
-
-Each component gets its own directory once the architect creates it:
-
-```text
-.agents/components/<component-id>/
-  00_architect.md
-  01_designer_core.md
-  02_designer_async.md
-  03_designer_ktest.md
-  10_creator_serial.md
-  11_checker_serial.md
-  12_advisor_serial.md
-  13_creator_serial_repair.md
-  14_checker_serial_repair.md
-  15_advisor_serial_repair.md
-  20_creator_concurrency.md
-  21_checker_concurrency.md
-  22_advisor_concurrency.md
-  23_creator_concurrency_repair.md
-  24_checker_concurrency_repair.md
-  25_advisor_concurrency_repair.md
-  30_reviewer_report.md
-  31_checker_final.md
-```
-
-Legacy note:
-
-- Existing components that already use `01_designer_spec.md` remain valid historical records and do not need to be renamed retroactively.
-- New components should use the split designer artifact set above.
-
-Rules:
-
-1. The main agent creates the component directory and assigns ownership.
-2. Artifact prefixes are two-digit chronological sequence numbers chosen by the main agent.
-3. Each workflow step owns one file. The file name must reveal both the role and the phase.
-4. The baseline phase slots are:
-   - `00` architect,
-   - `01` designer core,
-   - `02` designer async,
-   - `03` designer ktest,
-   - `10` serial creator,
-   - `11` serial checker,
-   - `12` serial advisor,
-   - `20` concurrency creator,
-   - `21` concurrency checker,
-   - `22` concurrency advisor,
-   - `30` reviewer,
-   - `31` final checker.
-5. Repair cycles within a phase continue numerically inside that decade, for example `13`, `14`, `15` for one serial repair loop and `23`, `24`, `25` for one concurrency repair loop. If more than one repair loop is needed in the same phase, continue the numbering monotonically within the same decade.
-6. Later passes create new numbered artifacts instead of appending to closed artifacts from earlier steps. During one active step, the owning agent may append only to its current artifact while work is in progress.
-7. Each subagent writes only its own artifact unless the main agent explicitly instructs otherwise.
-8. Creators edit implementation files plus the currently assigned `creator` artifact, but do not overwrite design, checker, advisor, or reviewer artifacts.
-9. Checkers may edit test code and the currently assigned `checker` artifact, but should not edit production implementation unless the main agent explicitly instructs otherwise.
-10. Advisors edit only their own advisory artifact.
-11. Reviewers may edit code plus the currently assigned reviewer artifact, but do not edit checker or advisor artifacts.
-12. No subagent may modify artifacts owned by another role, and no subagent may update `COMPONENT_INDEX.md`.
-13. Main-agent handoff notes should summarize environment facts, validated commands, current component states, open blockers, and the next recommended action so a future session can resume with minimal rediscovery.
-14. Main-agent handoff file names must start with a memorable fancy nickname so later sessions are easy to spot in filesystem listings. The recommended pattern is `<fancy-nickname>-YYYYMMDD-HHMM-<summary>.md`.
-
-## 5. Workflow States
-
-Each component moves through these high-level states:
-
-1. `Planned`
-   The component is listed in `COMPONENT_INDEX.md` with dependencies and a size budget.
-2. `Architected`
-   `00_architect.md` exists and defines scope, order, and readiness for design.
-3. `Specified`
-   The required designer artifact set exists and is complete.
-   For new components, this means `01_designer_core.md`, `02_designer_async.md`, and `03_designer_ktest.md`.
-   For legacy components, the older `01_designer_spec.md` remains acceptable.
-4. `SerialImplementing`
-   A creator is actively implementing the first serial pass or a serial repair batch.
-5. `SerialChecked`
-   The current serial checker artifact exists and the serial phase is either passing or awaiting an advisor decision.
-6. `ConcurrencyImplementing`
-   A creator is actively implementing the concurrency pass or a concurrency repair batch.
-7. `ConcurrencyChecked`
-   The current concurrency checker artifact exists and the concurrency phase is either passing or awaiting an advisor decision.
-8. `Reviewing`
-   The reviewer is actively checking or editing code quality.
-9. `FinalChecked`
-   The post-review checker artifact exists.
-10. `Accepted`
-   The main agent judges the component complete enough to become a dependency of later work.
-11. `Blocked`
-   Progress is paused because an unresolved dependency, protocol violation, or environment issue prevents safe advancement.
-
-Normal flow is:
+The normal component path is:
 
 ```text
 Planned -> Architected -> Specified
-  -> SerialImplementing -> SerialChecked
-  -> SerialImplementing -> SerialChecked (repeat as needed)
-  -> ConcurrencyImplementing -> ConcurrencyChecked
-  -> ConcurrencyImplementing -> ConcurrencyChecked (repeat as needed)
-  -> Reviewing -> FinalChecked -> Accepted
+  -> Serial creator/checker loop
+  -> Concurrency creator/checker loop (only when the designer requires it)
+  -> Reviewer
+  -> Final checker
+  -> Accepted
 ```
 
-The main agent may skip the dedicated concurrency checker phase only if the designer explicitly records that no concurrency-specific tests are required for the component.
-The main agent may skip the dedicated concurrency creator phase only if the designer explicitly records that the concurrency obligations are empty, trivial, or intentionally deferred to a later accepted component.
+Gate rules:
 
-## 6. Gate Conditions
+1. `Architected` means the component has a valid architect artifact and explicit dependency-safe placement.
+2. `Specified` means the required designer artifact set exists. For new components, this is always `01_designer_core.md` plus `03_designer_ktest.md`, and `02_designer_async.md` only when concurrency or serialization obligations need a dedicated artifact.
+3. Serial and concurrency repair loops may be either direct `creator -> checker` loops or advisor-mediated `advisor -> creator -> checker` loops.
+4. The reviewer runs after implementation and checker loops are complete enough for code-quality review.
+5. A component is not `Accepted` until the final post-review checker pass reports no blocking findings.
 
-### Architect -> Designer
+Artifact content requirements live in `templates/`.
+This protocol only defines which artifacts must exist before the next state transition is allowed.
 
-The architect handoff is valid only if it states:
+## 4. Parallel Scheduling Model
 
-- the component goal,
-- the dependency set,
-- the prior sources or prior-derived constraints that materially shaped the split,
-- any components that can be scheduled in parallel with this one once the same prerequisite set is satisfied,
-- the recommended parallel wave or an explicit statement that no useful same-wave parallelism exists,
-- the reason this order is safe,
-- the code budget,
-- the concrete files or modules expected to change,
-- the exit condition that marks the component ready for implementation.
+The scheduler should think in terms of one serialized command lane plus as many safe command-free lanes as the current dependency graph allows.
 
-### Designer -> Creator
+Practical rules:
 
-The designer handoff is valid only if it states:
+1. Do not wait for a current component to reach creator before planning the next wave. Once a prerequisite component's architect result is accepted and its boundary is stable enough, the main agent should start architecting or designing dependency-safe successors.
+2. Keep the command lane narrow. Only the part of checker work that actually runs build, test, or QEMU commands belongs there.
+3. Keep everyone else moving. While one checker is waiting for or holding the execution lock, other lanes should continue with architect, designer, creator, reviewer, packet preparation, and checker preparation work whenever write sets do not conflict.
+4. Treat compile-only creator exceptions as rare. They consume the same shared command environment and should only be authorized when they provide clear signal that is worth delaying checker execution.
 
-- in `01_designer_core.md`:
-  - module boundaries and interface surface,
-  - functional behavior including failure cases,
-  - state changes and maintained invariants,
-  - which obligations belong to the serial creator pass,
-  - the prior-derived rules that the creator must preserve,
-  - explicit non-goals for this component;
-- in `02_designer_async.md`:
-  - concurrency and atomicity rules,
-  - which obligations belong to the concurrency creator pass,
-  - whether the concurrency creator pass is required, empty, or intentionally deferred;
-- in `03_designer_ktest.md`:
-  - which checker-owned tests belong to the serial phase,
-  - whether the concurrency phase requires checker-owned concurrent tests or explicitly does not,
-  - any prior-derived semantic cases the checker must validate,
-  - the smallest representative final-checker rerun surface.
+### Conceptual Best-Effort Wave Example
 
-### Creator -> Checker
+Suppose component `A` is the current critical path and the accepted architect output for `A` shows that later components `B` and `C` will depend on `A` but not on each other.
 
-The creator handoff is valid only if it states:
+The preferred schedule is:
 
-- which files changed,
-- which spec revision it implemented,
-- which pass it completed, for example serial implementation, serial repair batch, concurrency implementation, or concurrency repair batch,
-- any approved deviation,
-- which self-checks were run,
-- which obligations remain intentionally deferred to a later pass,
-- known limitations that remain in scope.
+1. Finish and accept `A`'s architect artifact.
+2. Immediately run `A`'s designer while also starting architect work for `B` and `C`.
+3. Once `A`'s designer core boundary is stable enough for downstream planning, let `A` move into creator work while `B` and `C` move into designer work.
+4. When `A` reaches checker, let that checker write ktests and prepare evidence first. Only the actual execution stage needs the lock.
+5. While `A`'s checker waits for or holds `.agents/locks/checker-execution.lock/`, keep `B` and `C` moving with command-free work such as creator passes, reviewer work on earlier components, or more architect or designer work for the next wave.
+6. Once `A` is accepted, `B` and `C` should ideally already be specified or partially implemented, so the next critical path does not restart from zero.
 
-### Checker -> Advisor or Main Agent
+The anti-pattern is a full-chain schedule like:
 
-The checker handoff is valid only if it states:
+```text
+A architect -> A designer -> A creator -> A checker -> A accepted -> B architect -> ...
+```
 
-- confirmed behaviors,
-- failing behaviors,
-- tests added, updated, or still missing,
-- whether the check covered the serial phase, the concurrency phase, or the final post-review phase,
-- whether KVM appeared available and whether the observed run used KVM or fell back to TCG when that mattered to interpretation,
-- spec clauses that were violated or left unverified,
-- regression risk,
-- recommended next owner.
+The target is instead:
 
-If the current checker pass is a serial or concurrency pass and it still has blocking findings, the next owner should normally be `advisor`.
-If the current checker pass is the final post-review pass and it has no blocking findings, the next owner should normally be `main-agent`.
+```text
+command lane:
+  A checker execution
 
-### Advisor -> Creator
+command-free lanes:
+  B creator
+  C designer
+  next-wave architect or packet preparation
+```
 
-The advisor handoff is valid only if it states:
+The workflow still has one serialized execution lane, but it should not behave like a one-component-at-a-time pipeline.
 
-- a numbered repair list,
-- the reason each repair is needed,
-- which checker finding it addresses,
-- what evidence will mark the repair complete,
-- whether the repair belongs to the serial loop or the concurrency loop.
+## 5. Artifacts And Templates
 
-### Reviewer -> Checker
+Use the naming and directory scheme from [`README.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/README.md).
+Use the role-specific artifact templates under `templates/`.
 
-The reviewer handoff is valid only if it states:
+Scheduler-level artifact rules:
 
-- what code-quality issues were reviewed,
-- what edits were made directly,
-- which guidelines or style principles those edits address,
-- any residual quality concerns left for later components,
-- the exact files touched,
-- that the next owner is the final checker.
+1. The main agent creates component directories and owns `COMPONENT_INDEX.md`.
+2. Each workflow step writes its own artifact; do not append new step results into an older role's file.
+3. Repaired or repeated passes create new numbered artifacts rather than reopening closed ones.
+4. Main-agent continuity notes live under `.agents/main-agent/` and should use the fancy-nickname filename pattern described in `README.md`.
+5. Packet archives live under `.agents/subagent-tasks/<component-id>/` and should map cleanly back to the delegated step they authorized.
 
-## 7. Specification Quality Bar
+## 6. Acceptance Policy
 
-Every designer specification must be detailed enough that a creator can implement without inventing hidden policy.
+A component may become `Accepted` only when:
 
-Minimum required sections:
+1. the required artifacts exist and are internally consistent;
+2. the implementation matches the latest accepted designer spec or approved repair batch;
+3. blocking checker and reviewer findings are resolved or explicitly deferred by the main agent;
+4. the final post-review checker pass reports no blocking findings;
+5. the component is stable enough to become a dependency for later work without reopening its core contract by default.
 
-1. `01_designer_core.md`
-   - scope and non-goals,
-   - dependencies and provided interfaces,
-   - data/control flow,
-   - functional rules in precondition/action/postcondition form,
-   - error handling and invariants,
-   - pass boundaries for the serial creator.
-2. `02_designer_async.md`
-   - concurrency and atomicity constraints,
-   - whether async or concurrency implementation is required now, empty, or deferred,
-   - pass boundaries for the concurrency creator.
-3. `03_designer_ktest.md`
-   - serial-phase checker-owned test obligations,
-   - concurrency-phase checker-owned test obligations, or an explicit statement that no dedicated concurrency tests are required,
-   - the smallest expected final-checker rerun surface.
-
-If any of these are missing, the component is not ready for implementation.
-
-## 8. Checker Policy
-
-Checker passes should be inserted:
-
-- after the serial pass first reaches a creator handoff,
-- after every serial repair batch that changes behavior,
-- after the concurrency pass first reaches a creator handoff when the designer requires concurrency validation,
-- after every concurrency repair batch that changes behavior,
-- after the reviewer completes quality edits,
-- before promoting a component to a dependency for later components.
-
-Checker output should prefer precise findings over narrative summary.
-When behavior-changing code lacks adequate coverage, the checker should normally add or request targeted ktests instead of leaving the obligation purely narrative.
-When test runtime or machine capability matters, the checker should also record the environment mode explicitly rather than silently assuming KVM.
-When checker reruns multiple verification commands, it should execute kernel test commands sequentially instead of in parallel.
-When the checker writes or moves `#[ktest]` code, it should prefer the closest relevant module plus a small shared test-support module for fixtures, instead of centralizing every test in `mod.rs`.
-
-## 9. Reviewer Policy
-
-Reviewer passes should focus on static code quality rather than re-running behavioral verification.
-
-The reviewer should check at least:
-
-1. checked arithmetic and boundary validation,
-2. whether invariants are expressed through types or interfaces where practical,
-3. visibility hygiene and module boundaries,
-4. comment and doc-comment quality,
-5. Rust readability and control-flow clarity,
-6. whether test fixtures hide mistakes instead of surfacing them.
-
-The reviewer may directly edit code, but those edits must stay within the accepted component scope.
-Behavior-changing reviewer edits are allowed only when they are clearly in service of code-quality correctness and the final checker can re-validate them.
-
-## 10. Refactor Policy
-
-The default refactor strategy is a parallel in-tree implementation:
-
-1. The legacy `exfat` module stays intact as the active implementation.
-2. New work lands under `kernel/src/fs/fs_impls/exfat_refactor/`.
-3. The new module is compiled, but it does not become the registered `exfat` filesystem by default.
-4. Validation for the refactor should rely first on targeted ktests and dedicated integration tests, not on replacing the legacy default mount path early.
-5. Switching the registered filesystem type from legacy `exfat` to `exfat_refactor` is a deliberate project milestone, not an incidental side effect of ongoing work.
-
-## 11. Acceptance Policy
-
-A component may be marked `Accepted` only when:
-
-1. Its artifacts exist and are internally consistent.
-2. Its implementation matches the latest accepted designer spec or approved advisor change set.
-3. Blocking findings from checker and reviewer work are resolved or consciously deferred by the main agent.
-4. The final post-review checker pass reports no blocking findings.
-5. The component is stable enough to become a dependency for later components.
-
-Acceptance does not mean the whole filesystem is done. It means later components may build on it without reopening its core contract by default.
+Acceptance does not mean the whole filesystem is done.
+It means later components may safely build on that component's current contract.

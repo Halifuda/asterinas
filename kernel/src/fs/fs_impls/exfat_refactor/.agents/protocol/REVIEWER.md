@@ -16,6 +16,8 @@ The reviewer performs bounded code-quality review after implementation and check
 4. Default to repository coding guidelines, `AGENTS.md`, and packet materials rather than to the full exFAT prior corpus unless the packet explicitly asks for semantic review against prior excerpts.
 5. Remove or inline short helpers that lack a packet-backed reason to exist, especially field-exposing accessors with no proven cross-module caller.
 6. Ensure every temporary staging surface in scope is explicitly marked as temporary in code comments and echoed in the reviewer report with its future owner or removal condition.
+7. Use the packet's review-quality slice as the default bounded checklist instead of requiring the main agent to restate the same quality expectations manually each time.
+8. Treat the packet's write-set and lane classification as a parallel-safety contract; do not widen into overlapping files or opportunistic command runs.
 
 ## Allowed edits
 

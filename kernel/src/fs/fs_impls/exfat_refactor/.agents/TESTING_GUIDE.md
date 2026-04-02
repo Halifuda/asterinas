@@ -147,8 +147,9 @@ The checker should usually:
 Role restrictions still apply while using this guide:
 
 - the main agent, architect, designer, and advisor should not run kernel build or test commands;
-- the creator may run compile-only kernel commands, but not runtime or ktest commands;
+- creator passes are command-free by default; compile-only kernel commands should be treated as explicit packet-level exceptions, never as a routine requirement;
 - the checker owns `cargo osdk test`, `make ktest`, and other runtime verification commands.
+- a checker may prepare tests and reports before execution, but command-producing verification should enter only after holding the shared execution lock described by the protocol.
 
 ## 7. Minimum Test Obligations By Change Type
 

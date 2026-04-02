@@ -9,6 +9,7 @@
 - Status: `Architected`
 - Author:
 - Date:
+- Task packet:
 
 ## Purpose
 
@@ -25,6 +26,7 @@ Explain why this component can be implemented at this stage without depending on
 - Can run in parallel with:
 - Recommended parallel wave:
 - Stable pre-existing interfaces used:
+- Prior sources or prior slices that materially shaped the split:
 
 ## exFAT Concepts Covered
 

@@ -2,17 +2,38 @@
 
 # Asterinas Architect Priors For exFAT
 
-This note records the Asterinas-local knowledge that an architect should treat as prior context before splitting or sequencing the exFAT refactor.
+This note records the Asterinas-local architectural and integration knowledge that the main agent may slice into task packets.
+It is not a semantic authority for exFAT on-disk behavior.
+Unless a packet records a justified local exception:
 
-It complements:
+1. `Microsoft-exFAT-spec.md` remains the normative source for exFAT semantics.
+2. `linux-exFAT-implementation-summary.md` remains the preferred implementation reference when the spec leaves design room.
+3. This file constrains only local integration, interface, ownership, and test reality.
 
-- `Microsoft-exFAT-spec.md`, which provides the on-disk rules.
-- `linux-exFAT-implementation-summary.md`, which provides a mature implementation reference model.
+This file exists so the main agent does not have to rediscover the same local context on every packet.
+Packets should normally cite the relevant sections or role profiles below instead of pasting long summaries.
+Code-quality guidance now lives separately in `ASTERINAS_CODE_QUALITY_PRIORS.md` so local integration constraints and engineering-quality rules can be sliced independently.
 
-This file focuses on the current Asterinas codebase, its FS/VFS contracts, and the practical testing environment that shapes implementable component boundaries.
-It is intentionally not the normative source for exFAT semantics. Unless a task packet records a justified local exception, Microsoft exFAT rules take precedence, Linux exFAT remains the preferred implementation reference, and this file only constrains local integration, code organization, and testing reality.
+## 1. Packet-Friendly Role Profiles
 
-## 1. Why This File Exists
+Use these profile labels when a packet needs a stable short reference:
+
+- `I-ARCH`
+  - Source-map awareness, dependency ordering, shared-state ownership, mount sequencing, and testing reality needed for component splitting.
+- `I-DESIGN`
+  - Local interface boundaries, ownership expectations, and integration constraints that shape the component contract.
+- `I-CREATE`
+  - Only the exact local interfaces and integration assumptions touched by the implementation pass.
+- `I-CHECK`
+  - Runtime and test-environment facts needed to interpret verification evidence correctly.
+- `I-REVIEW`
+  - Local API and ownership boundaries that matter during bounded code-quality review.
+
+These profiles are intentionally smaller than the full file.
+Architect and designer packets should usually cite only the sections they need.
+Creator, checker, and reviewer packets should usually receive an even narrower slice.
+
+## 2. Why This File Exists
 
 The Microsoft specification and the Linux summary are necessary, but they are not sufficient on their own.
 
@@ -27,16 +48,16 @@ An architect for this project must also understand:
 Without this local context, a component plan can easily become structurally correct in theory but misaligned with the real Asterinas integration surface.
 The inverse failure mode is also forbidden: this file must not be used to pull the refactor back toward reproducing legacy Asterinas exFAT semantics when Microsoft and Linux priors support a cleaner or more correct design.
 
-## 2. Repository-Level Constraints That Matter To The Architect
+## 3. Repository-Level Constraints That Matter To The Architect
 
 - The repository-root `AGENTS.md` is binding on all agents.
 - `kernel/` code must remain safe Rust. No `unsafe` may be introduced into exFAT code under `kernel/src/fs/fs_impls/exfat_refactor/`.
-- Creator output must fully comply with the coding guidelines in the repository-root `AGENTS.md`.
-- Component plans should favor narrow visibility, small focused functions, explicit invariants, and specification-first behavior.
+- Creator and reviewer output must fully comply with the coding guidelines in the repository-root `AGENTS.md`.
+- Component plans should favor explicit boundaries, ownership clarity, and specification-first behavior.
 
 These constraints are not only creator constraints. They directly affect how the architect should cut components.
 
-## 3. Current Asterinas exFAT Source Map
+## 4. Current Asterinas exFAT Source Map
 
 The legacy Asterinas exFAT implementation is split into these files:
 
@@ -54,7 +75,7 @@ The legacy Asterinas exFAT implementation is split into these files:
 Architecturally, this means the current legacy implementation is already organized by major exFAT concerns, but the boundaries are still coarse.
 Refactor components in `exfat_refactor` should usually treat these legacy files as a baseline to learn from, not as files that must be edited in place or as the semantic target to preserve by default.
 
-## 4. Asterinas FS/VFS Contracts exFAT Must Satisfy
+## 5. Asterinas FS/VFS Contracts exFAT Must Satisfy
 
 ### FileSystem contract
 
@@ -96,7 +117,7 @@ The Asterinas page cache expects a `PageCacheBackend` that can:
 The current exFAT inode already implements this contract.
 Any refactor of mapping, allocation, truncation, or data I/O must preserve this page-cache integration surface.
 
-## 5. Current exFAT Runtime Objects And What They Imply
+## 6. Current exFAT Runtime Objects And What They Imply
 
 ### `ExfatFs`
 
@@ -229,7 +250,7 @@ Architecturally, this means inode work should likely be split into more than one
 - directory semantics,
 - file data mapping and page-cache behavior.
 
-## 6. Current Asterinas-Specific Behavior Gaps And Special Cases
+## 7. Current Asterinas-Specific Behavior Gaps And Special Cases
 
 The architect should explicitly account for the following local realities:
 
@@ -241,7 +262,7 @@ The architect should explicitly account for the following local realities:
 These are not merely implementation details.
 They affect which components are safe to isolate and how testable those components are.
 
-## 7. Testing Reality In Asterinas
+## 8. Testing Reality In Asterinas
 
 ### Two test worlds
 

@@ -14,10 +14,13 @@ The creator implements exactly one specified component pass or one advisor-defin
 2. Keep comments selective and explain intent or invariants, not obvious mechanics.
 3. Keep the implementation inside the assigned files and inside the assigned pass.
 4. Ask to split the work further if the assigned spec still looks too large.
-5. If compile-only verification is authorized, run it only in the environment named in the task packet, which should normally spell out the `docker exec ...` prefix and in-container repository path explicitly.
+5. Creator passes are command-free by default. If compile-only verification is explicitly authorized as an exception and actually used, run it only in the environment named in the task packet, which should normally spell out the `docker exec ...` prefix and in-container repository path explicitly.
 6. Implement against the supplied designer artifacts plus the packet's explicit prior excerpts. Do not assume unstated exFAT on-disk rules from memory when the packet did not provide them.
 7. When the packet authorizes a temporary staging surface, leave the required short code comment in place and record the same future owner or removal condition in the creator artifact.
 8. Do not add a short helper or field-exposing accessor unless the packet or designer artifact already proves why another component needs that helper now.
+9. Use the packet's implementation-quality slice as the main reusable quality checklist for the pass. Do not ask architect or designer artifacts to solve creator-local implementation choices unless the spec is genuinely incomplete.
+10. Do not opportunistically add compile commands on your own. Parallel safety is part of the packet contract.
+11. A creator pass is not required to produce a compile result unless the task packet explicitly makes one part of the pass contract.
 
 ## Allowed edits
 
