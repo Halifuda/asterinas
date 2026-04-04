@@ -127,11 +127,14 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 
 ## Execution Lock
 
+- Lock script:
+  - normally `.agents/tools/checker_lock.sh`
 - Lock path:
   - normally `.agents/locks/checker-execution.lock/` for checker execution stages
 - Lock metadata file:
   - `owner.toml`
 - If this task includes a command-producing checker stage, state:
+  - the exact `checker_lock.sh acquire ...` command shape to use,
   - whether the stage must hold the execution lock,
   - the quiet-wait retry interval, which must be at least `60` seconds,
   - the maximum wait budget before reporting back,

@@ -21,10 +21,11 @@ The checker may do command-free preparation in the same pass before entering loc
 8. Fail the pass when a short production helper or field-exposing accessor has no packet-backed justification.
 9. Use the packet's verification-quality slice when classifying code-quality defects inside scope instead of improvising a broader review standard.
 10. Write findings so the main agent can decide cleanly whether a direct `creator -> checker` repair loop is enough or whether an advisor pass is needed to re-scope the repair.
-11. Before running any build, ktest, or QEMU-producing command, acquire `.agents/locks/checker-execution.lock/` and write `owner.toml` inside it.
-12. If the lock is busy, wait quietly and retry on the packet's schedule instead of immediately reporting back.
+11. Before running any build, ktest, or QEMU-producing command, acquire the execution lock through `.agents/tools/checker_lock.sh acquire`.
+12. Pass the packet's component id, checker phase, command string, retry interval, and wait budget to the script instead of open-coding another lock procedure.
 13. Do not retry more frequently than once per `60` seconds unless the packet explicitly requires a longer interval.
-14. If the wait budget in the packet is exceeded, stop and report that the checker could not enter the execution stage.
+14. After the command-producing stage finishes, release the lock through `.agents/tools/checker_lock.sh release`.
+15. If the wait budget in the packet is exceeded, stop and report that the checker could not enter the execution stage.
 
 ## Allowed edits
 

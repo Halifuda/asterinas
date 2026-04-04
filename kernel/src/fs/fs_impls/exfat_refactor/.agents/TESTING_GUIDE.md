@@ -42,6 +42,14 @@ The preferred layout is:
 2. use a small shared `test_support.rs` or similar test-only module for reusable fixtures,
 3. keep `mod.rs` free of unrelated test piles unless there is a concrete reason to centralize.
 
+Test-only helpers should follow the same default layout:
+
+1. keep helpers inside the local `mod tests` when only that module's tests use them,
+2. move reusable fixtures or builders into `test_support.rs` or another clearly test-only module when multiple test modules need them,
+3. avoid adding `#[cfg(ktest)]` methods inside the production `impl` body unless the helper is a documented cross-module test surface that cannot live in a test-only module yet.
+
+If such an exception is unavoidable, the code comment should say why it cannot live under `mod tests` or `test_support.rs` and should name the future owner or removal condition.
+
 Each checker-owned `#[ktest]` should also include a short comment that says what scenario the test sets up and what behavior it is intended to confirm.
 These comments do not need to restate every line of the test body, but they should make the purpose obvious to a reader who is scanning the file.
 
@@ -149,7 +157,13 @@ Role restrictions still apply while using this guide:
 - the main agent, architect, designer, and advisor should not run kernel build or test commands;
 - creator passes are command-free by default; compile-only kernel commands should be treated as explicit packet-level exceptions, never as a routine requirement;
 - the checker owns `cargo osdk test`, `make ktest`, and other runtime verification commands.
-- a checker may prepare tests and reports before execution, but command-producing verification should enter only after holding the shared execution lock described by the protocol.
+- a checker may prepare tests and reports before execution, but command-producing verification should enter only after acquiring the shared execution lock through `.agents/tools/checker_lock.sh`.
+
+The concrete lock flow is:
+
+1. run `.agents/tools/checker_lock.sh acquire --component ... --phase ... --command ... --retry-seconds 60 --wait-budget-seconds ...`,
+2. run the assigned verification command after acquisition succeeds,
+3. run `.agents/tools/checker_lock.sh release` when that command-producing stage is finished.
 
 ## 7. Minimum Test Obligations By Change Type
 

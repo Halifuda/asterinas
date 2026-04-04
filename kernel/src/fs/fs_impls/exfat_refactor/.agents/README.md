@@ -28,6 +28,12 @@ The process therefore depends on a closed loop:
 4. Check the result.
 5. Feed defects back as bounded repair work.
 
+The scheduler is intentionally loop-based rather than purely linear:
+
+- one main-agent loop may launch one creator round, and that round may include multiple disjoint sibling creators in parallel,
+- after that creator round starts, the remaining parallel budget in the same loop should go to architect, designer, reviewer, packet-preparation, or checker-preparation work,
+- if a command-free delegated lane stalls, the preferred fix is to repair and continue delegation rather than collapsing that work back into the main thread.
+
 ## Role Model
 
 - Main agent:
@@ -55,6 +61,7 @@ The process therefore depends on a closed loop:
   - role-specific files such as `ARCHITECT.md`, `CREATOR.md`, and `CHECKER.md`
   - `TASK_PACKET_TEMPLATE.md` for per-task read or write scopes and stop conditions
 - `subagent-tasks/` stores the archived task packets that were actually sent to delegated subagents.
+- `tools/` stores small workflow scripts owned by the main agent, including the checker execution-lock helper.
 - [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md) is the scheduler-owned task board.
 - `templates/` contains the required handoff formats for each agent role.
 - Component artifacts use chronological two-digit prefixes grouped by phase:

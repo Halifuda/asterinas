@@ -115,6 +115,7 @@ The following rules recur often enough in `exfat_refactor` that they deserve sta
 11. In `kernel/`, do not introduce `unsafe`.
 12. Use `?` for fallible flows and avoid `unwrap()` where failure is possible.
 13. Keep tests readable, assertion-based, and close to the behavior they validate.
+14. Keep test-only helpers in `mod tests` or test-only support modules by default; `#[cfg(ktest)]` items inside production code need an explicit cross-module reason and an exit plan.
 
 ## 4. Role Boundaries For Quality Guidance
 

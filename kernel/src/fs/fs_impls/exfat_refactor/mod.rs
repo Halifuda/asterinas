@@ -8,12 +8,15 @@
 //! until the refactored implementation is ready to take over deliberately.
 
 mod boot_sector;
+mod bitmap;
 mod dentry;
 mod fat;
 mod fileset;
 mod inode;
 mod io;
 mod super_block;
+mod sysroot;
+mod upcase_table;
 
 #[cfg(ktest)]
 mod test_support;

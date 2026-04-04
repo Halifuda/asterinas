@@ -39,48 +39,50 @@ Because this file no longer repeats role-level detail, ordinary subagent packets
 11. In the shared worktree and shared container, there is one serialized command lane by default. Unless the main agent prepared a genuinely isolated environment, do not run multiple command-producing verification lanes in parallel.
 12. Checker execution is lock-guarded:
     - command-free checker work may happen before execution in the same pass;
-    - before any build, `cargo osdk test`, `make ktest`, or QEMU-producing command, the checker must atomically create `.agents/locks/checker-execution.lock/`;
-    - after acquiring that directory, the checker must write one metadata file, `.agents/locks/checker-execution.lock/owner.toml`;
-    - `owner.toml` should record the component, checker phase, command, pid if available, and start time;
-    - if the lock already exists, the checker waits quietly and retries;
-    - the retry interval must be at least `60` seconds unless the task packet requires a longer interval;
+    - before any build, `cargo osdk test`, `make ktest`, or QEMU-producing command, the checker must use `.agents/tools/checker_lock.sh acquire` to claim `.agents/locks/checker-execution.lock/`;
+    - the script writes `.agents/locks/checker-execution.lock/owner.toml` with the component, checker phase, command, pid, and start time;
+    - if the lock already exists, the checker waits quietly and retries through the script rather than open-coding a new lock procedure;
+    - the retry interval passed to the script must be at least `60` seconds unless the task packet requires a longer interval;
+    - after the command-producing stage completes, the checker must release the lock through `.agents/tools/checker_lock.sh release`;
     - only the main agent may decide a lock is stale and clear it.
 13. Command-free work should fill the parallel lanes whenever dependencies and write sets allow it. Architect, designer, reviewer, most advisor work, creator passes, checker preparation work, and packet preparation should not sit idle just because the command lane is busy.
-14. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
-15. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
-16. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
-17. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
-18. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
-19. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.
-20. Prior knowledge is also packet-scoped. The main agent must curate which parts of these prior layers each role receives:
+14. When a delegated command-free lane stalls because the subagent misread scope, lacked packet clarity, or otherwise failed to start correctly, the main agent should repair and continue that delegated lane first by clarifying, re-packetizing, or re-dispatching it. The main thread should not absorb unfinished command-free delegated work just to preserve momentum unless the user explicitly asks for local takeover or delegation has become impossible and that exception is recorded in the active handoff.
+15. Main-agent scheduling should be organized in loops. One loop may contain one creator round, and that round may include multiple creator packets in parallel when they belong to the same planned wave, have stable prerequisites, and keep disjoint write sets. After that creator round has been launched, the same loop should spend the remaining parallel budget on architect, designer, reviewer, packet-preparation, or checker-preparation work rather than opening a second creator round.
+16. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
+17. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
+18. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
+19. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
+20. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
+21. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.
+22. Prior knowledge is also packet-scoped. The main agent must curate which parts of these prior layers each role receives:
     - `Microsoft-exFAT-spec.md`
     - `linux-exFAT-implementation-summary.md`
     - `ASTERINAS_ARCHITECT_PRIORS.md`
     - `ASTERINAS_CODE_QUALITY_PRIORS.md`
-21. Prior precedence is fixed unless a packet records a justified exception:
+23. Prior precedence is fixed unless a packet records a justified exception:
     - Microsoft spec for normative on-disk semantics
     - Linux summary for preferred implementation guidance when the spec leaves room
     - Asterinas architect priors for local integration constraints
     - Asterinas code-quality priors for engineering-quality constraints
-22. Role packets should be sliced aggressively:
+24. Role packets should be sliced aggressively:
     - architect gets semantic priors plus boundary-level local and quality slices;
     - designer gets only the semantic and integration material needed to specify the component plus design-level quality slices;
     - creator gets the designer-derived constraints plus only the semantic or integration excerpts needed to avoid semantic drift, plus `Q-CREATE`;
     - checker gets the relevant semantic excerpts, designer test obligations, required integration facts, and `Q-CHECK`;
     - reviewer normally receives the broadest quality slice and semantic priors only when semantic drift is in review scope.
-23. If a delegated role appears to require prior material that the packet did not supply, the subagent must stop and report the missing input instead of silently substituting memory or unrelated files.
-24. Legacy Asterinas `exfat` code is an integration reference, not the semantic target of the refactor. If local Asterinas interfaces force a divergence from Microsoft- or Linux-derived behavior, the architect or designer artifact must record that explicitly.
-25. Temporary staging surfaces are allowed only when the packet or referenced artifact names them explicitly and gives an exit plan. The code comment and role artifact must both name the future owner, absorbing component, or removal condition.
-26. Short helpers and field-exposing accessors need explicit justification. If the packet or referenced artifact cannot name the cross-module caller, trust boundary, or repeated error-prone pattern that requires the helper now, the helper should not be added.
-27. The advisor role is optional. The main agent may send a checker finding list directly back into a creator repair batch when the scope is already narrow and obvious.
-28. Main-agent handoff writing is continuous. The active handoff is the editable record of the current wave rather than a final append-only summary written at the end.
-29. Every material wave action by the main agent must be reflected in the active handoff during that same wave. This includes at least:
+25. If a delegated role appears to require prior material that the packet did not supply, the subagent must stop and report the missing input instead of silently substituting memory or unrelated files.
+26. Legacy Asterinas `exfat` code is an integration reference, not the semantic target of the refactor. If local Asterinas interfaces force a divergence from Microsoft- or Linux-derived behavior, the architect or designer artifact must record that explicitly.
+27. Temporary staging surfaces are allowed only when the packet or referenced artifact names them explicitly and gives an exit plan. The code comment and role artifact must both name the future owner, absorbing component, or removal condition.
+28. Short helpers and field-exposing accessors need explicit justification. If the packet or referenced artifact cannot name the cross-module caller, trust boundary, or repeated error-prone pattern that requires the helper now, the helper should not be added.
+29. The advisor role is optional. The main agent may send a checker finding list directly back into a creator repair batch when the scope is already narrow and obvious.
+30. Main-agent handoff writing is continuous. The active handoff is the editable record of the current wave rather than a final append-only summary written at the end.
+31. Every material wave action by the main agent must be reflected in the active handoff during that same wave. This includes at least:
     - component-planning and scheduling decisions,
     - implementation or repair waves the main agent drove or accepted,
     - checker or reviewer outcomes that change what happens next,
     - protocol, template, README, testing-guide, or packet-shaping changes.
-30. The active handoff may be rewritten, condensed, or reorganized during the wave so the final note stays readable, but it must not drop decisions or state that a future main agent would need to resume safely.
-31. Before a wave is considered complete or committed, the main agent must ensure the active handoff already reflects the final shape of that wave, and the finalized note must end with explicit next-main-agent tasks.
+32. The active handoff may be rewritten, condensed, or reorganized during the wave so the final note stays readable, but it must not drop decisions or state that a future main agent would need to resume safely.
+33. Before a wave is considered complete or committed, the main agent must ensure the active handoff already reflects the final shape of that wave, and the finalized note must end with explicit next-main-agent tasks.
 
 ## 2. Role Ownership
 
@@ -135,7 +137,9 @@ Practical rules:
 1. Do not wait for a current component to reach creator before planning the next wave. Once a prerequisite component's architect result is accepted and its boundary is stable enough, the main agent should start architecting or designing dependency-safe successors.
 2. Keep the command lane narrow. Only the part of checker work that actually runs build, test, or QEMU commands belongs there.
 3. Keep everyone else moving. While one checker is waiting for or holding the execution lock, other lanes should continue with architect, designer, creator, reviewer, packet preparation, and checker preparation work whenever write sets do not conflict.
-4. Treat compile-only creator exceptions as rare. They consume the same shared command environment and should only be authorized when they provide clear signal that is worth delaying checker execution.
+4. Inside one main-agent loop, creator work should appear as one bounded creator round. That round may contain multiple sibling creators in parallel, but the scheduler should not open a second creator round in the same loop after the first round is already in flight.
+5. If a command-free delegated lane misfires, fix delegation rather than collapsing the lane back into the main thread. Parallelism comes from keeping those lanes alive, not from the scheduler doing their work itself.
+6. Treat compile-only creator exceptions as rare. They consume the same shared command environment and should only be authorized when they provide clear signal that is worth delaying checker execution.
 
 ### Conceptual Best-Effort Wave Example
 
@@ -145,9 +149,9 @@ The preferred schedule is:
 
 1. Finish and accept `A`'s architect artifact.
 2. Immediately run `A`'s designer while also starting architect work for `B` and `C`.
-3. Once `A`'s designer core boundary is stable enough for downstream planning, let `A` move into creator work while `B` and `C` move into designer work.
+3. Once `A`'s designer core boundary is stable enough for downstream planning, let `A` move into one creator round while `B` and `C` move into designer work.
 4. When `A` reaches checker, let that checker write ktests and prepare evidence first. Only the actual execution stage needs the lock.
-5. While `A`'s checker waits for or holds `.agents/locks/checker-execution.lock/`, keep `B` and `C` moving with command-free work such as creator passes, reviewer work on earlier components, or more architect or designer work for the next wave.
+5. While `A`'s checker waits for or holds `.agents/locks/checker-execution.lock/`, keep `B` and `C` moving with command-free work such as reviewer work on earlier components, or more architect or designer work for the next wave.
 6. Once `A` is accepted, `B` and `C` should ideally already be specified or partially implemented, so the next critical path does not restart from zero.
 
 The anti-pattern is a full-chain schedule like:
@@ -163,7 +167,7 @@ command lane:
   A checker execution
 
 command-free lanes:
-  B creator
+  one creator round for the already-planned sibling implementations
   C designer
   next-wave architect or packet preparation
 ```
