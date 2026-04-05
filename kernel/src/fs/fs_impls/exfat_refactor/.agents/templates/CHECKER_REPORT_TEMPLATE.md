@@ -50,3 +50,4 @@ List the properties the checker could not validate.
 - Next owner:
 - Reason:
 - Blocking or non-blocking:
+- If this is the last checker pass before acceptance, state whether it was a required final checker or a previously recorded skip case.

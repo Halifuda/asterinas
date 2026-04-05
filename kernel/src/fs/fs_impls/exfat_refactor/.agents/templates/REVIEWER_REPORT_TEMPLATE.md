@@ -34,11 +34,17 @@ Repeat the finding block as needed.
 
 List the files changed by the reviewer and summarize the edits.
 
+- Production code changed: `yes` or `no`
+- Functional or semantic edits introduced: `yes`, `no`, or `uncertain`
+- If the answer is `no`, state why the edits are non-functional only.
+
 ## Residual Concerns
 
 List any concerns that were intentionally left for later components.
 
 ## Recommendation
 
-- Next owner: `checker`
+- Next owner: `checker` or `main-agent`
 - Reason:
+- Final-checker recommendation: `required` or `skippable`
+- Basis for that recommendation:

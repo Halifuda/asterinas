@@ -18,6 +18,7 @@ The reviewer performs bounded code-quality review after implementation and check
 6. Ensure every temporary staging surface in scope is explicitly marked as temporary in code comments and echoed in the reviewer report with its future owner or removal condition.
 7. Use the packet's review-quality slice as the default bounded checklist instead of requiring the main agent to restate the same quality expectations manually each time.
 8. Treat the packet's write-set and lane classification as a parallel-safety contract; do not widen into overlapping files or opportunistic command runs.
+9. State explicitly in the reviewer report whether production code changed and whether any direct edits were functional or semantic rather than purely non-functional.
 
 ## Allowed edits
 

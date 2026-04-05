@@ -21,6 +21,30 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 
 - One short paragraph describing the exact assigned step.
 
+## Architectural Unit Context
+
+- State the functional goal that this packet belongs to in the finished system.
+- Name the final architectural owner when it is already known.
+- If the owner is not yet fixed, list the bounded owner candidates and the specific uncertainty the architect must resolve.
+- State the expected landing form when already known:
+  - owner methods,
+  - owner-private helpers,
+  - owner-internal state,
+  - independent service or process,
+  - independent validated value type,
+  - or temporary construction seam.
+- If this packet covers only a work slice inside a larger unit, name the parent unit explicitly.
+- Record the interfaces, traits, internal services, or higher-level functions that this unit ultimately serves.
+
+## Required Resolution Questions
+
+- List the boundary, ownership, and scheduling questions that this packet expects the role to answer.
+- For architect packets, this section should explicitly separate:
+  - unit-definition questions,
+  - owner-definition questions,
+  - and work-slice or parallel-wave questions.
+- If the role is not architect, point to the architect artifact that already resolved those questions.
+
 ## Read Set
 
 - Files the subagent is allowed to read by default.
@@ -46,14 +70,17 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
   - the full semantic prior set,
   - selected excerpts from `Microsoft-exFAT-spec.md`,
   - selected excerpts from `linux-exFAT-implementation-summary.md`,
+  - selected exact source paths under `/home/halifuda/linux/fs/exfat/`,
   - or only prior-derived semantic constraints from an earlier artifact.
 - If excerpts are used, list the exact files or sections.
+- If direct Linux source reads are authorized, list the exact files or directories and why the summary alone is not enough for this packet.
 - State the intended precedence among those semantic inputs. Unless the packet records a justified exception, use:
   - `Microsoft-exFAT-spec.md` for normative exFAT semantics,
   - `linux-exFAT-implementation-summary.md` for preferred implementation guidance when the spec leaves design room.
+- Packet-authorized Linux source reads are exact implementation context, not a replacement semantic authority over Microsoft exFAT rules.
 - If the assigned work must deliberately diverge from Microsoft- or Linux-derived behavior because of an Asterinas interface constraint, record that exception explicitly here instead of letting the subagent infer it from legacy code.
 
-## Local Architectural Prior Inputs
+## Integration Prior Inputs
 
 - State whether this role receives:
   - the full `ASTERINAS_ARCHITECT_PRIORS.md`,
@@ -66,6 +93,17 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
   - mount-owned state boundaries,
   - shared-container testing reality,
   - legacy source-map context.
+
+## Workflow Prior Inputs
+
+- State which workflow constraints matter for this packet, for example:
+  - target creator work-slice size,
+  - write-set isolation requirements,
+  - creator parallelism goals,
+  - shared command-lane limits,
+  - packet-size or handoff-size limits.
+- For architect packets, state explicitly that workflow priors may shape work slices only after semantic and integration questions are resolved.
+- If no workflow priors matter beyond the default scheduler rules, say so explicitly.
 
 ## Quality Prior Inputs
 
@@ -82,6 +120,8 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 - Explain how the packet was kept narrow.
 - Prefer profile labels and section references over pasted long prose.
 - State any relevant earlier artifact that the subagent may rely on instead of reopening a larger prior source.
+- For architect packets, state explicitly which open questions are semantic, which are integration, and which are only workflow.
+- If Linux source reads are authorized, explain why those exact paths were included and what they are expected to clarify.
 
 ## Temporary Interfaces And Exit Plan
 

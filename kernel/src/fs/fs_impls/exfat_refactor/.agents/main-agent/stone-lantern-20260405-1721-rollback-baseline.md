@@ -37,6 +37,12 @@
 - `COMPONENT_INDEX.md` is reset to the corresponding pre-`INOKEY` planning state.
 - No creator, checker, reviewer, or resume loop should start until a replacement architect rubric is defined.
 
+## Protocol Update
+
+- Packet-scoped protocol now distinguishes scheduler glossary from role-visible terms: architect, designer, and common subagent rules restate the minimum owner-first terminology they need.
+- Packets may now explicitly authorize direct reads from `/home/halifuda/linux/fs/exfat/` when the Linux summary is insufficient for exact behavior or boundary questions.
+- Architect artifacts now recommend candidate work slices only; the active main-agent handoff is the scheduler-owned home of the globally active work-slice matrix.
+
 ## Next Main-Agent Tasks
 
 1. Read `README.md`, `PROTOCOL.md`, `COMPONENT_INDEX.md`, and this handoff.

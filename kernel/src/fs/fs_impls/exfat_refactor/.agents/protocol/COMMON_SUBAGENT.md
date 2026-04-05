@@ -22,15 +22,17 @@ Every ordinary subagent must follow these rules:
 13. When the task packet includes multiple prior layers, follow the packet's stated precedence. If the packet does not restate one, use the default precedence from the main protocol: Microsoft exFAT rules first, Linux exFAT implementation summary second, Asterinas architect priors as local context, and code-quality priors as engineering-quality constraints rather than semantic authority.
 14. If the packet cites profile labels or section references such as `I-DESIGN` or `Q-CREATE`, do not silently widen yourself to the full prior files unless the packet explicitly allows that broader read scope.
 15. If the assigned work appears to require missing prior material, stop and report the gap instead of silently substituting your own memory or unrelated documents.
-16. Do not treat the legacy Asterinas `exfat` implementation as the semantic target of the refactor. Use it only as local integration context unless the task packet explicitly records a required divergence or compatibility constraint.
-17. If the packet authorizes a temporary staging surface, keep it explicitly temporary in both code comments and role artifacts by naming the future owner or removal condition. Do not hide staging work behind vague `TODO` markers.
-18. Do not invent short helper wrappers or field-exposing accessors unless the packet or referenced artifact already states why another component needs that helper now.
-19. Treat the packet's lane classification as part of scope control:
+16. Treat the packet's architectural-unit context as authoritative for the assigned step. Do not silently reinterpret an owner-internal slice as a standalone architectural boundary or public surface.
+17. If the packet authorizes reads from `/home/halifuda/linux/fs/exfat/`, use those reads as exact Linux implementation context when needed. Do not assume the Linux summary alone is authoritative when the packet explicitly points you to source.
+18. Do not treat the legacy Asterinas `exfat` implementation as the semantic target of the refactor. Use it only as local integration context unless the task packet explicitly records a required divergence or compatibility constraint.
+19. If the packet authorizes a temporary staging surface, keep it explicitly temporary in both code comments and role artifacts by naming the future owner or removal condition. Do not hide staging work behind vague `TODO` markers.
+20. Do not invent short helper wrappers or field-exposing accessors unless the packet or referenced artifact already states why another component needs that helper now.
+21. Treat the packet's lane classification as part of scope control:
     - if the packet says the step is command-free, do not add compile, test, or runtime commands on your own;
     - if the packet says the step is serial with respect to another lane, do not proceed until that scheduling condition is satisfied.
-20. If the packet says the step may overlap only with disjoint write-set lanes, treat any newly discovered overlap as a stop-and-report condition rather than editing through it.
-21. If the packet says a checker execution stage must hold `.agents/locks/checker-execution.lock/`, do not run command-producing verification until that lock is acquired and `owner.toml` is written.
-22. If the packet tells you to wait for the execution lock, wait quietly on the packet's retry interval instead of immediately escalating. Do not clear a stale lock unless the main agent explicitly authorized that review.
+22. If the packet says the step may overlap only with disjoint write-set lanes, treat any newly discovered overlap as a stop-and-report condition rather than editing through it.
+23. If the packet says a checker execution stage must hold `.agents/locks/checker-execution.lock/`, do not run command-producing verification until that lock is acquired and `owner.toml` is written.
+24. If the packet tells you to wait for the execution lock, wait quietly on the packet's retry interval instead of immediately escalating. Do not clear a stale lock unless the main agent explicitly authorized that review.
 
 Subagent authority is strictly local.
 Seeing the larger workflow does not authorize scheduler actions.

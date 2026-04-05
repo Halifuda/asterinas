@@ -9,6 +9,7 @@ Update it during the wave, rewrite it when needed for clarity, and leave the nex
 
 - Fancy nickname:
 - Date:
+- Covered hours:
 - Author:
 - Workspace:
 - Container or environment:
@@ -31,6 +32,15 @@ Update it during the wave, rewrite it when needed for clarity, and leave the nex
 - Latest accepted components:
 - Components in progress:
 - Blocked components:
+
+## Active Work Slice Matrix
+
+This is the scheduler-owned global view of currently adopted work slices.
+Architect artifacts may recommend local candidate slices, but this matrix is the authoritative active plan.
+
+| Slice ID | Parent Unit | Goal | Write Set | Depends On | May Overlap With | Lane Class | Status | Source Artifact | Packet |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `WS-...` |  |  |  |  |  |  |  |  |  |
 
 ## Recent Decisions
 
@@ -61,6 +71,7 @@ List the assumptions that a future main agent must preserve, verify, or revisit.
 - Read `PROTOCOL.md`.
 - Read `COMPONENT_INDEX.md`.
 - Read the latest main-agent handoff note.
+- Read the active work-slice matrix in that handoff before dispatching or reshaping any lanes.
 - Verify the environment summary above still matches reality.
 - Confirm this handoff already reflects the material implementation and protocol changes from this wave before committing or handing off.
 
