@@ -7,18 +7,12 @@
 //! The legacy `exfat` module remains the active implementation and test baseline
 //! until the refactored implementation is ready to take over deliberately.
 
-mod bitmap;
 mod boot_sector;
 mod dentry;
 mod fat;
 mod fileset;
-mod fs;
-mod inode;
 mod io;
-mod read;
 mod super_block;
-mod sysroot;
-mod upcase_table;
 
 #[cfg(ktest)]
 mod test_support;

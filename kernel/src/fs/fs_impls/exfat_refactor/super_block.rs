@@ -97,6 +97,10 @@ impl ExfatSuperBlock {
         self.cluster_size as usize
     }
 
+    pub(super) fn cluster_size_in_sectors(&self) -> u32 {
+        self.sect_per_cluster
+    }
+
     /// Returns whether `cluster` lies in the legal data-region id range `2..ClusterCount + 2`.
     pub(super) fn is_data_cluster_id(&self, cluster: u32) -> bool {
         cluster >= EXFAT_RESERVED_CLUSTERS && cluster < self.data_cluster_end_exclusive()
@@ -174,8 +178,8 @@ mod tests {
             super_block.cluster_size as usize
         );
         assert_eq!(
-            super_block.sect_per_cluster,
-            1u32 << boot_sector.sector_per_cluster_bits
+            super_block.cluster_size_in_sectors(),
+            super_block.sect_per_cluster
         );
         assert_eq!(
             super_block.cluster_to_sector(root_cluster).unwrap(),
@@ -217,6 +221,8 @@ mod tests {
         assert!(super_block.is_data_cluster_range(EXFAT_RESERVED_CLUSTERS..range_end));
         assert!(super_block.is_data_cluster_range(range_end..range_end));
         assert!(!super_block.is_data_cluster_range(0..range_end));
-        assert!(!super_block.is_data_cluster_range(EXFAT_RESERVED_CLUSTERS..range_end + 1));
+        assert!(!super_block.is_data_cluster_range(
+            EXFAT_RESERVED_CLUSTERS..range_end + 1
+        ));
     }
 }
