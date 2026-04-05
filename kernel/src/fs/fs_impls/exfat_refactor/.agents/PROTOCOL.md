@@ -45,44 +45,48 @@ Because this file no longer repeats role-level detail, ordinary subagent packets
     - the retry interval passed to the script must be at least `60` seconds unless the task packet requires a longer interval;
     - after the command-producing stage completes, the checker must release the lock through `.agents/tools/checker_lock.sh release`;
     - only the main agent may decide a lock is stale and clear it.
-13. Command-free work should fill the parallel lanes whenever dependencies and write sets allow it. Architect, designer, reviewer, most advisor work, creator passes, checker preparation work, and packet preparation should not sit idle just because the command lane is busy.
-14. When a delegated command-free lane stalls because the subagent misread scope, lacked packet clarity, or otherwise failed to start correctly, the main agent should repair and continue that delegated lane first by clarifying, re-packetizing, or re-dispatching it. The main thread should not absorb unfinished command-free delegated work just to preserve momentum unless the user explicitly asks for local takeover or delegation has become impossible and that exception is recorded in the active handoff.
-15. Main-agent scheduling should be organized in loops. One loop may contain one creator round, and that round may include multiple creator packets in parallel when they belong to the same planned wave, have stable prerequisites, and keep disjoint write sets. After that creator round has been launched, the same loop should spend the remaining parallel budget on architect, designer, reviewer, packet-preparation, or checker-preparation work rather than opening a second creator round.
-16. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
-17. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
-18. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
-19. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
-20. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
-21. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.
-22. Prior knowledge is also packet-scoped. The main agent must curate which parts of these prior layers each role receives:
+13. Filtered verification commands must prove that they targeted the intended tests. A green exit status alone is insufficient evidence when `cargo osdk test <filter>` is used. The task packet and checker artifact must record either:
+    - an exact or otherwise uniquely justified test-path suffix derived from source inspection, or
+    - command output that explicitly names the executed tests.
+    Broad module-like filters are not enough unless the checker also records why they cannot silently miss or over-match the intended coverage.
+14. Command-free work should fill the parallel lanes whenever dependencies and write sets allow it. Architect, designer, reviewer, most advisor work, creator passes, checker preparation work, and packet preparation should not sit idle just because the command lane is busy.
+15. When a delegated command-free lane stalls because the subagent misread scope, lacked packet clarity, or otherwise failed to start correctly, the main agent should repair and continue that delegated lane first by clarifying, re-packetizing, or re-dispatching it. The main thread should not absorb unfinished command-free delegated work just to preserve momentum unless the user explicitly asks for local takeover or delegation has become impossible and that exception is recorded in the active handoff.
+16. Main-agent scheduling should be organized in loops. One loop may contain one creator round, and that round may include multiple creator packets in parallel when they belong to the same planned wave, have stable prerequisites, and keep disjoint write sets. After that creator round has been launched, the same loop should spend the remaining parallel budget on architect, designer, reviewer, packet-preparation, or checker-preparation work rather than opening a second creator round.
+17. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
+18. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
+19. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
+20. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
+21. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
+22. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.
+23. Prior knowledge is also packet-scoped. The main agent must curate which parts of these prior layers each role receives:
     - `Microsoft-exFAT-spec.md`
     - `linux-exFAT-implementation-summary.md`
     - `ASTERINAS_ARCHITECT_PRIORS.md`
     - `ASTERINAS_CODE_QUALITY_PRIORS.md`
-23. Prior precedence is fixed unless a packet records a justified exception:
+24. Prior precedence is fixed unless a packet records a justified exception:
     - Microsoft spec for normative on-disk semantics
     - Linux summary for preferred implementation guidance when the spec leaves room
     - Asterinas architect priors for local integration constraints
     - Asterinas code-quality priors for engineering-quality constraints
-24. Role packets should be sliced aggressively:
+25. Role packets should be sliced aggressively:
     - architect gets semantic priors plus boundary-level local and quality slices;
     - designer gets only the semantic and integration material needed to specify the component plus design-level quality slices;
     - creator gets the designer-derived constraints plus only the semantic or integration excerpts needed to avoid semantic drift, plus `Q-CREATE`;
     - checker gets the relevant semantic excerpts, designer test obligations, required integration facts, and `Q-CHECK`;
     - reviewer normally receives the broadest quality slice and semantic priors only when semantic drift is in review scope.
-25. If a delegated role appears to require prior material that the packet did not supply, the subagent must stop and report the missing input instead of silently substituting memory or unrelated files.
-26. Legacy Asterinas `exfat` code is an integration reference, not the semantic target of the refactor. If local Asterinas interfaces force a divergence from Microsoft- or Linux-derived behavior, the architect or designer artifact must record that explicitly.
-27. Temporary staging surfaces are allowed only when the packet or referenced artifact names them explicitly and gives an exit plan. The code comment and role artifact must both name the future owner, absorbing component, or removal condition.
-28. Short helpers and field-exposing accessors need explicit justification. If the packet or referenced artifact cannot name the cross-module caller, trust boundary, or repeated error-prone pattern that requires the helper now, the helper should not be added.
-29. The advisor role is optional. The main agent may send a checker finding list directly back into a creator repair batch when the scope is already narrow and obvious.
-30. Main-agent handoff writing is continuous. The active handoff is the editable record of the current wave rather than a final append-only summary written at the end.
-31. Every material wave action by the main agent must be reflected in the active handoff during that same wave. This includes at least:
+26. If a delegated role appears to require prior material that the packet did not supply, the subagent must stop and report the missing input instead of silently substituting memory or unrelated files.
+27. Legacy Asterinas `exfat` code is an integration reference, not the semantic target of the refactor. If local Asterinas interfaces force a divergence from Microsoft- or Linux-derived behavior, the architect or designer artifact must record that explicitly.
+28. Temporary staging surfaces are allowed only when the packet or referenced artifact names them explicitly and gives an exit plan. The code comment and role artifact must both name the future owner, absorbing component, or removal condition.
+29. Short helpers and field-exposing accessors need explicit justification. If the packet or referenced artifact cannot name the cross-module caller, trust boundary, or repeated error-prone pattern that requires the helper now, the helper should not be added.
+30. The advisor role is optional. The main agent may send a checker finding list directly back into a creator repair batch when the scope is already narrow and obvious.
+31. Main-agent handoff writing is continuous. The active handoff is the editable record of the current wave rather than a final append-only summary written at the end.
+32. Every material wave action by the main agent must be reflected in the active handoff during that same wave. This includes at least:
     - component-planning and scheduling decisions,
     - implementation or repair waves the main agent drove or accepted,
     - checker or reviewer outcomes that change what happens next,
     - protocol, template, README, testing-guide, or packet-shaping changes.
-32. The active handoff may be rewritten, condensed, or reorganized during the wave so the final note stays readable, but it must not drop decisions or state that a future main agent would need to resume safely.
-33. Before a wave is considered complete or committed, the main agent must ensure the active handoff already reflects the final shape of that wave, and the finalized note must end with explicit next-main-agent tasks.
+33. The active handoff may be rewritten, condensed, or reorganized during the wave so the final note stays readable, but it must not drop decisions or state that a future main agent would need to resume safely.
+34. Before a wave is considered complete or committed, the main agent must ensure the active handoff already reflects the final shape of that wave, and the finalized note must end with explicit next-main-agent tasks.
 
 ## 2. Role Ownership
 

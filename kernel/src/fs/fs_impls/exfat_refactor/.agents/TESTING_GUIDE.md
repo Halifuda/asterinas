@@ -136,6 +136,34 @@ So the recommended practice is:
 1. use the shortest suffix only for quick local probing when the name is unique,
 2. use a longer and more explicit suffix when recording a reproducible checker command.
 
+## 5A. How To Prove The Filter Actually Hit The Intended Tests
+
+When a checker records a filtered `cargo osdk test <TESTNAME>` run, it must also record why that filter is known to hit the intended tests.
+
+This is required because a green exit status alone is not sufficient evidence of coverage. In this workspace, `cargo osdk test` can still exit `0` even when the filter matches nothing.
+
+The checker must therefore provide one of these proof forms:
+
+1. source-backed suffix proof:
+   - inspect the local `#[ktest]` names,
+   - record the exact function-name suffix or longer `module_path::function_name` suffix used in the command,
+   - state why that suffix is unique enough for the intended coverage;
+2. output-backed proof:
+   - record command output that explicitly names the executed tests.
+
+Broad module-like filters such as `fs::tests` are not good enough on their own unless the checker also records why they cannot silently miss or over-match the intended cases.
+
+For `cargo osdk test`, the authoritative local implementation points are:
+
+- `osdk/deps/test-kernel/src/lib.rs`, where the runner checks the whitelist against the test path as a suffix;
+- `ostd/libs/ostd-test/src/lib.rs`, where OSDK forwards the requested whitelist into the runner.
+
+The practical default in this workflow should be:
+
+1. use exact `#[ktest]` function names, or a longer explicit suffix, for recorded checker commands;
+2. cite the corresponding source locations in the checker artifact;
+3. do not claim coverage from `exit 0` alone.
+
 ## 6. How Checkers Should Use Tests
 
 The checker should think in three layers:

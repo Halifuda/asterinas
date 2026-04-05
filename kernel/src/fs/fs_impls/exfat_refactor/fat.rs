@@ -7,7 +7,7 @@
     )
 )]
 
-use core::mem::size_of;
+use core::{convert::TryFrom, mem::size_of};
 
 use aster_block::BlockDevice;
 
@@ -159,7 +159,7 @@ impl ExfatChain {
         block_device: &dyn BlockDevice,
         super_block: &ExfatSuperBlock,
         offset: usize,
-    ) -> Result<(Self, usize)> {
+    ) -> Result<(ClusterId, usize)> {
         let cluster_size = super_block.cluster_size();
         let steps = offset / cluster_size;
         let intra_cluster_offset = offset % cluster_size;
@@ -167,7 +167,7 @@ impl ExfatChain {
             .map_err(|_| Error::with_message(Errno::EINVAL, "invalid walking steps for chain"))?;
         let chain = self.walk(block_device, super_block, steps)?;
 
-        Ok((chain, intra_cluster_offset))
+        Ok((chain.current, intra_cluster_offset))
     }
 
     /// Returns the first byte offset of the current cluster.
@@ -183,6 +183,17 @@ impl ExfatChain {
         }
 
         super_block.cluster_to_byte_offset(self.current)
+    }
+
+    /// Returns the total byte length covered by the validated chain.
+    pub(super) fn byte_len(&self, super_block: &ExfatSuperBlock) -> Result<usize> {
+        let cluster_count = usize::try_from(self.cluster_count).map_err(|_| {
+            Error::with_message(Errno::EINVAL, "chain length does not fit in usize")
+        })?;
+
+        cluster_count
+            .checked_mul(super_block.cluster_size())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "chain byte length overflow"))
     }
 }
 
@@ -333,7 +344,7 @@ fn validate_next_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) -> R
 mod tests {
     use ostd::prelude::ktest;
 
-    use super::{read_next_fat_value, ChainMode, ClusterId, ExfatChain, FatValue};
+    use super::{ChainMode, ClusterId, ExfatChain, FatValue, read_next_fat_value};
     use crate::fs::fs_impls::exfat_refactor::{
         boot_sector::read_primary_super_block, io::read_metadata_bytes,
         super_block::ExfatSuperBlock, test_support::load_exfat_disk,
@@ -460,7 +471,7 @@ mod tests {
         .unwrap();
 
         let walked = chain.walk(&disk, &super_block, 1).unwrap();
-        let (offset_chain, offset_in_cluster) = chain
+        let (offset_cluster, offset_in_cluster) = chain
             .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 13)
             .unwrap();
 
@@ -473,7 +484,7 @@ mod tests {
         );
         assert_eq!(walked.current, next_cluster);
         assert_eq!(walked.cluster_count, 1);
-        assert_eq!(offset_chain.current, next_cluster);
+        assert_eq!(offset_cluster, next_cluster);
         assert_eq!(offset_in_cluster, 13);
     }
 
@@ -497,7 +508,7 @@ mod tests {
         )
         .unwrap();
         let walked = chain.walk(&disk, &super_block, 1).unwrap();
-        let (offset_chain, offset_in_cluster) = chain
+        let (offset_cluster, offset_in_cluster) = chain
             .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size() + 7)
             .unwrap();
 
@@ -506,7 +517,7 @@ mod tests {
         assert_eq!(chain.mode, ChainMode::FatBacked);
         assert_eq!(walked.current, next_cluster);
         assert_eq!(walked.cluster_count, 1);
-        assert_eq!(offset_chain.current, next_cluster);
+        assert_eq!(offset_cluster, next_cluster);
         assert_eq!(offset_in_cluster, 7);
     }
 
@@ -527,8 +538,10 @@ mod tests {
         .unwrap();
 
         assert!(chain.walk(&disk, &super_block, 1).is_err());
-        assert!(chain
-            .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size())
-            .is_err());
+        assert!(
+            chain
+                .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size())
+                .is_err()
+        );
     }
 }

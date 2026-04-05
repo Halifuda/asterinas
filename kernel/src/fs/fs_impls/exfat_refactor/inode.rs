@@ -8,12 +8,15 @@
     )
 )]
 
+use alloc::sync::Arc;
 use core::convert::TryFrom;
 
 use super::{
     fat::{ChainMode, ClusterId, ExfatChain},
     fileset::ExfatDentrySet,
+    read::ExfatInodeReadView,
 };
+use crate::fs::vfs::page_cache::{PageCache, PageCacheBackend};
 use crate::prelude::*;
 
 bitflags! {
@@ -45,7 +48,7 @@ pub(super) struct ExfatInodeKey(u64);
 ///
 /// Cross-module query helpers are added only when a downstream component proves that a specific
 /// fact needs to cross the module boundary.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct ExfatInodeMeta {
     inode_key: ExfatInodeKey,
     file_attributes: FatAttr,
@@ -56,6 +59,13 @@ pub(super) struct ExfatInodeMeta {
     data_length: usize,
     chain: ExfatChain,
     raw_name_units: Vec<u16>,
+}
+
+/// Owns the regular-file page cache runtime state.
+pub(super) struct ExfatRegularFileRuntime {
+    page_cache: PageCache,
+    // Keeps a strong backend reference alive for `PageCache`.
+    backend: Arc<dyn PageCacheBackend>,
 }
 
 impl ExfatInodeKey {
@@ -175,6 +185,54 @@ impl ExfatInodeMeta {
             chain,
             raw_name_units: Vec::new(),
         })
+    }
+
+    /// Returns the immutable read-mapping facts for an existing regular file.
+    pub(super) fn read_view(&self) -> Result<ExfatInodeReadView<'_>> {
+        let valid_data_length = self.regular_file_valid_data_length()?;
+
+        Ok(ExfatInodeReadView::new(&self.chain, valid_data_length))
+    }
+
+    /// Returns the regular-file visible length used by read and cache boundaries.
+    pub(super) fn regular_file_valid_data_length(&self) -> Result<usize> {
+        if self.file_attributes.contains(FatAttr::DIRECTORY) {
+            return Err(Error::with_message(
+                Errno::EISDIR,
+                "directory metadata cannot cross the read-mapping boundary",
+            ));
+        }
+
+        Ok(self.valid_data_length)
+    }
+
+    /// Returns the backend-visible page count derived from `valid_data_length`.
+    pub(super) fn regular_file_page_count(&self) -> Result<usize> {
+        Ok(self.regular_file_valid_data_length()?.div_ceil(PAGE_SIZE))
+    }
+
+    /// Returns the initial page-cache capacity derived from `valid_data_length`.
+    pub(super) fn regular_file_cache_capacity(&self) -> Result<usize> {
+        self.regular_file_page_count()?
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "page cache capacity overflow"))
+    }
+}
+
+impl ExfatRegularFileRuntime {
+    /// Creates a regular-file runtime that owns `PageCache` and backend lifetime.
+    pub(super) fn new(page_cache: PageCache, backend: Arc<dyn PageCacheBackend>) -> Self {
+        Self { page_cache, backend }
+    }
+
+    /// Returns the owned page cache for this regular-file runtime.
+    pub(super) fn page_cache(&self) -> &PageCache {
+        &self.page_cache
+    }
+
+    /// Returns the backend-visible page count for this runtime.
+    pub(super) fn backend_page_count(&self) -> usize {
+        self.backend.npages()
     }
 }
 
@@ -379,16 +437,18 @@ mod tests {
         assert_eq!(root_meta.data_length, 0x2000);
         assert_eq!(root_meta.chain, chain);
         assert!(root_meta.raw_name_units.is_empty());
-        assert!(ExfatInodeMeta::new_root(
-            non_root_key,
-            chain,
-            0x2000,
-            0x2000,
-            created_at,
-            modified_at,
-            accessed_at,
-        )
-        .is_err());
+        assert!(
+            ExfatInodeMeta::new_root(
+                non_root_key,
+                chain,
+                0x2000,
+                0x2000,
+                created_at,
+                modified_at,
+                accessed_at,
+            )
+            .is_err()
+        );
         assert!(
             ExfatInodeMeta::new(root_key, &sample_file_record(0x0020, 0x20, 0x20), chain).is_err()
         );
@@ -416,9 +476,11 @@ mod tests {
             utc_offset: 0x40,
         };
 
-        assert!(ExfatInodeMeta::new_root(
-            root_key, chain, 0x2000, 0x2400, timestamp, timestamp, timestamp
-        )
-        .is_err());
+        assert!(
+            ExfatInodeMeta::new_root(
+                root_key, chain, 0x2000, 0x2400, timestamp, timestamp, timestamp
+            )
+            .is_err()
+        );
     }
 }

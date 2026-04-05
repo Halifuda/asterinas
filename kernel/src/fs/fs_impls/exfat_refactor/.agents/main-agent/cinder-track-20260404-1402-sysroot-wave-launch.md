@@ -7,6 +7,7 @@
 - Fancy nickname: `cinder-track`
 - Date: 2026-04-04 14:02 CST
 - Author: main-agent
+- Covered hours: approximately `2.5` hours, inferred from the file `Modify` timestamp at `2026-04-04 16:30 CST`
 - Workspace: `/home/halifuda/asterinas`
 - Container or environment: host workspace plus Docker container `codex-asterinas-dev`
 - Status: active wave record; test-surface cleanup and checker-lock script landed locally; `EXR-SYSROOT-06`, `EXR-UPCASE-07A`, `EXR-UPCASE-07B`, and `EXR-BITMAP-08A` are accepted, while `EXR-MOUNT-09` is the next dependency-ready big-loop component but remains unlaunched in this record

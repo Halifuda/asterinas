@@ -26,6 +26,11 @@ The checker may do command-free preparation in the same pass before entering loc
 13. Do not retry more frequently than once per `60` seconds unless the packet explicitly requires a longer interval.
 14. After the command-producing stage finishes, release the lock through `.agents/tools/checker_lock.sh release`.
 15. If the wait budget in the packet is exceeded, stop and report that the checker could not enter the execution stage.
+16. When using a filtered test command such as `cargo osdk test <filter>`, prove that the filter hit the intended tests. `exit 0` alone is not enough.
+17. Record that proof in the checker artifact by naming either:
+    - the exact or uniquely justified test-path suffixes taken from source inspection, or
+    - the command output that explicitly listed the executed tests.
+18. Treat broad module-like filters as insufficient evidence unless the artifact also explains why the filter cannot silently miss or over-match the intended coverage.
 
 ## Allowed edits
 

@@ -102,6 +102,7 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 
 - For example: read-only shell commands, compile-only commands, or sequential ktest commands.
 - For creator packets, compile-only commands should appear here only when the main agent explicitly authorizes a command exception.
+- If a filtered test command is allowed, record how the checker must prove that the filter hits the intended tests.
 
 ## Parallelism Classification
 
@@ -124,6 +125,7 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 - Isolation notes:
 - State whether this task must run serially with respect to other command-producing work.
 - If the task is command-free, state that the subagent must not add compile or runtime commands on its own.
+- If the task includes filtered tests, state the exact expected suffixes or the exact output evidence the checker must capture to prove coverage.
 
 ## Execution Lock
 

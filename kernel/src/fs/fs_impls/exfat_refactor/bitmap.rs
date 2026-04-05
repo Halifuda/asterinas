@@ -8,9 +8,9 @@
     )
 )]
 
+use alloc::vec::Vec;
 use core::{convert::TryFrom, ops::Range};
 
-use alloc::vec::Vec;
 use aster_block::BlockDevice;
 
 use super::{
@@ -23,6 +23,7 @@ use super::{
 use crate::prelude::*;
 
 /// Stores the validated allocation bitmap as a read-only occupancy surface.
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct ExfatAllocationBitmap {
     bytes: Vec<u8>,
     data_cluster_end_exclusive: u32,
@@ -138,10 +139,7 @@ impl ExfatAllocationBitmap {
 
 fn minimum_bitmap_byte_size(super_block: &ExfatSuperBlock) -> Result<usize> {
     let data_cluster_count = usize::try_from(super_block.data_cluster_count()).map_err(|_| {
-        Error::with_message(
-            Errno::EINVAL,
-            "volume cluster count does not fit in usize",
-        )
+        Error::with_message(Errno::EINVAL, "volume cluster count does not fit in usize")
     })?;
 
     Ok(data_cluster_count.div_ceil(8))
@@ -159,9 +157,9 @@ fn validate_bitmap_self_coverage(
     cluster_count: u32,
     bytes: &[u8],
 ) -> Result<()> {
-    let end_cluster = start_cluster.checked_add(cluster_count).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "bitmap cluster coverage overflow")
-    })?;
+    let end_cluster = start_cluster
+        .checked_add(cluster_count)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "bitmap cluster coverage overflow"))?;
 
     if !super_block.is_data_cluster_range(start_cluster..end_cluster) {
         return Err(Error::with_message(
@@ -197,13 +195,12 @@ fn is_cluster_allocated_in_bytes(bytes: &[u8], cluster: u32) -> Result<bool> {
 }
 
 fn bitmap_bit_index(cluster: u32) -> Result<usize> {
-    let bit_index = cluster.checked_sub(EXFAT_RESERVED_CLUSTERS).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "invalid data-region cluster")
-    })?;
+    let bit_index = cluster
+        .checked_sub(EXFAT_RESERVED_CLUSTERS)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid data-region cluster"))?;
 
-    usize::try_from(bit_index).map_err(|_| {
-        Error::with_message(Errno::EINVAL, "bitmap bit index does not fit in usize")
-    })
+    usize::try_from(bit_index)
+        .map_err(|_| Error::with_message(Errno::EINVAL, "bitmap bit index does not fit in usize"))
 }
 
 #[cfg(ktest)]
@@ -213,16 +210,18 @@ mod tests {
     use ostd::prelude::ktest;
 
     use super::{
-        bitmap_bit_index, minimum_bitmap_byte_size, ExfatAllocationBitmap, EXFAT_RESERVED_CLUSTERS,
+        EXFAT_RESERVED_CLUSTERS, ExfatAllocationBitmap, bitmap_bit_index, minimum_bitmap_byte_size,
     };
-    use crate::fs::fs_impls::exfat_refactor::{
-        boot_sector::read_primary_super_block,
-        fat::{ChainMode, ExfatChain},
-        super_block::ExfatSuperBlock,
-        sysroot::{scan_root_system_entries, ExfatSysRootBitmapDiscovery},
-        test_support::{load_exfat_disk, ExfatMemoryDisk},
+    use crate::{
+        fs::fs_impls::exfat_refactor::{
+            boot_sector::read_primary_super_block,
+            fat::{ChainMode, ExfatChain},
+            super_block::ExfatSuperBlock,
+            sysroot::{ExfatSysRootBitmapDiscovery, scan_root_system_entries},
+            test_support::{ExfatMemoryDisk, load_exfat_disk},
+        },
+        prelude::Errno,
     };
-    use crate::prelude::Errno;
 
     fn bitmap_fixture() -> (
         ExfatMemoryDisk,
@@ -262,10 +261,7 @@ mod tests {
             .unwrap()
     }
 
-    fn first_free_cluster(
-        bitmap: &ExfatAllocationBitmap,
-        super_block: &ExfatSuperBlock,
-    ) -> u32 {
+    fn first_free_cluster(bitmap: &ExfatAllocationBitmap, super_block: &ExfatSuperBlock) -> u32 {
         for cluster in EXFAT_RESERVED_CLUSTERS..super_block.data_cluster_end_exclusive() {
             if !bitmap.is_cluster_allocated(cluster).unwrap() {
                 return cluster;
@@ -285,13 +281,17 @@ mod tests {
         let free_cluster = first_free_cluster(&bitmap, &super_block);
 
         assert!(bitmap.is_cluster_allocated(occupied_cluster).unwrap());
-        assert!(bitmap
-            .is_cluster_range_allocated(occupied_cluster..occupied_cluster + 1)
-            .unwrap());
+        assert!(
+            bitmap
+                .is_cluster_range_allocated(occupied_cluster..occupied_cluster + 1)
+                .unwrap()
+        );
         assert!(!bitmap.is_cluster_allocated(free_cluster).unwrap());
-        assert!(!bitmap
-            .is_cluster_range_allocated(free_cluster..free_cluster + 1)
-            .unwrap());
+        assert!(
+            !bitmap
+                .is_cluster_range_allocated(free_cluster..free_cluster + 1)
+                .unwrap()
+        );
     }
 
     // Confirms the loader rejects a bitmap that does not meet the minimum size
@@ -360,6 +360,10 @@ mod tests {
         assert!(bitmap_facts.byte_size > minimum_byte_size);
         let bitmap = load_bitmap(&disk, &super_block, &bitmap_facts);
 
-        assert!(bitmap.is_cluster_allocated(bitmap_facts.start_cluster).unwrap());
+        assert!(
+            bitmap
+                .is_cluster_allocated(bitmap_facts.start_cluster)
+                .unwrap()
+        );
     }
 }
