@@ -11,6 +11,8 @@ mod boot_sector;
 mod dentry;
 mod fat;
 mod fileset;
+mod fs;
+mod inode;
 mod io;
 mod super_block;
 
