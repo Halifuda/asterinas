@@ -233,6 +233,39 @@ impl ExfatFs {
         let root_inode = build_root_inode(fs, root_chain)?;
         Ok(fs.publish_root_inode(root_inode))
     }
+
+    fn read_chain_bytes(
+        &self,
+        chain: ExfatChain,
+        byte_len: usize,
+    ) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; byte_len];
+        let mut loaded_chain = chain;
+        let mut copied_bytes = 0usize;
+        let cluster_size = self.super_block.cluster_size();
+
+        for cluster_index in 0..chain.cluster_count() {
+            let cluster_offset = loaded_chain.physical_cluster_start_offset(&self.super_block)?;
+            let remaining_bytes = byte_len - copied_bytes;
+            let copy_len = remaining_bytes.min(cluster_size);
+            read_metadata_bytes(
+                self.block_device.as_ref(),
+                cluster_offset,
+                &mut bytes[copied_bytes..copied_bytes + copy_len],
+            )?;
+            copied_bytes += copy_len;
+
+            if cluster_index + 1 < chain.cluster_count() {
+                loaded_chain = loaded_chain.walk(
+                    self.block_device.as_ref(),
+                    &self.super_block,
+                    1,
+                )?;
+            }
+        }
+
+        Ok(bytes)
+    }
 }
 
 impl FileSystem for ExfatFs {
@@ -542,12 +575,7 @@ fn ensure_upcase_table(fs: &Arc<ExfatFs>, upcase_dentry: ExfatUpcaseDentry) -> R
     let raw_table_size = usize::try_from(upcase_dentry.size).map_err(|_| {
         Error::with_message(Errno::EINVAL, "upcase table size does not fit the host")
     })?;
-    let raw_table_bytes = read_chain_bytes(
-        fs.block_device.as_ref(),
-        &fs.super_block,
-        upcase_chain,
-        raw_table_size,
-    )?;
+    let raw_table_bytes = fs.read_chain_bytes(upcase_chain, raw_table_size)?;
 
     fs.install_upcase_table(upcase_dentry, &raw_table_bytes)
 }
@@ -613,36 +641,6 @@ fn root_dentry_set(start_cluster: u32) -> Result<ExfatDentrySet> {
         &[b'i' as u16, b'n' as u16, b'o' as u16],
         Vec::new(),
     )
-}
-
-fn read_chain_bytes(
-    block_device: &dyn BlockDevice,
-    super_block: &ExfatSuperBlock,
-    chain: ExfatChain,
-    byte_len: usize,
-) -> Result<Vec<u8>> {
-    let mut bytes = vec![0; byte_len];
-    let mut loaded_chain = chain;
-    let mut copied_bytes = 0usize;
-    let cluster_size = super_block.cluster_size();
-
-    for cluster_index in 0..chain.cluster_count() {
-        let cluster_offset = loaded_chain.physical_cluster_start_offset(super_block)?;
-        let remaining_bytes = byte_len - copied_bytes;
-        let copy_len = remaining_bytes.min(cluster_size);
-        read_metadata_bytes(
-            block_device,
-            cluster_offset,
-            &mut bytes[copied_bytes..copied_bytes + copy_len],
-        )?;
-        copied_bytes += copy_len;
-
-        if cluster_index + 1 < chain.cluster_count() {
-            loaded_chain = loaded_chain.walk(block_device, super_block, 1)?;
-        }
-    }
-
-    Ok(bytes)
 }
 
 #[cfg(ktest)]
