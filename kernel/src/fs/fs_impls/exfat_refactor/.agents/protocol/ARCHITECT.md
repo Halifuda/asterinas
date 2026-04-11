@@ -13,14 +13,24 @@ The architect defines the smallest functionally coherent unit that has a stable 
 - Functional unit:
   the smallest functionally coherent implementation slice that has a stable final owner and a justified architectural boundary in the finished system.
 - Architectural owner:
-  the type, service object, process, daemon, runtime state holder, or validated value type that ultimately owns the unit's behavior, state, and invariants.
+  the stable finished-system owner that ultimately carries the unit's behavior, state, and invariants.
+  In this workspace, prefer one of these owner classes unless the packet explicitly justifies an exception:
+  - VFS trait carrier
+  - structure owner (including owner-local runtime structures and on-disk-structure-derived internal structures)
+  - daemon process
+  - record type
 - Work slice:
   a packet-sized implementation step used for delegation or parallelism. It may cover only part of one functional unit and does not by itself justify a long-lived boundary.
 
 ## Required behavior
 
 1. Name the concrete filesystem function the proposed unit serves in the finished system.
-2. Name the unit's final architectural owner. The owner may be a trait carrier, an internal service object, a daemon-like process, a runtime state holder, or a validated value type, but it must be stable in the finished system.
+2. Name the unit's final architectural owner and state which canonical owner class it belongs to. In this workspace, prefer:
+   - VFS trait carrier,
+   - structure owner,
+   - daemon process,
+   - or record type.
+   If the unit does not fit one of those classes cleanly, explain why that exception is still a stable finished-system owner rather than packet convenience.
 3. Distinguish the architectural unit from the work slices that may implement it. Dependency safety and creator parallelism constrain work-slice planning, but they do not by themselves justify a standalone unit boundary.
 4. Justify the unit boundary in terms of functional cohesion, owned state, lifecycle, scheduling or concurrency semantics, trust boundary, or reusable validated-value semantics.
 5. If a behavior is logically subordinate to a larger owner and does not carry an independent boundary justification, keep it inside that owner instead of inventing a standalone module surface, struct, or free-function API.
@@ -28,8 +38,9 @@ The architect defines the smallest functionally coherent unit that has a stable 
    - owner methods,
    - owner-private helpers,
    - owner-internal state,
-   - independent service or process,
-   - independent validated value type,
+   - owner-local structure,
+   - daemon process surface,
+   - record type,
    - or an explicitly temporary construction seam.
 7. Make ready-now parallel work slices explicit separately from the architectural unit boundary.
 8. Keep proposed initial creator work slices narrow, normally around `150-300` lines and comfortably below `400`.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_block::{BlockDevice, BLOCK_SIZE};
+use aster_block::{BLOCK_SIZE, BlockDevice};
 use ostd::mm::VmIo;
 
 use crate::prelude::*;
@@ -52,7 +52,7 @@ mod tests {
     use super::read_metadata_bytes;
     use crate::fs::fs_impls::exfat_refactor::{
         boot_sector::read_primary_boot_sector,
-        test_support::{load_exfat_disk, ExfatMemoryDisk},
+        test_support::{ExfatMemoryDisk, load_exfat_disk},
     };
 
     fn assert_metadata_read_matches_disk(disk: &ExfatMemoryDisk, offset: usize, len: usize) {

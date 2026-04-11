@@ -348,7 +348,7 @@ fn validate_next_cluster(super_block: &ExfatSuperBlock, cluster: ClusterId) -> R
 mod tests {
     use ostd::prelude::ktest;
 
-    use super::{read_next_fat_value, ChainMode, ClusterId, ExfatChain, FatValue};
+    use super::{ChainMode, ClusterId, ExfatChain, FatValue, read_next_fat_value};
     use crate::fs::fs_impls::exfat_refactor::{
         boot_sector::read_primary_super_block, io::read_metadata_bytes,
         super_block::ExfatSuperBlock, test_support::load_exfat_disk,
@@ -542,8 +542,10 @@ mod tests {
         .unwrap();
 
         assert!(chain.walk(&disk, &super_block, 1).is_err());
-        assert!(chain
-            .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size())
-            .is_err());
+        assert!(
+            chain
+                .walk_to_cluster_at_offset(&disk, &super_block, super_block.cluster_size())
+                .is_err()
+        );
     }
 }

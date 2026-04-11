@@ -34,6 +34,19 @@ The scheduler is intentionally loop-based rather than purely linear:
 - after that creator round starts, the remaining parallel budget in the same loop should go to architect, designer, reviewer, packet-preparation, or checker-preparation work,
 - if a command-free delegated lane stalls, the preferred fix is to repair and continue delegation rather than collapsing that work back into the main thread.
 
+## Codex Skills
+
+Two reusable Codex skills mirror the stable workflow rules for this workspace so future sessions do not need to replay the full protocol text every time:
+
+- `$exfat-main-agent`
+  Use when acting as the scheduler for `exfat_refactor`: resuming the board, shaping waves, curating packets, updating `COMPONENT_INDEX.md`, or writing main-agent handoffs.
+- `$exfat-subagent-workflow`
+  Use for ordinary delegated architect, designer, creator, checker, reviewer, and advisor work against one archived task packet.
+
+These skills live under `$CODEX_HOME/skills/`.
+They are the preferred invocation path in Codex sessions.
+The repository-local protocol files remain the source text for maintenance and review.
+
 ## Role Model
 
 - Main agent:
@@ -57,11 +70,13 @@ The scheduler is intentionally loop-based rather than purely linear:
 - When exact Linux behavior, sequencing, or boundary shape matters, packets may explicitly authorize direct reads from `/home/halifuda/linux/fs/exfat/`. The summary is a map and orientation aid, not a substitute for those packet-scoped source reads.
 - [`TESTING_GUIDE.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/TESTING_GUIDE.md) records how exFAT ktests should be written, selected, and executed in the validated container workflow.
 - [`PROTOCOL.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/PROTOCOL.md) is the main-agent-owned normative workflow and should not normally be forwarded to ordinary subagents.
+- In Codex sessions, main-agent work should normally begin with `$exfat-main-agent`.
 - `protocol/` contains the scoped documents that should actually be forwarded to ordinary subagents:
   - `COMMON_SUBAGENT.md`
   - role-specific files such as `ARCHITECT.md`, `CREATOR.md`, and `CHECKER.md`
   - `TASK_PACKET_TEMPLATE.md` for per-task read or write scopes and stop conditions
   - these role-scoped files should restate any term or boundary rule that an ordinary subagent must understand; do not assume the subagent also received scheduler-only terminology from `PROTOCOL.md`
+  - in Codex sessions, ordinary delegated work should normally invoke `$exfat-subagent-workflow`, which mirrors these role-scoped rules in a more token-efficient form
 - `subagent-tasks/` stores the archived task packets that were actually sent to delegated subagents.
 - `tools/` stores small workflow scripts owned by the main agent, including the checker execution-lock helper.
 - [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md) is the scheduler-owned task board.

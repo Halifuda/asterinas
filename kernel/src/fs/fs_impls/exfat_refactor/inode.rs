@@ -11,6 +11,11 @@
 use alloc::sync::{Arc, Weak};
 use core::time::Duration;
 
+use super::{
+    fat::{ChainMode, ClusterId, ExfatChain},
+    fileset::ExfatDentrySet,
+    fs::ExfatFs,
+};
 use crate::{
     fs::{
         file::{InodeMode, InodeType, StatusFlags},
@@ -21,12 +26,6 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-};
-
-use super::{
-    fat::{ChainMode, ClusterId, ExfatChain},
-    fileset::ExfatDentrySet,
-    fs::ExfatFs,
 };
 
 const SECTOR_SIZE: usize = 512;
@@ -302,8 +301,12 @@ mod tests {
         let valid_size = 1200u64;
         let file_attribute = 0x20u16;
         let cluster_size = super_block.cluster_size();
-        let mut dentry_set =
-            trusted_dentry_set(file_size, valid_size, file_attribute, chain.current_cluster());
+        let mut dentry_set = trusted_dentry_set(
+            file_size,
+            valid_size,
+            file_attribute,
+            chain.current_cluster(),
+        );
 
         let mode = InodeMode::S_IRUSR | InodeMode::S_IWUSR | InodeMode::S_IRGRP;
         let uid = Uid::new(1000);
@@ -366,7 +369,10 @@ mod tests {
         assert_eq!(metadata.last_modify_at, inode.mtime());
         assert_eq!(metadata.last_meta_change_at, inode.ctime());
         assert_eq!(metadata.optimal_block_size, cluster_size);
-        assert_eq!(metadata.nr_sectors_allocated, cluster_size.div_ceil(SECTOR_SIZE));
+        assert_eq!(
+            metadata.nr_sectors_allocated,
+            cluster_size.div_ceil(SECTOR_SIZE)
+        );
 
         assert_eq!(inode.location, Some(location));
         assert_eq!(inode.file_attribute, file_attribute);

@@ -4,7 +4,9 @@
 
 Use this template when delegating ordinary subagent work.
 The packet should be small enough that the subagent does not need the full scheduler protocol or full thread history.
-For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant files under `protocol/` instead.
+For ordinary delegated work, do not attach `PROTOCOL.md`.
+In Codex sessions, prefer telling the subagent to use `$exfat-subagent-workflow` and name the matching role reference inside that skill.
+Use the repo-local `protocol/` files as the source text for maintenance or when the packet explicitly chooses file-based delivery instead.
 
 ## Metadata
 
@@ -61,8 +63,11 @@ For ordinary delegated work, do not attach `PROTOCOL.md`; attach the relevant fi
 
 - Artifacts, code paths, or test outputs the subagent must rely on.
 - When the component uses split designer artifacts, list exactly which designer files this role is allowed to see.
-- List the role-scoped protocol files that accompany this packet.
-- Do not treat `PROTOCOL.md` as a substitute for those role files.
+- State the reusable workflow delivery path for this packet:
+  - preferred Codex form: `Skill to use: $exfat-subagent-workflow`
+  - required role reference, for example `references/checker.md`
+  - optional repo-local protocol source files when maintenance or explicit file delivery is needed
+- Do not treat `PROTOCOL.md` as a substitute for those role rules.
 
 ## Semantic Prior Inputs
 

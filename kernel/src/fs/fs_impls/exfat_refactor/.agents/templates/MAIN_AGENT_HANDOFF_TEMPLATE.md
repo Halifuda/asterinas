@@ -67,13 +67,14 @@ List the assumptions that a future main agent must preserve, verify, or revisit.
 
 ## Resume Checklist
 
+- Use `$exfat-main-agent`.
 - Read `README.md`.
-- Read `PROTOCOL.md`.
 - Read `COMPONENT_INDEX.md`.
 - Read the latest main-agent handoff note.
 - Read the active work-slice matrix in that handoff before dispatching or reshaping any lanes.
 - Verify the environment summary above still matches reality.
 - Confirm this handoff already reflects the material implementation and protocol changes from this wave before committing or handing off.
+- Read `PROTOCOL.md` when protocol maintenance or an explicit scheduler-rule question is in scope.
 
 ## File Naming
 

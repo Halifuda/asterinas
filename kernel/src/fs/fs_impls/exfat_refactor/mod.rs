@@ -7,8 +7,10 @@
 //! The legacy `exfat` module remains the active implementation and test baseline
 //! until the refactored implementation is ready to take over deliberately.
 
+mod bitmap;
 mod boot_sector;
 mod dentry;
+mod directory;
 mod fat;
 mod fileset;
 mod fs;

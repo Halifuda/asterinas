@@ -2,16 +2,18 @@
 
 #![cfg_attr(
     not(ktest),
-    expect(dead_code, reason = "File-record helpers are staged before later refactor passes consume them.")
+    expect(
+        dead_code,
+        reason = "File-record helpers are staged before later refactor passes consume them."
+    )
 )]
 
 use core::ops::Range;
 
-use crate::prelude::*;
-
 use super::dentry::{
     DENTRY_SIZE, ExfatDentry, ExfatFileDentry, ExfatNameDentry, ExfatStreamDentry,
 };
+use crate::prelude::*;
 
 const EXFAT_FILE: u8 = 0x85;
 const EXFAT_STREAM: u8 = 0xC0;
@@ -227,9 +229,7 @@ impl ExfatDentrySet {
 fn is_benign_secondary(dentry: &ExfatDentry) -> bool {
     matches!(
         dentry,
-        ExfatDentry::GenericSecondary(_)
-            | ExfatDentry::VendorExt(_)
-            | ExfatDentry::VendorAlloc(_)
+        ExfatDentry::GenericSecondary(_) | ExfatDentry::VendorExt(_) | ExfatDentry::VendorAlloc(_)
     )
 }
 
@@ -242,7 +242,8 @@ fn logical_name_units(raw_name_units: &[u16]) -> &[u16] {
 }
 
 fn name_dentries_from_units(name_units: &[u16]) -> Vec<ExfatDentry> {
-    let mut name_dentries = Vec::with_capacity(name_units.len().div_ceil(EXFAT_FILE_NAME_LEN).max(1));
+    let mut name_dentries =
+        Vec::with_capacity(name_units.len().div_ceil(EXFAT_FILE_NAME_LEN).max(1));
 
     if name_units.is_empty() {
         name_dentries.push(ExfatDentry::Name(ExfatNameDentry {
@@ -389,8 +390,8 @@ mod tests {
     #[ktest]
     fn fileset_valid_construction_round_trip_serialization() {
         let raw_name_units = vec![
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
         ];
 
         let set = ExfatDentrySet::from_trusted_metadata(
@@ -415,16 +416,16 @@ mod tests {
     fn fileset_raw_name_aggregation() {
         let mut first_units = [0u16; EXFAT_FILE_NAME_LEN];
         first_units[..EXFAT_FILE_NAME_LEN].copy_from_slice(&[
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F,
         ]);
 
         let mut second_units = [0u16; EXFAT_FILE_NAME_LEN];
         second_units[..5].copy_from_slice(&[0x0050, 0x0051, 0x0052, 0x0053, 0x0054]);
 
         let raw_name_units = vec![
-            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
-            0x004B, 0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
+            0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A, 0x004B,
+            0x004C, 0x004D, 0x004E, 0x004F, 0x0050, 0x0051, 0x0052, 0x0053, 0x0054,
         ];
 
         let entries = vec![

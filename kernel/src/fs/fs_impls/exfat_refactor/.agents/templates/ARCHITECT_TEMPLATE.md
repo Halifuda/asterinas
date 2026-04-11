@@ -15,12 +15,18 @@
 
 - Functional goal:
 - Final architectural owner:
+- Owner class:
+  - VFS trait carrier,
+  - structure owner,
+  - daemon process,
+  - or record type.
 - Expected landing form:
 - Boundary kind:
   - stable architectural boundary,
   - owner-internal slice,
-  - independent service/process,
-  - independent validated value type,
+  - owner-local structure,
+  - daemon-process surface,
+  - record-type boundary,
   - or temporary construction seam.
 - Why this boundary is architecturally real:
 

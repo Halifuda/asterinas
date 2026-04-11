@@ -7,7 +7,7 @@
 use core::ops::Range;
 
 use super::boot_sector::{
-    persistent_volume_flags, ValidatedBootSector, EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS,
+    EXFAT_FIRST_CLUSTER, EXFAT_RESERVED_CLUSTERS, ValidatedBootSector, persistent_volume_flags,
 };
 use crate::prelude::*;
 
@@ -221,8 +221,6 @@ mod tests {
         assert!(super_block.is_data_cluster_range(EXFAT_RESERVED_CLUSTERS..range_end));
         assert!(super_block.is_data_cluster_range(range_end..range_end));
         assert!(!super_block.is_data_cluster_range(0..range_end));
-        assert!(!super_block.is_data_cluster_range(
-            EXFAT_RESERVED_CLUSTERS..range_end + 1
-        ));
+        assert!(!super_block.is_data_cluster_range(EXFAT_RESERVED_CLUSTERS..range_end + 1));
     }
 }

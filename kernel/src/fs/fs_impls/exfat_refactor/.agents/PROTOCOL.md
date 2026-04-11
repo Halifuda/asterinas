@@ -10,8 +10,12 @@ Use the surrounding documents as follows:
 
 - [`README.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/README.md):
   workspace map and project framing
+- `$exfat-main-agent`:
+  preferred Codex entry point for ordinary main-agent resume, scheduling, packet-shaping, and handoff work
+- `$exfat-subagent-workflow`:
+  preferred Codex entry point for ordinary delegated architect, designer, creator, checker, reviewer, and advisor work
 - `protocol/`:
-  role-scoped rules that ordinary subagents should actually receive
+  source-text role rules mirrored by `$exfat-subagent-workflow`
 - `templates/`:
   required artifact content and handoff formats
 - `subagent-tasks/`:
@@ -19,13 +23,19 @@ Use the surrounding documents as follows:
 
 Ordinary subagents should normally receive only the relevant `protocol/` files plus a task packet, not this full scheduler document.
 Because this file no longer repeats role-level detail, ordinary subagent packets should not forward `PROTOCOL.md` at all unless the delegated task is itself main-agent continuity or protocol-maintenance work.
+In Codex sessions, prefer invoking `$exfat-main-agent` for scheduler work and `$exfat-subagent-workflow` for ordinary delegated work instead of replaying these stable rules in packet prose.
 
 ## 0. Core Terms
 
 - Functional unit:
   the smallest functionally coherent implementation slice that has a stable final owner and a justified architectural boundary in the finished system.
 - Architectural owner:
-  the type, service object, process, daemon, runtime state holder, or validated value type that ultimately owns the unit's behavior, state, and invariants.
+  the stable finished-system owner that ultimately carries the unit's behavior, state, and invariants.
+  In this workspace, the canonical owner classes are:
+  - VFS trait carrier,
+  - structure owner (including owner-local runtime structures and on-disk-structure-derived internal structures),
+  - daemon process,
+  - record type.
 - Work slice:
   a packet-sized implementation step used for delegation or parallelism. A work slice may cover only part of one functional unit and does not by itself justify a long-lived API, file, struct, or module boundary.
 
@@ -39,6 +49,7 @@ Role-scoped protocol files must restate the minimum subset of these terms that t
 3. The main agent is the only scheduler. Only the main agent may change official component state, ownership, or [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md).
 4. No component may enter implementation before its architect handoff and required designer artifacts exist. For new components, that normally means `01_designer_core.md` plus `03_designer_ktest.md`; `02_designer_async.md` is required only when the component has meaningful concurrency, serialization, atomicity, lock-ordering, or async-facing obligations that later roles cannot safely infer from the core spec alone.
 5. Components in [`COMPONENT_INDEX.md`](/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/COMPONENT_INDEX.md) are tracked functional units, not packet-convenience cuts. The architect artifact must name the unit's final owner and explain why the boundary is architecturally real rather than only useful for delegation.
+   The named final owner should fit one of the canonical owner classes from section `0`, or the architect artifact must explicitly justify why a different class is unavoidable.
 6. Creator work slices must stay narrow. A creator pass should normally land about `150-300` lines of initial implementation and stay comfortably below `400`; exceeding `500` lines requires an explicit main-agent decision that records why a smaller work slice would be worse.
 7. A component may depend only on accepted components or stable pre-existing kernel interfaces.
 8. The legacy `kernel/src/fs/fs_impls/exfat/` remains the active registered filesystem and regression baseline until the main agent explicitly schedules takeover. `exfat_refactor` may compile in tree, but it must not silently become the registered `exfat` type during exploratory refactor work.
@@ -66,8 +77,11 @@ Role-scoped protocol files must restate the minimum subset of these terms that t
 16. When a delegated command-free lane stalls because the subagent misread scope, lacked packet clarity, or otherwise failed to start correctly, the main agent should repair and continue that delegated lane first by clarifying, re-packetizing, or re-dispatching it. The main thread should not absorb unfinished command-free delegated work just to preserve momentum unless the user explicitly asks for local takeover or delegation has become impossible and that exception is recorded in the active handoff.
 17. Main-agent scheduling should be organized in loops. One loop may contain one creator round, and that round may include multiple creator packets in parallel when they belong to the same planned wave, have stable prerequisites, and keep disjoint write sets. After that creator round has been launched, the same loop should spend the remaining parallel budget on architect, designer, reviewer, packet-preparation, or checker-preparation work rather than opening a second creator round.
 18. Task packets are mandatory for delegated ordinary-subagent work. Each packet must define read scope, write scope, forbidden files, prior inputs, lane classification, stop condition, and command environment if commands are allowed.
-19. Every delegated ordinary-subagent packet must also name the role-specific protocol file set that accompanies it. A packet is incomplete if the subagent receives only the packet without the matching role rules under `protocol/`.
-20. `PROTOCOL.md` is main-agent-facing by default. Do not forward it to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
+19. Every delegated ordinary-subagent packet must also name either:
+    - the role-specific protocol file set under `protocol/`, or
+    - the mirrored skill invocation `$exfat-subagent-workflow` plus the matching role reference inside that skill.
+    In Codex sessions, prefer the skill path. A packet is incomplete if it provides only the packet body without any matching role rules.
+20. `PROTOCOL.md` is main-agent-facing by default. Prefer `$exfat-main-agent` for ordinary main-agent resume or scheduling work, and do not forward `PROTOCOL.md` to ordinary subagents unless the delegated task is explicitly about main-agent continuity, protocol maintenance, or another scheduler-owned workflow task.
 21. The actual packet sent to a subagent must be archived under `.agents/subagent-tasks/<component-id>/`. Reissued packets must be kept as new historical files rather than overwriting old ones.
 22. Every delegated role artifact must cite the archived packet it followed. If the main agent performed the step locally, the artifact should say so explicitly.
 23. Task packets must state whether the step is `command-free`, an `explicit compile-only exception`, or `runtime/test-producing`, and must name known conflicts that block overlap with sibling lanes.

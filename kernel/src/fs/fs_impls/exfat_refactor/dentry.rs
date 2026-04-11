@@ -2,7 +2,10 @@
 
 #![cfg_attr(
     not(ktest),
-    expect(dead_code, reason = "Dentry parsing is staged before later refactor passes consume it.")
+    expect(
+        dead_code,
+        reason = "Dentry parsing is staged before later refactor passes consume it."
+    )
 )]
 
 use core::mem::size_of;
@@ -14,6 +17,7 @@ pub(super) const DENTRY_SIZE: usize = 32;
 const EXFAT_UNUSED: u8 = 0x00;
 const EXFAT_BITMAP: u8 = 0x81;
 const EXFAT_UPCASE: u8 = 0x82;
+const EXFAT_VOLUME_LABEL: u8 = 0x83;
 const EXFAT_FILE: u8 = 0x85;
 const EXFAT_STREAM: u8 = 0xC0;
 const EXFAT_NAME: u8 = 0xC1;
@@ -62,6 +66,13 @@ impl ExfatDentry {
             Self::Unused => &[0; DENTRY_SIZE],
         }
     }
+
+    pub(super) fn is_volume_label(&self) -> bool {
+        matches!(
+            self,
+            Self::GenericPrimary(dentry) if dentry.dentry_type == EXFAT_VOLUME_LABEL
+        )
+    }
 }
 
 impl From<RawExfatDentry> for ExfatDentry {
@@ -93,12 +104,12 @@ impl From<RawExfatDentry> for ExfatDentry {
         match dentry.dentry_type {
             EXFAT_UNUSED => Self::Unused,
             0x01..=0x7F => Self::Deleted(ExfatDeletedDentry::from_bytes(dentry_bytes)),
-            0x80..=0xBF => Self::GenericPrimary(ExfatGenericPrimaryDentry::from_bytes(
-                dentry_bytes,
-            )),
-            0xC2..=0xDF | 0xE2..=0xFF => Self::GenericSecondary(
-                ExfatGenericSecondaryDentry::from_bytes(dentry_bytes),
-            ),
+            0x80..=0xBF => {
+                Self::GenericPrimary(ExfatGenericPrimaryDentry::from_bytes(dentry_bytes))
+            }
+            0xC2..=0xDF | 0xE2..=0xFF => {
+                Self::GenericSecondary(ExfatGenericSecondaryDentry::from_bytes(dentry_bytes))
+            }
             _ => unreachable!("all possible entry types are covered"),
         }
     }
@@ -253,12 +264,18 @@ mod tests {
     // Confirms the decoder preserves the special concrete entry kinds needed by later parsing.
     #[ktest]
     fn typed_decode_recognizes_special_entry_kinds() {
-        assert!(matches!(ExfatDentry::from(raw_dentry(EXFAT_FILE)), ExfatDentry::File(_)));
+        assert!(matches!(
+            ExfatDentry::from(raw_dentry(EXFAT_FILE)),
+            ExfatDentry::File(_)
+        ));
         assert!(matches!(
             ExfatDentry::from(raw_dentry(EXFAT_STREAM)),
             ExfatDentry::Stream(_)
         ));
-        assert!(matches!(ExfatDentry::from(raw_dentry(EXFAT_NAME)), ExfatDentry::Name(_)));
+        assert!(matches!(
+            ExfatDentry::from(raw_dentry(EXFAT_NAME)),
+            ExfatDentry::Name(_)
+        ));
         assert!(matches!(
             ExfatDentry::from(raw_dentry(EXFAT_BITMAP)),
             ExfatDentry::Bitmap(_)

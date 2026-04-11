@@ -218,12 +218,12 @@ mod tests {
     use zerocopy::IntoBytes;
 
     use super::{
-        read_primary_boot_sector, read_primary_super_block, validate_primary_boot_sector,
-        verify_primary_boot_region_checksum, ExfatBootSector, EXFAT_RESERVED_CLUSTERS,
+        EXFAT_RESERVED_CLUSTERS, ExfatBootSector, read_primary_boot_sector,
+        read_primary_super_block, validate_primary_boot_sector,
+        verify_primary_boot_region_checksum,
     };
     use crate::fs::fs_impls::exfat_refactor::{
-        super_block::ExfatSuperBlock,
-        test_support::load_exfat_disk,
+        super_block::ExfatSuperBlock, test_support::load_exfat_disk,
     };
 
     fn assert_super_block_matches_boot_sector(
