@@ -9,7 +9,9 @@
 
 use core::mem::size_of;
 
-use aster_block::BlockDevice;
+use alloc::vec;
+use aster_block::{BLOCK_SIZE, BlockDevice};
+use ostd::mm::VmIo;
 
 use super::{io::read_metadata_bytes, super_block::ExfatSuperBlock};
 use crate::prelude::*;
@@ -304,6 +306,81 @@ pub(super) fn read_next_fat_value(
         }
         other => Ok(other),
     }
+}
+
+/// Writes one decoded FAT entry for a validated cluster to every mirrored FAT.
+pub(super) fn write_next_fat_value(
+    block_device: &dyn BlockDevice,
+    super_block: &ExfatSuperBlock,
+    cluster: ClusterId,
+    value: FatValue,
+) -> Result<()> {
+    validate_source_cluster(super_block, cluster)?;
+    if let FatValue::Next(next_cluster) = value {
+        validate_next_cluster(super_block, next_cluster)?;
+    }
+
+    let original_value = read_next_fat_value(block_device, super_block, cluster)?;
+    let raw_value = u32::from(value).to_le_bytes();
+    let primary_offset = fat_entry_byte_offset(super_block, cluster)?;
+
+    write_metadata_bytes(block_device, primary_offset, &raw_value)?;
+    if super_block.fat1_start_sector != super_block.fat2_start_sector {
+        let mirror_offset = super_block
+            .fat2_start_sector
+            .checked_mul(u64::from(super_block.sector_size))
+            .and_then(|start| {
+                start.checked_add(u64::from(cluster).checked_mul(FAT_ENTRY_SIZE)?)
+            })
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "fat entry offset overflow"))?;
+        if let Err(error) = write_metadata_bytes(
+            block_device,
+            usize::try_from(mirror_offset)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "fat entry offset overflow"))?,
+            &raw_value,
+        ) {
+            let original_raw = u32::from(original_value).to_le_bytes();
+            let _ = write_metadata_bytes(block_device, primary_offset, &original_raw);
+            return Err(error.into());
+        }
+    }
+
+    Ok(())
+}
+
+fn write_metadata_bytes(
+    block_device: &dyn BlockDevice,
+    offset: usize,
+    buf: &[u8],
+) -> Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+
+    let write_end = offset
+        .checked_add(buf.len())
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+    let aligned_start = offset / BLOCK_SIZE * BLOCK_SIZE;
+    let aligned_blocks = write_end
+        .div_ceil(BLOCK_SIZE)
+        .checked_sub(aligned_start / BLOCK_SIZE)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write underflow"))?;
+    let aligned_len = aligned_blocks
+        .checked_mul(BLOCK_SIZE)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+
+    let mut aligned_buf = vec![0; aligned_len];
+    read_metadata_bytes(block_device, aligned_start, &mut aligned_buf)?;
+
+    let start_offset = offset - aligned_start;
+    let end_offset = start_offset
+        .checked_add(buf.len())
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata slice overflow"))?;
+    aligned_buf[start_offset..end_offset].copy_from_slice(buf);
+
+    block_device.write_bytes(aligned_start, &aligned_buf)?;
+
+    Ok(())
 }
 
 fn fat_entry_byte_offset(super_block: &ExfatSuperBlock, cluster: ClusterId) -> Result<usize> {

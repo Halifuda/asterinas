@@ -10,6 +10,7 @@ use core::time::Duration;
 use aster_block::BlockDevice;
 
 use super::{
+    allocator::{AllocationResult, Allocator},
     bitmap::AllocationBitmap,
     boot_sector::BOOT_SIGNATURE,
     dentry::{ExfatBitmapDentry, ExfatDentry, ExfatUpcaseDentry},
@@ -178,6 +179,7 @@ pub(super) struct ExfatFs {
     mount_open_state: Mutex<()>,
     upcase_state: Mutex<UpcaseState>,
     allocation_bitmap: Mutex<Option<AllocationBitmap>>,
+    allocator: Mutex<Allocator>,
     opened_inode_state: Mutex<OpenedInodeState>,
 }
 
@@ -208,6 +210,7 @@ impl ExfatFs {
             mount_open_state: Mutex::new(()),
             upcase_state: Mutex::new(UpcaseState::default()),
             allocation_bitmap: Mutex::new(None),
+            allocator: Mutex::new(Allocator::new(super_block.cluster_search_ptr)),
             opened_inode_state: Mutex::new(OpenedInodeState::default()),
         })
     }
@@ -297,6 +300,11 @@ impl FileSystem for ExfatFs {
 }
 
 impl ExfatFs {
+    /// Returns the current traversal context used by inode-owned file reads.
+    pub(super) fn file_read_context(&self) -> (&dyn BlockDevice, &ExfatSuperBlock) {
+        (self.block_device.as_ref(), &self.super_block)
+    }
+
     /// Validates and publishes the mounted volume's upcase table once.
     pub(super) fn install_upcase_table(
         &self,
@@ -389,6 +397,17 @@ impl ExfatFs {
         };
 
         Ok(bitmap.free_cluster_count())
+    }
+
+    /// Returns the owner-local allocation bitmap guard.
+    pub(super) fn allocation_bitmap(&self) -> MutexGuard<'_, Option<AllocationBitmap>> {
+        self.allocation_bitmap.lock()
+    }
+
+    /// Allocates clusters through the filesystem-owned allocator service.
+    pub(super) fn allocate_clusters(&self, cluster_count: u32) -> Result<AllocationResult> {
+        let mut allocator = self.allocator.lock();
+        allocator.allocate(self, cluster_count)
     }
 
     /// Creates a fresh read-only directory stream from inode-owned chain snapshot facts.

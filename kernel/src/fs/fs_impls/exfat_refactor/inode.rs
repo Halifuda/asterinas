@@ -15,11 +15,16 @@ use alloc::{
 };
 use core::time::Duration;
 
+use aster_block::{BlockDevice, bio::BioWaiter};
+use spin::Once;
+
 use super::{
     directory::{DirectoryFileRecord, DirectoryRecord},
     fat::{ChainMode, ClusterId, ExfatChain},
     fileset::ExfatDentrySet,
-    fs::{EXFAT_NAME_MAX, ExfatFs},
+    fs::{ExfatFs, EXFAT_NAME_MAX},
+    io::read_metadata_bytes,
+    super_block::ExfatSuperBlock,
 };
 use crate::{
     fs::{
@@ -28,19 +33,24 @@ use crate::{
         vfs::{
             file_system::FileSystem,
             inode::{Extension, Inode, InodeIo, Metadata},
+            page_cache::{CachePage, PageCache, PageCacheBackend},
         },
     },
     prelude::*,
     process::{Gid, Uid},
+    vm::vmo::Vmo,
 };
+use ostd::mm::io::util::HasVmReaderWriter;
 
 const SECTOR_SIZE: usize = 512;
+const READ_BOUNCE_BUFFER_SIZE: usize = 4096;
 
 /// Carries the VFS-visible exFAT inode metadata snapshot.
 pub(super) struct ExfatInode {
     fs: Weak<ExfatFs>,
     metadata: Metadata,
     extension: Extension,
+    page_cache: Once<PageCache>,
     location: Option<ExfatInodeLocation>,
     file_attribute: u16,
     valid_size: usize,
@@ -55,6 +65,14 @@ pub(super) struct ExfatInodeLocation {
     parent_ino: Option<u64>,
     dentry_set_byte_offset: usize,
     dentry_entry_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PhysicalFileRange {
+    cluster: ClusterId,
+    physical_byte_offset: usize,
+    intra_cluster_offset: usize,
+    mappable_byte_count: usize,
 }
 
 impl ExfatInodeLocation {
@@ -102,10 +120,11 @@ impl ExfatInode {
         metadata.optimal_block_size = cluster_size;
         metadata.nr_sectors_allocated = allocated_size.div_ceil(SECTOR_SIZE);
 
-        Ok(Arc::new(Self {
+        let inode = Arc::new(Self {
             fs,
             metadata,
             extension: Extension::new(),
+            page_cache: Once::new(),
             location,
             file_attribute: file_dentry.attribute,
             valid_size,
@@ -113,13 +132,240 @@ impl ExfatInode {
             cluster_count: chain.cluster_count(),
             chain_mode: chain.mode(),
             allocated_size,
-        }))
+        });
+        inode.initialize_page_cache()?;
+        Ok(inode)
+    }
+
+    fn initialize_page_cache(self: &Arc<Self>) -> Result<()> {
+        if self.type_() != InodeType::File {
+            return Ok(());
+        }
+
+        let page_cache = Self::build_page_cache(Arc::downgrade(self), self.size())?;
+        self.page_cache.call_once(|| page_cache);
+        Ok(())
+    }
+
+    fn build_page_cache(backend: Weak<Self>, capacity: usize) -> Result<PageCache> {
+        let backend: Weak<dyn PageCacheBackend> = backend;
+        PageCache::with_capacity(capacity, backend)
     }
 
     fn owner_fs(&self) -> Arc<ExfatFs> {
         self.fs
             .upgrade()
             .expect("exFAT inode must not outlive its filesystem owner")
+    }
+
+    fn page_count(&self) -> usize {
+        if self.type_() != InodeType::File {
+            return 0;
+        }
+
+        self.size().div_ceil(PAGE_SIZE)
+    }
+
+    fn page_offset(&self, page_index: usize) -> Result<usize> {
+        if page_index >= self.page_count() {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "exFAT page-cache request starts beyond the inode snapshot",
+            ));
+        }
+
+        page_index.checked_mul(PAGE_SIZE).ok_or_else(|| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "exFAT page-cache offset overflowed usize",
+            )
+        })
+    }
+
+    fn fill_cache_page_from_read_owner(&self, page_index: usize, frame: &CachePage) -> Result<()> {
+        let page_offset = self.page_offset(page_index)?;
+        let mut writer = frame.writer().to_fallible();
+        self.read_at(page_offset, &mut writer, StatusFlags::empty())?;
+
+        let remaining = writer.avail();
+        if remaining > 0 {
+            writer.fill_zeros(remaining).map_err(|(error, _)| error)?;
+        }
+
+        Ok(())
+    }
+
+    fn mapping_chain(
+        &self,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+    ) -> Result<ExfatChain> {
+        ExfatChain::new(
+            block_device,
+            super_block,
+            self.start_cluster,
+            Some(self.cluster_count),
+            self.chain_mode,
+        )
+    }
+
+    fn mapping_cluster_size(&self, super_block: &ExfatSuperBlock) -> Result<usize> {
+        let cluster_size = super_block.cluster_size();
+        if cluster_size != self.metadata.optimal_block_size {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "exFAT inode cluster geometry mismatched its metadata snapshot",
+            ));
+        }
+
+        Ok(cluster_size)
+    }
+
+    fn physically_backed_end(&self) -> usize {
+        self.size().min(self.valid_size).min(self.allocated_size)
+    }
+
+    fn physically_mappable_byte_count(
+        &self,
+        request_offset: usize,
+        request_len: usize,
+        intra_cluster_offset: usize,
+        cluster_size: usize,
+    ) -> Result<usize> {
+        let backed_end = self.physically_backed_end();
+        let backed_remaining = backed_end.checked_sub(request_offset).ok_or_else(|| {
+            Error::with_message(
+                Errno::EINVAL,
+                "exFAT mapping request starts beyond the physically backed range",
+            )
+        })?;
+        let cluster_remaining =
+            cluster_size
+                .checked_sub(intra_cluster_offset)
+                .ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EINVAL,
+                        "exFAT mapping request exceeds the containing cluster",
+                    )
+                })?;
+
+        Ok(request_len.min(backed_remaining).min(cluster_remaining))
+    }
+
+    fn map_physical_file_range(
+        &self,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        request_offset: usize,
+        request_len: usize,
+    ) -> Result<Option<PhysicalFileRange>> {
+        if self.type_() != InodeType::File {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "exFAT file mapping requires a regular-file inode",
+            ));
+        }
+
+        if request_len == 0 || request_offset >= self.physically_backed_end() {
+            return Ok(None);
+        }
+
+        let cluster_size = self.mapping_cluster_size(super_block)?;
+        let mapping_chain = self.mapping_chain(block_device, super_block)?;
+        let (mapped_chain, intra_cluster_offset) =
+            mapping_chain.walk_to_cluster_at_offset(block_device, super_block, request_offset)?;
+        let cluster_start_offset = mapped_chain.physical_cluster_start_offset(super_block)?;
+        let physical_byte_offset = cluster_start_offset
+            .checked_add(intra_cluster_offset)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EOVERFLOW,
+                    "exFAT mapped byte offset overflowed usize",
+                )
+            })?;
+        let mappable_byte_count = self.physically_mappable_byte_count(
+            request_offset,
+            request_len,
+            intra_cluster_offset,
+            cluster_size,
+        )?;
+
+        Ok(Some(PhysicalFileRange {
+            cluster: mapped_chain.current_cluster(),
+            physical_byte_offset,
+            intra_cluster_offset,
+            mappable_byte_count,
+        }))
+    }
+
+    fn read_visible_byte_count(&self, offset: usize, writer: &VmWriter) -> Result<usize> {
+        let request_end = offset.checked_add(writer.avail()).ok_or_else(|| {
+            Error::with_message(Errno::EOVERFLOW, "exFAT read request overflowed usize")
+        })?;
+
+        Ok(self.size().min(request_end).saturating_sub(offset))
+    }
+
+    fn copy_physical_file_range(
+        &self,
+        block_device: &dyn BlockDevice,
+        file_range: PhysicalFileRange,
+        request_len: usize,
+        writer: &mut VmWriter,
+    ) -> Result<usize> {
+        let copy_len = request_len
+            .min(file_range.mappable_byte_count)
+            .min(writer.avail());
+        if copy_len == 0 {
+            return Ok(0);
+        }
+
+        let mut scratch = vec![0; READ_BOUNCE_BUFFER_SIZE.min(copy_len)];
+        let mut copied = 0usize;
+
+        while copied < copy_len {
+            let remaining = copy_len - copied;
+            let chunk_len = scratch.len().min(remaining);
+            let chunk_offset = file_range
+                .physical_byte_offset
+                .checked_add(copied)
+                .ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EOVERFLOW,
+                        "exFAT physical read offset overflowed usize",
+                    )
+                })?;
+
+            read_metadata_bytes(block_device, chunk_offset, &mut scratch[..chunk_len])?;
+            writer
+                .write_fallible(&mut VmReader::from(&scratch[..chunk_len]))
+                .map_err(|(error, _)| error)?;
+            copied = copied.checked_add(chunk_len).ok_or_else(|| {
+                Error::with_message(Errno::EOVERFLOW, "exFAT read copy length overflowed usize")
+            })?;
+        }
+
+        Ok(copied)
+    }
+
+    fn zero_fill_valid_size_gap(
+        &self,
+        offset: usize,
+        request_len: usize,
+        writer: &mut VmWriter,
+    ) -> Result<usize> {
+        if request_len == 0 || offset < self.valid_size || offset >= self.size() {
+            return Ok(0);
+        }
+
+        let zero_len = self
+            .size()
+            .checked_sub(offset)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "exFAT zero-fill offset underflow"))?
+            .min(request_len)
+            .min(writer.avail());
+
+        Ok(writer.fill_zeros(zero_len).map_err(|(error, _)| error)?)
     }
 
     fn ensure_directory(&self) -> Result<()> {
@@ -155,15 +401,80 @@ impl ExfatInode {
 impl InodeIo for ExfatInode {
     fn read_at(
         &self,
-        _offset: usize,
-        _writer: &mut VmWriter,
+        offset: usize,
+        writer: &mut VmWriter,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
-        // Temporary seam: EXR-READ-OPS-25, EXR-WRITE-30, and EXR-PGCACHE-26 will own this path.
-        Err(Error::with_message(
-            Errno::EOPNOTSUPP,
-            "exFAT inode read path is not implemented yet",
-        ))
+        if self.type_() != InodeType::File {
+            return Err(Error::with_message(
+                Errno::EISDIR,
+                "exFAT buffered reads require a regular-file inode",
+            ));
+        }
+
+        if !writer.has_avail() || offset >= self.size() {
+            return Ok(0);
+        }
+
+        let fs = self.owner_fs();
+        let (block_device, super_block) = fs.file_read_context();
+        let mut logical_offset = offset;
+        let mut visible_byte_count = 0usize;
+        let visible_request_len = self.read_visible_byte_count(offset, writer)?;
+
+        while writer.has_avail() {
+            let remaining_visible = visible_request_len
+                .checked_sub(visible_byte_count)
+                .ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EINVAL,
+                        "exFAT read loop advanced past the visible request",
+                    )
+                })?;
+            if remaining_visible == 0 {
+                break;
+            }
+
+            let Some(file_range) = self.map_physical_file_range(
+                block_device,
+                super_block,
+                logical_offset,
+                remaining_visible,
+            )?
+            else {
+                break;
+            };
+            let copied =
+                self.copy_physical_file_range(block_device, file_range, remaining_visible, writer)?;
+            if copied == 0 {
+                break;
+            }
+
+            logical_offset = logical_offset.checked_add(copied).ok_or_else(|| {
+                Error::with_message(
+                    Errno::EOVERFLOW,
+                    "exFAT logical read offset overflowed usize",
+                )
+            })?;
+            visible_byte_count = visible_byte_count.checked_add(copied).ok_or_else(|| {
+                Error::with_message(Errno::EOVERFLOW, "exFAT read length overflowed usize")
+            })?;
+        }
+
+        let remaining_visible = visible_request_len
+            .checked_sub(visible_byte_count)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EINVAL,
+                    "exFAT zero-fill exceeded the visible read request",
+                )
+            })?;
+        let zero_filled =
+            self.zero_fill_valid_size_gap(logical_offset, remaining_visible, writer)?;
+
+        visible_byte_count
+            .checked_add(zero_filled)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "exFAT read length overflowed"))
     }
 
     fn write_at(
@@ -177,6 +488,24 @@ impl InodeIo for ExfatInode {
             Errno::EOPNOTSUPP,
             "exFAT inode write path is not implemented yet",
         ))
+    }
+}
+
+impl PageCacheBackend for ExfatInode {
+    fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+        self.fill_cache_page_from_read_owner(idx, frame)?;
+        Ok(BioWaiter::new())
+    }
+
+    fn write_page_async(&self, _idx: usize, _frame: &CachePage) -> Result<BioWaiter> {
+        Err(Error::with_message(
+            Errno::EOPNOTSUPP,
+            "exFAT page-cache writeback is deferred to EXR-WRITE-30 and EXR-SYNC-31",
+        ))
+    }
+
+    fn npages(&self) -> usize {
+        self.page_count()
     }
 }
 
@@ -264,6 +593,10 @@ impl Inode for ExfatInode {
     fn fs(&self) -> Arc<dyn FileSystem> {
         let fs: Arc<dyn FileSystem> = self.owner_fs();
         fs
+    }
+
+    fn page_cache(&self) -> Option<Arc<Vmo>> {
+        self.page_cache.get().map(|page_cache| page_cache.pages().clone())
     }
 
     fn extension(&self) -> &Extension {
@@ -389,15 +722,17 @@ mod tests {
         fs_impls::exfat_refactor::{
             boot_sector::read_primary_super_block,
             dentry::{
-                DENTRY_SIZE, ExfatDentry, ExfatFileDentry, ExfatStreamDentry, ExfatUpcaseDentry,
-                RawExfatDentry,
+                ExfatDentry, ExfatFileDentry, ExfatStreamDentry, ExfatUpcaseDentry, RawExfatDentry,
+                DENTRY_SIZE,
             },
             fileset::ExfatDentrySet,
             io::read_metadata_bytes,
-            test_support::{ExfatMemoryDisk, load_exfat_disk},
+            test_support::{load_exfat_disk, ExfatMemoryDisk},
         },
         utils::DirentVisitor,
     };
+    use crate::vm::vmo::CommitFlags;
+    use ostd::mm::VmIo;
 
     const UPCASE_TABLE_UNIT_COUNT: usize = 0x1_0000;
     const UPCASE_TABLE_IDENTITY_RUN_MARKER: u16 = 0xFFFF;
@@ -778,9 +1113,117 @@ mod tests {
         .expect("trusted inode dentry set should validate")
     }
 
-    // Confirms copied metadata, weak FS owner recovery, and staged seam rejections.
+    fn prepared_mapping_context() -> (Arc<dyn BlockDevice>, ExfatSuperBlock, Arc<ExfatFs>) {
+        let block_device: Arc<dyn BlockDevice> = Arc::new(load_exfat_disk());
+        let super_block = read_primary_super_block(block_device.as_ref()).unwrap();
+        let fs = Arc::new(ExfatFs::new(block_device.clone(), super_block).unwrap());
+
+        (block_device, super_block, fs)
+    }
+
+    fn mapping_test_inode(
+        fs: &Arc<ExfatFs>,
+        block_device: &Arc<dyn BlockDevice>,
+        super_block: &ExfatSuperBlock,
+        start_cluster: ClusterId,
+        cluster_count: u32,
+        file_size: u64,
+        valid_size: u64,
+    ) -> Arc<ExfatInode> {
+        let cluster_size = super_block.cluster_size();
+        let chain = ExfatChain::new(
+            block_device.as_ref(),
+            super_block,
+            start_cluster,
+            Some(cluster_count),
+            ChainMode::Contiguous,
+        )
+        .unwrap();
+        let metadata = Metadata {
+            ino: 64,
+            size: 0,
+            optimal_block_size: SECTOR_SIZE,
+            nr_sectors_allocated: 0,
+            last_access_at: Duration::ZERO,
+            last_modify_at: Duration::ZERO,
+            last_meta_change_at: Duration::ZERO,
+            type_: InodeType::File,
+            mode: InodeMode::S_IRUSR,
+            nr_hard_links: 1,
+            uid: Uid::new(0),
+            gid: Gid::new(0),
+            container_dev_id: block_device.id(),
+            self_dev_id: None,
+        };
+        let dentry_set = trusted_dentry_set(file_size, valid_size, 0x20, start_cluster);
+
+        ExfatInode::new(
+            Arc::downgrade(fs),
+            metadata,
+            &dentry_set,
+            &chain,
+            cluster_size,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn prepared_buffered_read_context() -> (Arc<ExfatMemoryDisk>, ExfatSuperBlock, Arc<ExfatFs>) {
+        let disk = Arc::new(load_exfat_disk());
+        let super_block = read_primary_super_block(disk.as_ref()).unwrap();
+        let block_device: Arc<dyn BlockDevice> = disk.clone();
+        let fs = Arc::new(ExfatFs::new(block_device, super_block).unwrap());
+
+        (disk, super_block, fs)
+    }
+
+    fn buffered_read_test_inode(
+        fs: &Arc<ExfatFs>,
+        disk: &Arc<ExfatMemoryDisk>,
+        super_block: &ExfatSuperBlock,
+        start_cluster: ClusterId,
+        cluster_count: u32,
+        file_size: u64,
+        valid_size: u64,
+    ) -> Arc<ExfatInode> {
+        let block_device: Arc<dyn BlockDevice> = disk.clone();
+        mapping_test_inode(
+            fs,
+            &block_device,
+            super_block,
+            start_cluster,
+            cluster_count,
+            file_size,
+            valid_size,
+        )
+    }
+
+    fn patterned_file_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn write_contiguous_file_bytes(
+        disk: &ExfatMemoryDisk,
+        super_block: &ExfatSuperBlock,
+        start_cluster: ClusterId,
+        file_bytes: &[u8],
+    ) {
+        let file_byte_offset = super_block.cluster_to_byte_offset(start_cluster).unwrap();
+        disk.write_bytes(file_byte_offset, file_bytes);
+    }
+
+    fn committed_page_bytes(page_cache: &Arc<Vmo>, page_index: usize) -> Vec<u8> {
+        let frame = page_cache
+            .commit_on(page_index, CommitFlags::empty())
+            .unwrap();
+        let mut bytes = vec![0xA5; PAGE_SIZE];
+        frame.read_bytes(0, &mut bytes).unwrap();
+        bytes
+    }
+
+    // Confirms copied metadata, weak FS owner recovery, and buffered read ownership.
     #[ktest]
-    fn inode_carrier_snapshots_metadata_and_rejects_temporary_seams() {
+    fn inode_carrier_snapshots_metadata_and_exercises_buffered_read() {
         let disk = Arc::new(load_exfat_disk());
         let super_block = read_primary_super_block(disk.as_ref()).unwrap();
         let chain = ExfatChain::new(
@@ -792,6 +1235,7 @@ mod tests {
         )
         .unwrap();
         let container_dev_id = disk.id();
+        let block_device = disk.clone();
         let fs = Arc::new(ExfatFs::new(disk, super_block).unwrap());
 
         let file_size = 1234u64;
@@ -885,7 +1329,20 @@ mod tests {
 
         let mut read_buffer = [0u8; 4];
         let mut read_writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
-        assert_eopnotsupp(inode.read_at(0, &mut read_writer, StatusFlags::empty()));
+        let mut expected_read = [0u8; 4];
+        read_metadata_bytes(
+            block_device.as_ref(),
+            super_block
+                .cluster_to_byte_offset(chain.current_cluster())
+                .unwrap(),
+            &mut expected_read,
+        )
+        .unwrap();
+        let read_len = inode
+            .read_at(0, &mut read_writer, StatusFlags::empty())
+            .unwrap();
+        assert_eq!(read_len, expected_read.len());
+        assert_eq!(read_buffer, expected_read);
 
         let write_buffer = [1u8; 4];
         let mut write_reader = VmReader::from(write_buffer.as_slice()).to_fallible();
@@ -900,6 +1357,462 @@ mod tests {
         assert_eq!(metadata_after_rejections.mode, mode);
         assert_eq!(metadata_after_rejections.uid, uid);
         assert_eq!(metadata_after_rejections.gid, gid);
+    }
+
+    // Confirms regular-file snapshots own their page-cache attachment and size facts.
+    #[ktest]
+    fn inode_page_cache_attachment_stays_inode_local_for_regular_file_snapshot() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_size = PAGE_SIZE + 64;
+        let file_bytes = patterned_file_bytes(file_size);
+        let inode_a = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            file_size as u64,
+        );
+        let inode_b = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            file_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let page_cache_a = inode_a.page_cache().expect("regular files own a page cache");
+        let page_cache_b = inode_b.page_cache().expect("regular files own a page cache");
+        let expected_cache_size = file_size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+
+        assert_eq!(page_cache_a.size(), expected_cache_size);
+        assert_eq!(page_cache_a.size(), page_cache_b.size());
+        assert_eq!(
+            inode_a.page_cache.get().unwrap().backend().npages(),
+            inode_a.size().div_ceil(PAGE_SIZE)
+        );
+        assert!(!Arc::ptr_eq(&page_cache_a, &page_cache_b));
+    }
+
+    // Confirms cache misses are filled through the inode owner for backed bytes.
+    #[ktest]
+    fn inode_page_cache_backend_fills_backed_bytes_through_inode_owner() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_size = PAGE_SIZE + 64;
+        let file_bytes = patterned_file_bytes(file_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            file_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let page_cache = inode.page_cache().expect("regular files own a page cache");
+        let page_bytes = committed_page_bytes(&page_cache, 0);
+
+        assert_eq!(&page_bytes[..PAGE_SIZE], &file_bytes[..PAGE_SIZE]);
+        assert_eq!(inode.page_cache.get().unwrap().backend().npages(), 2);
+    }
+
+    // Confirms cache-visible data keeps the valid-size gap and EOF zero-fill rules.
+    #[ktest]
+    fn inode_page_cache_preserves_valid_size_gap_and_eof_zero_fill() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_size = PAGE_SIZE + 64;
+        let valid_size = PAGE_SIZE + 16;
+        let file_bytes = patterned_file_bytes(valid_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            valid_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let page_cache = inode.page_cache().expect("regular files own a page cache");
+        let page_bytes = committed_page_bytes(&page_cache, 1);
+
+        assert_eq!(&page_bytes[..16], &file_bytes[PAGE_SIZE..valid_size]);
+        assert_eq!(&page_bytes[16..64], &[0; 48]);
+        assert_eq!(&page_bytes[64..], &[0; PAGE_SIZE - 64]);
+    }
+
+    // Confirms repeated cache-backed commits stay stable on one inode snapshot.
+    #[ktest]
+    fn inode_page_cache_repeated_commit_reads_are_stable_on_one_snapshot() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_size = PAGE_SIZE + 64;
+        let valid_size = PAGE_SIZE + 16;
+        let file_bytes = patterned_file_bytes(valid_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            valid_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let page_cache = inode.page_cache().expect("regular files own a page cache");
+        let first_page_bytes = committed_page_bytes(&page_cache, 1);
+        let second_page_bytes = committed_page_bytes(&page_cache, 1);
+
+        assert_eq!(first_page_bytes, second_page_bytes);
+        assert_eq!(&first_page_bytes[..16], &file_bytes[PAGE_SIZE..valid_size]);
+        assert_eq!(&first_page_bytes[16..64], &[0; 48]);
+    }
+
+    // Confirms logical offsets resolve to the expected cluster position and byte offset.
+    #[ktest]
+    fn file_mapping_translates_logical_offsets_to_expected_physical_ranges() {
+        let (block_device, super_block, fs) = prepared_mapping_context();
+        let cluster_size = super_block.cluster_size();
+        let cluster_size_u64 = u64::try_from(cluster_size).unwrap();
+        let start_cluster = super_block.root_dir;
+        let inode = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            start_cluster,
+            3,
+            cluster_size_u64 * 3,
+            cluster_size_u64 * 3,
+        );
+        let snapshot_before = (
+            inode.metadata().size,
+            inode.valid_size,
+            inode.start_cluster,
+            inode.cluster_count,
+            inode.allocated_size,
+        );
+
+        let boundary_range = inode
+            .map_physical_file_range(
+                block_device.as_ref(),
+                &super_block,
+                cluster_size,
+                cluster_size,
+            )
+            .unwrap()
+            .unwrap();
+        let mid_cluster_range = inode
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size + 17, 99)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            boundary_range,
+            PhysicalFileRange {
+                cluster: start_cluster + 1,
+                physical_byte_offset: super_block
+                    .cluster_to_byte_offset(start_cluster + 1)
+                    .unwrap(),
+                intra_cluster_offset: 0,
+                mappable_byte_count: cluster_size,
+            }
+        );
+        assert_eq!(
+            mid_cluster_range,
+            PhysicalFileRange {
+                cluster: start_cluster + 1,
+                physical_byte_offset: super_block
+                    .cluster_to_byte_offset(start_cluster + 1)
+                    .unwrap()
+                    + 17,
+                intra_cluster_offset: 17,
+                mappable_byte_count: 99,
+            }
+        );
+        assert_eq!(
+            (
+                inode.metadata().size,
+                inode.valid_size,
+                inode.start_cluster,
+                inode.cluster_count,
+                inode.allocated_size,
+            ),
+            snapshot_before
+        );
+    }
+
+    // Confirms the mapped span stops at size, valid-size, and cluster boundaries.
+    #[ktest]
+    fn file_mapping_mappable_span_respects_size_facts_and_cluster_geometry() {
+        let (block_device, super_block, fs) = prepared_mapping_context();
+        let cluster_size = super_block.cluster_size();
+        let cluster_size_u64 = u64::try_from(cluster_size).unwrap();
+        let start_cluster = super_block.root_dir;
+
+        let size_limited = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            start_cluster,
+            3,
+            cluster_size_u64 + 40,
+            cluster_size_u64 * 3,
+        );
+        let valid_size_limited = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            start_cluster,
+            3,
+            cluster_size_u64 * 3,
+            cluster_size_u64 + 24,
+        );
+        let cluster_limited = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            start_cluster,
+            3,
+            cluster_size_u64 * 3,
+            cluster_size_u64 * 3,
+        );
+
+        let size_bound_range = size_limited
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size, 128)
+            .unwrap()
+            .unwrap();
+        let valid_size_bound_range = valid_size_limited
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size, 128)
+            .unwrap()
+            .unwrap();
+        let cluster_bound_range = cluster_limited
+            .map_physical_file_range(
+                block_device.as_ref(),
+                &super_block,
+                cluster_size * 2 - 13,
+                256,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(size_bound_range.cluster, start_cluster + 1);
+        assert_eq!(size_bound_range.intra_cluster_offset, 0);
+        assert_eq!(size_bound_range.mappable_byte_count, 40);
+        assert_eq!(valid_size_bound_range.cluster, start_cluster + 1);
+        assert_eq!(valid_size_bound_range.intra_cluster_offset, 0);
+        assert_eq!(valid_size_bound_range.mappable_byte_count, 24);
+        assert_eq!(cluster_bound_range.cluster, start_cluster + 1);
+        assert_eq!(cluster_bound_range.intra_cluster_offset, cluster_size - 13);
+        assert_eq!(cluster_bound_range.mappable_byte_count, 13);
+    }
+
+    // Confirms repeated translation calls return the same result for one inode snapshot.
+    #[ktest]
+    fn file_mapping_repeated_calls_are_stable_on_one_snapshot() {
+        let (block_device, super_block, fs) = prepared_mapping_context();
+        let cluster_size = super_block.cluster_size();
+        let cluster_size_u64 = u64::try_from(cluster_size).unwrap();
+        let inode = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            super_block.root_dir,
+            3,
+            cluster_size_u64 * 3,
+            cluster_size_u64 * 3,
+        );
+
+        let first_range = inode
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size + 33, 64)
+            .unwrap();
+        let second_range = inode
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size + 33, 64)
+            .unwrap();
+
+        assert_eq!(first_range, second_range);
+    }
+
+    // Confirms empty and fully unbacked requests stay explicit instead of inventing read policy.
+    #[ktest]
+    fn file_mapping_empty_or_unbacked_requests_stay_explicit() {
+        let (block_device, super_block, fs) = prepared_mapping_context();
+        let cluster_size = super_block.cluster_size();
+        let cluster_size_u64 = u64::try_from(cluster_size).unwrap();
+        let inode = mapping_test_inode(
+            &fs,
+            &block_device,
+            &super_block,
+            super_block.root_dir,
+            2,
+            cluster_size_u64 * 3,
+            cluster_size_u64 * 3,
+        );
+
+        let zero_len_range = inode
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size, 0)
+            .unwrap();
+        let beyond_allocated_range = inode
+            .map_physical_file_range(block_device.as_ref(), &super_block, cluster_size * 2, 1)
+            .unwrap();
+
+        assert_eq!(zero_len_range, None);
+        assert_eq!(beyond_allocated_range, None);
+    }
+
+    // Confirms buffered reads copy backed bytes and stop at logical EOF.
+    #[ktest]
+    fn file_buffered_read_copies_backed_bytes_and_truncates_at_eof() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_bytes = patterned_file_bytes(96);
+        let inode =
+            buffered_read_test_inode(&fs, &disk, &super_block, super_block.root_dir, 1, 96, 96);
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let mut read_buffer = [0xCC; 32];
+        let mut read_writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
+        let read_len = inode
+            .read_at(80, &mut read_writer, StatusFlags::empty())
+            .unwrap();
+
+        assert_eq!(read_len, 16);
+        assert_eq!(&read_buffer[..16], &file_bytes[80..96]);
+        assert_eq!(&read_buffer[16..], &[0xCC; 16]);
+    }
+
+    // Confirms reads crossing valid_size return data first, then zeros only up to EOF.
+    #[ktest]
+    fn file_buffered_read_zero_fills_from_valid_size_to_logical_eof() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_bytes = patterned_file_bytes(40);
+        let inode =
+            buffered_read_test_inode(&fs, &disk, &super_block, super_block.root_dir, 1, 64, 40);
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let mut read_buffer = [0xA5; 40];
+        let mut read_writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
+        let read_len = inode
+            .read_at(32, &mut read_writer, StatusFlags::empty())
+            .unwrap();
+
+        assert_eq!(read_len, 32);
+        assert_eq!(&read_buffer[..8], &file_bytes[32..40]);
+        assert_eq!(&read_buffer[8..32], &[0; 24]);
+        assert_eq!(&read_buffer[32..], &[0xA5; 8]);
+    }
+
+    // Confirms reads starting at or past EOF return zero and leave caller bytes unchanged.
+    #[ktest]
+    fn file_buffered_read_at_or_beyond_eof_returns_zero_without_mutation() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_bytes = patterned_file_bytes(48);
+        let inode =
+            buffered_read_test_inode(&fs, &disk, &super_block, super_block.root_dir, 1, 48, 48);
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let mut eof_buffer = [0x5A; 12];
+        let mut eof_writer = VmWriter::from(eof_buffer.as_mut_slice()).to_fallible();
+        let eof_read_len = inode
+            .read_at(48, &mut eof_writer, StatusFlags::empty())
+            .unwrap();
+
+        let mut past_eof_buffer = [0x5A; 12];
+        let mut past_eof_writer = VmWriter::from(past_eof_buffer.as_mut_slice()).to_fallible();
+        let past_eof_read_len = inode
+            .read_at(53, &mut past_eof_writer, StatusFlags::empty())
+            .unwrap();
+
+        assert_eq!(eof_read_len, 0);
+        assert_eq!(past_eof_read_len, 0);
+        assert_eq!(eof_buffer, [0x5A; 12]);
+        assert_eq!(past_eof_buffer, [0x5A; 12]);
+    }
+
+    // Confirms repeated reads on one inode snapshot stay deterministic across data and zero-fill.
+    #[ktest]
+    fn file_buffered_read_repeated_calls_are_stable_on_one_snapshot() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let cluster_size = super_block.cluster_size();
+        let valid_size = cluster_size + 32;
+        let file_size = cluster_size + 96;
+        let file_bytes = patterned_file_bytes(valid_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            valid_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let mut first_buffer = [0x7E; 96];
+        let mut first_writer = VmWriter::from(first_buffer.as_mut_slice()).to_fallible();
+        let first_read_len = inode
+            .read_at(cluster_size - 24, &mut first_writer, StatusFlags::empty())
+            .unwrap();
+
+        let mut second_buffer = [0x7E; 96];
+        let mut second_writer = VmWriter::from(second_buffer.as_mut_slice()).to_fallible();
+        let second_read_len = inode
+            .read_at(cluster_size - 24, &mut second_writer, StatusFlags::empty())
+            .unwrap();
+
+        let mut expected_buffer = [0x7E; 96];
+        expected_buffer[..56].copy_from_slice(&file_bytes[cluster_size - 24..valid_size]);
+        expected_buffer[56..].fill(0);
+
+        assert_eq!(first_read_len, 96);
+        assert_eq!(second_read_len, first_read_len);
+        assert_eq!(first_buffer, expected_buffer);
+        assert_eq!(second_buffer, expected_buffer);
     }
 
     // Confirms lookup folds names through the installed table, derives the key from

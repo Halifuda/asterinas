@@ -11,7 +11,8 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::convert::TryFrom;
 
-use aster_block::BlockDevice;
+use aster_block::{BLOCK_SIZE, BlockDevice};
+use ostd::mm::VmIo;
 
 use super::{
     boot_sector::EXFAT_RESERVED_CLUSTERS, dentry::ExfatBitmapDentry, fat::ExfatChain,
@@ -21,9 +22,10 @@ use crate::prelude::*;
 
 const BITS_PER_BYTE: usize = 8;
 
-/// Carries one validated, immutable allocation-bitmap snapshot for `ExfatFs`.
-#[derive(Debug)]
+/// Carries one validated allocation-bitmap snapshot for `ExfatFs`.
+#[derive(Clone, Debug)]
 pub(super) struct AllocationBitmap {
+    bitmap_chain: ExfatChain,
     bitmap_bytes: Box<[u8]>,
     valid_cluster_count: u32,
     used_cluster_count: u32,
@@ -97,6 +99,7 @@ impl AllocationBitmap {
             })?;
 
         Ok(Self {
+            bitmap_chain,
             bitmap_bytes: bitmap_bytes.into_boxed_slice(),
             valid_cluster_count,
             used_cluster_count,
@@ -134,6 +137,213 @@ impl AllocationBitmap {
         self.free_cluster_count
     }
 
+    /// Finds the first contiguous free run at or after the search cursor.
+    pub(super) fn find_contiguous_free_run(
+        &self,
+        search_start_cluster: u32,
+        cluster_count: u32,
+    ) -> Result<Option<u32>> {
+        if cluster_count == 0 {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "allocation request must be positive",
+            ));
+        }
+
+        if cluster_count > self.free_cluster_count {
+            return Ok(None);
+        }
+
+        let data_cluster_end_exclusive = self.data_cluster_end_exclusive()?;
+        let search_start_cluster =
+            normalize_search_start(search_start_cluster, data_cluster_end_exclusive);
+
+        if let Some(run_start) = self.find_contiguous_free_run_in_range(
+            search_start_cluster..data_cluster_end_exclusive,
+            cluster_count,
+        ) {
+            return Ok(Some(run_start));
+        }
+
+        Ok(self.find_contiguous_free_run_in_range(
+            EXFAT_RESERVED_CLUSTERS..search_start_cluster,
+            cluster_count,
+        ))
+    }
+
+    /// Collects the first free clusters in search order for a fragmented allocation.
+    pub(super) fn collect_free_clusters(
+        &self,
+        search_start_cluster: u32,
+        cluster_count: u32,
+    ) -> Result<Vec<u32>> {
+        if cluster_count == 0 {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "allocation request must be positive",
+            ));
+        }
+
+        if cluster_count > self.free_cluster_count {
+            return Err(Error::with_message(Errno::ENOSPC, "not enough free clusters"));
+        }
+
+        let data_cluster_end_exclusive = self.data_cluster_end_exclusive()?;
+        let search_start_cluster =
+            normalize_search_start(search_start_cluster, data_cluster_end_exclusive);
+        let target_count = usize::try_from(cluster_count).map_err(|_| {
+            Error::with_message(
+                Errno::EINVAL,
+                "allocation request does not fit the host",
+            )
+        })?;
+
+        let mut clusters = Vec::with_capacity(target_count);
+        self.collect_free_clusters_in_range(
+            search_start_cluster..data_cluster_end_exclusive,
+            target_count,
+            &mut clusters,
+        );
+        if clusters.len() < target_count {
+            self.collect_free_clusters_in_range(
+                EXFAT_RESERVED_CLUSTERS..search_start_cluster,
+                target_count,
+                &mut clusters,
+            );
+        }
+
+        if clusters.len() != target_count {
+            return Err(Error::with_message(
+                Errno::ENOSPC,
+                "not enough free clusters",
+            ));
+        }
+
+        Ok(clusters)
+    }
+
+    /// Returns a committed snapshot with the given clusters marked allocated.
+    pub(super) fn reserve_clusters(&self, clusters: &[u32]) -> Result<Self> {
+        let mut committed = self.clone();
+        committed.apply_cluster_reservation(clusters)?;
+        Ok(committed)
+    }
+
+    /// Writes the published bitmap snapshot back to its on-disk file chain.
+    pub(super) fn write_to_disk(
+        &self,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+    ) -> Result<()> {
+        let mut loaded_chain = self.bitmap_chain;
+        let mut copied_bytes = 0usize;
+        let cluster_size = super_block.cluster_size();
+
+        for cluster_index in 0..self.bitmap_chain.cluster_count() {
+            if copied_bytes >= self.bitmap_bytes.len() {
+                break;
+            }
+            let cluster_offset = loaded_chain.physical_cluster_start_offset(super_block)?;
+            let remaining_bytes = self.bitmap_bytes.len() - copied_bytes;
+            let copy_len = remaining_bytes.min(cluster_size);
+            write_metadata_bytes(
+                block_device,
+                cluster_offset,
+                &self.bitmap_bytes[copied_bytes..copied_bytes + copy_len],
+            )?;
+            copied_bytes += copy_len;
+
+            if cluster_index + 1 < self.bitmap_chain.cluster_count() {
+                loaded_chain = loaded_chain.walk(block_device, super_block, 1)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_cluster_reservation(&mut self, clusters: &[u32]) -> Result<()> {
+        let reservation_count = u32::try_from(clusters.len()).map_err(|_| {
+            Error::with_message(
+                Errno::EINVAL,
+                "allocation reservation does not fit the host",
+            )
+        })?;
+
+        for &cluster in clusters {
+            if self.cluster_is_allocated(cluster)? {
+                return Err(Error::with_message(
+                    Errno::EINVAL,
+                    "allocation reservation overlaps an allocated cluster",
+                ));
+            }
+            set_cluster_bit(&mut self.bitmap_bytes, cluster, true);
+        }
+
+        self.used_cluster_count = self
+            .used_cluster_count
+            .checked_add(reservation_count)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EINVAL,
+                    "allocation bitmap accounting mismatched",
+                )
+            })?;
+        self.free_cluster_count = self
+            .free_cluster_count
+            .checked_sub(reservation_count)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EINVAL,
+                    "allocation bitmap accounting mismatched",
+                )
+            })?;
+
+        Ok(())
+    }
+
+    fn find_contiguous_free_run_in_range(
+        &self,
+        search_range: core::ops::Range<u32>,
+        cluster_count: u32,
+    ) -> Option<u32> {
+        let mut contiguous_start = 0u32;
+        let mut contiguous_len = 0u32;
+
+        for cluster in search_range {
+            if cluster_bit_is_set(&self.bitmap_bytes, cluster) {
+                contiguous_len = 0;
+                continue;
+            }
+
+            if contiguous_len == 0 {
+                contiguous_start = cluster;
+            }
+            contiguous_len += 1;
+
+            if contiguous_len == cluster_count {
+                return Some(contiguous_start);
+            }
+        }
+
+        None
+    }
+
+    fn collect_free_clusters_in_range(
+        &self,
+        search_range: core::ops::Range<u32>,
+        target_count: usize,
+        clusters: &mut Vec<u32>,
+    ) {
+        for cluster in search_range {
+            if !cluster_bit_is_set(&self.bitmap_bytes, cluster) {
+                clusters.push(cluster);
+                if clusters.len() == target_count {
+                    return;
+                }
+            }
+        }
+    }
+
     fn data_cluster_end_exclusive(&self) -> Result<u32> {
         self.valid_cluster_count
             .checked_add(EXFAT_RESERVED_CLUSTERS)
@@ -158,6 +368,9 @@ fn load_bitmap_bytes(
     let cluster_size = super_block.cluster_size();
 
     for cluster_index in 0..bitmap_chain.cluster_count() {
+        if copied_bytes >= bitmap_size {
+            break;
+        }
         let cluster_offset = loaded_chain.physical_cluster_start_offset(super_block)?;
         let remaining_bytes = bitmap_size - copied_bytes;
         let copy_len = remaining_bytes.min(cluster_size);
@@ -174,6 +387,41 @@ fn load_bitmap_bytes(
     }
 
     Ok(bitmap_bytes)
+}
+
+fn write_metadata_bytes(
+    block_device: &dyn BlockDevice,
+    offset: usize,
+    buf: &[u8],
+) -> Result<()> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+
+    let write_end = offset
+        .checked_add(buf.len())
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+    let aligned_start = offset / BLOCK_SIZE * BLOCK_SIZE;
+    let aligned_blocks = write_end
+        .div_ceil(BLOCK_SIZE)
+        .checked_sub(aligned_start / BLOCK_SIZE)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write underflow"))?;
+    let aligned_len = aligned_blocks
+        .checked_mul(BLOCK_SIZE)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+
+    let mut aligned_buf = vec![0; aligned_len];
+    read_metadata_bytes(block_device, aligned_start, &mut aligned_buf)?;
+
+    let start_offset = offset - aligned_start;
+    let end_offset = start_offset
+        .checked_add(buf.len())
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata slice overflow"))?;
+    aligned_buf[start_offset..end_offset].copy_from_slice(buf);
+
+    block_device.write_bytes(aligned_start, &aligned_buf)?;
+
+    Ok(())
 }
 
 fn validate_bitmap_cluster_ownership(
@@ -230,6 +478,30 @@ fn cluster_bit_is_set(bitmap_bytes: &[u8], cluster: u32) -> bool {
     bitmap_bytes[byte_index] & (1u8 << bit_offset) != 0
 }
 
+fn normalize_search_start(search_start_cluster: u32, data_cluster_end_exclusive: u32) -> u32 {
+    if search_start_cluster < EXFAT_RESERVED_CLUSTERS
+        || search_start_cluster >= data_cluster_end_exclusive
+    {
+        EXFAT_RESERVED_CLUSTERS
+    } else {
+        search_start_cluster
+    }
+}
+
+fn set_cluster_bit(bitmap_bytes: &mut [u8], cluster: u32, allocated: bool) {
+    let bit_index = usize::try_from(cluster - EXFAT_RESERVED_CLUSTERS)
+        .expect("validated data cluster ids fit in usize");
+    let byte_index = bit_index / BITS_PER_BYTE;
+    let bit_offset = (bit_index % BITS_PER_BYTE) as u32;
+    let mask = 1u8 << bit_offset;
+
+    if allocated {
+        bitmap_bytes[byte_index] |= mask;
+    } else {
+        bitmap_bytes[byte_index] &= !mask;
+    }
+}
+
 #[cfg(ktest)]
 mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
@@ -240,7 +512,7 @@ mod tests {
     use super::*;
     use crate::{
         fs::fs_impls::exfat_refactor::{
-            boot_sector::EXFAT_RESERVED_CLUSTERS,
+            boot_sector::{read_primary_super_block, EXFAT_RESERVED_CLUSTERS},
             dentry::{DENTRY_SIZE, ExfatBitmapDentry, ExfatDentry, RawExfatDentry},
             fat::{ChainMode, ExfatChain},
             fs::ExfatFs,
@@ -346,11 +618,16 @@ mod tests {
         panic!("expected bitmap singleton in root directory")
     }
 
-    fn manual_bitmap_snapshot(bitmap_bytes: Vec<u8>, valid_cluster_count: u32) -> AllocationBitmap {
+    fn manual_bitmap_snapshot(
+        bitmap_bytes: Vec<u8>,
+        valid_cluster_count: u32,
+        bitmap_chain: ExfatChain,
+    ) -> AllocationBitmap {
         let used_cluster_count =
             count_used_clusters(&bitmap_bytes, usize::try_from(valid_cluster_count).unwrap())
                 .unwrap();
         AllocationBitmap {
+            bitmap_chain,
             bitmap_bytes: bitmap_bytes.into_boxed_slice(),
             valid_cluster_count,
             used_cluster_count,
@@ -412,7 +689,17 @@ mod tests {
 
     #[ktest]
     fn bitmap_accounting_ignores_padding_bits_beyond_valid_range() {
-        let snapshot = manual_bitmap_snapshot(vec![0xAD, 0xFF], 10);
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let bitmap_chain = ExfatChain::new(
+            &disk,
+            &super_block,
+            0,
+            Some(0),
+            ChainMode::FatBacked,
+        )
+        .unwrap();
+        let snapshot = manual_bitmap_snapshot(vec![0xAD, 0xFF], 10, bitmap_chain);
         let first_cluster = EXFAT_RESERVED_CLUSTERS;
         let middle_cluster = EXFAT_RESERVED_CLUSTERS + 4;
         let tail_cluster = EXFAT_RESERVED_CLUSTERS + 9;
