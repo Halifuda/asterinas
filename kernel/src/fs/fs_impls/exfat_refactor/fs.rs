@@ -13,7 +13,7 @@ use super::{
     bitmap::AllocationBitmap,
     boot_sector::BOOT_SIGNATURE,
     dentry::{ExfatBitmapDentry, ExfatDentry, ExfatUpcaseDentry},
-    directory::{DirectoryEngine, DirectoryRecord},
+    directory::{DirectoryEngine, DirectoryFileRecord, DirectoryRecord},
     fat::{ChainMode, ExfatChain},
     fileset::ExfatDentrySet,
     inode::{ExfatInode, ExfatInodeLocation},
@@ -33,9 +33,10 @@ use crate::{
 };
 
 const EXFAT_FS_NAME: &str = "exfat";
-const EXFAT_NAME_MAX: usize = 255;
+pub(super) const EXFAT_NAME_MAX: usize = 255;
 const UPCASE_TABLE_UNIT_COUNT: usize = 0x1_0000;
 const UPCASE_TABLE_IDENTITY_RUN_MARKER: u16 = 0xFFFF;
+const EXFAT_FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 
 /// Carries the owner-private opened-inode publication boundary for `ExfatFs`.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -390,6 +391,85 @@ impl ExfatFs {
         Ok(bitmap.free_cluster_count())
     }
 
+    /// Creates a fresh read-only directory stream from inode-owned chain snapshot facts.
+    pub(super) fn directory_stream(
+        &self,
+        parent_ino: Option<u64>,
+        start_cluster: u32,
+        cluster_count: u32,
+        chain_mode: ChainMode,
+    ) -> Result<DirectoryEngine<'_>> {
+        let chain = ExfatChain::new(
+            self.block_device.as_ref(),
+            &self.super_block,
+            start_cluster,
+            Some(cluster_count),
+            chain_mode,
+        )?;
+
+        DirectoryEngine::new(
+            self.block_device.as_ref(),
+            &self.super_block,
+            parent_ino,
+            chain,
+        )
+    }
+
+    /// Resolves or publishes the canonical opened child inode for one matched directory record.
+    pub(super) fn resolve_or_publish_child_inode(
+        self: &Arc<Self>,
+        file_record: &DirectoryFileRecord,
+    ) -> Result<Arc<ExfatInode>> {
+        let location = file_record.location();
+        let (parent_ino, dentry_set_byte_offset, dentry_entry_index) = location.inode_key_parts();
+        let inode_key = InodeKey::new(parent_ino, dentry_set_byte_offset, dentry_entry_index);
+
+        if let Some(inode) = self.lookup_opened_inode(&inode_key) {
+            return Ok(inode);
+        }
+
+        let cluster_size = self.super_block.cluster_size();
+        let chain = ExfatChain::new(
+            self.block_device.as_ref(),
+            &self.super_block,
+            file_record.start_cluster(),
+            Some(file_record.cluster_count(cluster_size)?),
+            file_record.chain_mode(),
+        )?;
+        let inode_type = file_record.inode_type();
+        let file_attribute = file_record.file_attribute();
+        let metadata = Metadata {
+            ino: file_record.inode_number(),
+            size: 0,
+            optimal_block_size: cluster_size,
+            nr_sectors_allocated: 0,
+            last_access_at: Duration::ZERO,
+            last_modify_at: Duration::ZERO,
+            last_meta_change_at: Duration::ZERO,
+            type_: inode_type,
+            mode: inode_mode_from_file_attributes(file_attribute, inode_type),
+            nr_hard_links: 1,
+            uid: Uid::new(0),
+            gid: Gid::new(0),
+            container_dev_id: self.block_device.id(),
+            self_dev_id: None,
+        };
+        let inode = ExfatInode::new(
+            Arc::downgrade(self),
+            metadata,
+            file_record.dentry_set(),
+            &chain,
+            cluster_size,
+            Some(ExfatInodeLocation::new(
+                parent_ino,
+                dentry_set_byte_offset,
+                dentry_entry_index,
+            )),
+        )?;
+
+        Ok(self.publish_opened_inode(inode_key, inode))
+    }
+
     fn lookup_opened_inode(&self, key: &InodeKey) -> Option<Arc<ExfatInode>> {
         self.opened_inode_state.lock().lookup_opened_inode(key)
     }
@@ -406,6 +486,12 @@ impl ExfatFs {
 
     fn publish_root_inode(&self, inode: Arc<ExfatInode>) -> Arc<ExfatInode> {
         self.opened_inode_state.lock().publish_root_inode(inode)
+    }
+
+    #[cfg(ktest)]
+    pub(super) fn opened_inode_count(&self) -> usize {
+        let opened_inode_state = self.opened_inode_state.lock();
+        opened_inode_state.opened_inodes.len() + usize::from(opened_inode_state.root_inode.is_some())
     }
 }
 
@@ -508,6 +594,17 @@ fn name_hash_from_utf16_units(utf16_units: &[u16]) -> u16 {
     })
 }
 
+fn inode_mode_from_file_attributes(file_attribute: u16, inode_type: InodeType) -> InodeMode {
+    let mut mode = InodeMode::S_IRUSR | InodeMode::S_IRGRP | InodeMode::S_IROTH;
+    if (file_attribute & EXFAT_FILE_ATTRIBUTE_READ_ONLY) == 0 {
+        mode |= InodeMode::S_IWUSR | InodeMode::S_IWGRP | InodeMode::S_IWOTH;
+    }
+    if matches!(inode_type, InodeType::Dir) {
+        mode |= InodeMode::S_IXUSR | InodeMode::S_IXGRP | InodeMode::S_IXOTH;
+    }
+    mode
+}
+
 fn root_directory_chain(fs: &Arc<ExfatFs>) -> Result<ExfatChain> {
     ExfatChain::new(
         fs.block_device.as_ref(),
@@ -523,7 +620,7 @@ fn discover_root_prerequisites(
     root_chain: ExfatChain,
 ) -> Result<(ExfatUpcaseDentry, ExfatBitmapDentry)> {
     let mut directory_engine =
-        DirectoryEngine::new(fs.block_device.as_ref(), &fs.super_block, root_chain)?;
+        DirectoryEngine::new(fs.block_device.as_ref(), &fs.super_block, None, root_chain)?;
     let mut upcase_dentry = None;
     let mut bitmap_dentry = None;
 

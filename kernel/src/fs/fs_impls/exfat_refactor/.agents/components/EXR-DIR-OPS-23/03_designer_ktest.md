@@ -8,8 +8,8 @@
 - Title: `ExfatInode` Read-Only Directory Operations Checker Coverage
 - Status: `Specified`
 - Author: designer
-- Date: `2026-04-10`
-- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-DIR-OPS-23/20260410-1545-designer-packet.md`
+- Date: `2026-04-11`
+- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-DIR-OPS-23/20260411-1622-designer-repair-packet.md`
 - Based on architect artifact: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/components/EXR-DIR-OPS-23/00_architect.md`
 
 ## Purpose
@@ -28,13 +28,15 @@ Define the minimal checker-owned regression coverage needed to prove that `looku
 ### Scenario 1: Case-aware lookup resolves a canonical child handle
 
 - Test intent:
-  - Confirm directory lookup consumes filesystem-owned canonicalization and filesystem-owned child-handle reuse.
+  - Confirm directory lookup consumes filesystem-owned canonicalization, derives `InodeKey` from trusted record-location facts, and uses filesystem-owned child-handle reuse.
 - Suggested test shape:
   - Build a directory inode with a directory record whose visible name differs only by case from the queried name.
 - Assertions:
   - Lookup succeeds for the case-equivalent name.
   - Repeated lookup returns the same canonical child handle rather than a duplicate inode shell.
   - The result depends on the installed upcase behavior, not on raw byte equality alone.
+  - The repeated result stays tied to the same validated record location, not to mutable inode metadata or name text alone.
+  - The validated record location is understood as the parent inode identity, the primary-entry byte offset, and the primary-entry ordinal.
 
 ### Scenario 2: Lookup miss stays read-only
 
@@ -50,13 +52,14 @@ Define the minimal checker-owned regression coverage needed to prove that `looku
 ### Scenario 3: Readdir emits visible entries in stable order
 
 - Test intent:
-  - Confirm `readdir_at` projects validated file records into user-visible entries and leaves raw system entries hidden.
+  - Confirm `readdir_at` projects validated file records into user-visible entries, keeps any trusted location facts owner-internal, and leaves raw system entries hidden.
 - Suggested test shape:
   - Use a directory stream that contains ordinary file records plus root-directory singleton metadata entries.
 - Assertions:
   - File records are emitted in stable order.
   - Raw bitmap and upcase singleton entries are not emitted as user-visible children.
   - The enumeration remains read-only and does not depend on mutation support.
+  - Any location facts needed for later `lookup` remain hidden from the dirent visitor.
 
 ### Scenario 4: Readdir continuation token is stable
 
@@ -74,6 +77,7 @@ Define the minimal checker-owned regression coverage needed to prove that `looku
 - These tests should inspect only read-only directory behavior on `ExfatInode`.
 - They should consume `DirectoryEngine`, `UpcaseTable`, and filesystem-owned reuse indirectly through the inode methods rather than testing those owners independently again.
 - They should not introduce namespace mutation, mount/open sequencing, or file-data coverage.
+- They should verify the repaired bridge assumptions indirectly: a directory-stream handoff from `ExfatFs` and child publication through the filesystem-owned opened-inode boundary.
 - No dedicated concurrency tests are required beyond the repeated-call stability covered above.
 
 ## Minimal Checker Obligation
@@ -81,6 +85,7 @@ Define the minimal checker-owned regression coverage needed to prove that `looku
 The checker must include a regression that proves:
 
 - lookup consumes filesystem-owned canonicalization,
+- lookup derives `InodeKey` from trusted record-location facts,
 - lookup reuses one canonical child handle for repeated resolution,
 - readdir hides system entries and preserves visible ordering,
 - and readdir continuation remains stable across repeated calls.

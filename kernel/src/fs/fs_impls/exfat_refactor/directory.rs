@@ -12,18 +12,25 @@ use aster_block::BlockDevice;
 
 use super::{
     dentry::{DENTRY_SIZE, ExfatDentry, ExfatFileDentry, RawExfatDentry},
-    fat::ExfatChain,
+    fat::{ChainMode, ClusterId, ExfatChain},
     fileset::ExfatDentrySet,
     io::read_metadata_bytes,
     super_block::ExfatSuperBlock,
 };
-use crate::prelude::*;
+use crate::{
+    fs::file::InodeType,
+    prelude::*,
+};
+
+const EXFAT_FILE_ATTRIBUTE_DIRECTORY: u16 = 0x10;
+const EXFAT_STREAM_FLAG_CONTIGUOUS: u8 = 0x02;
 
 /// Streams directory records in on-disk order.
 #[derive(Debug)]
 pub(super) struct DirectoryEngine<'a> {
     block_device: &'a dyn BlockDevice,
     super_block: &'a ExfatSuperBlock,
+    parent_ino: Option<u64>,
     chain: ExfatChain,
     directory_end_offset: usize,
     cursor: DirectoryCursor,
@@ -35,10 +42,130 @@ struct DirectoryCursor {
     cluster_offset: usize,
 }
 
+/// Carries the trusted location facts for one validated file record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DirectoryRecordLocation {
+    parent_ino: Option<u64>,
+    dentry_set_byte_offset: usize,
+    dentry_entry_index: u32,
+}
+
+impl DirectoryRecordLocation {
+    fn new(parent_ino: Option<u64>, dentry_set_byte_offset: usize, dentry_entry_index: u32) -> Self {
+        Self {
+            parent_ino,
+            dentry_set_byte_offset,
+            dentry_entry_index,
+        }
+    }
+
+    pub(super) fn inode_key_parts(self) -> (Option<u64>, usize, u32) {
+        (
+            self.parent_ino,
+            self.dentry_set_byte_offset,
+            self.dentry_entry_index,
+        )
+    }
+
+    fn stable_inode_number(self) -> u64 {
+        let parent_ino = self.parent_ino.unwrap_or(0);
+        let byte_offset = u64::try_from(self.dentry_set_byte_offset).unwrap_or(u64::MAX);
+        // Keep dirent inode numbers stable across rescans by deriving them only
+        // from the validated location facts that also feed `InodeKey`.
+        let mixed = parent_ino
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            ^ byte_offset.rotate_left(17)
+            ^ u64::from(self.dentry_entry_index).rotate_left(3)
+            ^ 0xA57E_B707_EF32_A31D;
+
+        if mixed <= 1 {
+            mixed.wrapping_add(2)
+        } else {
+            mixed
+        }
+    }
+}
+
+/// Carries one validated file record plus the trusted location facts that identify it.
+#[derive(Debug)]
+pub(super) struct DirectoryFileRecord {
+    dentry_set: ExfatDentrySet,
+    location: DirectoryRecordLocation,
+}
+
+impl DirectoryFileRecord {
+    fn new(dentry_set: ExfatDentrySet, location: DirectoryRecordLocation) -> Self {
+        Self { dentry_set, location }
+    }
+
+    pub(super) fn dentry_set(&self) -> &ExfatDentrySet {
+        &self.dentry_set
+    }
+
+    pub(super) fn location(&self) -> DirectoryRecordLocation {
+        self.location
+    }
+
+    pub(super) fn raw_name_units(&self) -> Vec<u16> {
+        self.dentry_set.raw_name_units()
+    }
+
+    pub(super) fn inode_type(&self) -> InodeType {
+        if self.file_attribute() & EXFAT_FILE_ATTRIBUTE_DIRECTORY != 0 {
+            InodeType::Dir
+        } else {
+            InodeType::File
+        }
+    }
+
+    pub(super) fn inode_number(&self) -> u64 {
+        self.location.stable_inode_number()
+    }
+
+    pub(super) fn file_attribute(&self) -> u16 {
+        self.dentry_set.file_dentry().attribute
+    }
+
+    pub(super) fn start_cluster(&self) -> ClusterId {
+        self.dentry_set.stream_dentry().start_cluster
+    }
+
+    pub(super) fn chain_mode(&self) -> ChainMode {
+        if self.dentry_set.stream_dentry().flags & EXFAT_STREAM_FLAG_CONTIGUOUS != 0 {
+            ChainMode::Contiguous
+        } else {
+            ChainMode::FatBacked
+        }
+    }
+
+    pub(super) fn cluster_count(&self, cluster_size: usize) -> Result<u32> {
+        if cluster_size == 0 {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory record cluster size must be non-zero",
+            ));
+        }
+
+        let allocated_size = usize::try_from(self.dentry_set.stream_dentry().size).map_err(|_| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory record allocated size overflowed usize",
+            )
+        })?;
+        let cluster_count = allocated_size.div_ceil(cluster_size);
+        u32::try_from(cluster_count).map_err(|_| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory record cluster count overflowed u32",
+            )
+        })
+    }
+}
+
 /// Describes one logical directory record emitted by the scan service.
 #[derive(Debug)]
 pub(super) enum DirectoryRecord {
-    File(ExfatDentrySet),
+    File(DirectoryFileRecord),
     Singleton(ExfatDentry),
 }
 
@@ -47,6 +174,7 @@ impl<'a> DirectoryEngine<'a> {
     pub(super) fn new(
         block_device: &'a dyn BlockDevice,
         super_block: &'a ExfatSuperBlock,
+        parent_ino: Option<u64>,
         chain: ExfatChain,
     ) -> Result<Self> {
         if chain.is_empty() {
@@ -68,6 +196,7 @@ impl<'a> DirectoryEngine<'a> {
         Ok(Self {
             block_device,
             super_block,
+            parent_ino,
             chain,
             directory_end_offset,
             cursor: DirectoryCursor {
@@ -89,7 +218,17 @@ impl<'a> DirectoryEngine<'a> {
                 ExfatDentry::Unused => return Ok(None),
                 dentry if dentry.is_volume_label() => continue,
                 ExfatDentry::File(file_dentry) => {
-                    let record = self.read_file_record(file_dentry)?;
+                    let record_start_offset = self
+                        .cursor
+                        .byte_offset
+                        .checked_sub(DENTRY_SIZE)
+                        .ok_or_else(|| {
+                            Error::with_message(
+                                Errno::EINVAL,
+                                "directory file record offset underflow",
+                            )
+                        })?;
+                    let record = self.read_file_record(file_dentry, record_start_offset)?;
                     return Ok(Some(DirectoryRecord::File(record)));
                 }
                 ExfatDentry::Bitmap(bitmap_dentry) => {
@@ -112,7 +251,11 @@ impl<'a> DirectoryEngine<'a> {
         }
     }
 
-    fn read_file_record(&mut self, file_dentry: ExfatFileDentry) -> Result<ExfatDentrySet> {
+    fn read_file_record(
+        &mut self,
+        file_dentry: ExfatFileDentry,
+        record_start_offset: usize,
+    ) -> Result<DirectoryFileRecord> {
         let secondary_count = usize::from(file_dentry.num_secondary);
         let mut dentries = Vec::with_capacity(secondary_count + 1);
         dentries.push(ExfatDentry::File(file_dentry));
@@ -135,7 +278,20 @@ impl<'a> DirectoryEngine<'a> {
             dentries.push(dentry);
         }
 
-        ExfatDentrySet::new(dentries)
+        let dentry_entry_index =
+            u32::try_from(record_start_offset / DENTRY_SIZE).map_err(|_| {
+                Error::with_message(
+                    Errno::EOVERFLOW,
+                    "directory record entry index overflowed u32",
+                )
+            })?;
+        let location = DirectoryRecordLocation::new(
+            self.parent_ino,
+            record_start_offset,
+            dentry_entry_index,
+        );
+
+        Ok(DirectoryFileRecord::new(ExfatDentrySet::new(dentries)?, location))
     }
 
     fn read_next_dentry(&mut self) -> Result<Option<ExfatDentry>> {
@@ -211,7 +367,7 @@ mod tests {
         )
         .unwrap();
 
-        DirectoryEngine::new(disk, super_block, chain).unwrap()
+        DirectoryEngine::new(disk, super_block, Some(1), chain).unwrap()
     }
 
     fn write_raw_dentry(
@@ -379,7 +535,7 @@ mod tests {
         let record = engine.next_record().unwrap().unwrap();
         match record {
             DirectoryRecord::File(actual) => {
-                assert!(actual.verify_checksum());
+                assert!(actual.dentry_set().verify_checksum());
                 assert_eq!(
                     actual.raw_name_units(),
                     vec![b'i' as u16, b'n' as u16, b'o' as u16]
