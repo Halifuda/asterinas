@@ -4,7 +4,7 @@
     reason = "Filesystem owner is staged before mount integration."
 )]
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::time::Duration;
 
 use aster_block::BlockDevice;
@@ -12,7 +12,7 @@ use aster_block::BlockDevice;
 use super::{
     allocator::{AllocationResult, Allocator},
     bitmap::AllocationBitmap,
-    boot_sector::BOOT_SIGNATURE,
+    boot_sector::{BOOT_SIGNATURE, MEDIA_FAILURE, VOLUME_DIRTY},
     dentry::{ExfatBitmapDentry, ExfatDentry, ExfatUpcaseDentry},
     directory::{DirectoryEngine, DirectoryFileRecord, DirectoryRecord},
     fat::{ChainMode, ExfatChain},
@@ -35,9 +35,70 @@ use crate::{
 
 const EXFAT_FS_NAME: &str = "exfat";
 pub(super) const EXFAT_NAME_MAX: usize = 255;
+const EXFAT_VOLUME_LABEL_MAX: usize = 11;
 const UPCASE_TABLE_UNIT_COUNT: usize = 0x1_0000;
 const UPCASE_TABLE_IDENTITY_RUN_MARKER: u16 = 0xFFFF;
 const EXFAT_FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootSource {
+    Primary,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BootDirtyIntent {
+    volume_dirty: bool,
+    clear_to_zero: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BootPolicySnapshot {
+    trusted_boot_source: BootSource,
+    persistent_boot_flags: u32,
+    percent_in_use: Option<u8>,
+}
+
+impl BootPolicySnapshot {
+    fn new(
+        trusted_boot_source: BootSource,
+        persistent_boot_flags: u32,
+        percent_in_use: Option<u8>,
+    ) -> Self {
+        Self {
+            trusted_boot_source,
+            persistent_boot_flags,
+            percent_in_use,
+        }
+    }
+
+    fn dirty_intent(&self) -> BootDirtyIntent {
+        BootDirtyIntent {
+            volume_dirty: self.persistent_boot_flags & u32::from(VOLUME_DIRTY) != 0,
+            clear_to_zero: self.persistent_boot_flags & u32::from(MEDIA_FAILURE) != 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct BootPolicyState {
+    snapshot: Option<BootPolicySnapshot>,
+}
+
+impl BootPolicyState {
+    fn publish(&mut self, snapshot: BootPolicySnapshot) -> BootPolicySnapshot {
+        if let Some(published) = self.snapshot {
+            return published;
+        }
+
+        self.snapshot = Some(snapshot);
+        snapshot
+    }
+
+    fn published_dirty_intent(&self) -> Option<BootDirtyIntent> {
+        self.snapshot.as_ref().map(BootPolicySnapshot::dirty_intent)
+    }
+}
 
 /// Carries the owner-private opened-inode publication boundary for `ExfatFs`.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -59,6 +120,44 @@ impl InodeKey {
             dentry_set_byte_offset,
             dentry_entry_index,
         }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct ConvertedName {
+    utf16_units: Vec<u16>,
+}
+
+impl ConvertedName {
+    fn new(utf16_units: Vec<u16>) -> Self {
+        Self { utf16_units }
+    }
+
+    pub(super) fn as_utf16_units(&self) -> &[u16] {
+        &self.utf16_units
+    }
+
+    pub(super) fn into_utf16_units(self) -> Vec<u16> {
+        self.utf16_units
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct ConvertedLabel {
+    utf16_units: Vec<u16>,
+}
+
+impl ConvertedLabel {
+    fn new(utf16_units: Vec<u16>) -> Self {
+        Self { utf16_units }
+    }
+
+    pub(super) fn as_utf16_units(&self) -> &[u16] {
+        &self.utf16_units
+    }
+
+    pub(super) fn into_utf16_units(self) -> Vec<u16> {
+        self.utf16_units
     }
 }
 
@@ -177,6 +276,7 @@ pub(super) struct ExfatFs {
     vfs_super_block: SuperBlock,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     mount_open_state: Mutex<()>,
+    boot_policy_state: Mutex<BootPolicyState>,
     upcase_state: Mutex<UpcaseState>,
     allocation_bitmap: Mutex<Option<AllocationBitmap>>,
     allocator: Mutex<Allocator>,
@@ -208,6 +308,7 @@ impl ExfatFs {
             vfs_super_block,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             mount_open_state: Mutex::new(()),
+            boot_policy_state: Mutex::new(BootPolicyState::default()),
             upcase_state: Mutex::new(UpcaseState::default()),
             allocation_bitmap: Mutex::new(None),
             allocator: Mutex::new(Allocator::new(super_block.cluster_search_ptr)),
@@ -217,6 +318,8 @@ impl ExfatFs {
 
     /// Opens the mounted root directory, installing mount prerequisites first.
     pub(super) fn open_root_inode(fs: &Arc<Self>) -> Result<Arc<dyn Inode>> {
+        let _boot_policy = fs.publish_boot_policy(None, None);
+
         if let Some(root_inode) = fs.opened_inode_state.lock().root_inode() {
             let root_inode: Arc<dyn Inode> = root_inode;
             return Ok(root_inode);
@@ -303,6 +406,28 @@ impl ExfatFs {
     /// Returns the current traversal context used by inode-owned file reads.
     pub(super) fn file_read_context(&self) -> (&dyn BlockDevice, &ExfatSuperBlock) {
         (self.block_device.as_ref(), &self.super_block)
+    }
+
+    fn select_trusted_boot_source(&self, fallback_candidate: Option<BootSource>) -> BootSource {
+        fallback_candidate.unwrap_or(BootSource::Primary)
+    }
+
+    fn publish_boot_policy(
+        &self,
+        fallback_candidate: Option<BootSource>,
+        percent_in_use: Option<u8>,
+    ) -> BootPolicySnapshot {
+        let snapshot = BootPolicySnapshot::new(
+            self.select_trusted_boot_source(fallback_candidate),
+            self.super_block.vol_flags_persistent,
+            percent_in_use,
+        );
+
+        self.boot_policy_state.lock().publish(snapshot)
+    }
+
+    fn published_boot_dirty_intent(&self) -> Option<BootDirtyIntent> {
+        self.boot_policy_state.lock().published_dirty_intent()
     }
 
     /// Validates and publishes the mounted volume's upcase table once.
@@ -402,6 +527,29 @@ impl ExfatFs {
     /// Returns the owner-local allocation bitmap guard.
     pub(super) fn allocation_bitmap(&self) -> MutexGuard<'_, Option<AllocationBitmap>> {
         self.allocation_bitmap.lock()
+    }
+
+    /// Validates and converts an external filesystem name into UTF-16 units.
+    pub(super) fn convert_name(&self, name: &str) -> Result<ConvertedName> {
+        Ok(ConvertedName::new(convert_external_utf16_units(
+            name,
+            EXFAT_NAME_MAX,
+            "name is too long",
+        )?))
+    }
+
+    /// Validates and converts an external volume label into UTF-16 units.
+    pub(super) fn convert_label(&self, label: &str) -> Result<ConvertedLabel> {
+        Ok(ConvertedLabel::new(convert_external_utf16_units(
+            label,
+            EXFAT_VOLUME_LABEL_MAX,
+            "volume label is too long",
+        )?))
+    }
+
+    /// Decodes validated UTF-16 name units into a VFS-visible string.
+    pub(super) fn visible_name_from_utf16_units(&self, utf16_units: &[u16]) -> Result<String> {
+        decode_visible_name(utf16_units)
     }
 
     /// Allocates clusters through the filesystem-owned allocator service.
@@ -613,6 +761,25 @@ fn name_hash_from_utf16_units(utf16_units: &[u16]) -> u16 {
     })
 }
 
+fn convert_external_utf16_units(
+    text: &str,
+    max_units: usize,
+    too_long_message: &'static str,
+) -> Result<Vec<u16>> {
+    let utf16_units: Vec<u16> = text.encode_utf16().collect();
+    if utf16_units.len() > max_units {
+        return Err(Error::with_message(Errno::ENAMETOOLONG, too_long_message));
+    }
+
+    Ok(utf16_units)
+}
+
+fn decode_visible_name(utf16_units: &[u16]) -> Result<String> {
+    String::from_utf16(utf16_units).map_err(|_| {
+        Error::with_message(Errno::EINVAL, "directory record name is not valid UTF-16")
+    })
+}
+
 fn inode_mode_from_file_attributes(file_attribute: u16, inode_type: InodeType) -> InodeMode {
     let mut mode = InodeMode::S_IRUSR | InodeMode::S_IRGRP | InodeMode::S_IROTH;
     if (file_attribute & EXFAT_FILE_ATTRIBUTE_READ_ONLY) == 0 {
@@ -773,9 +940,9 @@ mod tests {
             fat::{ChainMode, ExfatChain},
             inode::{ExfatInode, ExfatInodeLocation},
         },
-        EXFAT_FS_NAME, EXFAT_NAME_MAX, ExfatFs, ExfatUpcaseDentry, InodeKey, OpenedInodeState,
-        UPCASE_TABLE_IDENTITY_RUN_MARKER, UPCASE_TABLE_UNIT_COUNT, mandatory_upcase_unit,
-        table_checksum,
+        BootDirtyIntent, BootSource, ExfatFs, ExfatUpcaseDentry, InodeKey, OpenedInodeState,
+        EXFAT_FS_NAME, EXFAT_NAME_MAX, MEDIA_FAILURE, UPCASE_TABLE_IDENTITY_RUN_MARKER,
+        UPCASE_TABLE_UNIT_COUNT, VOLUME_DIRTY, mandatory_upcase_unit, table_checksum,
     };
     use crate::{
         fs::{
@@ -1090,6 +1257,79 @@ mod tests {
         );
     }
 
+    // Confirms valid external names are converted into validated UTF-16 units by `ExfatFs`.
+    #[ktest]
+    fn charset_convert_name_accepts_valid_external_name() {
+        let fs = new_exfat_fs();
+        let name = "Readme-01";
+        let expected_units = name.encode_utf16().collect::<Vec<_>>();
+
+        let converted = fs.convert_name(name).unwrap();
+
+        assert_eq!(converted.as_utf16_units(), expected_units.as_slice());
+        assert_eq!(converted.clone().into_utf16_units(), expected_units);
+    }
+
+    // Confirms valid external labels are converted into validated UTF-16 units by `ExfatFs`.
+    #[ktest]
+    fn charset_convert_label_accepts_valid_external_label() {
+        let fs = new_exfat_fs();
+        let label = "ASTERINAS";
+        let expected_units = label.encode_utf16().collect::<Vec<_>>();
+
+        let converted = fs.convert_label(label).unwrap();
+
+        assert_eq!(converted.as_utf16_units(), expected_units.as_slice());
+        assert_eq!(converted.clone().into_utf16_units(), expected_units);
+    }
+
+    // Confirms validated UTF-16 units decode through `ExfatFs` and malformed UTF-16 is rejected.
+    #[ktest]
+    fn charset_visible_name_from_utf16_units_decodes_validated_units() {
+        let fs = new_exfat_fs();
+        let converted = fs.convert_name("README").unwrap();
+
+        let decoded = fs
+            .visible_name_from_utf16_units(converted.as_utf16_units())
+            .unwrap();
+        let malformed_error = fs
+            .visible_name_from_utf16_units(&[0xD800])
+            .unwrap_err();
+
+        assert_eq!(decoded, "README");
+        assert_eq!(malformed_error.error(), Errno::EINVAL);
+    }
+
+    // Confirms overlong external inputs are rejected before any converted value is published.
+    #[ktest]
+    fn charset_convert_name_and_label_reject_overlong_inputs() {
+        let fs = new_exfat_fs();
+        let overlong_name = "n".repeat(EXFAT_NAME_MAX + 1);
+        let overlong_label = "l".repeat(super::EXFAT_VOLUME_LABEL_MAX + 1);
+
+        let name_error = fs.convert_name(&overlong_name).unwrap_err();
+        let label_error = fs.convert_label(&overlong_label).unwrap_err();
+
+        assert_eq!(name_error.error(), Errno::ENAMETOOLONG);
+        assert_eq!(label_error.error(), Errno::ENAMETOOLONG);
+    }
+
+    // Confirms repeated conversions return the same validated output shape for the same FS state.
+    #[ktest]
+    fn charset_repeated_conversion_returns_same_validated_output_shape() {
+        let fs = new_exfat_fs();
+
+        let first_name = fs.convert_name("Readme").unwrap();
+        let second_name = fs.convert_name("Readme").unwrap();
+        let first_label = fs.convert_label("ASTERINAS").unwrap();
+        let second_label = fs.convert_label("ASTERINAS").unwrap();
+
+        assert_eq!(first_name, second_name);
+        assert_eq!(first_label, second_label);
+        assert_eq!(first_name.as_utf16_units().len(), "Readme".encode_utf16().count());
+        assert_eq!(first_label.as_utf16_units().len(), "ASTERINAS".encode_utf16().count());
+    }
+
     #[ktest]
     fn filesystem_identity_and_super_block_snapshot_are_stable() {
         // Confirms the owner exposes one stable VFS identity and reuses the
@@ -1224,5 +1464,71 @@ mod tests {
             vec![b'A' as u16, b'Z' as u16]
         );
         assert!(fs.used_cluster_count().unwrap() > 0);
+    }
+
+    // Confirms the mount/open owner publishes the boot policy before the root
+    // inode becomes visible and keeps the published snapshot stable.
+    #[ktest]
+    fn boot_policy_publishes_before_root_open_and_stays_stable() {
+        let fs = Arc::new(new_mount_ready_exfat_fs());
+
+        assert!(fs.opened_inode_state.lock().root_inode().is_none());
+        assert!(fs.published_boot_dirty_intent().is_none());
+
+        let first_root = ExfatFs::open_root_inode(&fs).unwrap();
+        let first_snapshot = fs.publish_boot_policy(Some(BootSource::Fallback), Some(17));
+
+        assert_eq!(first_snapshot.trusted_boot_source, BootSource::Primary);
+        assert_eq!(first_snapshot.percent_in_use, None);
+        assert_eq!(first_snapshot.dirty_intent(),
+            BootDirtyIntent {
+                volume_dirty: false,
+                clear_to_zero: false,
+            }
+        );
+        assert!(fs.published_boot_dirty_intent().is_some());
+        assert!(fs.opened_inode_state.lock().root_inode().is_some());
+        let published_root = fs.opened_inode_state.lock().root_inode().unwrap();
+        let published_root_as_inode: Arc<dyn Inode> = published_root;
+        assert!(Arc::ptr_eq(&first_root, &published_root_as_inode));
+
+        let second_snapshot = fs.publish_boot_policy(Some(BootSource::Fallback), Some(99));
+        assert_eq!(second_snapshot, first_snapshot);
+    }
+
+    // Confirms the dirty boot intent is published separately from the trusted
+    // source and keeps the persistent boot-region flags intact.
+    #[ktest]
+    fn boot_policy_dirty_intent_stays_separate_from_trusted_source() {
+        let mut fs = new_exfat_fs();
+        fs.super_block.vol_flags_persistent = u32::from(VOLUME_DIRTY | MEDIA_FAILURE);
+
+        let snapshot = fs.publish_boot_policy(Some(BootSource::Fallback), Some(33));
+        let dirty_intent = snapshot.dirty_intent();
+
+        assert_eq!(snapshot.trusted_boot_source, BootSource::Fallback);
+        assert_eq!(snapshot.percent_in_use, Some(33));
+        assert!(dirty_intent.volume_dirty);
+        assert!(dirty_intent.clear_to_zero);
+        assert_eq!(fs.published_boot_dirty_intent(), Some(dirty_intent));
+    }
+
+    // Confirms changing only the observational `percent_in_use` input does not
+    // perturb the trusted source or the persistent dirty-intent publication.
+    #[ktest]
+    fn boot_policy_percent_in_use_is_observational_only() {
+        let mut first_fs = new_exfat_fs();
+        first_fs.super_block.vol_flags_persistent = u32::from(VOLUME_DIRTY);
+        let mut second_fs = new_exfat_fs();
+        second_fs.super_block.vol_flags_persistent = first_fs.super_block.vol_flags_persistent;
+
+        let first_snapshot = first_fs.publish_boot_policy(Some(BootSource::Fallback), Some(7));
+        let second_snapshot = second_fs.publish_boot_policy(Some(BootSource::Fallback), Some(91));
+
+        assert_eq!(first_snapshot.trusted_boot_source, second_snapshot.trusted_boot_source);
+        assert_eq!(first_snapshot.dirty_intent(), second_snapshot.dirty_intent());
+        assert_ne!(first_snapshot.percent_in_use, second_snapshot.percent_in_use);
+        assert_eq!(first_snapshot.percent_in_use, Some(7));
+        assert_eq!(second_snapshot.percent_in_use, Some(91));
     }
 }

@@ -9,19 +9,17 @@
 )]
 
 use aster_block::BlockDevice;
+use ostd::mm::VmIo;
 
 use super::{
     allocator::AllocationResult,
-    dentry::{DENTRY_SIZE, ExfatDentry, ExfatDeletedDentry, ExfatFileDentry, RawExfatDentry},
+    dentry::{DENTRY_SIZE, ExfatDeletedDentry, ExfatDentry, ExfatFileDentry, RawExfatDentry},
     fat::{ChainMode, ClusterId, ExfatChain, FatValue, write_next_fat_value},
     fileset::ExfatDentrySet,
     io::read_metadata_bytes,
     super_block::ExfatSuperBlock,
 };
-use crate::{
-    fs::file::InodeType,
-    prelude::*,
-};
+use crate::{fs::file::InodeType, prelude::*};
 
 const EXFAT_FILE_ATTRIBUTE_DIRECTORY: u16 = 0x10;
 const EXFAT_STREAM_FLAG_CONTIGUOUS: u8 = 0x02;
@@ -65,7 +63,11 @@ pub(super) struct DirectoryRecordLocation {
 }
 
 impl DirectoryRecordLocation {
-    fn new(parent_ino: Option<u64>, dentry_set_byte_offset: usize, dentry_entry_index: u32) -> Self {
+    fn new(
+        parent_ino: Option<u64>,
+        dentry_set_byte_offset: usize,
+        dentry_entry_index: u32,
+    ) -> Self {
         Self {
             parent_ino,
             dentry_set_byte_offset,
@@ -86,8 +88,7 @@ impl DirectoryRecordLocation {
         let byte_offset = u64::try_from(self.dentry_set_byte_offset).unwrap_or(u64::MAX);
         // Keep dirent inode numbers stable across rescans by deriving them only
         // from the validated location facts that also feed `InodeKey`.
-        let mixed = parent_ino
-            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+        let mixed = parent_ino.wrapping_mul(0x9E37_79B1_85EB_CA87)
             ^ byte_offset.rotate_left(17)
             ^ u64::from(self.dentry_entry_index).rotate_left(3)
             ^ 0xA57E_B707_EF32_A31D;
@@ -109,7 +110,10 @@ pub(super) struct DirectoryFileRecord {
 
 impl DirectoryFileRecord {
     fn new(dentry_set: ExfatDentrySet, location: DirectoryRecordLocation) -> Self {
-        Self { dentry_set, location }
+        Self {
+            dentry_set,
+            location,
+        }
     }
 
     pub(super) fn dentry_set(&self) -> &ExfatDentrySet {
@@ -160,12 +164,13 @@ impl DirectoryFileRecord {
             ));
         }
 
-        let allocated_size = usize::try_from(self.dentry_set.stream_dentry().size).map_err(|_| {
-            Error::with_message(
-                Errno::EOVERFLOW,
-                "directory record allocated size overflowed usize",
-            )
-        })?;
+        let allocated_size =
+            usize::try_from(self.dentry_set.stream_dentry().size).map_err(|_| {
+                Error::with_message(
+                    Errno::EOVERFLOW,
+                    "directory record allocated size overflowed usize",
+                )
+            })?;
         let cluster_count = allocated_size.div_ceil(cluster_size);
         u32::try_from(cluster_count).map_err(|_| {
             Error::with_message(
@@ -299,13 +304,13 @@ impl<'a> DirectoryEngine<'a> {
                     "directory record entry index overflowed u32",
                 )
             })?;
-        let location = DirectoryRecordLocation::new(
-            self.parent_ino,
-            record_start_offset,
-            dentry_entry_index,
-        );
+        let location =
+            DirectoryRecordLocation::new(self.parent_ino, record_start_offset, dentry_entry_index);
 
-        Ok(DirectoryFileRecord::new(ExfatDentrySet::new(dentries)?, location))
+        Ok(DirectoryFileRecord::new(
+            ExfatDentrySet::new(dentries)?,
+            location,
+        ))
     }
 
     fn read_next_dentry(&mut self) -> Result<Option<ExfatDentry>> {
@@ -431,7 +436,7 @@ impl<'a> DirectoryEngine<'a> {
                     .checked_add(required_slots)
                     .ok_or_else(|| {
                         Error::with_message(Errno::EINVAL, "directory slot range overflow")
-                })?;
+                    })?;
                 self.tombstone_slot_range(tombstone_start_index, existing_slots - required_slots)?;
             } else if trailing_consumes_unused_terminator {
                 self.publish_unused_terminator(location_entry_index, required_slots)?;
@@ -508,7 +513,10 @@ impl<'a> DirectoryEngine<'a> {
 
     fn entry_index_from_location(&self, location: DirectoryRecordLocation) -> Result<usize> {
         let entry_index = usize::try_from(location.dentry_entry_index).map_err(|_| {
-            Error::with_message(Errno::EOVERFLOW, "directory record entry index overflowed usize")
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory record entry index overflowed usize",
+            )
         })?;
         let expected_offset = self.entry_byte_offset(entry_index)?;
         if expected_offset != location.dentry_set_byte_offset {
@@ -553,9 +561,7 @@ impl<'a> DirectoryEngine<'a> {
     fn record_slot_count(&self, location: DirectoryRecordLocation) -> Result<usize> {
         let entry_index = self.entry_index_from_location(location)?;
         match self.read_dentry_at(entry_index)? {
-            ExfatDentry::File(file_dentry) => {
-                Ok(usize::from(file_dentry.num_secondary) + 1)
-            }
+            ExfatDentry::File(file_dentry) => Ok(usize::from(file_dentry.num_secondary) + 1),
             _ => Err(Error::with_message(
                 Errno::EINVAL,
                 "directory record location does not point at a file primary",
@@ -619,7 +625,8 @@ impl<'a> DirectoryEngine<'a> {
                 }
                 ExfatDentry::Unused => {
                     let start_entry_index = run_start.unwrap_or(entry_index);
-                    let consumes_unused_terminator = required_slots > entry_index - start_entry_index;
+                    let consumes_unused_terminator =
+                        required_slots > entry_index - start_entry_index;
                     if total_entries - start_entry_index >= required_slots {
                         return Ok(DirectorySlotSearch::Fits {
                             start_entry_index,
@@ -796,14 +803,10 @@ impl<'a> DirectoryEngine<'a> {
         Ok(())
     }
 
-    fn logical_directory_chunk_at(
-        &self,
-        offset: usize,
-        max_len: usize,
-    ) -> Result<(usize, usize)> {
-        let (cluster_chain, cluster_intra_offset) = self
-            .chain
-            .walk_to_cluster_at_offset(self.block_device, self.super_block, offset)?;
+    fn logical_directory_chunk_at(&self, offset: usize, max_len: usize) -> Result<(usize, usize)> {
+        let (cluster_chain, cluster_intra_offset) =
+            self.chain
+                .walk_to_cluster_at_offset(self.block_device, self.super_block, offset)?;
         let cluster_start_offset = cluster_chain.physical_cluster_start_offset(self.super_block)?;
         let cluster_remaining = self
             .super_block
@@ -938,8 +941,7 @@ fn deleted_dentry() -> ExfatDentry {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use ostd::mm::VmIo;
-    use ostd::prelude::ktest;
+    use ostd::{mm::VmIo, prelude::ktest};
     use zerocopy::IntoBytes;
 
     use super::{DirectoryEngine, DirectoryRecord};
@@ -1048,7 +1050,9 @@ mod tests {
         RawExfatDentry::from_bytes(&bytes)
     }
 
-    fn committed_growth(super_block: &crate::fs::fs_impls::exfat_refactor::super_block::ExfatSuperBlock) -> AllocationResult {
+    fn committed_growth(
+        super_block: &crate::fs::fs_impls::exfat_refactor::super_block::ExfatSuperBlock,
+    ) -> AllocationResult {
         AllocationResult {
             start_cluster: super_block.data_cluster_end_exclusive() - 1,
             cluster_count: 1,
@@ -1402,7 +1406,10 @@ mod tests {
         );
         let mut bytes = [0; DENTRY_SIZE];
         disk.read_bytes(growth_start_offset, &mut bytes);
-        assert!(matches!(ExfatDentry::from(RawExfatDentry::from_bytes(&bytes)), ExfatDentry::File(_)));
+        assert!(matches!(
+            ExfatDentry::from(RawExfatDentry::from_bytes(&bytes)),
+            ExfatDentry::File(_)
+        ));
         assert!(matches!(
             ExfatDentry::from(read_raw_dentry(&disk, &super_block, 0)),
             ExfatDentry::Bitmap(_)

@@ -8,19 +8,16 @@
     )
 )]
 
-use alloc::{
-    string::String,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{sync::{Arc, Weak}, vec::Vec};
 use core::time::Duration;
 
-use aster_block::{BlockDevice, bio::BioWaiter};
+use aster_block::{BLOCK_SIZE, BlockDevice, bio::BioWaiter};
 use spin::Once;
 
 use super::{
+    allocator::AllocationResult,
     directory::{DirectoryFileRecord, DirectoryRecord},
-    fat::{ChainMode, ClusterId, ExfatChain},
+    fat::{ChainMode, ClusterId, ExfatChain, FatValue, write_next_fat_value},
     fileset::ExfatDentrySet,
     fs::{ExfatFs, EXFAT_NAME_MAX},
     io::read_metadata_bytes,
@@ -40,7 +37,10 @@ use crate::{
     process::{Gid, Uid},
     vm::vmo::Vmo,
 };
-use ostd::mm::io::util::HasVmReaderWriter;
+use ostd::{
+    mm::{VmIo, io::util::HasVmReaderWriter},
+    sync::RwMutex,
+};
 
 const SECTOR_SIZE: usize = 512;
 const READ_BOUNCE_BUFFER_SIZE: usize = 4096;
@@ -49,15 +49,12 @@ const READ_BOUNCE_BUFFER_SIZE: usize = 4096;
 pub(super) struct ExfatInode {
     fs: Weak<ExfatFs>,
     metadata: Metadata,
+    state: Mutex<ExfatInodeState>,
+    publication_gate: RwMutex<()>,
     extension: Extension,
     page_cache: Once<PageCache>,
     location: Option<ExfatInodeLocation>,
     file_attribute: u16,
-    valid_size: usize,
-    start_cluster: ClusterId,
-    cluster_count: u32,
-    chain_mode: ChainMode,
-    allocated_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +70,52 @@ struct PhysicalFileRange {
     physical_byte_offset: usize,
     intra_cluster_offset: usize,
     mappable_byte_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExfatInodeState {
+    metadata: Metadata,
+    valid_size: usize,
+    start_cluster: ClusterId,
+    cluster_count: u32,
+    chain_mode: ChainMode,
+    allocated_size: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExfatInodeWriteState {
+    metadata: Metadata,
+    valid_size: usize,
+    start_cluster: ClusterId,
+    cluster_count: u32,
+    chain_mode: ChainMode,
+    allocated_size: usize,
+}
+
+impl From<ExfatInodeState> for ExfatInodeWriteState {
+    fn from(state: ExfatInodeState) -> Self {
+        Self {
+            metadata: state.metadata,
+            valid_size: state.valid_size,
+            start_cluster: state.start_cluster,
+            cluster_count: state.cluster_count,
+            chain_mode: state.chain_mode,
+            allocated_size: state.allocated_size,
+        }
+    }
+}
+
+impl From<ExfatInodeWriteState> for ExfatInodeState {
+    fn from(state: ExfatInodeWriteState) -> Self {
+        Self {
+            metadata: state.metadata,
+            valid_size: state.valid_size,
+            start_cluster: state.start_cluster,
+            cluster_count: state.cluster_count,
+            chain_mode: state.chain_mode,
+            allocated_size: state.allocated_size,
+        }
+    }
 }
 
 impl ExfatInodeLocation {
@@ -119,22 +162,39 @@ impl ExfatInode {
         metadata.size = size;
         metadata.optimal_block_size = cluster_size;
         metadata.nr_sectors_allocated = allocated_size.div_ceil(SECTOR_SIZE);
+        let state_metadata = metadata;
 
         let inode = Arc::new(Self {
             fs,
             metadata,
+            state: Mutex::new(ExfatInodeState {
+                metadata: state_metadata,
+                valid_size,
+                start_cluster: chain.current_cluster(),
+                cluster_count: chain.cluster_count(),
+                chain_mode: chain.mode(),
+                allocated_size,
+            }),
+            publication_gate: RwMutex::new(()),
             extension: Extension::new(),
             page_cache: Once::new(),
             location,
             file_attribute: file_dentry.attribute,
-            valid_size,
-            start_cluster: chain.current_cluster(),
-            cluster_count: chain.cluster_count(),
-            chain_mode: chain.mode(),
-            allocated_size,
         });
         inode.initialize_page_cache()?;
         Ok(inode)
+    }
+
+    fn snapshot(&self) -> ExfatInodeState {
+        *self.state.lock()
+    }
+
+    fn write_state(&self) -> ExfatInodeWriteState {
+        self.snapshot().into()
+    }
+
+    fn replace_state(&self, write_state: ExfatInodeWriteState) {
+        *self.state.lock() = write_state.into();
     }
 
     fn initialize_page_cache(self: &Arc<Self>) -> Result<()> {
@@ -164,6 +224,26 @@ impl ExfatInode {
         }
 
         self.size().div_ceil(PAGE_SIZE)
+    }
+
+    fn valid_size(&self) -> usize {
+        self.snapshot().valid_size
+    }
+
+    fn start_cluster(&self) -> ClusterId {
+        self.snapshot().start_cluster
+    }
+
+    fn cluster_count(&self) -> u32 {
+        self.snapshot().cluster_count
+    }
+
+    fn chain_mode(&self) -> ChainMode {
+        self.snapshot().chain_mode
+    }
+
+    fn allocated_size(&self) -> usize {
+        self.snapshot().allocated_size
     }
 
     fn page_offset(&self, page_index: usize) -> Result<usize> {
@@ -203,9 +283,9 @@ impl ExfatInode {
         ExfatChain::new(
             block_device,
             super_block,
-            self.start_cluster,
-            Some(self.cluster_count),
-            self.chain_mode,
+            self.start_cluster(),
+            Some(self.cluster_count()),
+            self.chain_mode(),
         )
     }
 
@@ -222,7 +302,12 @@ impl ExfatInode {
     }
 
     fn physically_backed_end(&self) -> usize {
-        self.size().min(self.valid_size).min(self.allocated_size)
+        let snapshot = self.snapshot();
+        snapshot
+            .metadata
+            .size
+            .min(snapshot.valid_size)
+            .min(snapshot.allocated_size)
     }
 
     fn physically_mappable_byte_count(
@@ -354,7 +439,7 @@ impl ExfatInode {
         request_len: usize,
         writer: &mut VmWriter,
     ) -> Result<usize> {
-        if request_len == 0 || offset < self.valid_size || offset >= self.size() {
+        if request_len == 0 || offset < self.valid_size() || offset >= self.size() {
             return Ok(0);
         }
 
@@ -366,6 +451,348 @@ impl ExfatInode {
             .min(writer.avail());
 
         Ok(writer.fill_zeros(zero_len).map_err(|(error, _)| error)?)
+    }
+
+    fn committed_growth_clusters(
+        current_allocated_size: usize,
+        target_end: usize,
+        cluster_size: usize,
+    ) -> Result<u32> {
+        let growth_bytes = target_end
+            .checked_sub(current_allocated_size)
+            .ok_or_else(|| {
+                Error::with_message(Errno::EINVAL, "exFAT growth request underflowed")
+            })?;
+        if growth_bytes == 0 {
+            return Ok(0);
+        }
+
+        let growth_clusters = growth_bytes.div_ceil(cluster_size);
+        u32::try_from(growth_clusters).map_err(|_| {
+            Error::with_message(Errno::EOVERFLOW, "exFAT growth cluster count overflowed")
+        })
+    }
+
+    fn fold_committed_allocation(
+        write_state: &mut ExfatInodeWriteState,
+        allocation: AllocationResult,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        cluster_size: usize,
+    ) -> Result<()> {
+        if write_state.cluster_count == 0 {
+            write_state.start_cluster = allocation.start_cluster;
+            write_state.cluster_count = allocation.cluster_count;
+            write_state.chain_mode = allocation.chain_mode;
+        } else if Self::can_preserve_contiguous_chain(write_state, allocation)? {
+            write_state.cluster_count = write_state
+                .cluster_count
+                .checked_add(allocation.cluster_count)
+                .ok_or_else(|| {
+                    Error::with_message(Errno::EOVERFLOW, "exFAT cluster count overflowed")
+                })?;
+        } else {
+            let current_chain = ExfatChain::new(
+                block_device,
+                super_block,
+                write_state.start_cluster,
+                Some(write_state.cluster_count),
+                write_state.chain_mode,
+            )?;
+            let appended_chain = ExfatChain::new(
+                block_device,
+                super_block,
+                allocation.start_cluster,
+                Some(allocation.cluster_count),
+                allocation.chain_mode,
+            )?;
+            let current_clusters =
+                Self::collect_chain_clusters(block_device, super_block, current_chain)?;
+            let appended_clusters =
+                Self::collect_chain_clusters(block_device, super_block, appended_chain)?;
+            let mut combined_clusters = Vec::with_capacity(
+                current_clusters
+                    .len()
+                    .checked_add(appended_clusters.len())
+                    .ok_or_else(|| {
+                        Error::with_message(Errno::EOVERFLOW, "exFAT chain cluster overflowed")
+                    })?,
+            );
+            combined_clusters.extend_from_slice(&current_clusters);
+            combined_clusters.extend_from_slice(&appended_clusters);
+
+            Self::materialize_fat_chain(block_device, super_block, &combined_clusters)?;
+
+            write_state.start_cluster = *combined_clusters.first().ok_or_else(|| {
+                Error::with_message(Errno::EINVAL, "exFAT combined chain must not be empty")
+            })?;
+            write_state.cluster_count =
+                u32::try_from(combined_clusters.len()).map_err(|_| {
+                    Error::with_message(
+                        Errno::EOVERFLOW,
+                        "exFAT combined cluster count overflowed",
+                    )
+                })?;
+            write_state.chain_mode = ChainMode::FatBacked;
+        }
+
+        write_state.allocated_size = allocated_size(write_state.cluster_count, cluster_size)?;
+        write_state.metadata.nr_sectors_allocated =
+            write_state.allocated_size.div_ceil(SECTOR_SIZE);
+        Ok(())
+    }
+
+    fn can_preserve_contiguous_chain(
+        write_state: &ExfatInodeWriteState,
+        allocation: AllocationResult,
+    ) -> Result<bool> {
+        if write_state.chain_mode != ChainMode::Contiguous
+            || allocation.chain_mode != ChainMode::Contiguous
+        {
+            return Ok(false);
+        }
+
+        let next_cluster = write_state
+            .start_cluster
+            .checked_add(write_state.cluster_count)
+            .ok_or_else(|| {
+                Error::with_message(Errno::EOVERFLOW, "exFAT contiguous chain overflowed")
+            })?;
+        Ok(next_cluster == allocation.start_cluster)
+    }
+
+    fn collect_chain_clusters(
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        chain: ExfatChain,
+    ) -> Result<Vec<ClusterId>> {
+        let cluster_count = usize::try_from(chain.cluster_count()).map_err(|_| {
+            Error::with_message(Errno::EOVERFLOW, "exFAT chain size overflowed usize")
+        })?;
+        let mut clusters = Vec::with_capacity(cluster_count);
+        let mut loaded_chain = chain;
+
+        for cluster_index in 0..chain.cluster_count() {
+            clusters.push(loaded_chain.current_cluster());
+            if cluster_index + 1 < chain.cluster_count() {
+                loaded_chain = loaded_chain.walk(block_device, super_block, 1)?;
+            }
+        }
+
+        Ok(clusters)
+    }
+
+    fn materialize_fat_chain(
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        clusters: &[ClusterId],
+    ) -> Result<()> {
+        let Some(&last_cluster) = clusters.last() else {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "exFAT chain materialization requires at least one cluster",
+            ));
+        };
+
+        for window in clusters.windows(2) {
+            write_next_fat_value(
+                block_device,
+                super_block,
+                window[0],
+                FatValue::Next(window[1]),
+            )?;
+        }
+
+        write_next_fat_value(
+            block_device,
+            super_block,
+            last_cluster,
+            FatValue::EndOfChain,
+        )?;
+
+        Ok(())
+    }
+
+    fn map_physical_file_range_with_state(
+        &self,
+        state: &ExfatInodeWriteState,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        request_offset: usize,
+        request_len: usize,
+    ) -> Result<Option<PhysicalFileRange>> {
+        if self.type_() != InodeType::File {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "exFAT file mapping requires a regular-file inode",
+            ));
+        }
+
+        if request_len == 0 || request_offset >= state.metadata.size.min(state.allocated_size) {
+            return Ok(None);
+        }
+
+        let cluster_size = self.mapping_cluster_size(super_block)?;
+        let mapping_chain = ExfatChain::new(
+            block_device,
+            super_block,
+            state.start_cluster,
+            Some(state.cluster_count),
+            state.chain_mode,
+        )?;
+        let (mapped_chain, intra_cluster_offset) =
+            mapping_chain.walk_to_cluster_at_offset(block_device, super_block, request_offset)?;
+        let cluster_start_offset = mapped_chain.physical_cluster_start_offset(super_block)?;
+        let physical_byte_offset = cluster_start_offset
+            .checked_add(intra_cluster_offset)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EOVERFLOW,
+                    "exFAT mapped byte offset overflowed usize",
+                )
+            })?;
+        let backed_end = state.metadata.size.min(state.allocated_size);
+        let backed_remaining = backed_end.checked_sub(request_offset).ok_or_else(|| {
+            Error::with_message(
+                Errno::EINVAL,
+                "exFAT mapping request starts beyond the physically backed range",
+            )
+        })?;
+        let cluster_remaining =
+            cluster_size
+                .checked_sub(intra_cluster_offset)
+                .ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EINVAL,
+                        "exFAT mapping request exceeds the containing cluster",
+                    )
+                })?;
+        let mappable_byte_count = request_len.min(backed_remaining).min(cluster_remaining);
+
+        Ok(Some(PhysicalFileRange {
+            cluster: mapped_chain.current_cluster(),
+            physical_byte_offset,
+            intra_cluster_offset,
+            mappable_byte_count,
+        }))
+    }
+
+    fn write_disk_bytes(
+        block_device: &dyn BlockDevice,
+        physical_byte_offset: usize,
+        reader: &mut VmReader,
+        byte_count: usize,
+    ) -> Result<usize> {
+        if byte_count == 0 {
+            return Ok(0);
+        }
+        let write_end = physical_byte_offset
+            .checked_add(byte_count)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "exFAT write offset overflowed usize"))?;
+        let aligned_start = physical_byte_offset / BLOCK_SIZE * BLOCK_SIZE;
+        let aligned_end = write_end.div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
+        let aligned_len = aligned_end
+            .checked_sub(aligned_start)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "exFAT aligned write underflowed"))?;
+
+        // The block-device byte write seam only accepts sector-aligned requests.
+        let mut aligned_buf = vec![0; aligned_len];
+        read_metadata_bytes(block_device, aligned_start, &mut aligned_buf)?;
+
+        let start_offset = physical_byte_offset
+            .checked_sub(aligned_start)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "exFAT aligned write underflowed"))?;
+        let end_offset = start_offset
+            .checked_add(byte_count)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "exFAT aligned write overflowed"))?;
+        let mut aligned_writer =
+            VmWriter::from(&mut aligned_buf[start_offset..end_offset]).to_fallible();
+        let copied = reader
+            .read_fallible(&mut aligned_writer)
+            .map_err(|(error, _)| error)?;
+        if copied == 0 {
+            return Ok(0);
+        }
+
+        block_device.write_bytes(aligned_start, &aligned_buf)?;
+        Ok(copied)
+    }
+
+    fn write_to_disk_with_state(
+        &self,
+        state: &ExfatInodeWriteState,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        offset: usize,
+        reader: &mut VmReader,
+    ) -> Result<usize> {
+        let total_len = reader.remain();
+        let mut written = 0usize;
+
+        while written < total_len {
+            let remaining = total_len - written;
+            let logical_offset = offset.checked_add(written).ok_or_else(|| {
+                Error::with_message(Errno::EOVERFLOW, "exFAT logical write offset overflowed")
+            })?;
+            let Some(file_range) = self.map_physical_file_range_with_state(
+                state,
+                block_device,
+                super_block,
+                logical_offset,
+                remaining,
+            )? else {
+                return Err(Error::with_message(
+                    Errno::EINVAL,
+                    "exFAT write request exceeds the committed allocation coverage",
+                ));
+            };
+
+            let byte_count = remaining.min(file_range.mappable_byte_count);
+            let copied = Self::write_disk_bytes(
+                block_device,
+                file_range.physical_byte_offset,
+                reader,
+                byte_count,
+            )?;
+            if copied == 0 {
+                break;
+            }
+
+            written = written.checked_add(copied).ok_or_else(|| {
+                Error::with_message(Errno::EOVERFLOW, "exFAT write length overflowed usize")
+            })?;
+        }
+
+        Ok(written)
+    }
+
+    fn zero_fill_disk_range_with_state(
+        &self,
+        state: &ExfatInodeWriteState,
+        block_device: &dyn BlockDevice,
+        super_block: &ExfatSuperBlock,
+        offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let zeros = vec![0; len];
+        let mut reader = VmReader::from(zeros.as_slice()).to_fallible();
+        let copied = self.write_to_disk_with_state(state, block_device, super_block, offset, &mut reader)?;
+        if copied != len {
+            return Err(Error::with_message(
+                Errno::EIO,
+                "exFAT zero-fill short write on the disk-backed file range",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn commit_write_state(&self, write_state: &ExfatInodeWriteState) {
+        self.replace_state(*write_state);
     }
 
     fn ensure_directory(&self) -> Result<()> {
@@ -390,12 +817,6 @@ impl ExfatInode {
 
         Ok(record_folded_name == lookup_folded_name)
     }
-
-    fn visible_record_name(file_record: &DirectoryFileRecord) -> Result<String> {
-        String::from_utf16(&file_record.raw_name_units()).map_err(|_| {
-            Error::with_message(Errno::EINVAL, "directory record name is not valid UTF-16")
-        })
-    }
 }
 
 impl InodeIo for ExfatInode {
@@ -405,6 +826,8 @@ impl InodeIo for ExfatInode {
         writer: &mut VmWriter,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
+        let _publication_guard = self.publication_gate.read();
+
         if self.type_() != InodeType::File {
             return Err(Error::with_message(
                 Errno::EISDIR,
@@ -479,15 +902,97 @@ impl InodeIo for ExfatInode {
 
     fn write_at(
         &self,
-        _offset: usize,
-        _reader: &mut VmReader,
-        _status_flags: StatusFlags,
+        offset: usize,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
-        // Temporary seam: EXR-READ-OPS-25, EXR-WRITE-30, and EXR-PGCACHE-26 will own this path.
-        Err(Error::with_message(
-            Errno::EOPNOTSUPP,
-            "exFAT inode write path is not implemented yet",
-        ))
+        if self.type_() != InodeType::File {
+            return Err(Error::with_message(
+                Errno::EISDIR,
+                "exFAT buffered writes require a regular-file inode",
+            ));
+        }
+        if status_flags.contains(StatusFlags::O_DIRECT) {
+            return Err(Error::with_message(
+                Errno::EOPNOTSUPP,
+                "exFAT inode write path does not support direct I/O yet",
+            ));
+        }
+        if !reader.has_remain() {
+            return Ok(0);
+        }
+
+        let _publication_guard = self.publication_gate.write();
+        let write_len = reader.remain();
+        let write_end = offset.checked_add(write_len).ok_or_else(|| {
+            Error::with_message(Errno::EOVERFLOW, "exFAT write request overflowed usize")
+        })?;
+        let fs = self.owner_fs();
+        let (block_device, super_block) = fs.file_read_context();
+        let cluster_size = self.mapping_cluster_size(super_block)?;
+        let mut write_state = self.write_state();
+        let original_valid_size = write_state.valid_size;
+        let original_size = write_state.metadata.size;
+
+        if write_end > write_state.allocated_size {
+            let additional_cluster_count = Self::committed_growth_clusters(
+                write_state.allocated_size,
+                write_end,
+                cluster_size,
+            )?;
+            if additional_cluster_count > 0 {
+                let allocation = fs.allocate_clusters(additional_cluster_count)?;
+                Self::fold_committed_allocation(
+                    &mut write_state,
+                    allocation,
+                    block_device,
+                    super_block,
+                    cluster_size,
+                )?;
+            }
+        }
+
+        write_state.metadata.size = original_size.max(write_end);
+        write_state.valid_size = original_valid_size.max(write_end);
+
+        if let Some(page_cache) = self.page_cache.get() {
+            page_cache.resize(write_state.metadata.size)?;
+        }
+
+        if offset > original_valid_size {
+            self.zero_fill_disk_range_with_state(
+                &write_state,
+                block_device,
+                super_block,
+                original_valid_size,
+                offset - original_valid_size,
+            )?;
+        }
+
+        let copied = self.write_to_disk_with_state(
+            &write_state,
+            block_device,
+            super_block,
+            offset,
+            reader,
+        )?;
+        if copied != write_len {
+            return Err(Error::with_message(
+                Errno::EIO,
+                "exFAT buffered write short-copied the caller bytes",
+            ));
+        }
+
+        if let Some(page_cache) = self.page_cache.get() {
+            page_cache.discard_range(original_valid_size.min(offset)..write_state.metadata.size);
+        }
+
+        let now = inode_timestamp_now();
+        write_state.metadata.last_modify_at = now;
+        write_state.metadata.last_meta_change_at = now;
+        self.commit_write_state(&write_state);
+
+        Ok(copied)
     }
 }
 
@@ -505,13 +1010,21 @@ impl PageCacheBackend for ExfatInode {
     }
 
     fn npages(&self) -> usize {
-        self.page_count()
+        // Page-cache internals may ask the backend for `npages()` while a
+        // buffered write already owns the publication gate. In that case, the
+        // committed inode snapshot is still a stable published state, so fall
+        // back to it instead of self-deadlocking on the same owner-local seam.
+        if let Some(_publication_guard) = self.publication_gate.try_read() {
+            return self.page_count();
+        }
+
+        self.snapshot().metadata.size.div_ceil(PAGE_SIZE)
     }
 }
 
 impl Inode for ExfatInode {
     fn size(&self) -> usize {
-        self.metadata.size
+        self.snapshot().metadata.size
     }
 
     fn resize(&self, _new_size: usize) -> Result<()> {
@@ -522,7 +1035,7 @@ impl Inode for ExfatInode {
     }
 
     fn metadata(&self) -> Metadata {
-        self.metadata
+        self.snapshot().metadata
     }
 
     fn ino(&self) -> u64 {
@@ -567,7 +1080,7 @@ impl Inode for ExfatInode {
     }
 
     fn atime(&self) -> Duration {
-        self.metadata.last_access_at
+        self.snapshot().metadata.last_access_at
     }
 
     fn set_atime(&self, _time: Duration) {
@@ -575,7 +1088,7 @@ impl Inode for ExfatInode {
     }
 
     fn mtime(&self) -> Duration {
-        self.metadata.last_modify_at
+        self.snapshot().metadata.last_modify_at
     }
 
     fn set_mtime(&self, _time: Duration) {
@@ -583,7 +1096,7 @@ impl Inode for ExfatInode {
     }
 
     fn ctime(&self) -> Duration {
-        self.metadata.last_meta_change_at
+        self.snapshot().metadata.last_meta_change_at
     }
 
     fn set_ctime(&self, _time: Duration) {
@@ -609,9 +1122,9 @@ impl Inode for ExfatInode {
         let fs = self.owner_fs();
         let mut directory_stream = fs.directory_stream(
             Some(self.ino()),
-            self.start_cluster,
-            self.cluster_count,
-            self.chain_mode,
+            self.start_cluster(),
+            self.cluster_count(),
+            self.chain_mode(),
         )?;
         let mut logical_offset = 0usize;
         let mut emitted_count = 0usize;
@@ -631,7 +1144,7 @@ impl Inode for ExfatInode {
                 continue;
             }
 
-            let name = Self::visible_record_name(&file_record)?;
+            let name = fs.visible_name_from_utf16_units(&file_record.raw_name_units())?;
             let emitted_offset = logical_offset.checked_add(1).ok_or_else(|| {
                 Error::with_message(
                     Errno::EOVERFLOW,
@@ -668,19 +1181,15 @@ impl Inode for ExfatInode {
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         self.ensure_directory()?;
 
-        let lookup_name_units: Vec<u16> = name.encode_utf16().collect();
-        if lookup_name_units.len() > EXFAT_NAME_MAX {
-            return Err(Error::new(Errno::ENAMETOOLONG));
-        }
-
         let fs = self.owner_fs();
-        let lookup_folded_name = fs.fold_utf16(&lookup_name_units)?;
+        let lookup_name = fs.convert_name(name)?;
+        let lookup_folded_name = fs.fold_utf16(lookup_name.as_utf16_units())?;
         let lookup_name_hash = fs.name_hash_from_folded_utf16(&lookup_folded_name)?;
         let mut directory_stream = fs.directory_stream(
             Some(self.ino()),
-            self.start_cluster,
-            self.cluster_count,
-            self.chain_mode,
+            self.start_cluster(),
+            self.cluster_count(),
+            self.chain_mode(),
         )?;
 
         while let Some(record) = directory_stream.next_record()? {
@@ -708,6 +1217,18 @@ fn allocated_size(cluster_count: u32, cluster_size: usize) -> Result<usize> {
     cluster_size
         .checked_mul(cluster_count as usize)
         .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "exFAT inode allocation overflow"))
+}
+
+fn inode_timestamp_now() -> Duration {
+    #[cfg(ktest)]
+    {
+        Duration::ZERO
+    }
+
+    #[cfg(not(ktest))]
+    {
+        crate::time::clocks::RealTimeCoarseClock::get().read_time()
+    }
 }
 
 #[cfg(ktest)]
@@ -1171,6 +1692,8 @@ mod tests {
     fn prepared_buffered_read_context() -> (Arc<ExfatMemoryDisk>, ExfatSuperBlock, Arc<ExfatFs>) {
         let disk = Arc::new(load_exfat_disk());
         let super_block = read_primary_super_block(disk.as_ref()).unwrap();
+        let (upcase_dentry, raw_table_bytes) = valid_upcase_fixture();
+        write_upcase_prerequisite(&disk, &super_block, upcase_dentry, &raw_table_bytes);
         let block_device: Arc<dyn BlockDevice> = disk.clone();
         let fs = Arc::new(ExfatFs::new(block_device, super_block).unwrap());
 
@@ -1317,11 +1840,12 @@ mod tests {
 
         assert_eq!(inode.location, Some(location));
         assert_eq!(inode.file_attribute, file_attribute);
-        assert_eq!(inode.valid_size, valid_size as usize);
-        assert_eq!(inode.start_cluster, chain.current_cluster());
-        assert_eq!(inode.cluster_count, chain.cluster_count());
-        assert_eq!(inode.chain_mode, ChainMode::Contiguous);
-        assert_eq!(inode.allocated_size, cluster_size);
+        let snapshot = inode.snapshot();
+        assert_eq!(snapshot.valid_size, valid_size as usize);
+        assert_eq!(snapshot.start_cluster, chain.current_cluster());
+        assert_eq!(snapshot.cluster_count, chain.cluster_count());
+        assert_eq!(snapshot.chain_mode, ChainMode::Contiguous);
+        assert_eq!(snapshot.allocated_size, cluster_size);
 
         let upgraded_fs = inode.fs();
         let expected_fs: Arc<dyn FileSystem> = fs.clone();
@@ -1344,19 +1868,166 @@ mod tests {
         assert_eq!(read_len, expected_read.len());
         assert_eq!(read_buffer, expected_read);
 
-        let write_buffer = [1u8; 4];
+        let write_offset = valid_size as usize + 8;
+        let write_buffer = [0xA1, 0xB2, 0xC3, 0xD4];
         let mut write_reader = VmReader::from(write_buffer.as_slice()).to_fallible();
-        assert_eopnotsupp(inode.write_at(0, &mut write_reader, StatusFlags::empty()));
+        let write_len = inode
+            .write_at(write_offset, &mut write_reader, StatusFlags::empty())
+            .unwrap();
+        assert_eq!(write_len, write_buffer.len());
+
+        let mut write_back_buffer = [0x5A; 12];
+        let mut write_back_writer = VmWriter::from(write_back_buffer.as_mut_slice()).to_fallible();
+        let read_back_len = inode
+            .read_at(valid_size as usize, &mut write_back_writer, StatusFlags::empty())
+            .unwrap();
+        assert_eq!(read_back_len, 12);
+        assert_eq!(&write_back_buffer[..8], &[0; 8]);
+        assert_eq!(&write_back_buffer[8..], &write_buffer);
         assert_eopnotsupp(inode.resize(2048));
         assert_eopnotsupp(inode.set_mode(InodeMode::S_IRUSR));
         assert_eopnotsupp(inode.set_owner(Uid::new(2000)));
         assert_eopnotsupp(inode.set_group(Gid::new(2001)));
 
-        let metadata_after_rejections = inode.metadata();
-        assert_eq!(metadata_after_rejections.size, file_size as usize);
-        assert_eq!(metadata_after_rejections.mode, mode);
-        assert_eq!(metadata_after_rejections.uid, uid);
-        assert_eq!(metadata_after_rejections.gid, gid);
+        let snapshot_after_write = inode.snapshot();
+        assert_eq!(snapshot_after_write.metadata.size, file_size as usize);
+        assert_eq!(snapshot_after_write.valid_size, write_offset + write_buffer.len());
+        assert_eq!(snapshot_after_write.allocated_size, cluster_size);
+        assert_eq!(snapshot_after_write.metadata.mode, mode);
+        assert_eq!(snapshot_after_write.metadata.uid, uid);
+        assert_eq!(snapshot_after_write.metadata.gid, gid);
+        assert_eq!(
+            inode.page_cache.get().unwrap().pages().size(),
+            (file_size as usize).div_ceil(PAGE_SIZE) * PAGE_SIZE
+        );
+    }
+
+    // Confirms a zero-sized file grows through the committed allocation seam before bytes land.
+    #[ktest]
+    fn inode_buffered_write_grows_an_empty_file_and_publishes_allocation_facts() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        ExfatFs::open_root_inode(&fs).unwrap();
+        let block_device: Arc<dyn BlockDevice> = disk.clone();
+        let inode = mapping_test_inode(&fs, &block_device, &super_block, 0, 0, 0, 0);
+
+        let write_buffer = [0x91, 0x92, 0x93, 0x94, 0x95, 0x96];
+        let mut write_reader = VmReader::from(write_buffer.as_slice()).to_fallible();
+        let write_len = inode
+            .write_at(0, &mut write_reader, StatusFlags::empty())
+            .unwrap();
+
+        let mut read_buffer = [0xA5; 6];
+        let mut read_writer = VmWriter::from(read_buffer.as_mut_slice()).to_fallible();
+        let read_len = inode
+            .read_at(0, &mut read_writer, StatusFlags::empty())
+            .unwrap();
+        let snapshot = inode.snapshot();
+
+        assert_eq!(write_len, write_buffer.len());
+        assert_eq!(read_len, write_buffer.len());
+        assert_eq!(read_buffer, write_buffer);
+        assert_eq!(snapshot.metadata.size, write_buffer.len());
+        assert_eq!(snapshot.valid_size, write_buffer.len());
+        assert!(snapshot.allocated_size >= write_buffer.len());
+        assert_ne!(snapshot.start_cluster, 0);
+        assert_eq!(
+            inode.page_cache.get().unwrap().pages().size(),
+            write_buffer.len().div_ceil(PAGE_SIZE) * PAGE_SIZE
+        );
+    }
+
+    // Confirms extending writes on non-empty files keep newly committed growth reachable.
+    #[ktest]
+    fn inode_buffered_write_extends_a_non_empty_file_across_growth() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        ExfatFs::open_root_inode(&fs).unwrap();
+        let cluster_size = super_block.cluster_size();
+        let initial_bytes = patterned_file_bytes(cluster_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            1,
+            cluster_size as u64,
+            cluster_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &initial_bytes,
+        );
+
+        let write_offset = cluster_size - 4;
+        let write_buffer = [0xD1, 0xD2, 0xD3, 0xD4, 0xE1, 0xE2, 0xE3, 0xE4];
+        let mut write_reader = VmReader::from(write_buffer.as_slice()).to_fallible();
+        let write_len = inode
+            .write_at(write_offset, &mut write_reader, StatusFlags::empty())
+            .unwrap();
+
+        let mut read_back_buffer = [0xA5; 8];
+        let mut read_back_writer = VmWriter::from(read_back_buffer.as_mut_slice()).to_fallible();
+        let read_back_len = inode
+            .read_at(write_offset, &mut read_back_writer, StatusFlags::empty())
+            .unwrap();
+        let snapshot = inode.snapshot();
+
+        assert_eq!(write_len, write_buffer.len());
+        assert_eq!(read_back_len, write_buffer.len());
+        assert_eq!(read_back_buffer, write_buffer);
+        assert_eq!(snapshot.metadata.size, cluster_size + 4);
+        assert_eq!(snapshot.valid_size, cluster_size + 4);
+        assert_eq!(snapshot.cluster_count, 2);
+        assert_eq!(snapshot.allocated_size, cluster_size * 2);
+    }
+
+    // Confirms buffered-write publication leaves reads and `npages()` on the
+    // same published inode snapshot after a growth-across-page-boundary write.
+    #[ktest]
+    fn inode_publication_gate_keeps_read_and_npages_on_one_published_state() {
+        let (disk, super_block, fs) = prepared_buffered_read_context();
+        let file_size = PAGE_SIZE - 8;
+        let file_bytes = patterned_file_bytes(file_size);
+        let inode = buffered_read_test_inode(
+            &fs,
+            &disk,
+            &super_block,
+            super_block.root_dir,
+            2,
+            file_size as u64,
+            file_size as u64,
+        );
+        write_contiguous_file_bytes(
+            disk.as_ref(),
+            &super_block,
+            super_block.root_dir,
+            &file_bytes,
+        );
+
+        let write_offset = PAGE_SIZE - 8;
+        let write_buffer = [
+            0xE1, 0xE2, 0xE3, 0xE4, 0xF1, 0xF2, 0xF3, 0xF4, 0xA1, 0xA2, 0xA3, 0xA4, 0xB1, 0xB2,
+            0xB3, 0xB4,
+        ];
+        let mut write_reader = VmReader::from(write_buffer.as_slice()).to_fallible();
+        let write_len = inode
+            .write_at(write_offset, &mut write_reader, StatusFlags::empty())
+            .unwrap();
+
+        let mut read_back_buffer = [0x5A; 16];
+        let mut read_back_writer = VmWriter::from(read_back_buffer.as_mut_slice()).to_fallible();
+        let read_back_len = inode
+            .read_at(write_offset, &mut read_back_writer, StatusFlags::empty())
+            .unwrap();
+        let snapshot = inode.snapshot();
+
+        assert_eq!(write_len, write_buffer.len());
+        assert_eq!(read_back_len, write_buffer.len());
+        assert_eq!(read_back_buffer, write_buffer);
+        assert_eq!(snapshot.metadata.size, PAGE_SIZE + 8);
+        assert_eq!(snapshot.valid_size, PAGE_SIZE + 8);
+        assert_eq!(inode.page_cache.get().unwrap().backend().npages(), 2);
     }
 
     // Confirms regular-file snapshots own their page-cache attachment and size facts.
@@ -1512,11 +2183,11 @@ mod tests {
             cluster_size_u64 * 3,
         );
         let snapshot_before = (
-            inode.metadata().size,
-            inode.valid_size,
-            inode.start_cluster,
-            inode.cluster_count,
-            inode.allocated_size,
+            inode.snapshot().metadata.size,
+            inode.snapshot().valid_size,
+            inode.snapshot().start_cluster,
+            inode.snapshot().cluster_count,
+            inode.snapshot().allocated_size,
         );
 
         let boundary_range = inode
@@ -1558,11 +2229,11 @@ mod tests {
         );
         assert_eq!(
             (
-                inode.metadata().size,
-                inode.valid_size,
-                inode.start_cluster,
-                inode.cluster_count,
-                inode.allocated_size,
+                inode.snapshot().metadata.size,
+                inode.snapshot().valid_size,
+                inode.snapshot().start_cluster,
+                inode.snapshot().cluster_count,
+                inode.snapshot().allocated_size,
             ),
             snapshot_before
         );
@@ -1825,9 +2496,9 @@ mod tests {
         let mut directory_stream = fs
             .directory_stream(
                 Some(root.ino()),
-                root.start_cluster,
-                root.cluster_count,
-                root.chain_mode,
+                root.start_cluster(),
+                root.cluster_count(),
+                root.chain_mode(),
             )
             .unwrap();
         let file_record = loop {
