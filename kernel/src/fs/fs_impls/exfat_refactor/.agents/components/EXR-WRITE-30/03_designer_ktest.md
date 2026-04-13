@@ -8,8 +8,8 @@
 - Title: `ExfatInode` buffered write and resize coverage
 - Status: `Specified`
 - Author: designer
-- Date: `2026-04-12`
-- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-WRITE-30/20260412-2215-designer-packet.md`
+- Date: `2026-04-13`
+- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-WRITE-30/20260413-0650-designer-repair-packet.md`
 - Based on architect artifact: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/components/EXR-WRITE-30/00_architect.md`
 
 ## Purpose
@@ -35,6 +35,7 @@ Define the minimum checker-owned regression coverage needed to prove that buffer
 - Assertions:
   - The returned byte count matches the written input.
   - The later read observes the new bytes at the expected offset.
+  - The inode snapshot keeps the same committed allocation facts and page-cache size.
   - The write does not widen into a new allocator or sync owner.
 
 ### Scenario 2: Write growth zero-fills the skipped valid-size gap before publishing it
@@ -49,6 +50,7 @@ Define the minimum checker-owned regression coverage needed to prove that buffer
   - Bytes before the write offset are zero-filled.
   - Bytes at and after the write offset match the caller input.
   - The published `size` and `valid_size` reflect one coherent post-write state.
+  - The page-cache size matches the newly visible EOF.
 
 ### Scenario 3: Resize shrink truncates visible EOF and cache sizing
 
@@ -74,13 +76,14 @@ Define the minimum checker-owned regression coverage needed to prove that buffer
   - The inode publishes a larger size and updated allocation facts only after the growth call succeeds.
   - The unwritten grown suffix is zero-visible.
   - The observed behavior stays on `ExfatInode` and consumes committed allocation facts rather than exposing allocator internals.
+  - The new `start_cluster`, `cluster_count`, `chain_mode`, and `allocated_size` values are visible on the inode snapshot only after commit.
 
 ## Observability
 
-- These tests should inspect write-visible bytes, `size`, `valid_size`, inode-local page-cache sizing, and allocation facts on the inode snapshot.
+- These tests should inspect write-visible bytes, `size`, `valid_size`, `start_cluster`, `cluster_count`, `chain_mode`, `allocated_size`, inode-local page-cache sizing, and allocation facts on the inode snapshot.
 - They should not introduce sync-order coverage, background writeback behavior, or direct-I/O coverage.
 - They should not retest allocator search or mapping translation in isolation; those remain covered by their own components.
-- No dedicated concurrency tests are required.
+- No dedicated concurrency tests are required because `02_designer_async.md` documents a synchronous publication boundary only.
 
 ## Minimal Checker Obligation
 

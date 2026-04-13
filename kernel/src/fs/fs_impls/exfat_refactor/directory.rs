@@ -11,8 +11,9 @@
 use aster_block::BlockDevice;
 
 use super::{
-    dentry::{DENTRY_SIZE, ExfatDentry, ExfatFileDentry, RawExfatDentry},
-    fat::{ChainMode, ClusterId, ExfatChain},
+    allocator::AllocationResult,
+    dentry::{DENTRY_SIZE, ExfatDentry, ExfatDeletedDentry, ExfatFileDentry, RawExfatDentry},
+    fat::{ChainMode, ClusterId, ExfatChain, FatValue, write_next_fat_value},
     fileset::ExfatDentrySet,
     io::read_metadata_bytes,
     super_block::ExfatSuperBlock,
@@ -24,6 +25,19 @@ use crate::{
 
 const EXFAT_FILE_ATTRIBUTE_DIRECTORY: u16 = 0x10;
 const EXFAT_STREAM_FLAG_CONTIGUOUS: u8 = 0x02;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectorySlotSearch {
+    Fits {
+        start_entry_index: usize,
+        consumes_unused_terminator: bool,
+    },
+    TailTooShort {
+        start_entry_index: usize,
+        consumes_unused_terminator: bool,
+    },
+    NoReusableTail,
+}
 
 /// Streams directory records in on-disk order.
 #[derive(Debug)]
@@ -328,18 +342,610 @@ impl<'a> DirectoryEngine<'a> {
         self.cursor.cluster_offset = 0;
         Ok(())
     }
+
+    /// Places a validated file-record set into a reusable slot range.
+    pub(super) fn place_dentry_set(
+        &mut self,
+        dentry_set: &ExfatDentrySet,
+        committed_growth: Option<AllocationResult>,
+    ) -> Result<DirectoryRecordLocation> {
+        let bytes = dentry_set.to_le_bytes();
+        let required_slots = bytes.len() / DENTRY_SIZE;
+        let search = self.find_reusable_slot_run(required_slots)?;
+
+        match search {
+            DirectorySlotSearch::Fits {
+                start_entry_index,
+                consumes_unused_terminator,
+            } => {
+                self.write_dentry_bytes_at(start_entry_index, &bytes)?;
+                if consumes_unused_terminator {
+                    self.publish_unused_terminator(start_entry_index, required_slots)?;
+                }
+                self.location_for_entry_index(start_entry_index)
+            }
+            DirectorySlotSearch::TailTooShort {
+                start_entry_index,
+                consumes_unused_terminator,
+            } => {
+                let Some(committed_growth) = committed_growth else {
+                    return Err(Error::with_message(
+                        Errno::ENOSPC,
+                        "directory has no reusable slot range for the validated record",
+                    ));
+                };
+                self.extend_directory_chain(committed_growth)?;
+                self.write_dentry_bytes_at(start_entry_index, &bytes)?;
+                if consumes_unused_terminator
+                    || start_entry_index
+                        .checked_add(required_slots)
+                        .ok_or_else(|| {
+                            Error::with_message(Errno::EINVAL, "directory tail overflow")
+                        })?
+                        < self.directory_entry_count()
+                {
+                    self.publish_unused_terminator(start_entry_index, required_slots)?;
+                }
+                self.location_for_entry_index(start_entry_index)
+            }
+            DirectorySlotSearch::NoReusableTail => {
+                let Some(committed_growth) = committed_growth else {
+                    return Err(Error::with_message(
+                        Errno::ENOSPC,
+                        "directory has no reusable slot range for the validated record",
+                    ));
+                };
+                let placement_entry_index = self.directory_entry_count();
+                self.extend_directory_chain(committed_growth)?;
+                self.write_dentry_bytes_at(placement_entry_index, &bytes)?;
+                self.publish_unused_terminator(placement_entry_index, required_slots)?;
+                self.location_for_entry_index(placement_entry_index)
+            }
+        }
+    }
+
+    /// Rewrites a validated file-record set at a trusted directory location.
+    pub(super) fn rewrite_dentry_set(
+        &mut self,
+        location: DirectoryRecordLocation,
+        dentry_set: &ExfatDentrySet,
+        committed_growth: Option<AllocationResult>,
+    ) -> Result<DirectoryRecordLocation> {
+        let bytes = dentry_set.to_le_bytes();
+        let required_slots = bytes.len() / DENTRY_SIZE;
+        let location_entry_index = self.entry_index_from_location(location)?;
+        let existing_slots = self.record_slot_count(location)?;
+        let trailing_start_index = location_entry_index
+            .checked_add(existing_slots)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory slot range overflow"))?;
+        let (trailing_reusable_slots, trailing_consumes_unused_terminator) =
+            self.trailing_reusable_tail_state(trailing_start_index, required_slots)?;
+        let in_place_capacity = existing_slots
+            .checked_add(trailing_reusable_slots)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory slot range overflow"))?;
+
+        if required_slots <= in_place_capacity {
+            self.write_dentry_bytes_at(location_entry_index, &bytes)?;
+            if required_slots < existing_slots {
+                let tombstone_start_index = location_entry_index
+                    .checked_add(required_slots)
+                    .ok_or_else(|| {
+                        Error::with_message(Errno::EINVAL, "directory slot range overflow")
+                })?;
+                self.tombstone_slot_range(tombstone_start_index, existing_slots - required_slots)?;
+            } else if trailing_consumes_unused_terminator {
+                self.publish_unused_terminator(location_entry_index, required_slots)?;
+            }
+
+            return Ok(location);
+        }
+
+        let search = self.find_reusable_slot_run(required_slots)?;
+        match search {
+            DirectorySlotSearch::Fits {
+                start_entry_index,
+                consumes_unused_terminator,
+            } => {
+                self.write_dentry_bytes_at(start_entry_index, &bytes)?;
+                self.tombstone_slot_range(location_entry_index, existing_slots)?;
+                if consumes_unused_terminator {
+                    self.publish_unused_terminator(start_entry_index, required_slots)?;
+                }
+                self.location_for_entry_index(start_entry_index)
+            }
+            DirectorySlotSearch::TailTooShort {
+                start_entry_index,
+                consumes_unused_terminator,
+            } => {
+                let Some(committed_growth) = committed_growth else {
+                    return Err(Error::with_message(
+                        Errno::ENOSPC,
+                        "directory has no reusable slot range for the relocated record",
+                    ));
+                };
+                self.extend_directory_chain(committed_growth)?;
+                self.write_dentry_bytes_at(start_entry_index, &bytes)?;
+                self.tombstone_slot_range(location_entry_index, existing_slots)?;
+                if consumes_unused_terminator
+                    || start_entry_index
+                        .checked_add(required_slots)
+                        .ok_or_else(|| {
+                            Error::with_message(Errno::EINVAL, "directory tail overflow")
+                        })?
+                        < self.directory_entry_count()
+                {
+                    self.publish_unused_terminator(start_entry_index, required_slots)?;
+                }
+                self.location_for_entry_index(start_entry_index)
+            }
+            DirectorySlotSearch::NoReusableTail => {
+                let Some(committed_growth) = committed_growth else {
+                    return Err(Error::with_message(
+                        Errno::ENOSPC,
+                        "directory has no reusable slot range for the relocated record",
+                    ));
+                };
+                let placement_entry_index = self.directory_entry_count();
+                self.extend_directory_chain(committed_growth)?;
+                self.write_dentry_bytes_at(placement_entry_index, &bytes)?;
+                self.tombstone_slot_range(location_entry_index, existing_slots)?;
+                self.publish_unused_terminator(placement_entry_index, required_slots)?;
+                self.location_for_entry_index(placement_entry_index)
+            }
+        }
+    }
+
+    /// Tombstones the live slots for a validated file record.
+    pub(super) fn tombstone_dentry_set(&mut self, location: DirectoryRecordLocation) -> Result<()> {
+        let location_entry_index = self.entry_index_from_location(location)?;
+        let slot_count = self.record_slot_count(location)?;
+        self.tombstone_slot_range(location_entry_index, slot_count)
+    }
+
+    fn directory_entry_count(&self) -> usize {
+        self.directory_end_offset / DENTRY_SIZE
+    }
+
+    fn entry_index_from_location(&self, location: DirectoryRecordLocation) -> Result<usize> {
+        let entry_index = usize::try_from(location.dentry_entry_index).map_err(|_| {
+            Error::with_message(Errno::EOVERFLOW, "directory record entry index overflowed usize")
+        })?;
+        let expected_offset = self.entry_byte_offset(entry_index)?;
+        if expected_offset != location.dentry_set_byte_offset {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory record location is inconsistent",
+            ));
+        }
+
+        Ok(entry_index)
+    }
+
+    fn location_for_entry_index(&self, entry_index: usize) -> Result<DirectoryRecordLocation> {
+        let byte_offset = self.entry_byte_offset(entry_index)?;
+        let dentry_entry_index = u32::try_from(entry_index).map_err(|_| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory record entry index overflowed u32",
+            )
+        })?;
+        Ok(DirectoryRecordLocation::new(
+            self.parent_ino,
+            byte_offset,
+            dentry_entry_index,
+        ))
+    }
+
+    fn entry_byte_offset(&self, entry_index: usize) -> Result<usize> {
+        entry_index.checked_mul(DENTRY_SIZE).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "directory entry byte offset overflow")
+        })
+    }
+
+    fn read_dentry_at(&self, entry_index: usize) -> Result<ExfatDentry> {
+        let mut raw_bytes = [0; DENTRY_SIZE];
+        let byte_offset = self.entry_byte_offset(entry_index)?;
+        self.read_directory_bytes(byte_offset, &mut raw_bytes)?;
+
+        Ok(ExfatDentry::from(RawExfatDentry::from_bytes(&raw_bytes)))
+    }
+
+    fn record_slot_count(&self, location: DirectoryRecordLocation) -> Result<usize> {
+        let entry_index = self.entry_index_from_location(location)?;
+        match self.read_dentry_at(entry_index)? {
+            ExfatDentry::File(file_dentry) => {
+                Ok(usize::from(file_dentry.num_secondary) + 1)
+            }
+            _ => Err(Error::with_message(
+                Errno::EINVAL,
+                "directory record location does not point at a file primary",
+            )),
+        }
+    }
+
+    fn trailing_reusable_tail_state(
+        &self,
+        start_entry_index: usize,
+        required_slots: usize,
+    ) -> Result<(usize, bool)> {
+        let total_entries = self.directory_entry_count();
+        if start_entry_index >= total_entries {
+            return Ok((0, false));
+        }
+
+        let mut reusable_slots = 0usize;
+        for entry_index in start_entry_index..total_entries {
+            match self.read_dentry_at(entry_index)? {
+                ExfatDentry::Deleted(_) => {
+                    reusable_slots += 1;
+                }
+                ExfatDentry::Unused => {
+                    let consumes_unused_terminator = required_slots > reusable_slots;
+                    return Ok((
+                        total_entries - start_entry_index,
+                        consumes_unused_terminator,
+                    ));
+                }
+                _ => break,
+            }
+        }
+
+        Ok((reusable_slots, false))
+    }
+
+    fn find_reusable_slot_run(&self, required_slots: usize) -> Result<DirectorySlotSearch> {
+        if required_slots == 0 {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "validated directory records must occupy at least one slot",
+            ));
+        }
+
+        let total_entries = self.directory_entry_count();
+        let mut run_start = None;
+        let mut run_length = 0usize;
+
+        for entry_index in 0..total_entries {
+            match self.read_dentry_at(entry_index)? {
+                ExfatDentry::Deleted(_) => {
+                    run_start.get_or_insert(entry_index);
+                    run_length += 1;
+                    if run_length >= required_slots {
+                        return Ok(DirectorySlotSearch::Fits {
+                            start_entry_index: run_start.expect("deleted run start must be set"),
+                            consumes_unused_terminator: false,
+                        });
+                    }
+                }
+                ExfatDentry::Unused => {
+                    let start_entry_index = run_start.unwrap_or(entry_index);
+                    let consumes_unused_terminator = required_slots > entry_index - start_entry_index;
+                    if total_entries - start_entry_index >= required_slots {
+                        return Ok(DirectorySlotSearch::Fits {
+                            start_entry_index,
+                            consumes_unused_terminator,
+                        });
+                    }
+                    return Ok(DirectorySlotSearch::TailTooShort {
+                        start_entry_index,
+                        consumes_unused_terminator,
+                    });
+                }
+                _ => {
+                    run_start = None;
+                    run_length = 0;
+                }
+            }
+        }
+
+        if let Some(start_entry_index) = run_start {
+            if total_entries - start_entry_index >= required_slots {
+                return Ok(DirectorySlotSearch::Fits {
+                    start_entry_index,
+                    consumes_unused_terminator: false,
+                });
+            }
+            return Ok(DirectorySlotSearch::TailTooShort {
+                start_entry_index,
+                consumes_unused_terminator: false,
+            });
+        }
+
+        Ok(DirectorySlotSearch::NoReusableTail)
+    }
+
+    fn tombstone_slot_range(&self, start_entry_index: usize, slot_count: usize) -> Result<()> {
+        if slot_count == 0 {
+            return Ok(());
+        }
+
+        let end_entry_index = start_entry_index.checked_add(slot_count).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "directory tombstone range overflow")
+        })?;
+        let tombstone = deleted_dentry();
+        for entry_index in start_entry_index..end_entry_index {
+            self.write_dentry_bytes_at(entry_index, tombstone.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    fn write_dentry_bytes_at(&self, entry_index: usize, bytes: &[u8]) -> Result<()> {
+        let byte_offset = self.entry_byte_offset(entry_index)?;
+        self.write_directory_bytes(byte_offset, bytes)
+    }
+
+    fn publish_unused_terminator(
+        &self,
+        record_start_entry_index: usize,
+        record_slot_count: usize,
+    ) -> Result<()> {
+        let terminator_entry_index = record_start_entry_index
+            .checked_add(record_slot_count)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory tail overflow"))?;
+
+        if terminator_entry_index >= self.directory_entry_count() {
+            if terminator_entry_index == self.directory_entry_count() {
+                return Ok(());
+            }
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory growth did not leave room for an Unused terminator",
+            ));
+        }
+
+        self.write_dentry_bytes_at(terminator_entry_index, ExfatDentry::Unused.as_bytes())
+    }
+
+    fn read_directory_bytes(&self, offset: usize, buf: &mut [u8]) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let read_end = offset
+            .checked_add(buf.len())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory read overflow"))?;
+        if read_end > self.directory_end_offset {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory read exceeded the logical directory stream",
+            ));
+        }
+
+        let mut copied_bytes = 0usize;
+        while copied_bytes < buf.len() {
+            let logical_offset = offset
+                .checked_add(copied_bytes)
+                .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory read overflow"))?;
+            let (physical_offset, chunk_len) =
+                self.logical_directory_chunk_at(logical_offset, buf.len() - copied_bytes)?;
+            read_metadata_bytes(
+                self.block_device,
+                physical_offset,
+                &mut buf[copied_bytes..copied_bytes + chunk_len],
+            )?;
+            copied_bytes += chunk_len;
+        }
+
+        Ok(())
+    }
+
+    fn write_directory_bytes(&self, offset: usize, buf: &[u8]) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let write_end = offset
+            .checked_add(buf.len())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory write overflow"))?;
+        if write_end > self.directory_end_offset {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory write exceeded the logical directory stream",
+            ));
+        }
+
+        let mut written_bytes = 0usize;
+        while written_bytes < buf.len() {
+            let logical_offset = offset
+                .checked_add(written_bytes)
+                .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory write overflow"))?;
+            let (physical_offset, chunk_len) =
+                self.logical_directory_chunk_at(logical_offset, buf.len() - written_bytes)?;
+            self.write_physical_metadata_bytes(
+                physical_offset,
+                &buf[written_bytes..written_bytes + chunk_len],
+            )?;
+            written_bytes += chunk_len;
+        }
+
+        Ok(())
+    }
+
+    fn write_physical_metadata_bytes(&self, offset: usize, buf: &[u8]) -> Result<()> {
+        use aster_block::BLOCK_SIZE;
+
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        let write_end = offset
+            .checked_add(buf.len())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+        let aligned_start = offset / BLOCK_SIZE * BLOCK_SIZE;
+        let aligned_blocks = write_end
+            .div_ceil(BLOCK_SIZE)
+            .checked_sub(aligned_start / BLOCK_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write underflow"))?;
+        let aligned_len = aligned_blocks
+            .checked_mul(BLOCK_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata write overflow"))?;
+
+        let mut aligned_buf = Vec::with_capacity(aligned_len);
+        aligned_buf.resize(aligned_len, 0);
+        read_metadata_bytes(self.block_device, aligned_start, &mut aligned_buf)?;
+
+        let start_offset = offset - aligned_start;
+        let end_offset = start_offset
+            .checked_add(buf.len())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "metadata slice overflow"))?;
+        aligned_buf[start_offset..end_offset].copy_from_slice(buf);
+
+        self.block_device.write_bytes(aligned_start, &aligned_buf)?;
+
+        Ok(())
+    }
+
+    fn logical_directory_chunk_at(
+        &self,
+        offset: usize,
+        max_len: usize,
+    ) -> Result<(usize, usize)> {
+        let (cluster_chain, cluster_intra_offset) = self
+            .chain
+            .walk_to_cluster_at_offset(self.block_device, self.super_block, offset)?;
+        let cluster_start_offset = cluster_chain.physical_cluster_start_offset(self.super_block)?;
+        let cluster_remaining = self
+            .super_block
+            .cluster_size()
+            .checked_sub(cluster_intra_offset)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory chunk underflow"))?;
+        let chunk_len = max_len.min(cluster_remaining);
+        let physical_offset = cluster_start_offset
+            .checked_add(cluster_intra_offset)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory chunk overflow"))?;
+
+        Ok((physical_offset, chunk_len))
+    }
+
+    fn extend_directory_chain(&mut self, growth: AllocationResult) -> Result<()> {
+        if growth.cluster_count == 0 {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory growth must allocate at least one cluster",
+            ));
+        }
+
+        let appended_chain = ExfatChain::new(
+            self.block_device,
+            self.super_block,
+            growth.start_cluster,
+            Some(growth.cluster_count),
+            growth.chain_mode,
+        )?;
+        let current_clusters = self.collect_chain_clusters(self.chain)?;
+        let appended_clusters = self.collect_chain_clusters(appended_chain)?;
+        let mut combined_clusters = Vec::with_capacity(
+            current_clusters
+                .len()
+                .checked_add(appended_clusters.len())
+                .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory chain overflow"))?,
+        );
+        combined_clusters.extend_from_slice(&current_clusters);
+        combined_clusters.extend_from_slice(&appended_clusters);
+
+        // Materialize the full chain locally so the directory can keep using a
+        // single owner-private traversal model after growth.
+        self.materialize_directory_chain(&combined_clusters)?;
+
+        let combined_cluster_count = u32::try_from(combined_clusters.len()).map_err(|_| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory chain cluster count overflowed u32",
+            )
+        })?;
+        let head_cluster = *combined_clusters.first().ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "directory chain must not be empty")
+        })?;
+        self.chain = ExfatChain::new(
+            self.block_device,
+            self.super_block,
+            head_cluster,
+            Some(combined_cluster_count),
+            ChainMode::FatBacked,
+        )?;
+
+        let growth_clusters = usize::try_from(growth.cluster_count).map_err(|_| {
+            Error::with_message(
+                Errno::EOVERFLOW,
+                "directory growth cluster count overflowed usize",
+            )
+        })?;
+        let growth_bytes = growth_clusters
+            .checked_mul(self.super_block.cluster_size())
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory growth overflow"))?;
+        self.directory_end_offset = self
+            .directory_end_offset
+            .checked_add(growth_bytes)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "directory growth overflow"))?;
+
+        Ok(())
+    }
+
+    fn collect_chain_clusters(&self, chain: ExfatChain) -> Result<Vec<ClusterId>> {
+        let cluster_count = usize::try_from(chain.cluster_count()).map_err(|_| {
+            Error::with_message(Errno::EINVAL, "directory chain size overflows usize")
+        })?;
+        let mut clusters = Vec::with_capacity(cluster_count);
+        let mut loaded_chain = chain;
+
+        for cluster_index in 0..chain.cluster_count() {
+            clusters.push(loaded_chain.current_cluster());
+            if cluster_index + 1 < chain.cluster_count() {
+                loaded_chain = loaded_chain.walk(self.block_device, self.super_block, 1)?;
+            }
+        }
+
+        Ok(clusters)
+    }
+
+    fn materialize_directory_chain(&self, clusters: &[ClusterId]) -> Result<()> {
+        let Some(&last_cluster) = clusters.last() else {
+            return Err(Error::with_message(
+                Errno::EINVAL,
+                "directory chain must not be empty",
+            ));
+        };
+
+        for window in clusters.windows(2) {
+            write_next_fat_value(
+                self.block_device,
+                self.super_block,
+                window[0],
+                FatValue::Next(window[1]),
+            )?;
+        }
+
+        write_next_fat_value(
+            self.block_device,
+            self.super_block,
+            last_cluster,
+            FatValue::EndOfChain,
+        )?;
+
+        Ok(())
+    }
+}
+
+fn deleted_dentry() -> ExfatDentry {
+    ExfatDentry::Deleted(ExfatDeletedDentry {
+        dentry_type: 0x01,
+        reserved: [0; DENTRY_SIZE - 1],
+    })
 }
 
 #[cfg(ktest)]
 mod tests {
-    use alloc::vec;
+    use alloc::{vec, vec::Vec};
 
+    use ostd::mm::VmIo;
     use ostd::prelude::ktest;
     use zerocopy::IntoBytes;
 
     use super::{DirectoryEngine, DirectoryRecord};
     use crate::{
         fs::fs_impls::exfat_refactor::{
+            allocator::AllocationResult,
             boot_sector::read_primary_super_block,
             dentry::{
                 DENTRY_SIZE, ExfatBitmapDentry, ExfatDentry, ExfatStreamDentry, ExfatUpcaseDentry,
@@ -426,6 +1032,46 @@ mod tests {
             dentry_type: 0x00,
             value: [0; 31],
         }
+    }
+
+    fn read_raw_dentry(
+        disk: &ExfatMemoryDisk,
+        super_block: &crate::fs::fs_impls::exfat_refactor::super_block::ExfatSuperBlock,
+        entry_index: usize,
+    ) -> RawExfatDentry {
+        let cluster_start = super_block
+            .cluster_to_byte_offset(super_block.root_dir)
+            .unwrap();
+        let offset = cluster_start + entry_index * DENTRY_SIZE;
+        let mut bytes = [0; DENTRY_SIZE];
+        disk.read_bytes(offset, &mut bytes);
+        RawExfatDentry::from_bytes(&bytes)
+    }
+
+    fn committed_growth(super_block: &crate::fs::fs_impls::exfat_refactor::super_block::ExfatSuperBlock) -> AllocationResult {
+        AllocationResult {
+            start_cluster: super_block.data_cluster_end_exclusive() - 1,
+            cluster_count: 1,
+            chain_mode: ChainMode::FatBacked,
+        }
+    }
+
+    fn validated_file_set(
+        super_block: &crate::fs::fs_impls::exfat_refactor::super_block::ExfatSuperBlock,
+        raw_name_units: &[u16],
+        tail_dentries: Vec<ExfatDentry>,
+    ) -> ExfatDentrySet {
+        ExfatDentrySet::from_trusted_metadata(
+            Default::default(),
+            ExfatStreamDentry {
+                start_cluster: super_block.root_dir,
+                size: 0,
+                ..Default::default()
+            },
+            raw_name_units,
+            tail_dentries,
+        )
+        .unwrap()
     }
 
     fn bitmap_dentry(start_cluster: u32, size: u64) -> ExfatDentry {
@@ -661,5 +1307,105 @@ mod tests {
 
         let error = engine.next_record().unwrap_err();
         assert_eq!(error.error(), Errno::EINVAL);
+    }
+
+    // Confirms tombstoned slots are reused before the write path asks for growth.
+    #[ktest]
+    fn directory_engine_reuses_deleted_slots_before_growth() {
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let mut engine = make_directory_engine(&disk, &super_block, 1);
+        let file_set = validated_file_set(&super_block, &[b'r' as u16], vec![]);
+        let slot_count = file_set.to_le_bytes().len() / DENTRY_SIZE;
+
+        for entry_index in 0..slot_count {
+            write_raw_dentry(&disk, &super_block, entry_index, deleted_dentry());
+        }
+        write_raw_dentry(&disk, &super_block, slot_count, unused_dentry());
+
+        let location = engine.place_dentry_set(&file_set, None).unwrap();
+
+        assert_eq!(location.inode_key_parts(), (Some(1), 0, 0));
+        assert!(matches!(
+            ExfatDentry::from(read_raw_dentry(&disk, &super_block, 0)),
+            ExfatDentry::File(_)
+        ));
+        assert!(matches!(
+            ExfatDentry::from(read_raw_dentry(&disk, &super_block, slot_count)),
+            ExfatDentry::Unused
+        ));
+    }
+
+    // Confirms a rewrite stays at the trusted location when the smaller set still fits.
+    #[ktest]
+    fn directory_engine_preserves_location_when_rewrite_still_fits() {
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let mut engine = make_directory_engine(&disk, &super_block, 1);
+        let original_set = validated_file_set(
+            &super_block,
+            &[b'o' as u16, b'r' as u16],
+            vec![ExfatDentry::GenericSecondary(Default::default())],
+        );
+        let smaller_set = validated_file_set(&super_block, &[b'o' as u16], vec![]);
+        let slot_count = original_set.to_le_bytes().len() / DENTRY_SIZE;
+        let original_slots = slot_count;
+
+        for entry_index in 0..original_slots {
+            write_raw_dentry(&disk, &super_block, entry_index, deleted_dentry());
+        }
+        write_raw_dentry(&disk, &super_block, original_slots, unused_dentry());
+
+        let location = engine
+            .place_dentry_set(&original_set, None)
+            .expect("initial placement should reuse deleted slots");
+        let rewritten_location = engine
+            .rewrite_dentry_set(location, &smaller_set, None)
+            .unwrap();
+
+        assert_eq!(rewritten_location, location);
+        assert!(matches!(
+            ExfatDentry::from(read_raw_dentry(&disk, &super_block, original_slots - 1)),
+            ExfatDentry::Deleted(_)
+        ));
+    }
+
+    // Confirms expansion consumes the committed allocation result instead of reopening search.
+    #[ktest]
+    fn directory_engine_consumes_committed_growth_for_directory_expansion() {
+        let disk = load_exfat_disk();
+        let super_block = read_primary_super_block(&disk).unwrap();
+        let mut engine = make_directory_engine(&disk, &super_block, 1);
+        let file_set = validated_file_set(&super_block, &[b'g' as u16], vec![]);
+        let cluster_entries = super_block.cluster_size() / DENTRY_SIZE;
+        let growth = committed_growth(&super_block);
+        let growth_start_offset = super_block
+            .cluster_to_byte_offset(growth.start_cluster)
+            .unwrap();
+
+        for entry_index in 0..cluster_entries {
+            write_entry_sequence(&disk, &super_block, entry_index, &[bitmap_dentry(11, 8192)]);
+        }
+
+        let error = engine.place_dentry_set(&file_set, None).unwrap_err();
+        assert_eq!(error.error(), Errno::ENOSPC);
+
+        let location = engine.place_dentry_set(&file_set, Some(growth)).unwrap();
+
+        assert_eq!(
+            location.inode_key_parts(),
+            (
+                Some(1),
+                cluster_entries * DENTRY_SIZE,
+                cluster_entries as u32
+            )
+        );
+        let mut bytes = [0; DENTRY_SIZE];
+        disk.read_bytes(growth_start_offset, &mut bytes);
+        assert!(matches!(ExfatDentry::from(RawExfatDentry::from_bytes(&bytes)), ExfatDentry::File(_)));
+        assert!(matches!(
+            ExfatDentry::from(read_raw_dentry(&disk, &super_block, 0)),
+            ExfatDentry::Bitmap(_)
+        ));
     }
 }

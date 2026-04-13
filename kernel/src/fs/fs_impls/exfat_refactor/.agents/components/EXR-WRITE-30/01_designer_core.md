@@ -5,11 +5,11 @@
 ## Metadata
 
 - Component ID: `EXR-WRITE-30`
-- Title: `ExfatInode` buffered write and size mutation
+- Title: `ExfatInode` buffered write, growth, and truncate publication
 - Status: `Specified`
 - Author: designer
-- Date: `2026-04-12`
-- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-WRITE-30/20260412-2215-designer-packet.md`
+- Date: `2026-04-13`
+- Task packet: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/subagent-tasks/EXR-WRITE-30/20260413-0650-designer-repair-packet.md`
 - Based on architect artifact: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/.agents/components/EXR-WRITE-30/00_architect.md`
 
 ## Scope
@@ -17,10 +17,10 @@
 - In scope:
   - Define `ExfatInode::write_at` as the inode-owned buffered regular-file write surface.
   - Define `ExfatInode::resize` as the inode-owned size-growth and truncate surface for regular files.
+  - Replace the ambiguous mutation-holder wording with one explicit owner-private `ExfatInodeWriteState` in `inode.rs`.
   - Consume `EXR-PGCACHE-26` as the inode-local cache boundary for write-visible bytes and cache sizing.
   - Consume `EXR-ALLOC-27` as the only committed-growth handoff when allocation coverage must expand.
   - Consume `EXR-FILE-MAP-24` when the write path needs logical-to-physical translation without reopening mapping ownership.
-  - Define the narrow owner-private helper shape allowed inside `inode.rs`, including one inode-local mutable state holder if the current copied snapshot fields need mutation.
 - Out of scope:
   - Direct-I/O write support or an `O_DIRECT` bypass path.
   - Filesystem-wide sync ordering, durable flush semantics, or page-cache writeback ownership, which remain downstream in `EXR-SYNC-31`.
@@ -40,19 +40,28 @@
 - Interfaces provided:
   - `ExfatInode::write_at`
   - `ExfatInode::resize`
+  - An owner-private `ExfatInodeWriteState` that may carry exactly the mutable write-side facts:
+    - `size`
+    - `valid_size`
+    - `start_cluster`
+    - `cluster_count`
+    - `chain_mode`
+    - `allocated_size`
+    - `metadata.nr_sectors_allocated`
+    - `metadata.last_modify_at`
+    - `metadata.last_meta_change_at`
   - Owner-private helpers inside `inode.rs` that may:
-    - hold mutable file-state facts for one inode,
-    - compute additional cluster demand,
-    - fold committed allocation results into the inode-owned snapshot,
+    - compute additional cluster demand from a target logical size,
+    - fold a committed `AllocationResult` into the write-state holder,
     - zero-fill a valid-size gap before publishing a larger initialized range,
     - keep page-cache sizing and visible bytes coherent with the new inode state.
 - Files or modules touched:
   - Primary landing: `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/inode.rs`
   - Narrow owner-consumed helper adjustments in `/home/halifuda/asterinas/kernel/src/fs/fs_impls/exfat_refactor/fs.rs` are acceptable only if the existing `ExfatFs` wrapper surface needs a small extension to stay owner-first.
 - Hidden implementation details:
-  - Whether mutable inode file facts stay inline on `ExfatInode` behind one owner-private guard or move into one small inode-local state struct.
-  - Whether post-write visibility is maintained by cache-backed owner-private reads, synchronous owner-private write placement, or a combination of the two, so long as the visible byte-stream contract remains on `ExfatInode`.
-  - Exact helper names and how write and resize share them, provided they remain owner-private to `ExfatInode`.
+  - The intended creator shape is one call-local `ExfatInodeWriteState` per write or resize call, not an ad hoc collection of mutable fields or a filesystem-global writer.
+  - Post-write visibility may be achieved by a combination of cache sizing and inode-local byte publication, but the visible byte stream must remain owned by `ExfatInode`.
+  - Exact helper names and how write and resize share them remain flexible, provided they stay owner-private to `ExfatInode`.
 
 ## Functional Specification
 
@@ -79,8 +88,9 @@
   - The inode already carries trusted size, valid-size, allocation, and chain facts.
   - The inode-local page cache is already attached for regular files.
 - Actions:
-  - Compute the write end with overflow checking and derive the final logical size for the call.
-  - If the final logical size exceeds the current allocated coverage, request exactly the additional committed allocation facts needed through the `ExfatFs` owner boundary and fold the returned `AllocationResult` into the inode-owned chain and allocation snapshot before publishing the larger coverage.
+  - Compute the write end with overflow checking and derive the final logical end for the call.
+  - Construct one call-local `ExfatInodeWriteState` from the current inode snapshot.
+  - If the final logical end exceeds `allocated_size`, compute the exact additional cluster count needed from the current cluster size, request that count through `ExfatFs::allocate_clusters()`, and fold the returned `AllocationResult` into the write-state holder before any larger EOF becomes visible.
   - Resize the inode-local page cache before publishing a larger logical EOF.
   - If the write begins beyond the current `valid_size`, zero-initialize the gap `[old_valid_size, offset)` in the same inode-owned visible byte source that later buffered reads and mappings will observe.
   - Copy the caller bytes through the inode-owned buffered write path.
@@ -120,7 +130,7 @@
 ### Allowed Helper Shape
 
 - Owner-private helpers may:
-  - hold mutable file-state facts such as `size`, `valid_size`, `start_cluster`, `cluster_count`, `chain_mode`, and `allocated_size`,
+  - hold the call-local `ExfatInodeWriteState`,
   - compute how many additional clusters a growth request needs,
   - fold a committed `AllocationResult` into the inode snapshot,
   - zero-fill unwritten gaps before `valid_size` advances,
@@ -135,7 +145,7 @@
 ## Invariants
 
 - `write_at` and `resize` stay on `ExfatInode`, not on `ExfatFs` or a new writer service.
-- `EXR-ALLOC-27` remains the only owner of allocation search, reservation intent, and commit; this row consumes only committed results.
+- `EXR-ALLOC-27` remains the only owner of allocation search, reservation intent, and commit; this row consumes only committed results via `ExfatFs::allocate_clusters()`.
 - `EXR-PGCACHE-26` remains the inode-local cache owner; this row may resize or dirty that cache but does not re-home it.
 - `EXR-READ-OPS-25` remains the owner of read-visible EOF, short-read, and valid-size zero-fill semantics; this row must preserve those semantics when it changes `size` or `valid_size`.
 - Successful read-after-write visibility on one inode snapshot must stay coherent.
@@ -145,11 +155,11 @@
 ## Concurrency Specification
 
 - Shared state:
-  - The inode-owned mutable file-state snapshot.
+  - The call-local `ExfatInodeWriteState`.
   - The inode-local `PageCache`.
   - The filesystem-owned committed-allocation service reached through `ExfatFs`.
 - Lock ordering:
-  - If creator work introduces an inode-local mutation guard, it must serialize publication of `size`, `valid_size`, and allocation facts.
+  - If creator work introduces an inode-local mutation holder, it must serialize publication of `size`, `valid_size`, allocation facts, and dirty timestamps.
   - Do not hold a page-cache page guard or future sync guard while calling `ExfatFs::allocate_clusters()`.
   - Do not let truncate or growth keep a filesystem-global lock alive after the committed allocation facts have been consumed.
 - Atomicity requirements:
@@ -161,8 +171,8 @@
   - Do not publish a larger size before the required committed allocation result has been folded into the inode snapshot.
   - Do not let buffered write drift into a background flush queue or sync shell.
 - Allowed simplifications:
-  - One inode-local mutation guard is acceptable.
-  - Synchronous allocation consumption is acceptable.
+  - One inode-local mutation holder is sufficient.
+  - Synchronous allocation consumption is sufficient.
   - A small owner-private mutable state struct is acceptable if it keeps mutation local to `ExfatInode`.
 
 ## Pass Split
@@ -171,6 +181,7 @@
 
 - Required implementation obligations:
   - Replace the temporary `write_at` and `resize` rejections with real inode-owned buffered mutation in `inode.rs`.
+  - Introduce one owner-private `ExfatInodeWriteState` and use it as the sole mutable write-state carrier for each call.
   - Consume `ExfatFs::allocate_clusters()` only when growth exceeds current allocation coverage.
   - Keep page-cache sizing and visible bytes coherent with new inode state.
   - Zero-fill unwritten valid-size gaps before publishing them as initialized.
@@ -219,5 +230,6 @@
 - Reviewers should confirm that buffered write and size mutation stay on `ExfatInode`.
 - Reviewers should confirm that `EXR-ALLOC-27`, `EXR-PGCACHE-26`, and `EXR-READ-OPS-25` remain consumed owners rather than reimplemented services.
 - Reviewers should confirm that valid-size gap handling preserves the already accepted read-visible zero-fill contract.
+- Reviewers should confirm that `02_designer_async.md` only documents the serial publication boundary and does not reserve a separate post-serial concurrency patch for this row.
 - Reviewers should reject any attempt to add a write manager, allocator facade, direct-I/O path, or sync shell.
 - Creator work should be treated as shared-file work in `inode.rs`, not as fake parallel lanes against the same mutation state.
