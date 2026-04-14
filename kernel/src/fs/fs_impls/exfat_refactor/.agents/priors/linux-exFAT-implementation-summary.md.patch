@@ -1,0 +1,15 @@
+--- kernel/src/fs/fs_impls/exfat_refactor/.agents/priors/linux-exFAT-implementation-summary.md
++++ kernel/src/fs/fs_impls/exfat_refactor/.agents/priors/linux-exFAT-implementation-summary.md
+@@ -34,7 +34,13 @@
+ 
+ ### 1.3 Directory Iteration & `f_pos` Traversal (`readdir` / `getdents`)
+-- **Variable-Length Entry Mapping**: [To be filled: How does Linux map the VFS `f_pos` (file position marker) to exFAT's variable-length sequence of directory entries (File + Stream + N * Name entries)? How does it safely resume iteration?]
+-- **Name Hash Collisions**: [To be filled: How Linux validates the `NameHash` in the Stream Extension against the actual Unicode name during traversal to detect corruption.]
++- **Variable-Length Entry Mapping**: Linux exFAT identically maps the VFS `f_pos` (or `cpos`) to the **absolute physical byte offset** inside the directory cluster chain. Because all exFAT entries are exactly 32 bytes, `f_pos` counts up in multiples of 32. When `exfat_readdir` encounters a valid `TYPE_FILE` (0x85) entry, it parses its Stream Extension to find `num_ext`, and safely advances `*cpos = EXFAT_DEN_TO_B(dentry + 1 + num_ext)`. Thus, it natively leaps over the variable parts atomically. If iteration stops, the user-space `f_pos` is safely parked exactly at the 32-byte boundary of the *next* logical entry.
++- **Name Hash Collisions (`exfat_find_dir_entry`)**: Linux enforces strict 2-stage verification to bypass linear unicode name comparisons. When scanning for a name, it first checks if the Stream Extension's `name_len` and 16-bit `name_hash` match the target. **Only** if this fast integer match succeeds does it actually extract the subsequent `TYPE_EXTEND` Unicode string buffers and perform a full `exfat_uniname_ncmp`.
+ 
+ ### 1.4 Page Cache Block Translation (`bmap` / `get_block`)
+-- **`NoFatChain` Read Acceleration**: [To be filled: How does Linux translate logical VFS pages via `get_block` into physical sectors, and how does it fast-path continuous reads by bypassing the FAT table entirely when `NoFatChain` is 1?]
++- **`NoFatChain` Read Acceleration (`exfat_map_cluster`)**: When resolving a VFS logical block (`iblock`) to a disk sector (`get_block`), Linux leverages the `NoFatChain` flag beautifully. If the flag (`ALLOC_NO_FAT_CHAIN`) is 1, the mapping executes a pure $O(1)$ arithmetic shift (`*clu = ei->start_clu + clu_offset`), entirely short-circuiting the FAT sector read logic. If it is 0 (`ALLOC_FAT_CHAIN`), it must traverse the FAT chain array block by block via `exfat_get_cluster`. This explains the massive sequential IOps performance gain of exFAT and why maintaining the `NoFatChain` state during allocations (Section 1.1) is critical.
+ 
+ ### 1.5 Concurrency & Locking Topology (The Linux Baseline)
