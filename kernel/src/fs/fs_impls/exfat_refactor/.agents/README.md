@@ -57,4 +57,4 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `SYSTEM_BLUEPRINT.md`: The scheduler-owned active global blueprint and traceability matrix.
 - `priors/`: Prior knowledge layer containing heavy context separated for the strict information funnel.
 - `protocol/templates/`: Required handoff formats. Component artifacts use a prefix scheme based on the architectural mapping level (e.g. `pass_03_write_at_creator.md` for an implementation pass under a meso component).
-- `main-agent/`: Main-agent checkpoint notes follow the `YYYYMMDD-HHMM-nickname-summary_main_agent_handoff_TEMPLATE.md` convention.
+- `main-agent/`: Main-agent checkpoint notes follow the `YYYYMMDD-HHMM-nickname-summary_main_agent_handoff_TEMPLATE.md` convention. A single main-agent tenure should maintain one live handoff file and update it in place rather than creating a new file for every short session.

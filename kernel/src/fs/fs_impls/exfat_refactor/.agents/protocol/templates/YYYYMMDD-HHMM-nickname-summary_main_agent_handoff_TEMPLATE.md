@@ -2,6 +2,8 @@
 
 # Main-Agent Handoff: [Thread Name / Session Nickname]
 
+> **Live-file rule:** One main-agent tenure should keep exactly one live handoff file and update it in place. Do **not** create a fresh handoff file for every micro-session, review, or repair step within the same continuous ownership span. Create a new file only when a genuinely new main-agent tenure starts or ownership is intentionally rolled forward.
+
 **Date / Time:** [e.g., April 14, 2026, 16:00 CST]
 **Status:** [Active | Closed / Handed Over]
 
@@ -31,3 +33,9 @@
 *When the next LLM context window starts, what is the EXACT first step it must take? Be highly prescriptive.*
 1. [e.g., "Wait for the Subagent currently running EXR-ALLOC Creator to finish, then review its template."]
 2. [e.g., "Dispatch the synchronized Checker Pass for EXR-WRITEAT-P02 using the Creator receipt and the Designer ktest."]
+
+## 6. Live File Discipline
+*Keep this reminder in the active handoff so later main-agents do not split one tenure across many files.*
+- **This file is the live handoff for:** [main-agent tenure / wave name]
+- **Update rule:** [e.g., "Update this same file in place until ownership changes."]
+- **Supersedes / Replaces:** [Older live file if any, otherwise `N/A`]
