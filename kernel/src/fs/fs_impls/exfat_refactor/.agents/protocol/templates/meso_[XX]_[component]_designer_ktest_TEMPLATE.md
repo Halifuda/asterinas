@@ -2,29 +2,59 @@
 
 # Meso-Component Designer KTest: `{component_name}`
 
-*This artifact defines the exact testing obligations for the `Checker`. These must cover functionality, architecture invariants, and concurrency interleaving as mandated by the Designer.*
+*This artifact defines the exact testing obligations for the `Checker`. It must separate Creator-synced unit obligations from independent meso-level integration obligations. Each scenario should explain `Setup`, `Execution Chain`, and `Assertion` at a high level only, without line-by-line implementation detail.*
 
-## 1. Functionality Assertions
+## 1. Creator-Synced Unit Test Obligations
 
-### Base-Case Success
+### Unit Scenario: Base-Case Success
+- **Related Micro-Features:**
 - **Setup:**
-- **Execution:** Call the single exported Meso-Level Interface.
+- **Execution Chain:** Call the single exported Meso-Level Interface.
 - **Assertion:** 
 
-### Error Paths
+### Unit Scenario: Error Paths
+- **Related Micro-Features:**
 - **Scenario [Error Variant X]:**
+- **Setup:**
+- **Execution Chain:**
 - **Assertion:** 
 
-## 2. Invariant Checks
+## 2. Invariant / Rollback Obligations
 
-*Tests required to certify memory safety, structural coherence (e.g., FAT chain linkage), and rollback stability.*
-- **Check 1:** 
+*Tests required to certify memory safety, structural coherence (e.g., FAT chain linkage), and rollback stability. These obligations may be implemented in Creator-synced passes when they map cleanly to the covered micro set.*
+### Invariant Scenario 1
+- **Related Micro-Features:**
+- **Setup:**
+- **Execution Chain:**
+- **Assertion:** 
 
-## 3. [Conditional] Concurrency / Interleaving Tests
+## 3. Meso-Level Integration Test Obligations
 
-*MANDATORY ONLY if the component shares highly contended local locks or engages in non-blocking / `Bio` event interleaving with shared state. Otherwise, remove or ignore this section.*
+*Each integration scenario must involve tightly coupled micro-features and is implemented as an independent Checker pass. The `Success Path` entry is mandatory whenever the meso-component has more than trivial cross-micro interaction. The other three path types are optional depending on complexity; if omitted, explain why.*
 
-### Stale State Yield Test
-- **Setup:** A concurrent reader/writer configuration.
-- **Execution:** Thread A initiates `{component_name}` and encounters a `Bio` handoff. Concurrent Thread B executes a write operation, changing the same block/metadata.
-- **Assertion:** Thread A resumes its operation safely, either recognizing the stale state and reporting an error (`EAGAIN` or specific panic) or safely completing without corrupting state.
+### Success Path (Mandatory)
+- **Covered Micro-Features:**
+- **Setup:**
+- **Execution Chain:**
+- **Assertion:**
+
+### Failure-Maintenance Path (Optional)
+- **Required?:** [Yes/No + one-line reason]
+- **Covered Micro-Features:**
+- **Setup:**
+- **Execution Chain:**
+- **Assertion:**
+
+### Idempotence / Repeated-Call Path (Optional)
+- **Required?:** [Yes/No + one-line reason]
+- **Covered Micro-Features:**
+- **Setup:**
+- **Execution Chain:**
+- **Assertion:**
+
+### Concurrency Path (Optional)
+- **Required?:** [Yes/No + one-line reason]
+- **Covered Micro-Features:**
+- **Setup:**
+- **Execution Chain:**
+- **Assertion:**

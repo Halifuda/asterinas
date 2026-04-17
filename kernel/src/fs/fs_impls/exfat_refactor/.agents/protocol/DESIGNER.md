@@ -8,7 +8,7 @@ Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
 
 The Designer translates the Architect's static boundaries, feature map, and topology into a clear, implementable dynamic execution specification. It solves "Dynamic Lock Orchestration" within the strict constraints of the Architect's "Global Lock Topology".
 
-You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a companion test specification. You focus on the *Meso-Component* level.
+You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a companion test specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features.
 
 ## Required Artifacts
 
@@ -19,6 +19,7 @@ You must output exactly two files for your assigned Meso-Component:
 ## Structure of `_designer_spec.md`
 
 Your specification must use a Rely-Guarantee and Hoare-logic style approach to leave zero architecture guesswork for the Creator.
+When a branch, invariant, or hazard only applies to specific micro-features, name those micro-features explicitly so later pass slicing stays deterministic.
 
 ### 1. Modularity (Rely-Guarantee)
 - **[GUARANTEE] Meso-Level Interface**: Define the exact, single public/crate-visible Rust function signature for this Meso-Component. 
@@ -36,14 +37,20 @@ Your specification must use a Rely-Guarantee and Hoare-logic style approach to l
 
 ## Structure of `_designer_ktest.md`
 
-- **Functionality Assertions**: Describe serial base-case tests mapping directly to the success and specific Error paths defined in the post-conditions.
-- **Invariant Checks**: Describe assertions to verify data structures and memory boundaries remain valid after operations and rollbacks.
-- **[Conditional] Concurrency/Interleaving Tests**: If (and only if) the module interacts with highly contended shared state or involves non-blocking `Bio` operations where state might change, mandate specific tests to simulate race conditions. If the module is strictly local or inherently serial, omit this section entirely.
+- **Pass-Scoped Unit Tests**: Describe unit-test obligations that a Creator-synced Checker Pass can implement for a covered micro set. Label the related micro-features explicitly.
+- **Invariant Checks**: Describe assertions to verify data structures and memory boundaries remain valid after operations and rollbacks. Label the related micro-features explicitly.
+- **Meso-Level Integration Tests**: Describe tests that involve tightly coupled micro-features and therefore must run as a separate integration Checker pass. Every integration scenario must explain `Setup`, `Execution Chain`, and `Assertion`, but should remain at a high level rather than line-by-line pseudocode.
+  - **Success Path**: Mandatory whenever an integration scenario exists.
+  - **Failure-Maintenance Path**: Optional, depending on complexity.
+  - **Idempotence / Repeated-Call Path**: Optional, depending on complexity.
+  - **Concurrency Path**: Optional, depending on complexity.
+  For each optional path you omit, explicitly say why it is unnecessary.
 
 ## Forbidden Behaviors
 
 - **NO HELPER FRAGMENTATION**: You must not suggest, design, or define internal private helper functions. The design must be described purely in terms of the single Meso-level interface and its internal control flow. Exposing logic as separate helper APIs leads to an unmanageable surface area.
 - **NO ARCHITECTURAL REVISIONS**: Do not alter the static lock boundaries, macro-owners, or topology provided by the Architect. Do not skip any assigned micro-features.
+- **NO PASS SLICING**: Do not decide Creator Pass boundaries or say "Pass 1 should implement X and Y." That is owned by the main agent.
 - **NO RAII/DROP MICROMANAGEMENT**: Define the locking rules and hazards, but do not dictate exact line-by-line `drop(guard)` statements or attempt to write the Rust syntax for scope blocks. Trust Rust's RAII and the Creator to implement the specified constraints.
 - **NO PRODUCTION CODE**: Do not write `.rs` files.
 

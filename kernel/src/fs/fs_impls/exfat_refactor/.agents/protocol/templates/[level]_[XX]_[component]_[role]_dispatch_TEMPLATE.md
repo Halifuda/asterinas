@@ -3,8 +3,10 @@
 # Subagent Dispatch Stub (Strict Funnel)
 
 **Role ID:** [ARCHITECT | DESIGNER | CREATOR | CHECKER | REVIEWER]
-**Component/Task Group:** [e.g., EXR-ALLOC]
-**Atomic transaction/Micro-Feature:** [Specific focus if applicable]
+**Pass Kind:** [Macro Backbone | Meso Mapping | Meso Spec | Creator-Synced Pass | Meso Integration Pass | Reviewer Pass]
+**Component/Task Group:** [e.g., EXR-WRITEAT-P02]
+**Parent Meso-Component:** [e.g., `meso_03_write_at` or `N/A` for macro backbone]
+**Covered Micro-Features:** [Exact names, one per bullet if multiple, or `N/A`]
 
 ---
 
@@ -15,9 +17,9 @@
 
 ## 2. Output Requirement
 *The exact template the Subagent MUST fill out. Do not deviate from its structure.*
-- **Required Template:** `new_protocol/protocol/templates/[level]_[XX]_[component]_[role]_[type]_TEMPLATE.md`
+- **Required Template:** `.agents/protocol/templates/[level]_[XX]_[component]_[role]_TEMPLATE.md`
 - **Output Destination:** `[path/to/destination_artifact.md]`
 
 ## 3. Specific Overrides & Commands (Keep Minimal)
 *Only list execution-specific overrides (like testing filters) or repair paths. NO architectural summaries, design hints, or "how-to" tutorials here.*
-- [e.g., "Checker: Lock required before running `cargo osdk test`", or "Creator: Repair batch from Checker attached below", or "None"]
+- [e.g., "Checker: Lock required before running `cargo osdk test`", or "Integration Pass: implement only the meso-level integration scenarios", or "None"]
