@@ -2,7 +2,7 @@
 
 # Meso-Component Designer Specification: `{component_name}`
 
-*This artifact dictates the dynamic contract for the Meso-Component. The Creator must follow it exactly without inventing external architectures or helpers.*
+*This artifact dictates the dynamic contract for the Meso-Component. Creator Passes must follow it exactly without inventing external architectures or helpers. When a rule applies only to specific micro-features, name those micro-features explicitly so later pass slicing stays deterministic.*
 
 ## 1. Modularity (Rely-Guarantee)
 
@@ -20,16 +20,16 @@
 ## 2. Functionality (Hoare Logic)
 
 ### Pre-conditions
-*Logical conditions required of inputs.*
+*Logical conditions required of inputs. When applicable, annotate which micro-features depend on each condition.*
 - 
 
 ### Post-conditions
-*Exact success outcomes and defined error variants mapping.*
+*Exact success outcomes and defined error variants mapping. When applicable, annotate which micro-features each branch covers.*
 - **Case 1 (Success):** Returns `Ok(...)`, resulting in state X.
 - **Case 2 (Error Condition Y):** Returns `Err(...)`, zero side-effects.
 
 ### Invariants
-*Integrity rules spanning the execution.*
+*Integrity rules spanning the execution. When applicable, annotate which micro-features each invariant protects.*
 - 
 
 ## 3. Dynamic Lock Orchestration

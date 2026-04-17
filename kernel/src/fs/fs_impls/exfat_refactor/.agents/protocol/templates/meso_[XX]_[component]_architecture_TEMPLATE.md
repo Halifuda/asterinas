@@ -9,6 +9,7 @@
 
 ## 2. Micro-Feature Traceability Matrix
 <!-- List ALL micro-features from the inventory mapped to this component. NO OWNER GAPS ALLOWED. -->
+<!-- Keep each micro-feature as an explicit row. The main agent will later group rows into Creator/Checker passes. -->
 | Micro-Feature Name | Prior Reference | Description / Requisite |
 |---|---|---|
 | e.g., `Zero-fill gap` | Linux exFAT / Issue #0413 | Must fill uninitialized space with zeros when extending file size |

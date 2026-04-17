@@ -12,16 +12,17 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
 
 ## 2. Meso-Component Pipeline Index
 <!-- Tracks the high-level end-to-end lifecycle of each Meso-Component. 
-This tracks the macro-to-meso transition and architectural/design sign-off for the components as a whole. -->
+This tracks the macro-to-meso transition and architectural/design sign-off for the components as a whole.
+Creator/Checker slicing happens later and is decided by the main agent. -->
 
-| Meso-Component | 1. Architect Map | 2. Designer Contract | 3. Creator Impl | 4. Checker Validated | Overall Status |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| *(Pending)* | [ ] | [ ] | [ ] | [ ] | Pending |
+| Meso-Component | 1. Architect Map | 2. Designer Contract | 3. Creator Passes | 4. Checker Passes | 5. Integration Pass | 6. Reviewer | Overall Status |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| *(Pending)* | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | Pending |
 
-## 3. Micro-Feature Tracking & Dispatch (Information Funnel)
-<!-- Granular tracking of Micro-Features linked to their parent Meso-Components. 
-This acts as our active Dispatch Queue. It ensures no Micro-Feature (Owner Gap) is missed, and enforces #0413 crisis resolution at the implementation level (closed lock cycles, `?`/Drop paths). -->
+## 3. Pass Tracking & Dispatch (Information Funnel)
+<!-- Granular tracking of Creator/Checker/Reviewer passes linked to their parent Meso-Components.
+The main agent decides which Micro-Features travel together in each pass. This queue must show the parent meso scope and the covered-micro set explicitly. -->
 
-| Dispatch ID | Parent Meso-Component | Specific Micro-Feature / Task | Assigned Role | Artifact / Code | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| *(Pending)* | - | - | - | - | Pending |
+| Pass ID | Pass Kind | Parent Meso-Component | Covered Micro-Features | Assigned Role | Artifact / Code | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| *(Pending)* | - | - | - | - | - | Pending |

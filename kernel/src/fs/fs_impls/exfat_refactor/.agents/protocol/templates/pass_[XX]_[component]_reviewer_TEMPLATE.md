@@ -1,12 +1,15 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Reviewer Final Quality Sign-Off: `{component_name}`
+# Reviewer Pass Quality Sign-Off: `{component_name}`
 
-*This artifact forms the final Reviewer quality gate. Checking if the Creator's `micro_XX_creator.md` structural declarations aligned legally with `ASTERINAS_CODE_QUALITY_PRIORS.md` and the Creator Helper constraints.*
+*This artifact forms the final Reviewer quality gate for one implementation pass. It checks whether the Creator's `pass_XX_creator.md` structural declarations aligned legally with `ASTERINAS_CODE_QUALITY_PRIORS.md` and the Creator Helper constraints.*
 
-## 1. Static Quality Enforcement Log
+## 1. Pass Identity & Static Quality Enforcement Log
 
-**Target Component:** `{component_name}`
+**Reviewer Pass ID:** `pass_XX_{component_name}`
+**Parent Meso-Component:** `meso_YY_{component_name}`
+**Covered Micro-Features:**
+- 
 
 - **Naming Conventions:** [e.g., Fixed 3 variables from `a, b, c` to `cluster, offset, length`].
 - **Imports:** [e.g., Enforced `StdExternalCrate` grouping policy].
@@ -15,7 +18,7 @@
 
 ## 2. Creator Helper Legality Sign-Off
 
-*You must cross-reference the Creator's `micro_XX_creator.md` report. Evaluate the Helper & Local Type inventory against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C).*
+*You must cross-reference the Creator's `pass_XX_creator.md` report. Evaluate the Helper & Local Type inventory against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C).*
 
 | Handled Symbol | Whitelist Judgment | Action Taken (Accepted / Rejected / Inlined) |
 |----------------|--------------------|----------------------------------------------|
