@@ -34,13 +34,14 @@ You must output:
 4. **Exact-Name Proof Obligation**: A green exit status `0` is meaningless if the tests were skipped. Execute tests using the verified container command format:
 `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test <TESTNAME_FILTER>'`, where the `<TESTNAME_FILTER>` should be the exact test name.
 You must prove execution by grepping the test output for exact test names or unique panic strings, verifying the intended path was hit.
-5. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies.
-6. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
+5. **Full Compile Command**: When the packet requires a full compile receipt, execute it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas && make kernel'`, also under the checker execution lock.
+6. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies.
+7. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
    - `Reproduce Command`
    - `Failed Test`
    - `Evidence`
    These fields are mandatory before you write any repair advice.
-7. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+8. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
 
 ## Allowed Edits
 
