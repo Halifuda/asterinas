@@ -1,0 +1,103 @@
+==> docker exec codex-asterinas-dev bash -lc cd\ /root/asterinas\ \&\&\ make\ kernel
+/nix/store/jr6c4dhrwvibg2zcih30dyg3wcddigxi-initramfs
+/nix/store/01pp8qppzv4kx541lhwhiacx61jj9mr3-initramfs-image
+[Info] [normal] Forwarded QEMU guest port: 12658->22; 28547->8080 15292->6379 51822->5201 17003->31234 63766->31236 18962->11211
+[Info] [test] Forwarded QEMU guest port: 9141->22; 9872->8080 60914->6379 38403->5201 42265->31234 49096->31236 60148->11211
+warning: unstable feature specified for `-Ctarget-feature`: `ermsb`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+warning: `ostd-test` (lib) generated 1 warning
+warning: `linux-boot-params` (lib) generated 1 warning (1 duplicate)
+warning: `id-alloc` (lib) generated 1 warning (1 duplicate)
+warning: `align_ext` (lib) generated 1 warning (1 duplicate)
+warning: `int-to-c-enum` (lib) generated 1 warning (1 duplicate)
+warning: `ostd-pod` (lib) generated 1 warning (1 duplicate)
+warning: `typeflags-util` (lib) generated 1 warning (1 duplicate)
+warning: `aster-rights` (lib) generated 1 warning (1 duplicate)
+warning: `ostd` (lib) generated 1 warning (1 duplicate)
+warning: `component` (lib) generated 1 warning (1 duplicate)
+warning: `osdk-heap-allocator` (lib) generated 1 warning (1 duplicate)
+warning: `aster-util` (lib) generated 1 warning (1 duplicate)
+warning: `aster-console` (lib) generated 1 warning (1 duplicate)
+warning: `aster-input` (lib) generated 1 warning (1 duplicate)
+warning: `jhash` (lib) generated 1 warning (1 duplicate)
+warning: `aster-softirq` (lib) generated 1 warning (1 duplicate)
+warning: `device-id` (lib) generated 1 warning (1 duplicate)
+warning: `aster-block` (lib) generated 1 warning (1 duplicate)
+warning: `aster-bigtcp` (lib) generated 1 warning (1 duplicate)
+warning: `aster-systree` (lib) generated 1 warning (1 duplicate)
+warning: `aster-pci` (lib) generated 1 warning (1 duplicate)
+warning: `aster-cmdline` (lib) generated 1 warning (1 duplicate)
+warning: `aster-network` (lib) generated 1 warning (1 duplicate)
+warning: `aster-i8042` (lib) generated 1 warning (1 duplicate)
+warning: `aster-logger` (lib) generated 1 warning (1 duplicate)
+warning: `cpio-decoder` (lib) generated 1 warning (1 duplicate)
+warning: `aster-time` (lib) generated 1 warning (1 duplicate)
+warning: `aster-framebuffer` (lib) generated 1 warning (1 duplicate)
+warning: `aster-uart` (lib) generated 1 warning (1 duplicate)
+warning: `aster-mlsdisk` (lib) generated 1 warning (1 duplicate)
+warning: `aster-virtio` (lib) generated 1 warning (1 duplicate)
+warning: `osdk-frame-allocator` (lib) generated 1 warning (1 duplicate)
+warning: `xarray` (lib) generated 1 warning (1 duplicate)
+warning: `keyable-arc` (lib) generated 1 warning (1 duplicate)
+warning: `logo-ascii-art` (lib) generated 1 warning (1 duplicate)
+   Compiling aster-kernel v0.1.0 (/root/asterinas/kernel)
+warning: unused import: `fs::init`
+  --> /root/asterinas/kernel/src/fs/fs_impls/exfat_refactor/mod.rs:16:16
+   |
+16 | pub(super) use fs::init;
+   |                ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> /root/asterinas/kernel/src/fs/fs_impls/exfat_refactor/boot.rs:237:59
+    |
+237 |                     END_OF_DIRECTORY_ENTRY_TYPE => return finalize_root_records(bitmap, upcase),
+    |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<ChainVisitControl, ...>`, found `Result<(..., ...), ...>`
+    |
+    = note: expected enum `core::result::Result<ChainVisitControl, _>`
+               found enum `core::result::Result<(AllocationBitmapRecord, UpcaseRecord), _>`
+note: return type inferred to be `core::result::Result<ChainVisitControl, MountVolumeStateError>` here
+   --> /root/asterinas/kernel/src/fs/fs_impls/exfat_refactor/boot.rs:237:59
+    |
+237 |                     END_OF_DIRECTORY_ENTRY_TYPE => return finalize_root_records(bitmap, upcase),
+    |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `read_bytes` found for reference `&(dyn aster_block::BlockDevice + 'static)` in the current scope
+   --> /root/asterinas/kernel/src/fs/fs_impls/exfat_refactor/boot.rs:321:10
+    |
+320 | /     block_device
+321 | |         .read_bytes(offset, buffer)
+    | |         -^^^^^^^^^^ method not found in `&(dyn aster_block::BlockDevice + 'static)`
+    | |_________|
+    |
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `VmIo` which provides `read_bytes` is implemented but not in scope; perhaps you want to import it
+    |
+  3 + use ostd::mm::VmIo;
+    |
+
+error[E0599]: no method named `read_bytes` found for reference `&(dyn aster_block::BlockDevice + 'static)` in the current scope
+   --> /root/asterinas/kernel/src/fs/fs_impls/exfat_refactor/fat.rs:136:10
+    |
+135 | /     block_device
+136 | |         .read_bytes(offset, buffer)
+    | |         -^^^^^^^^^^ method not found in `&(dyn aster_block::BlockDevice + 'static)`
+    | |_________|
+    |
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `VmIo` which provides `read_bytes` is implemented but not in scope; perhaps you want to import it
+    |
+  3 + use ostd::mm::VmIo;
+    |
+
+Some errors have detailed explanations: E0308, E0599.
+For more information about an error, try `rustc --explain E0308`.
+warning: `aster-kernel` (lib) generated 2 warnings (1 duplicate)
+error: could not compile `aster-kernel` (lib) due to 3 previous errors; 2 warnings emitted
+[Error]: Cargo build failed
+make: *** [Makefile:306: kernel] Error 6

@@ -53,7 +53,7 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).
 - `subagent-tasks/`: Task packets grouped by `<component-id>`. Packets are lightweight **Dispatch Stubs** rather than heavy prose, avoiding context bloat and preventing Creator overreach.
 - `components/`: Subagent artifact outputs. Specs, evaluations, constraints are placed under exact `<component-id>` folders.
-- `tools/`: Workflow scripts, including the checker execution-lock helper (`checker_lock.sh`).
+- `tools/`: Workflow scripts. `checker_lock.sh` is the low-level checker execution lock, `checker_run.sh` is the preferred Checker build/ktest runner that archives per-test `qemu-serial.log`, and `ra_code_nav.py` is the preferred rust-analyzer code-navigation helper for symbol search, file symbols, definitions, references, implementations, and hover output.
 - `SYSTEM_BLUEPRINT.md`: The scheduler-owned active global blueprint and traceability matrix.
 - `priors/`: Prior knowledge layer containing heavy context separated for the strict information funnel.
 - `protocol/templates/`: Required handoff formats. Component artifacts use a prefix scheme based on the architectural mapping level (e.g. `pass_03_write_at_creator.md` for an implementation pass under a meso component).

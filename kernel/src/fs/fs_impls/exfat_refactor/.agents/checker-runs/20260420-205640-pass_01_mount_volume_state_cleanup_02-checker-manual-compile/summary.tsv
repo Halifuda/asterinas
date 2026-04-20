@@ -1,0 +1,2 @@
+step	status	command	stdout_log	serial_log
+make-kernel	1	cd /root/asterinas && make kernel	kernel/src/fs/fs_impls/exfat_refactor/.agents/checker-runs/20260420-205640-pass_01_mount_volume_state_cleanup_02-checker-manual-compile/00-make-kernel.log	

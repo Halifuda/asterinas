@@ -22,11 +22,11 @@
 
 ## 3. Lock-Guarded Evaluation Result
 
-*Document the results from the Checker Execution Lock stage. Include the explicit `cargo osdk test` command executed in the Docker environment (`codex-asterinas-dev`).*
+*Document the results from the Checker Execution Lock stage. Prefer `.agents/tools/checker_run.sh` and include both the wrapper command and the underlying Docker command(s). If running manually, include the explicit `cargo osdk test` command executed in the Docker environment (`codex-asterinas-dev`).*
 
-- **Reproduce Command**: `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test <TESTNAME>'`
+- **Reproduce Command**: `.agents/tools/checker_run.sh ktest --component <ID> --phase <PHASE> --test <FULL_TESTNAME>` *(or the exact manual Docker command if the wrapper was not used)*
 - **Exact-Name Proof**: (Show precise output lines proving the targeted `#[ktest]` actually ran, not just a blind `cargo check`).
-- **qemu-serial.log Scan**: (Confirm absence of RCU stalls, TCG panics, or cyclic lock dependencies).
+- **qemu-serial.log Scan**: (Confirm absence of RCU stalls, TCG panics, or cyclic lock dependencies. If multiple ktests ran, list each archived serial-log path produced by `checker_run.sh` or manual per-test copies).
 
 ## 4. Conclusion (Accepted OR Repair Batch)
 
