@@ -2,8 +2,13 @@
 
 //! Refactor-owned exFAT runtime pieces.
 
+mod bitmap;
+mod boot;
+#[cfg(ktest)]
+mod test_support;
+mod fat;
 mod fs;
 mod inode;
-mod ondisk;
+mod upcase;
 
 pub(super) use fs::init;

@@ -27,13 +27,28 @@
 - **Example:** "Used explicit block scoping `{ let read_guard = ...; }` prior to the `Bio::read` call to satisfy the non-blocking requirement, and fully handled the Case 2 `Err` path by directly returning `ExfatError::IO` without locking leaks."
 - 
 
-## 4. Helper & Local Type Inventory
+## 4. Generated Entity Census
 
-*If you extracted private helpers or created intermediate records/structs, you MUST list them here and explicitly state which Whitelist Rule (Rule A, Rule B, or Rule C from CREATOR.md) they satisfy.*
+*You MUST list every introduced production entity in the assigned write-set. This includes each new `struct`, `enum`, local type alias, module, and non-trait helper function. Trait-required methods may be grouped explicitly under an impl block instead of listed one-by-one. Test-only entities MUST appear in a separate subsection and are not exempt from reporting.*
 
-| Introduced Symbol | Type (Helper/Struct/Enum) | Whitelist Rule (A/B/C) & Justification |
-|-------------------|---------------------------|-----------------------------------------|
-| `e.g., _read_cluster_metadata` | Private fn | **Rule A**: Extracted to isolate the `RwLock` acquisition scope, preventing a lock escape prior to `Bio::read`. |
+### 4.1 Production Entity Census
+
+| Introduced Symbol | Kind | File | Owner / Module Boundary | Real Call Sites or Reuse | Whitelist Rule / Exemption | Final-System Status |
+|-------------------|------|------|-------------------------|--------------------------|----------------------------|---------------------|
+| `e.g., _read_cluster_metadata` | Private fn | `path/to/file.rs` | `Boot region validation` | Called by `foo` and `bar` | **Rule A**: Extracted to isolate the `RwLock` acquisition scope prior to `Bio::read`. | Intended final helper |
+| `e.g., MountStateDispatch` | Enum | `path/to/file.rs` | `temporary mount-state facade` | Called only by `mount_volume_state` | **Rule C**: required by the Designer-mandated dispatcher shape | Temporary facade; remove after later pass |
+
+### 4.2 Trait-Required Grouped Methods
+
+| Impl Block | Grouped Methods | Why Exempt from Per-Method Census |
+|------------|-----------------|-----------------------------------|
+| `impl FileSystem for ExfatFs` | `name`, `source`, `sync`, `root_inode`, `sb`, `flags`, `set_fs_flags` | Required trait surface; grouped here instead of listed one-by-one |
+
+### 4.3 Test-Only Entity Census
+
+| Introduced Symbol | Kind | File | Why Test-Only | Notes |
+|-------------------|------|------|---------------|-------|
+| `e.g., diagnose_boot_gate` | Private fn | `path/to/file.rs` | `#[cfg(ktest)]` checker diagnostics only | Duplicates production parsing intentionally for precise failure gates |
 
 ## 5. Contract Deviations & Boundary Notes
 

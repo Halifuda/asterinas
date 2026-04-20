@@ -1,0 +1,30 @@
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_mount_publishes_root_inode_superblock_and_defaults =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_mount_publishes_root_inode_superblock_and_defaults	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_mount_publishes_root_inode_superblock_and_defaults.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_mount_publishes_root_inode_superblock_and_defaults.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_root_and_superblock_reads_are_stable =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_root_and_superblock_reads_are_stable	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_root_and_superblock_reads_are_stable.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_root_and_superblock_reads_are_stable.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_recount_fallback_marks_cached_accounting =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_recount_fallback_marks_cached_accounting	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_recount_fallback_marks_cached_accounting.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_recount_fallback_marks_cached_accounting.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_preserves_volume_anomaly_flags =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_preserves_volume_anomaly_flags	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_preserves_volume_anomaly_flags.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_preserves_volume_anomaly_flags.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_invalid_boot_region =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_invalid_boot_region	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_invalid_boot_region.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_invalid_boot_region.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_boot_region_device_io =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_boot_region_device_io	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_boot_region_device_io.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_boot_region_device_io.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_inconsistent_allocation_bitmap =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_inconsistent_allocation_bitmap	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_inconsistent_allocation_bitmap.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_inconsistent_allocation_bitmap.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_allocation_bitmap_device_io =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_allocation_bitmap_device_io	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_allocation_bitmap_device_io.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_allocation_bitmap_device_io.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_invalid_upcase_table =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_rejects_invalid_upcase_table	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_invalid_upcase_table.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_rejects_invalid_upcase_table.qemu-serial.log
+
+===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_remount_allows_discard_and_rejects_immutable_delta =====
+0	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_remount_allows_discard_and_rejects_immutable_delta	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_remount_allows_discard_and_rejects_immutable_delta.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232626/mount_volume_state_remount_allows_discard_and_rejects_immutable_delta.qemu-serial.log

@@ -6,10 +6,10 @@ use aster_block::{
 };
 
 use super::{
+    bitmap::AllocationBitmapRecord,
+    boot::{self, BootRegion, VolumeAnomalyState},
     inode::ExfatInode,
-    ondisk::{
-        AllocationBitmapRecord, BootRegion, UpcaseTable, VolumeAnomalyState, load_validated_mount,
-    },
+    upcase::UpcaseTable,
 };
 use crate::{
     fs::{
@@ -248,9 +248,6 @@ pub(crate) enum MountVolumeStateOperation<'a> {
         next_flags: FsFlags,
         next_options: &'a ExfatMountOptions,
     },
-    RootInode,
-    SuperBlock,
-    Flags,
 }
 
 pub(crate) enum MountVolumeStateOutcome {
@@ -261,15 +258,6 @@ pub(crate) enum MountVolumeStateOutcome {
         flags: FsFlags,
     },
     Remounted {
-        flags: FsFlags,
-    },
-    RootInode {
-        root_inode: Arc<dyn Inode>,
-    },
-    SuperBlock {
-        super_block: SuperBlock,
-    },
-    Flags {
         flags: FsFlags,
     },
 }
@@ -327,21 +315,6 @@ pub(crate) fn mount_volume_state(
                 next_options,
             },
         ) => remount_published(fs, next_flags, next_options),
-        (MountVolumeStateTarget::Published { fs }, MountVolumeStateOperation::RootInode) => {
-            Ok(MountVolumeStateOutcome::RootInode {
-                root_inode: fs.published_root_inode()?,
-            })
-        }
-        (MountVolumeStateTarget::Published { fs }, MountVolumeStateOperation::SuperBlock) => {
-            Ok(MountVolumeStateOutcome::SuperBlock {
-                super_block: fs.super_block_snapshot()?,
-            })
-        }
-        (MountVolumeStateTarget::Published { fs }, MountVolumeStateOperation::Flags) => {
-            Ok(MountVolumeStateOutcome::Flags {
-                flags: fs.published_flags()?,
-            })
-        }
         _ => Err(MountVolumeStateError::InvalidMountInput),
     }
 }
@@ -351,7 +324,7 @@ fn mount_candidate(
     source: Option<&str>,
     options: &ExfatMountOptions,
 ) -> core::result::Result<MountVolumeStateOutcome, MountVolumeStateError> {
-    let validated_mount = load_validated_mount(block_device.as_ref())?;
+    let validated_mount = boot::ValidatedMount::load(block_device.as_ref())?;
     let fs = ExfatFs::new(block_device.clone(), source.map(ToString::to_string));
     let root_inode = ExfatInode::new_root(
         &fs,
@@ -487,7 +460,7 @@ mod tests {
 
     #[derive(Clone)]
     struct DirectoryEntryLocation {
-        boot_region: super::super::ondisk::BootRegion,
+        boot_region: super::super::boot::BootRegion,
         offset: usize,
     }
 
@@ -668,7 +641,7 @@ mod tests {
         assert_eq!(left.container_dev_id, right.container_dev_id);
     }
 
-    fn cluster_offset(boot_region: &super::super::ondisk::BootRegion, cluster: u32) -> usize {
+    fn cluster_offset(boot_region: &super::super::boot::BootRegion, cluster: u32) -> usize {
         let cluster_index = u64::from(cluster - 2);
         let sectors_per_cluster = u64::try_from(boot_region.sectors_per_cluster).unwrap();
         let sector_index = cluster_index
@@ -690,7 +663,7 @@ mod tests {
         disk: &Arc<ExfatRefactorMemoryDisk>,
         entry_type: u8,
     ) -> DirectoryEntryLocation {
-        let validated_mount = super::super::ondisk::load_validated_mount(disk.as_ref()).unwrap();
+        let validated_mount = super::super::test_support::load_validated_mount(disk.as_ref()).unwrap();
         let boot_region = validated_mount.boot_region;
         let mut current_cluster = boot_region.root_dir_cluster;
         let mut visited_clusters = BTreeSet::new();
@@ -759,7 +732,7 @@ mod tests {
 
     fn next_cluster(
         disk: &Arc<ExfatRefactorMemoryDisk>,
-        boot_region: &super::super::ondisk::BootRegion,
+        boot_region: &super::super::boot::BootRegion,
         current_cluster: u32,
     ) -> Option<u32> {
         let fat_offset = u64::from(boot_region.fat_offset_sectors)
@@ -769,7 +742,8 @@ mod tests {
             .checked_add(u64::from(current_cluster) * 4)
             .unwrap();
         let entry_bytes = disk.read_bytes(usize::try_from(entry_offset).unwrap(), 4);
-        let next_cluster = read_le_u32(&entry_bytes);
+        let next_cluster =
+            u32::from_le_bytes([entry_bytes[0], entry_bytes[1], entry_bytes[2], entry_bytes[3]]);
         if next_cluster >= 0xFFFF_FFF8 {
             None
         } else {
@@ -777,25 +751,27 @@ mod tests {
         }
     }
 
-    fn read_le_u16(bytes: &[u8]) -> u16 {
-        u16::from_le_bytes([bytes[0], bytes[1]])
-    }
-
-    fn read_le_u32(bytes: &[u8]) -> u32 {
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-    }
-
     fn upcase_data_offset(disk: &Arc<ExfatRefactorMemoryDisk>) -> usize {
         let directory_entry = find_directory_entry(disk, UPCASE_TABLE_ENTRY_TYPE);
         let directory_bytes = disk.read_bytes(directory_entry.offset, 32);
-        let first_cluster = read_le_u32(&directory_bytes[20..24]);
+        let first_cluster = u32::from_le_bytes([
+            directory_bytes[20],
+            directory_bytes[21],
+            directory_bytes[22],
+            directory_bytes[23],
+        ]);
         cluster_offset(&directory_entry.boot_region, first_cluster)
     }
 
     fn allocation_bitmap_data_offset(disk: &Arc<ExfatRefactorMemoryDisk>) -> usize {
         let directory_entry = find_directory_entry(disk, ALLOCATION_BITMAP_ENTRY_TYPE);
         let directory_bytes = disk.read_bytes(directory_entry.offset, 32);
-        let first_cluster = read_le_u32(&directory_bytes[20..24]);
+        let first_cluster = u32::from_le_bytes([
+            directory_bytes[20],
+            directory_bytes[21],
+            directory_bytes[22],
+            directory_bytes[23],
+        ]);
         cluster_offset(&directory_entry.boot_region, first_cluster)
     }
 
@@ -804,9 +780,10 @@ mod tests {
         init_mount_volume_state_test_runtime();
 
         let disk = ExfatRefactorMemoryDisk::new();
-        let validated_mount = super::super::ondisk::load_validated_mount(disk.as_ref())
+        let validated_mount = super::super::test_support::load_validated_mount(disk.as_ref())
             .unwrap_or_else(|error| {
-                let gate = super::super::ondisk::diagnose_invalid_on_disk_layout_gate(disk.as_ref());
+                let gate =
+                    super::super::test_support::diagnose_invalid_on_disk_layout_gate(disk.as_ref());
                 panic!(
                     "baseline fixture load_validated_mount failed with {:?}; diagnostic gate: {}",
                     error, gate
@@ -833,7 +810,7 @@ mod tests {
             super_block.fsid,
             u64::from(validated_mount.boot_region.volume_serial_number)
         );
-        assert_eq!(super_block.namelen, super::super::ondisk::UpcaseTable::NAME_MAX);
+        assert_eq!(super_block.namelen, super::super::upcase::UpcaseTable::NAME_MAX);
         assert_eq!(super_block.flags, 0);
         assert_eq!(fs.current_options().unwrap(), default_mount_options());
         assert!(fs
@@ -855,26 +832,10 @@ mod tests {
         let (fs, root_inode, super_block, _) = mounted_fs(&disk, default_mount_options());
 
         for _ in 0..3 {
-            let reread_root = match mount_volume_state(
-                MountVolumeStateTarget::Published { fs: &fs },
-                MountVolumeStateOperation::RootInode,
-            )
-            .unwrap()
-            {
-                MountVolumeStateOutcome::RootInode { root_inode } => root_inode,
-                _ => panic!("root read returned a non-root outcome"),
-            };
+            let reread_root = fs.root_inode();
             assert!(Arc::ptr_eq(&root_inode, &reread_root));
 
-            let reread_super_block = match mount_volume_state(
-                MountVolumeStateTarget::Published { fs: &fs },
-                MountVolumeStateOperation::SuperBlock,
-            )
-            .unwrap()
-            {
-                MountVolumeStateOutcome::SuperBlock { super_block } => super_block,
-                _ => panic!("superblock read returned a non-superblock outcome"),
-            };
+            let reread_super_block = fs.sb();
             assert_same_super_block(&super_block, &reread_super_block);
         }
     }

@@ -163,6 +163,8 @@
 - Accepted the final green Checker result for `pass_01_mount_volume_state` after the bounded repair loop. Direct main-agent repairs during the loop were limited to shallow compile/import/tooling issues; non-shallow baseline validation failures were routed back to Creator or Checker.
 - Accepted the Reviewer result for `pass_01_mount_volume_state` and skipped the post-review final Checker because Reviewer explicitly recorded non-functional edits only.
 - Recorded a temporary workflow audit file at `.agents/tmp/20260419-meso_01_round_trace.md` so the user can inspect every subagent attempt and workflow incident from this round.
+- Hardened the workflow protocol after the first implementation wave: Creator reports now require a complete introduced-entity census, Reviewer remains post-Checker but is split into a line-level quality gate plus a structural helper / owner-placement gate, broad structural cleanup is routed back to Creator instead of being performed inside Reviewer, and post-review final Checker is skippable only for explicitly line-level non-functional Reviewer edits.
+- Added shared workflow tools for future agents: `.agents/tools/checker_run.sh` is now the preferred Docker-backed Checker runner for `make kernel` / exact-name ktests with per-test `qemu-serial.log` archiving, and `.agents/tools/ra_code_nav.py` is the preferred rust-analyzer LSP navigation helper for scoped Asterinas symbol lookup, file outlines, definitions, references, implementations, and hover/type information.
 
 ## 5. Non-Normative Macro/Meso Working Rules
 *Planning aid only. This section records the current main-agent brainstorming for the first official Architect wave; it is not yet a scheduler protocol rule.*
