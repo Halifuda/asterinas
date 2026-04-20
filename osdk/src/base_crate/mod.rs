@@ -187,7 +187,8 @@ fn do_new_base_crate(
     add_manifest_dependency(dep_crate_name, dep_crate_path, link_unit_test_kernel);
 
     // Copy the manifest configurations from the target crate to the base crate
-    copy_profile_configurations(workspace_root);
+    copy_profile_configurations(&workspace_root);
+    copy_workspace_lockfile(&base_crate_path, &workspace_root);
 
     // Generate the features by copying the features from the target crate
     let dep_crate_features = dep_crate_features.iter().map(|(feature, value)| {
@@ -312,6 +313,19 @@ fn copy_profile_configurations(workspace_root: impl AsRef<Path>) {
 
     let content = toml::to_string(&manifest).unwrap();
     fs::write(manifest_path, content).unwrap();
+}
+
+fn copy_workspace_lockfile(
+    base_crate_path: impl AsRef<Path>,
+    workspace_root: impl AsRef<Path>,
+) {
+    let workspace_lockfile = workspace_root.as_ref().join("Cargo.lock");
+    if !workspace_lockfile.exists() {
+        return;
+    }
+
+    let base_lockfile = base_crate_path.as_ref().join("Cargo.lock");
+    fs::copy(workspace_lockfile, base_lockfile).unwrap();
 }
 
 fn add_feature_entries(

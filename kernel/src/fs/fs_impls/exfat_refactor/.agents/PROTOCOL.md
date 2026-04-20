@@ -13,8 +13,9 @@ Use the surrounding documents as follows:
 
 ## 0. Core Terms
 
-- **Final Owner**: The stable finished-system owner (VFS trait carrier, structure owner, daemon process, record type).
-- **Macro-Owner**: The large-scale architectural entities that belong to the final-owner concept (e.g., `ExfatFs`, `ExfatInode`, `FatChain`).
+- **Final Owner**: The stable finished-system owner (VFS trait carrier, On-disk Structure Owner, daemon process, record type).
+- **On-disk Structure Owner**: A Final Owner for one concrete durable exFAT structure or state machine, such as the Boot region, Allocation Bitmap, FAT, Up-case Table, directory-entry set, Stream Extension, or volume-label / volume-GUID entry. Use this full term; do not shorten it to an ambiguous generic phrase.
+- **Macro-Owner**: The large-scale architectural entities that belong to the final-owner concept, including VFS trait carriers and On-disk Structure Owners (e.g., `ExfatFs`, `ExfatInode`, `AllocationBitmap`, `UpcaseTable`, `Fat`).
 - **Meso-Component**: Explicit interfaces and primary structures mapped under a Macro-Owner (e.g., `write_at`, `resize`).
 - **Micro-Feature**: The specific functional details derived from prior knowledge (e.g., file write zero-fill gaps, allocation cluster counting, timestamp updates).
 - **Creator Pass**: A main-agent-defined implementation slice that sits between a Meso-Component and its Micro-Features. Each Creator Pass names exactly one parent meso-component and one explicit covered-micro set.
@@ -49,7 +50,7 @@ Use the surrounding documents as follows:
 19. **Strict Information Funnel**: Packets MUST be saved in `subagent-tasks/<component-id>/` and MUST use the `protocol/templates/[level]_[XX]_[component]_[role]_dispatch_TEMPLATE.md`. The main agent MUST NOT write design summaries or architectural hints in the packet. The packet is purely a pointer route (File Paths) to the input files and the output template.
     - **To Architect**: Inputs = `priors/Microsoft-exFAT-spec.md`, `priors/linux-exFAT-implementation-summary.md`, and the relevant Asterinas priors.
     - **To Designer**: Inputs = Architect topology and local component context.
-    - **To Creator**: Inputs = Designer's contract spec, the main-agent-selected covered-micro set, and `priors/ASTERINAS_CODE_QUALITY_PRIORS.md`. NEVER supply heavy exFAT specs or Linux code to Creator.
+    - **To Creator**: Inputs = Designer's contract spec, the main-agent-selected covered-micro set, and `priors/ASTERINAS_CODE_QUALITY_PRIORS.md`, plus only the stable pre-existing kernel interfaces strictly required to typecheck against Asterinas. NEVER supply heavy exFAT specs, Linux code, or legacy `kernel/src/fs/fs_impls/exfat/` implementation references to Creator.
     - **To Checker (Creator-Synced Pass)**: Inputs = Designer `_designer_ktest.md`, the matching Creator Pass report, and the pass write-set/code paths.
     - **To Checker (Meso Integration Pass)**: Inputs = Designer `_designer_ktest.md`, the accepted Creator Pass reports covering the target micro-features, and the pass write-set/code paths.
 20. If local Asterinas interfaces force a divergence from Microsoft or Linux behavior, the Architect or Designer artifact must record that explicitly.

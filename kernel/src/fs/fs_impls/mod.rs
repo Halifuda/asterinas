@@ -8,6 +8,7 @@ pub mod cgroupfs;
 pub mod configfs;
 pub mod devpts;
 pub mod exfat;
+pub mod exfat_refactor;
 pub mod ext2;
 pub mod overlayfs;
 pub mod procfs;
@@ -28,6 +29,8 @@ pub(super) fn init() {
 
     ext2::init();
     exfat::init();
+    // TODO: Register `exfat_refactor` here only after later ownership passes
+    // absorb the remaining legacy `exfat` runtime responsibilities.
     overlayfs::init();
 }
 

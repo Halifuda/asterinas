@@ -27,7 +27,8 @@ You must output:
    - **Rule C (Mandatory Trait/Callback Shape)**: The Designer's `[RELY]` dependencies strictly force you to provide a specific Trait or localized Callback/Closure shape.
    If you must introduce a new entity, you MUST explicitly document which whitelist rule it satisfies in your Creator Report.
 5. **Command-Free Execution**: You are a command-free role by default. Do not run `cargo osdk test` or kernel build commands to guess your way out of compiler errors unless explicitly authorized by the Dispatch Stub. The Checker owns the execution lock and validation loop.
-6. **No Architectural Revisions**: If the Designer's spec is fundamentally unimplementable in Rust (e.g., contradictory lifetimes across the `[GUARANTEE]` signature), document it in your report and return the task. Do not silently change the public signature, widen the covered-micro scope, or rewrite the lock topology.
+6. **No Legacy exFAT Oracle**: Do not treat the existing `kernel/src/fs/fs_impls/exfat/` implementation as a design oracle, scaffold source, or structure template for refactor work. Implement from the accepted Architect/Designer artifacts plus stable Asterinas kernel interfaces only. If a packet points you at legacy `exfat` implementation files, stop and report the packet violation instead of mining that code.
+7. **No Architectural Revisions**: If the Designer's spec is fundamentally unimplementable in Rust (e.g., contradictory lifetimes across the `[GUARANTEE]` signature), document it in your report and return the task. Do not silently change the public signature, widen the covered-micro scope, or rewrite the lock topology.
 
 ## Allowed Edits
 

@@ -13,8 +13,9 @@ You provide the static foundation that the Designer will later use to establish 
 
 ## Core Terms You Must Use
 
-- **Final Owner**: The stable finished-system owner. Must be one of four types: a VFS trait carrier, a structure owner, a daemon process, or a record type. *Note on WIP*: Before the entire system is completed, a "temporary seam" (a staging struct or facade) is also considered a legitimate final owner, provided it has an explicit, documented exit plan.
-- **Macro-Owner**: The large-scale architectural entities that belong to the final-owner concept (e.g., `ExfatFs`, `ExfatInode`, `FatChain`).
+- **Final Owner**: The stable finished-system owner. Must be one of four types: a VFS trait carrier, an On-disk Structure Owner, a daemon process, or a record type. *Note on WIP*: Before the entire system is completed, a "temporary seam" (a staging struct or facade) is also considered a legitimate final owner, provided it has an explicit, documented exit plan.
+- **On-disk Structure Owner**: A Final Owner for one concrete durable exFAT structure or state machine, such as the Boot region, Allocation Bitmap, FAT, Up-case Table, directory-entry set, Stream Extension, or volume-label / volume-GUID entry. Use this full term; do not shorten it to an ambiguous generic phrase.
+- **Macro-Owner**: The large-scale architectural entities that belong to the final-owner concept, including VFS trait carriers and On-disk Structure Owners (e.g., `ExfatFs`, `ExfatInode`, `AllocationBitmap`, `UpcaseTable`, `Fat`).
 - **Meso-Component**: Explicit interfaces and primary structures mapped under a Macro-Owner (e.g., `write_at`, `resize`).
 - **Micro-Feature**: The specific functional details derived from the Micro-Feature Inventory prior (e.g., file write zero-fill gaps, allocation cluster counting, timestamp updates).
 - **Global Lock Topology**: The absolute static hierarchy and holding states of synchronization primitives in the system.
