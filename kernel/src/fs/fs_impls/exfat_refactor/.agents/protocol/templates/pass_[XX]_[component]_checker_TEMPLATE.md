@@ -20,11 +20,20 @@
 - `{test_case_name}`: [e.g., verified base case, written inside `mod tests`]
 - `{integration_or_concurrency_test}`: [e.g., asserted thread starvation during Bio handoff]
 
+## 2.1 Test-Code Surface Record
+
+*Required whenever Checker created or edited Rust tests or `test_support/` helpers in this pass. Also required when the packet explicitly asks for a full re-audit of existing test surfaces. Checker records touched surfaces and obvious concerns, but Reviewer owns final static approval of test-code quality.*
+
+- **Touched Test Surface:** [List touched test files or say `None` if Checker reused existing tests only.]
+- **Existing Test Surface In Scope:** [List any packeted pre-existing `#[cfg(ktest)]` modules or `test_support/` files that were re-audited, or say `None`.]
+- **Checker Surface Note:** [e.g., `No test-code edits`, `New helper added`, `Possible move/split concern for Reviewer`]
+- **Reviewer Follow-Up Needed:** [Choose `No test-code surface touched`, `Ordinary post-checker Reviewer gate`, or `Full test-code quality re-audit required`.]
+
 ## 3. Lock-Guarded Evaluation Result
 
 *Document the results from the Checker Execution Lock stage. Prefer `.agents/tools/checker_run.sh` and include both the wrapper command and the underlying Docker command(s). If running manually, include the explicit `cargo osdk test` command executed in the Docker environment (`codex-asterinas-dev`).*
 
-- **Reproduce Command**: `.agents/tools/checker_run.sh ktest --component <ID> --phase <PHASE> --test <FULL_TESTNAME>` *(or the exact manual Docker command if the wrapper was not used)*
+- **Reproduce Command**: `.agents/tools/checker_run.sh ktest --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE> --test <FULL_TESTNAME>` *(or the exact manual Docker command if the wrapper was not used)*
 - **Exact-Name Proof**: (Show precise output lines proving the targeted `#[ktest]` actually ran, not just a blind `cargo check`).
 - **qemu-serial.log Scan**: (Confirm absence of RCU stalls, TCG panics, or cyclic lock dependencies. If multiple ktests ran, list each archived serial-log path produced by `checker_run.sh` or manual per-test copies).
 

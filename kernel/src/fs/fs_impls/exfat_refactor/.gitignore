@@ -1,0 +1,25 @@
+# Keep the repository surface narrow: protocol assets plus source code only.
+*
+.*
+
+!/.gitignore
+!/*.rs
+!/test_support/
+!/test_support/**
+!/.agents/
+
+/.agents/*
+!/.agents/README.md
+!/.agents/PROTOCOL.md
+!/.agents/PASS_SLICING.md
+!/.agents/SYSTEM_BLUEPRINT.md
+!/.agents/MEMO_PROTOCOL_BACKGROUND.md
+!/.agents/priors/
+!/.agents/priors/**
+!/.agents/protocol/
+!/.agents/protocol/**
+!/.agents/tools/
+!/.agents/tools/**
+!/.agents/locks/
+/.agents/locks/*
+!/.agents/locks/.gitkeep

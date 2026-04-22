@@ -14,7 +14,8 @@ pub(super) fn diagnose_boot_region(
     block_device: &dyn BlockDevice,
 ) -> core::result::Result<BootRegion, &'static str> {
     let mut sector_header = [0u8; 512];
-    read_device_bytes(block_device, 0, &mut sector_header)
+    block_device
+        .read_bytes(0, &mut sector_header)
         .map_err(|_| "read_boot_region:device_io")?;
     if &sector_header[3..11] != b"EXFAT   " {
         return Err("read_boot_region:oem_name");
@@ -123,7 +124,8 @@ pub(super) fn read_anomaly_state(
     boot_region: &BootRegion,
 ) -> core::result::Result<(), &'static str> {
     let mut boot_sector = vec![0; boot_region.sector_size];
-    read_device_bytes(block_device, 0, &mut boot_sector)
+    block_device
+        .read_bytes(0, &mut boot_sector)
         .map_err(|_| "read_anomaly_state:device_io")
 }
 
@@ -136,12 +138,14 @@ fn diagnose_validate_boot_checksum(
         None => return Err("validate_boot_checksum:checksum_region_len_overflow"),
     };
     let mut checksum_region = vec![0; checksum_region_len];
-    read_device_bytes(block_device, 0, &mut checksum_region)
+    block_device
+        .read_bytes(0, &mut checksum_region)
         .map_err(|_| "validate_boot_checksum:checksum_region_device_io")?;
     let expected_checksum = boot_region_checksum(&checksum_region);
 
     let mut checksum_sector = vec![0; boot_region.sector_size];
-    read_device_bytes(block_device, checksum_region_len, &mut checksum_sector)
+    block_device
+        .read_bytes(checksum_region_len, &mut checksum_sector)
         .map_err(|_| "validate_boot_checksum:checksum_sector_device_io")?;
     for chunk in checksum_sector.chunks_exact(mem::size_of::<u32>()) {
         if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != expected_checksum {
@@ -183,14 +187,6 @@ fn diagnose_validate_boot_geometry(
         return Err("validate_boot_geometry:fat_overlaps_cluster_heap");
     }
     Ok(())
-}
-
-fn read_device_bytes(
-    block_device: &dyn BlockDevice,
-    offset: usize,
-    buffer: &mut [u8],
-) -> Result<(), ()> {
-    block_device.read_bytes(offset, buffer).map_err(|_| ())
 }
 
 fn boot_region_checksum(bytes: &[u8]) -> u32 {

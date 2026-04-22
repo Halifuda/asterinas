@@ -6,7 +6,7 @@ use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::{
-    bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmapRecord},
+    bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmap},
     fat::{ChainVisitControl, FatReader},
     fs::MountVolumeStateError,
     upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseRecord, UpcaseTable},
@@ -33,11 +33,43 @@ pub(super) struct BootRegion {
 }
 
 impl BootRegion {
+    pub(super) fn load_mount_state(
+        block_device: &dyn BlockDevice,
+    ) -> core::result::Result<
+        (
+            Self,
+            VolumeAnomalyState,
+            AllocationBitmap,
+            Arc<UpcaseTable>,
+            usize,
+            bool,
+        ),
+        MountVolumeStateError,
+    > {
+        let boot_region = Self::read(block_device)?;
+        let anomaly = VolumeAnomalyState::read(block_device, &boot_region)?;
+        let mut fat_reader = FatReader::new(block_device, &boot_region);
+        let (bitmap, upcase) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
+        let upcase_table = Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase)?);
+        let (used_clusters, used_clusters_from_recount) =
+            bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
+        Ok((
+            boot_region,
+            anomaly,
+            bitmap,
+            upcase_table,
+            used_clusters,
+            used_clusters_from_recount,
+        ))
+    }
+
     pub(super) fn read(
         block_device: &dyn BlockDevice,
     ) -> core::result::Result<Self, MountVolumeStateError> {
         let mut sector_header = [0u8; 512];
-        Self::read_device_bytes(block_device, 0, &mut sector_header)?;
+        block_device
+            .read_bytes(0, &mut sector_header)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
         if &sector_header[3..11] != b"EXFAT   " {
             return Err(MountVolumeStateError::InvalidOnDiskLayout);
         }
@@ -166,6 +198,32 @@ impl BootRegion {
         usize::try_from(self.cluster_count).map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)
     }
 
+    pub(super) fn cluster_from_index(
+        &self,
+        cluster_index: usize,
+    ) -> core::result::Result<u32, MountVolumeStateError> {
+        let cluster_index =
+            u32::try_from(cluster_index).map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+        let cluster = FIRST_DATA_CLUSTER
+            .checked_add(cluster_index)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        if !self.is_valid_cluster(cluster) {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        Ok(cluster)
+    }
+
+    pub(super) fn cluster_index(
+        &self,
+        cluster: u32,
+    ) -> core::result::Result<usize, MountVolumeStateError> {
+        if !self.is_valid_cluster(cluster) {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        usize::try_from(cluster - FIRST_DATA_CLUSTER)
+            .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)
+    }
+
     pub(super) fn data_capacity_bytes(
         &self,
     ) -> core::result::Result<u64, MountVolumeStateError> {
@@ -208,11 +266,15 @@ impl BootRegion {
             .checked_mul(11)
             .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
         let mut checksum_region = vec![0; checksum_region_len];
-        Self::read_device_bytes(block_device, 0, &mut checksum_region)?;
+        block_device
+            .read_bytes(0, &mut checksum_region)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
         let expected_checksum = Self::checksum(&checksum_region);
 
         let mut checksum_sector = vec![0; self.sector_size];
-        Self::read_device_bytes(block_device, checksum_region_len, &mut checksum_sector)?;
+        block_device
+            .read_bytes(checksum_region_len, &mut checksum_sector)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
         for chunk in checksum_sector.chunks_exact(mem::size_of::<u32>()) {
             if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != expected_checksum {
                 return Err(MountVolumeStateError::InvalidOnDiskLayout);
@@ -246,16 +308,6 @@ impl BootRegion {
         Ok(())
     }
 
-    fn read_device_bytes(
-        block_device: &dyn BlockDevice,
-        offset: usize,
-        buffer: &mut [u8],
-    ) -> core::result::Result<(), MountVolumeStateError> {
-        block_device
-            .read_bytes(offset, buffer)
-            .map_err(|_| MountVolumeStateError::DeviceIo)
-    }
-
     fn checksum(bytes: &[u8]) -> u32 {
         let mut checksum = 0u32;
         for (offset, byte) in bytes.iter().enumerate() {
@@ -265,6 +317,41 @@ impl BootRegion {
             checksum = checksum.rotate_right(1).wrapping_add(u32::from(*byte));
         }
         checksum
+    }
+
+    fn scan_root_directory(
+        boot_region: &BootRegion,
+        fat_reader: &mut FatReader<'_>,
+    ) -> core::result::Result<(AllocationBitmap, UpcaseRecord), MountVolumeStateError> {
+        let mut bitmap = None;
+        let mut upcase = None;
+        fat_reader.walk_cluster_chain(boot_region.root_dir_cluster, |_, cluster_bytes| {
+            for entry in cluster_bytes.chunks_exact(32) {
+                match entry[0] {
+                    END_OF_DIRECTORY_ENTRY_TYPE => return Ok(ChainVisitControl::Stop),
+                    ALLOCATION_BITMAP_ENTRY_TYPE => {
+                        bitmap = Some(AllocationBitmap::parse(entry)?)
+                    }
+                    UPCASE_TABLE_ENTRY_TYPE => upcase = Some(UpcaseRecord::parse(entry)?),
+                    _ => (),
+                }
+                if bitmap.is_some() && upcase.is_some() {
+                    return Ok(ChainVisitControl::Stop);
+                }
+            }
+            Ok(ChainVisitControl::Continue)
+        })?;
+        Self::finalize_root_records(bitmap, upcase)
+    }
+
+    fn finalize_root_records(
+        bitmap: Option<AllocationBitmap>,
+        upcase: Option<UpcaseRecord>,
+    ) -> core::result::Result<(AllocationBitmap, UpcaseRecord), MountVolumeStateError> {
+        Ok((
+            bitmap.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+            upcase.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+        ))
     }
 }
 
@@ -281,78 +368,14 @@ impl VolumeAnomalyState {
         boot_region: &BootRegion,
     ) -> core::result::Result<Self, MountVolumeStateError> {
         let mut boot_sector = vec![0; boot_region.sector_size];
-        BootRegion::read_device_bytes(block_device, 0, &mut boot_sector)?;
+        block_device
+            .read_bytes(0, &mut boot_sector)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
         let volume_flags = u16::from_le_bytes([boot_sector[106], boot_sector[107]]);
         Ok(Self {
             clear_to_zero: volume_flags & 0x0008 != 0,
             media_failure: volume_flags & 0x0004 != 0,
             volume_dirty: volume_flags & 0x0002 != 0,
         })
-    }
-}
-
-pub(super) struct ValidatedMount {
-    pub(super) anomaly: VolumeAnomalyState,
-    pub(super) bitmap: AllocationBitmapRecord,
-    pub(super) boot_region: BootRegion,
-    pub(super) upcase_table: Arc<UpcaseTable>,
-    pub(super) used_clusters: usize,
-    pub(super) used_clusters_from_recount: bool,
-}
-
-impl ValidatedMount {
-    pub(super) fn load(
-        block_device: &dyn BlockDevice,
-    ) -> core::result::Result<Self, MountVolumeStateError> {
-        let boot_region = BootRegion::read(block_device)?;
-        let anomaly = VolumeAnomalyState::read(block_device, &boot_region)?;
-        let mut fat_reader = FatReader::new(block_device, &boot_region);
-        let (bitmap, upcase) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
-        let upcase_table = Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase)?);
-        let (used_clusters, used_clusters_from_recount) =
-            bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
-        Ok(Self {
-            anomaly,
-            bitmap,
-            boot_region,
-            upcase_table,
-            used_clusters,
-            used_clusters_from_recount,
-        })
-    }
-
-    fn scan_root_directory(
-        boot_region: &BootRegion,
-        fat_reader: &mut FatReader<'_>,
-    ) -> core::result::Result<(AllocationBitmapRecord, UpcaseRecord), MountVolumeStateError> {
-        let mut bitmap = None;
-        let mut upcase = None;
-        fat_reader.walk_cluster_chain(boot_region.root_dir_cluster, |_, cluster_bytes| {
-            for entry in cluster_bytes.chunks_exact(32) {
-                match entry[0] {
-                    END_OF_DIRECTORY_ENTRY_TYPE => return Ok(ChainVisitControl::Stop),
-                    ALLOCATION_BITMAP_ENTRY_TYPE => {
-                        bitmap = Some(AllocationBitmapRecord::parse(entry)?)
-                    }
-                    UPCASE_TABLE_ENTRY_TYPE => upcase = Some(UpcaseRecord::parse(entry)?),
-                    _ => (),
-                }
-                if bitmap.is_some() && upcase.is_some() {
-                    return Ok(ChainVisitControl::Stop);
-                }
-            }
-            Ok(ChainVisitControl::Continue)
-        })?;
-        Self::finalize_root_records(bitmap, upcase)
-    }
-
-    fn finalize_root_records(
-        bitmap: Option<AllocationBitmapRecord>,
-        upcase: Option<UpcaseRecord>,
-    ) -> core::result::Result<(AllocationBitmapRecord, UpcaseRecord), MountVolumeStateError> {
-        Ok((
-            bitmap.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
-            upcase.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
-        ))
     }
 }

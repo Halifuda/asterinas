@@ -29,12 +29,12 @@ Subcommands:
   pass          Run `make kernel`, then the requested exact-name ktests.
 
 Options:
-  --component ID              Component/pass identifier for checker lock metadata.
+  --component ID              Parent meso-component identifier for checker lock metadata and receipt grouping.
   --phase PHASE               Checker phase label for checker lock metadata.
   --test FULL_NAME            Exact ktest full name. May be repeated.
   --container NAME            Docker container name. Default: codex-asterinas-dev.
   --repo-dir PATH             Repository path inside the container. Default: /root/asterinas.
-  --out-dir PATH              Host output directory. Default: .agents/checker-runs/<timestamp>.
+  --out-dir PATH              Host output directory. Default: .agents/checker-runs/<component>/<timestamp>-<component>-<phase>.
   --retry-seconds SECONDS     Lock retry interval. Must be >= 60. Default: 60.
   --wait-budget-seconds SECONDS
                               Checker lock wait budget. Default: 0 (fail if busy).
@@ -152,7 +152,7 @@ parse_args() {
     esac
 
     if [ -z "$out_dir" ]; then
-        out_dir="$agents_dir/checker-runs/$(timestamp)-$(sanitize_name "$component")-$(sanitize_name "$phase")"
+        out_dir="$agents_dir/checker-runs/$(sanitize_name "$component")/$(timestamp)-$(sanitize_name "$component")-$(sanitize_name "$phase")"
     fi
 }
 

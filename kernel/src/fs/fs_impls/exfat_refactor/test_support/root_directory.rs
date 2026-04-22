@@ -9,7 +9,7 @@ use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::super::{
-    bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmapRecord},
+    bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmap},
     boot::BootRegion,
     fat::{FatChainStep, FatReader},
     fs::MountVolumeStateError,
@@ -22,7 +22,7 @@ pub(super) fn diagnose_scan_root_directory(
     block_device: &dyn BlockDevice,
     boot_region: &BootRegion,
     fat_reader: &mut FatReader<'_>,
-) -> core::result::Result<(AllocationBitmapRecord, UpcaseRecord), &'static str> {
+) -> core::result::Result<(AllocationBitmap, UpcaseRecord), &'static str> {
     let mut cluster_buffer = vec![0; boot_region.cluster_size];
     let mut current_cluster = boot_region.root_dir_cluster;
     let mut visited_clusters = BTreeSet::new();
@@ -43,7 +43,7 @@ pub(super) fn diagnose_scan_root_directory(
         for entry in cluster_buffer.chunks_exact(32) {
             match entry[0] {
                 END_OF_DIRECTORY_ENTRY_TYPE => return finalize_root_records(bitmap, upcase),
-                ALLOCATION_BITMAP_ENTRY_TYPE => match AllocationBitmapRecord::parse(entry) {
+                ALLOCATION_BITMAP_ENTRY_TYPE => match AllocationBitmap::parse(entry) {
                     Ok(record) => bitmap = Some(record),
                     Err(_) => return Err("scan_root_directory:invalid_allocation_bitmap_record"),
                 },
@@ -70,9 +70,9 @@ pub(super) fn diagnose_scan_root_directory(
 }
 
 fn finalize_root_records(
-    bitmap: Option<AllocationBitmapRecord>,
+    bitmap: Option<AllocationBitmap>,
     upcase: Option<UpcaseRecord>,
-) -> core::result::Result<(AllocationBitmapRecord, UpcaseRecord), &'static str> {
+) -> core::result::Result<(AllocationBitmap, UpcaseRecord), &'static str> {
     match (bitmap, upcase) {
         (Some(bitmap), Some(upcase)) => Ok((bitmap, upcase)),
         (None, _) => Err("scan_root_directory:missing_allocation_bitmap_record"),

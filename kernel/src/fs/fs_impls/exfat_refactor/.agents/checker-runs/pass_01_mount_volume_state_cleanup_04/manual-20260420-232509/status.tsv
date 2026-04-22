@@ -1,3 +1,0 @@
-
-===== RUN aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_mount_publishes_root_inode_superblock_and_defaults =====
-6	aster_kernel::fs::fs_impls::exfat_refactor::fs::tests::mount_volume_state_mount_publishes_root_inode_superblock_and_defaults	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232509/mount_volume_state_mount_publishes_root_inode_superblock_and_defaults.stdout.log	.agents/checker-runs/pass_01_mount_volume_state_cleanup_04/manual-20260420-232509/mount_volume_state_mount_publishes_root_inode_superblock_and_defaults.qemu-serial.log

@@ -50,9 +50,11 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - *Note on Priors*: We use an **Information Funnel**. Heavy priors (Microsoft specs, Linux source) are internalized by the Architect. Designers internalize Architect outputs + Linux references. Creators only see the Designer's contract, the main-agent-selected pass coverage, and Code Quality priors. Checkers see the Designer test contract plus the relevant Creator pass receipts.
 - `TESTING_GUIDE.md`: How exFAT ktests should be written and executed.
 - `PROTOCOL.md`: Main-agent-owned normative workflow.
+- `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).
 - `subagent-tasks/`: Task packets grouped by `<component-id>`. Packets are lightweight **Dispatch Stubs** rather than heavy prose, avoiding context bloat and preventing Creator overreach.
 - `components/`: Subagent artifact outputs. Specs, evaluations, constraints are placed under exact `<component-id>` folders.
+- `checker-runs/`: Checker execution receipts grouped by parent meso-component (`checker-runs/<meso-component>/...`).
 - `tools/`: Workflow scripts. `checker_lock.sh` is the low-level checker execution lock, `checker_run.sh` is the preferred Checker build/ktest runner that archives per-test `qemu-serial.log`, and `ra_code_nav.py` is the preferred rust-analyzer code-navigation helper for symbol search, file symbols, definitions, references, implementations, and hover output.
 - `SYSTEM_BLUEPRINT.md`: The scheduler-owned active global blueprint and traceability matrix.
 - `priors/`: Prior knowledge layer containing heavy context separated for the strict information funnel.

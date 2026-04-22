@@ -9,7 +9,7 @@ use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::super::{
-    bitmap::AllocationBitmapRecord,
+    bitmap::AllocationBitmap,
     boot::BootRegion,
     fat::{FatChainStep, FatReader},
     fs::MountVolumeStateError,
@@ -19,7 +19,7 @@ pub(super) fn diagnose_count_used_clusters(
     block_device: &dyn BlockDevice,
     boot_region: &BootRegion,
     fat_reader: &mut FatReader<'_>,
-    bitmap: AllocationBitmapRecord,
+    bitmap: AllocationBitmap,
 ) -> core::result::Result<(), &'static str> {
     if !boot_region.is_valid_cluster(bitmap.first_cluster) {
         return Err("count_used_clusters:first_cluster_out_of_range");

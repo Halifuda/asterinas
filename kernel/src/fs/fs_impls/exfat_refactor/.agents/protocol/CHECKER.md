@@ -8,7 +8,7 @@ Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
 
 The Checker is the **Validator and Diagnostic Condenser**. You are the ONLY role authorized to execute code, run tests, and spin up QEMU instances.
 
-You receive the `_designer_ktest.md` (which dictates *what* to test) plus the pass context chosen by the main agent. Your job is to implement those tests, run the execution pipeline under a strict global lock, evaluate the runtime integrity (including low-level logs), and either issue a final Sign-Off or generate an Actionable Repair Batch.
+You receive the `_designer_ktest.md` (which dictates *what* to test) plus the pass context chosen by the main agent. Your job is to implement those tests, run the execution pipeline under a strict global lock, evaluate the runtime integrity (including low-level logs), and either issue runtime acceptance evidence or generate an Actionable Repair Batch.
 
 There are two legal Checker pass kinds:
 1. **Creator-Synced Pass**: Must mirror one Creator Pass exactly, including parent meso-component and covered micro-features.
@@ -31,21 +31,23 @@ You must output:
    - Place tests directly next to the module they validate inside a `#[cfg(ktest)] mod tests { ... }` block.
    - If reusing test fixtures or builders and that support becomes non-trivial, keep it under a dedicated `test_support/` hierarchy split by concern instead of growing one flat helper file. Small one-off support may stay local when that remains the clearer boundary.
    - You must NOT add `#[cfg(ktest)]` test-only helpers to the production `impl` bodies unless absolutely unavoidable, in which case you must add a `TODO`/`FIXME` comment explaining the condition for removal.
-4. **Exact-Name Proof Obligation**: A green exit status `0` is meaningless if the tests were skipped. Prefer:
-`.agents/tools/checker_run.sh ktest --component <ID> --phase <PHASE> --test <FULL_KTEST_NAME>`.
+4. **Touched Test-Code Surface Record**: When you create or edit test code, you must record the touched test surfaces and any obvious topology concerns in your Checker report. Record helper placement, support hierarchy, naming, and local-vs-`test_support/` boundaries as observations for Reviewer follow-up. A passing test run does not excuse poor topology, but Checker is not the final approver of test-code structure.
+5. **Full-Surface Existing-Test Audit When Packeted**: If the packet explicitly says existing tests are in scope, inspect the whole named `#[cfg(ktest)]` / `test_support/` / successor test-only hierarchy rather than only the tests you touched in this pass. Existing helpers and fixtures are not exempt just because they predate the current Checker run. Your duty here is to record the full surface touched and any obvious concerns so Reviewer can make the final static test-quality judgment.
+6. **Exact-Name Proof Obligation**: A green exit status `0` is meaningless if the tests were skipped. Prefer:
+`.agents/tools/checker_run.sh ktest --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE> --test <FULL_KTEST_NAME>`.
 For manual execution, use the verified container command format:
 `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test <TESTNAME_FILTER>'`, where the `<TESTNAME_FILTER>` should be the exact test name.
 You must prove execution by grepping the test output for exact test names or unique panic strings, verifying the intended path was hit.
-5. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
-`.agents/tools/checker_run.sh make-kernel --component <ID> --phase <PHASE>`.
+7. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
+`.agents/tools/checker_run.sh make-kernel --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
 For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas && make kernel'`, also under the checker execution lock.
-6. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies. If one Checker run executes multiple ktests, use `checker_run.sh` or preserve each serial log before the next `cargo osdk test` overwrites it.
-7. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
+8. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies. If one Checker run executes multiple ktests, use `checker_run.sh` or preserve each serial log before the next `cargo osdk test` overwrites it.
+9. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
    - `Reproduce Command`
    - `Failed Test`
    - `Evidence`
    These fields are mandatory before you write any repair advice.
-8. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+10. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
 
 ## Allowed Edits
 
@@ -60,4 +62,4 @@ For manual execution, run it in the same verified container with `docker exec co
 
 ## Stop Condition
 
-Stop after the tests pass AND you generate a sign-off report, OR after the tests fail AND you generate a repair batch report. Release the checker lock before stopping.
+Stop after the tests pass AND you generate a runtime acceptance report, OR after the tests fail AND you generate a repair batch report. Release the checker lock before stopping.
