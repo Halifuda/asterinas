@@ -16,8 +16,8 @@
 
 ## 2. Test Obligations Executed
 
-**Tests Implemented from `_designer_ktest.md` (Using `#[ktest]` and `#[cfg(ktest)] mod tests`):**
-- `{test_case_name}`: [e.g., verified base case, written inside `mod tests`]
+**Tests Implemented from `_designer_ktest.md` (Using `#[ktest]` under an owner-adjacent `#[cfg(ktest)] mod tests` path, inline only when tiny or externalized through `#[path = "test_support/..."]` when non-trivial):**
+- `{test_case_name}`: [e.g., verified base case, with placement recorded as `inline tiny` or `test_support/ externalized`]
 - `{integration_or_concurrency_test}`: [e.g., asserted thread starvation during Bio handoff]
 
 ## 2.1 Test-Code Surface Record
@@ -26,6 +26,7 @@
 
 - **Touched Test Surface:** [List touched test files or say `None` if Checker reused existing tests only.]
 - **Existing Test Surface In Scope:** [List any packeted pre-existing `#[cfg(ktest)]` modules or `test_support/` files that were re-audited, or say `None`.]
+- **Test Placement Justification:** [Choose `inline tiny`, `test_support/ externalized`, or `mixed`; explain briefly.]
 - **Checker Surface Note:** [e.g., `No test-code edits`, `New helper added`, `Possible move/split concern for Reviewer`]
 - **Reviewer Follow-Up Needed:** [Choose `No test-code surface touched`, `Ordinary post-checker Reviewer gate`, or `Full test-code quality re-audit required`.]
 

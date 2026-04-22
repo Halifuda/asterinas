@@ -2,6 +2,7 @@
 
 mod bitmap;
 mod boot_region;
+pub(super) mod inode;
 mod mount_diagnostics;
 mod root_directory;
 mod upcase;

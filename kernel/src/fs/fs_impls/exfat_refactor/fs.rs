@@ -173,7 +173,7 @@ impl ExfatFs {
             anomaly,
             boot_region,
             flags: options.fs_flags,
-            options: *options,
+            options: options.clone(),
             root_inode: root_inode.clone(),
             upcase_table,
         };
@@ -212,6 +212,11 @@ impl ExfatFs {
         if publication.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
             return Err(MountVolumeStateError::ReadOnlyConflict);
         }
+        if publication.options.iocharset != next_options.iocharset
+            || publication.options.keep_last_dots != next_options.keep_last_dots
+        {
+            return Err(MountVolumeStateError::UnsupportedRemountDelta);
+        }
         publication.flags = next_flags;
         publication.options = next_options.with_flags(next_flags);
         Ok(next_flags)
@@ -243,7 +248,7 @@ impl ExfatFs {
         let publication = state
             .as_ref()
             .ok_or(MountVolumeStateError::UnpublishedState)?;
-        Ok(publication.options)
+        Ok(publication.options.clone())
     }
 
     fn publish_mount_state(
@@ -270,6 +275,24 @@ impl ExfatFs {
             .ok_or(MountVolumeStateError::UnpublishedState)?;
         let root_inode: Arc<dyn Inode> = publication.root_inode.clone();
         Ok(root_inode)
+    }
+
+    pub(super) fn published_lookup_state(
+        &self,
+    ) -> core::result::Result<
+        (Arc<dyn BlockDevice>, BootRegion, Arc<UpcaseTable>, ExfatMountOptions),
+        MountVolumeStateError,
+    > {
+        let state = self.state.read();
+        let publication = state
+            .as_ref()
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
+        Ok((
+            self.block_device.clone(),
+            publication.boot_region,
+            publication.upcase_table.clone(),
+            publication.options.clone(),
+        ))
     }
 
     fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, FreeSpaceAccountingError> {
@@ -434,10 +457,12 @@ impl FileSystem for ExfatFs {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExfatMountOptions {
     discard: bool,
     fs_flags: FsFlags,
+    pub(super) iocharset: String,
+    pub(super) keep_last_dots: bool,
 }
 
 impl ExfatMountOptions {
@@ -448,6 +473,8 @@ impl ExfatMountOptions {
         let mut options = Self {
             discard: false,
             fs_flags,
+            iocharset: "utf8".to_string(),
+            keep_last_dots: false,
         };
         let Some(args) = args else {
             return Ok(options);
@@ -459,14 +486,29 @@ impl ExfatMountOptions {
             match entry {
                 "discard" => options.discard = true,
                 "nodiscard" => options.discard = false,
+                "keep_last_dots" => options.keep_last_dots = true,
+                "nokeep_last_dots" => options.keep_last_dots = false,
+                _ if entry.starts_with("iocharset=") => {
+                    let iocharset = entry
+                        .split_once('=')
+                        .map(|(_, value)| value)
+                        .ok_or(MountVolumeStateError::InvalidMountInput)?;
+                    if iocharset.is_empty() {
+                        return Err(MountVolumeStateError::InvalidMountInput);
+                    }
+                    options.iocharset = iocharset.to_string();
+                }
                 _ => return Err(MountVolumeStateError::InvalidMountInput),
             }
         }
         Ok(options)
     }
 
-    fn with_flags(self, fs_flags: FsFlags) -> Self {
-        Self { fs_flags, ..self }
+    fn with_flags(&self, fs_flags: FsFlags) -> Self {
+        Self {
+            fs_flags,
+            ..self.clone()
+        }
     }
 }
 
