@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -333,6 +333,8 @@ fn default_mount_options() -> ExfatMountOptions {
     ExfatMountOptions {
         discard: false,
         fs_flags: FsFlags::empty(),
+        iocharset: String::from("utf8"),
+        keep_last_dots: false,
     }
 }
 
@@ -523,7 +525,14 @@ fn mount_volume_state_mount_publishes_root_inode_superblock_and_defaults() {
     );
     assert_eq!(super_block.flags, 0);
     assert_eq!(fs.current_options().unwrap(), default_mount_options());
-    assert!(fs.state.read().as_ref().unwrap().upcase_table.data.len() > 0);
+    let state = fs.state.read();
+    let publication = state.as_ref().unwrap();
+    assert!(publication
+        .upcase_table
+        .names_equal(&[u16::from(b'a')], &[u16::from(b'A')]));
+    assert!(!publication
+        .upcase_table
+        .names_equal(&[u16::from(b'a')], &[u16::from(b'B')]));
 }
 
 #[ktest]
@@ -658,7 +667,7 @@ fn mount_volume_state_remount_allows_discard_and_rejects_immutable_delta() {
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
     let discard_options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
 
     let flags = fs
@@ -675,8 +684,8 @@ fn mount_volume_state_remount_allows_discard_and_rejects_immutable_delta() {
 
     let unsupported_flags = FsFlags::SYNCHRONOUS;
     let unsupported_options = ExfatMountOptions {
-        discard: false,
         fs_flags: unsupported_flags,
+        ..default_mount_options()
     };
     assert_eq!(
         fs.remount_published(unsupported_flags, &unsupported_options)
@@ -698,7 +707,7 @@ fn administrative_trim_free_space_fast_fails_with_eopnotsupp_without_mutating_st
     let disk = ExfatRefactorMemoryDisk::new();
     let options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
     let (fs, _, _, _) = mounted_fs(&disk, options);
 
@@ -717,6 +726,7 @@ fn administrative_trim_free_space_rejects_read_only_before_unsupported_trim() {
     let options = ExfatMountOptions {
         discard: true,
         fs_flags: FsFlags::RDONLY,
+        ..default_mount_options()
     };
     let (fs, _, super_block, flags) = mounted_fs(&disk, options);
 
@@ -738,7 +748,7 @@ fn free_space_accounting_and_discard_integration_allocate_free_updates_superbloc
     let disk = ExfatRefactorMemoryDisk::new();
     let options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
     let (fs, _, _, _) = mounted_fs(&disk, options);
 
@@ -779,7 +789,7 @@ fn free_space_accounting_and_discard_integration_failures_preserve_snapshot_and_
     let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
     let options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
     let (fs, _, _, _) = mount_block_device(&block_device, options).unwrap();
 
@@ -815,7 +825,7 @@ fn free_space_accounting_and_discard_integration_repeated_snapshots_and_trim_rej
     let disk = ExfatRefactorMemoryDisk::new();
     let options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
     let (fs, _, _, _) = mounted_fs(&disk, options);
 
@@ -845,7 +855,7 @@ fn free_space_accounting_and_discard_integration_snapshot_linearizes_under_alloc
     let disk = ExfatRefactorMemoryDisk::new();
     let options = ExfatMountOptions {
         discard: true,
-        fs_flags: FsFlags::empty(),
+        ..default_mount_options()
     };
     let (fs, _, _, _) = mounted_fs(&disk, options);
     let initial_snapshot = fs.cached_free_space_snapshot().unwrap();

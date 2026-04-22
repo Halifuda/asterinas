@@ -6,11 +6,11 @@
 
 ## 1. Modularity (Rely-Guarantee)
 
-### [GUARANTEE] Meso-Level Interface
-*The singular, strict public or crate-visible Rust function signature.*
-```rust
-// e.g., pub(crate) fn write_at(&mut self, offset: usize, buf: &[u8]) -> Result<usize, ExfatError>
-```
+### [GUARANTEE] Meso-Level Boundary
+*Describe the single semantic crate-visible boundary for this Meso-Component: what class of request enters, what class of result leaves, and what must remain internal control flow beneath that boundary. Do not prescribe an exact Rust function signature, exact type names, or enum / variant spelling unless the packet explicitly says you are documenting an already-fixed pre-existing kernel interface.*
+- **Request Class:**
+- **Result Class:**
+- **Must Remain Internal:**
 
 ### [RELY] Bounded Dependencies
 *List the explicit OSTD, VFS interfaces, or lower-level capabilities the component is restricted to. Do not use APIs that violate the Architect's lock topology.*
@@ -24,9 +24,9 @@
 - 
 
 ### Post-conditions
-*Exact success outcomes and defined error variants mapping. When applicable, annotate which micro-features each branch covers.*
-- **Case 1 (Success):** Returns `Ok(...)`, resulting in state X.
-- **Case 2 (Error Condition Y):** Returns `Err(...)`, zero side-effects.
+*Describe the success / failure classes and resulting system state. When applicable, annotate which micro-features each branch covers. You may name semantic cases, but do not invent or freeze exact enum variant spelling unless the packet explicitly authorizes documenting a pre-existing stable interface.*
+- **Case 1 (Success):** [Describe the successful result class and resulting state.]
+- **Case 2 (Failure Class Y):** [Describe the failure class and any side-effect boundary.]
 
 ### Invariants
 *Integrity rules spanning the execution. When applicable, annotate which micro-features each invariant protects.*

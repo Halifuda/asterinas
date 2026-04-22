@@ -77,6 +77,78 @@ pub(super) fn diagnose_load_upcase_table(
     if stream_checksum(&table_bytes) != upcase.checksum {
         return Err("load_upcase_table:stream_checksum_mismatch");
     }
+    diagnose_decode_mapping(&table_bytes)?;
+    Ok(())
+}
+
+fn diagnose_decode_mapping(table_bytes: &[u8]) -> core::result::Result<(), &'static str> {
+    const TABLE_CODE_UNIT_COUNT: usize = u16::MAX as usize + 1;
+    const UNCOMPRESSED_TABLE_BYTE_LEN: usize = TABLE_CODE_UNIT_COUNT * 2;
+
+    let mapping = if table_bytes.len() == UNCOMPRESSED_TABLE_BYTE_LEN {
+        let mut mapping = Vec::with_capacity(TABLE_CODE_UNIT_COUNT);
+        for word in table_bytes.chunks_exact(2) {
+            mapping.push(u16::from_le_bytes([word[0], word[1]]));
+        }
+        mapping
+    } else {
+        let mut words = table_bytes.chunks_exact(2);
+        if !words.remainder().is_empty() {
+            return Err("load_upcase_table:odd_table_length");
+        }
+
+        let mut mapping = Vec::with_capacity(TABLE_CODE_UNIT_COUNT);
+        while let Some(word) = words.next() {
+            let value = u16::from_le_bytes([word[0], word[1]]);
+            if value != u16::MAX {
+                if mapping.len() == TABLE_CODE_UNIT_COUNT {
+                    return Err("load_upcase_table:mapping_too_long");
+                }
+                mapping.push(value);
+                continue;
+            }
+
+            let Some(identity_count_word) = words.next() else {
+                if mapping.len() == usize::from(u16::MAX) {
+                    mapping.push(u16::MAX);
+                    break;
+                }
+                return Err("load_upcase_table:identity_run_missing_count");
+            };
+            let identity_count =
+                u16::from_le_bytes([identity_count_word[0], identity_count_word[1]]);
+            if identity_count == 0 {
+                return Err("load_upcase_table:empty_identity_run");
+            }
+            let run_end = match mapping.len().checked_add(usize::from(identity_count)) {
+                Some(run_end) => run_end,
+                None => return Err("load_upcase_table:mapping_length_overflow"),
+            };
+            if run_end > TABLE_CODE_UNIT_COUNT {
+                return Err("load_upcase_table:mapping_too_long");
+            }
+            for code_unit in mapping.len()..run_end {
+                let code_unit =
+                    u16::try_from(code_unit).map_err(|_| "load_upcase_table:mapping_too_long")?;
+                mapping.push(code_unit);
+            }
+        }
+
+        mapping
+    };
+
+    if mapping.len() != TABLE_CODE_UNIT_COUNT {
+        return Err("load_upcase_table:incomplete_mapping");
+    }
+    for code_unit in 0u8..128 {
+        let expected_mapping = match code_unit {
+            b'a'..=b'z' => u16::from(code_unit - b'a' + b'A'),
+            _ => u16::from(code_unit),
+        };
+        if mapping[usize::from(code_unit)] != expected_mapping {
+            return Err("load_upcase_table:mandatory_first_128_mismatch");
+        }
+    }
     Ok(())
 }
 

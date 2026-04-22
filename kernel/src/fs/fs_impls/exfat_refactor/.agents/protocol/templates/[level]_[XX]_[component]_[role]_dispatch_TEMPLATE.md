@@ -27,4 +27,5 @@
 - [For user-named repair waves, copy every named symbol, helper family, `#[cfg(ktest)] mod tests`, and test-support path into the packet checklist; downstream artifacts must disposition each one.]
 - [For carrier/helper cleanup, state the default rejection rule: temporary carriers, top-level helper families, and thin helpers must be removed, inlined, moved, or strongly proven.]
 - [For full-surface Checker test audits, explicitly enumerate every in-scope existing `#[cfg(ktest)]` module, test helper family, and `test_support/` file; do not rely on generic wording like "check the tests".]
+- [For Checker packets with exact names under `<owner>::tests::*`, state that `#[path = "test_support/..."] mod tests` satisfies the module path and does not require inline test bodies.]
 - [e.g., "Checker: Lock required before running `cargo osdk test`", or "Integration Pass: implement only the meso-level integration scenarios", or "None"]
