@@ -20,6 +20,15 @@
 - **Example:** "This pass covers `Zero-fill gap` and `Update Mtime`. It also touched the shared write-path error conversion helper as incidental support so the covered-micro logic compiles cleanly."
 - 
 
+### 2.1 Cleanup Target Closure
+
+*Required when the packet frames this pass as structural cleanup. List each named cleanup objective separately so the main agent and Reviewer can tell whether the pass closed all targeted debt or only a subset.*
+
+| Targeted Cleanup Objective | Relevant Surface / Boundary | What This Pass Changed | Fully Closed In This Pass? | Notes / Remaining Debt |
+|----------------------------|-----------------------------|------------------------|----------------------------|------------------------|
+| `e.g., owner-boundary promotion` | `AllocationBitmap` vs `AllocationBitmapRecord` | `Promoted the production owner name and moved surviving helpers under the owner-local impl.` | `Yes` | `None.` |
+| `e.g., temporary error seam` | `MountVolumeStateError` reuse inside pass-01-only code | `Kept as a temporary seam with a precise exit-plan condition recorded below.` | `No` | `Replace before later discard/FITRIM/admin work or final meso acceptance.` |
+
 ## 3. Lock Orchestration & RAII Notes
 
 *Explain how RAII / block scopes were used to enforce the Designer's yield hazards and lock-order requirements for this pass.*
@@ -49,6 +58,24 @@
 | Introduced Symbol | Kind | File | Why Test-Only | Notes |
 |-------------------|------|------|---------------|-------|
 | `e.g., diagnose_boot_gate` | Private fn | `path/to/file.rs` | `#[cfg(ktest)]` checker diagnostics only | Duplicates production parsing intentionally for precise failure gates |
+
+### 4.4 Entity Rejection Table
+
+*Required for structural cleanup passes, full-surface audits, and any packet with user-named surfaces. This table is not a census of what was introduced; it is the proof that each in-scope entity was removed, inlined, moved, or kept for a hard reason. The default verdict is rejection unless the evidence column proves otherwise.*
+
+| Symbol / Family | Default Verdict | Kept / Removed / Moved / Inlined | Reason Required | Evidence |
+|-----------------|-----------------|----------------------------------|-----------------|----------|
+| `e.g., MountVolumeStateTarget / Operation / Outcome` | `temporary carrier family: reject unless proven` | `Removed` | `Stable contract, independent reuse, or invariant bundle` | `Replaced by direct owner methods with no loss of checked state.` |
+| `e.g., snapshot_free_space family` | `top-level helper family: reject unless meso entry or cross-owner` | `Moved` | `Why not owner-private method or inline?` | `Moved under ExfatFs because every call already carries the filesystem owner.` |
+| `e.g., read_le_u32` | `thin helper: inline unless invariant` | `Inlined` | `Named invariant, validation boundary, or real reuse` | `No invariant; direct from_le_bytes at call site is clearer.` |
+
+### 4.5 User-Named Surface Disposition
+
+*Required when the packet names concrete symbols, helper families, files, `#[cfg(ktest)] mod tests`, or test-support paths from user feedback. Copy each name exactly enough for the main agent and Reviewer to verify it was not skipped.*
+
+| User-Named Surface | Action | If Kept, Strong Proof | Evidence / Code Path |
+|--------------------|--------|-----------------------|----------------------|
+| `e.g., PublishedMountState` | `Kept / Removed / Moved / Inlined` | `Why tuple, existing owner fields, or direct owner method is inadequate.` | `path/to/file.rs` |
 
 ## 5. Contract Deviations & Boundary Notes
 

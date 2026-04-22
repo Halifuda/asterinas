@@ -22,4 +22,9 @@
 
 ## 3. Specific Overrides & Commands (Keep Minimal)
 *Only list execution-specific overrides (like testing filters) or repair paths. NO architectural summaries, design hints, or "how-to" tutorials here.*
+- [For structural cleanup passes, enumerate each targeted structural objective as a separate bullet instead of bundling them into one generic "cleanup" line.]
+- [For full-surface Reviewer structural-audit passes, explicitly say that every production `struct`, `enum`, return carrier, operation/outcome carrier, and non-trait helper in the named files is in scope; generic "review `fs.rs`" wording is insufficient.]
+- [For user-named repair waves, copy every named symbol, helper family, `#[cfg(ktest)] mod tests`, and test-support path into the packet checklist; downstream artifacts must disposition each one.]
+- [For carrier/helper cleanup, state the default rejection rule: temporary carriers, top-level helper families, and thin helpers must be removed, inlined, moved, or strongly proven.]
+- [For full-surface Checker test audits, explicitly enumerate every in-scope existing `#[cfg(ktest)]` module, test helper family, and `test_support/` file; do not rely on generic wording like "check the tests".]
 - [e.g., "Checker: Lock required before running `cargo osdk test`", or "Integration Pass: implement only the meso-level integration scenarios", or "None"]

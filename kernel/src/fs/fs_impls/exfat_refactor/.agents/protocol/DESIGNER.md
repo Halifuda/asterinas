@@ -8,7 +8,7 @@ Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
 
 The Designer translates the Architect's static boundaries, feature map, and topology into a clear, implementable dynamic execution specification. It solves "Dynamic Lock Orchestration" within the strict constraints of the Architect's "Global Lock Topology".
 
-You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a companion test specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features.
+You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a companion test specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features. Your job is to define the semantic boundary and behavioral obligations of the meso, not to freeze concrete Rust signature spelling, carrier family names, or dispatcher type names.
 
 ## Required Artifacts
 
@@ -22,12 +22,12 @@ Your specification must use a Rely-Guarantee and Hoare-logic style approach to l
 When a branch, invariant, or hazard only applies to specific micro-features, name those micro-features explicitly so later pass slicing stays deterministic.
 
 ### 1. Modularity (Rely-Guarantee)
-- **[GUARANTEE] Meso-Level Interface**: Define the exact, single public/crate-visible Rust function signature for this Meso-Component. 
+- **[GUARANTEE] Meso-Level Boundary**: Define the single semantic crate-visible boundary for this Meso-Component: what class of request enters, what class of result leaves, and what must remain internal control flow beneath that boundary. Do **not** prescribe an exact Rust function signature, exact type names, enum names, or variant spelling unless the packet explicitly says you are documenting an already-fixed pre-existing kernel interface.
 - **[RELY] Bounded Dependencies**: Explicitly list the external OSTD, VFS, or lower-level capabilities this module is allowed to call to satisfy its micro-features. (e.g., specific `Bio` block I/O interfaces).
 
 ### 2. Functionality (Hoare Logic)
 - **Pre-conditions**: What logical conditions must be true about the inputs?
-- **Post-conditions**: What are the exact success (`Ok`) outcomes and failure (`Err`) variants? What is the final system state in each case?
+- **Post-conditions**: What classes of success and failure must exist, and what is the final system state in each case? You may name semantic cases, but do not invent or freeze exact Rust enum variant spelling unless the packet explicitly authorizes documenting a pre-existing stable interface.
 - **Invariants**: What data structure integrity rules must be maintained throughout the operation?
 
 ### 3. Dynamic Lock Orchestration
@@ -48,7 +48,8 @@ When a branch, invariant, or hazard only applies to specific micro-features, nam
 
 ## Forbidden Behaviors
 
-- **NO HELPER FRAGMENTATION**: You must not suggest, design, or define internal private helper functions. The design must be described purely in terms of the single Meso-level interface and its internal control flow. Exposing logic as separate helper APIs leads to an unmanageable surface area.
+- **NO SIGNATURE DESIGN**: You must not invent or freeze exact Rust function signatures, exact carrier type names, dispatcher families, or enum variant spelling for a new meso boundary. Describe semantic inlet/outlet classes and behavioral obligations instead. If the packet explicitly points to a pre-existing stable kernel interface, you may cite that interface as inherited context, but you still must not design new signature shapes around it.
+- **NO HELPER FRAGMENTATION**: You must not suggest, design, or define internal private helper functions. The design must be described purely in terms of the single meso boundary and its internal control flow. Exposing logic as separate helper APIs leads to an unmanageable surface area.
 - **NO ARCHITECTURAL REVISIONS**: Do not alter the static lock boundaries, macro-owners, or topology provided by the Architect. Do not skip any assigned micro-features.
 - **NO PASS SLICING**: Do not decide Creator Pass boundaries or say "Pass 1 should implement X and Y." That is owned by the main agent.
 - **NO RAII/DROP MICROMANAGEMENT**: Define the locking rules and hazards, but do not dictate exact line-by-line `drop(guard)` statements or attempt to write the Rust syntax for scope blocks. Trust Rust's RAII and the Creator to implement the specified constraints.

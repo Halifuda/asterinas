@@ -25,7 +25,7 @@
 
 ## 2. Independent Entity Census & Helper Legality Sign-Off
 
-*You must independently inspect the code and compare it against the Creator census. Evaluate every introduced production entity against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C) and against its claimed owner/module boundary.*
+*You must independently inspect the code and compare it against the Creator census. Evaluate every introduced production entity against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C) and against its claimed owner/module boundary. For full-surface structural-audit packets, this table MUST also include surviving in-scope production `struct`s, `enum`s, carriers, and non-trait helpers even when they predate the current pass.*
 
 | Handled Symbol | Found By Reviewer? | Listed By Creator? | Claimed Owner / Boundary | Whitelist Judgment | Action Taken |
 |----------------|--------------------|--------------------|--------------------------|--------------------|--------------|
@@ -35,8 +35,42 @@
 ### 2.1 Reviewer Structural Checks
 
 - **Creator Census Completeness:** *(Did every introduced production entity appear in the Creator census? If not, list the omissions.)*
+- **Full-Surface Audit Coverage:** *(Required when packeted. Did the artifact disposition every named surviving production `struct`, `enum`, carrier, and non-trait helper in the audited write-set? If not, list the omissions.)*
 - **Owner / Module Placement:** *(Did any helper sit under the wrong owner, a neutral aggregator, or a catch-all file when it should belong to a narrower module?)* 
 - **Temporary Facades / Dead Variants:** *(Did any dispatcher enum, facade, or variant lack a real caller or exit plan?)* 
+
+### 2.2 Cleanup Target Closure Verification
+
+*Required when the packet frames the work as structural cleanup. Verify each named cleanup objective independently rather than inferring closure from one visible improvement.*
+
+| Targeted Cleanup Objective | Creator Marked Closed? | Reviewer Judgment | Evidence / Reason | Action |
+|----------------------------|------------------------|-------------------|-------------------|--------|
+| `e.g., owner-boundary promotion` | `Yes` | `Accepted` | `The old owner-local seam no longer survives on the production path.` | `Accepted` |
+| `e.g., temporary error seam` | `No` | `Still open` | `The pass documented the seam but did not yet localize or narrow it.` | `REJECT back to Creator cleanup` |
+
+### 2.3 User-Named Surface Closure
+
+*Required when the user or main agent names concrete symbols, helper families, files, `#[cfg(ktest)] mod tests`, or test-support paths. Reviewer must reject the pass if any named surface is absent, treated as exempt because it predates the pass, or kept without strong proof.*
+
+| User-Named Surface | Creator Disposition | Reviewer Judgment | If Kept, Is Proof Strong Enough? | Final Action |
+|--------------------|---------------------|-------------------|----------------------------------|--------------|
+| `e.g., PublishedMountState` | `Kept with invariant proof` | `Accepted / Rejected` | `Yes / No, with reason` | `Accepted / REJECT back to Creator cleanup` |
+
+### 2.4 Carrier Family Review
+
+*Required for any `Target` / `Operation` / `Outcome`, `Snapshot` / `Operation` / `Outcome`, `Validated*` / `Published*` / `State*`, or similar carrier family in scope. Review the family as a whole, not only each type in isolation.*
+
+| Carrier Family | Stable Contract? | Clearer Than Owner Methods + Tuple? | Whole Family Can Be Removed? | Judgment |
+|----------------|------------------|-------------------------------------|------------------------------|----------|
+| `e.g., MountVolumeStateTarget / Operation / Outcome` | `Yes / No` | `Yes / No` | `Yes / No` | `Accepted / REJECT back to Creator cleanup` |
+
+### 2.5 Test-Code Quality Gate
+
+*Required when test code or a test-only hierarchy is packeted for review. Checker may provide runtime evidence and touched-surface notes, but Reviewer owns this final static gate.*
+
+| Test Surface | Current Location | Should Move? | Helper Quality | Naming / Split Judgment | Action |
+|--------------|------------------|--------------|----------------|-------------------------|--------|
+| `e.g., #[cfg(ktest)] mod tests in fs.rs` | `path/to/file.rs` | `Yes / No` | `Accepted / Needs cleanup` | `Keep / rename / split / move to test-only subtree` | `Accepted / REJECT back to Creator cleanup` |
 
 ## 3. Temporary Seam & Exit Plan Verification
 
