@@ -19,14 +19,16 @@ tests=()
 usage() {
     cat <<'EOF'
 Usage:
+  checker_run.sh cargo-check --component ID --phase PHASE [OPTIONS]
   checker_run.sh make-kernel --component ID --phase PHASE [OPTIONS]
   checker_run.sh ktest --component ID --phase PHASE --test FULL_NAME [--test FULL_NAME ...] [OPTIONS]
   checker_run.sh pass --component ID --phase PHASE --test FULL_NAME [--test FULL_NAME ...] [OPTIONS]
 
 Subcommands:
+  cargo-check   Run `cargo check -p aster-kernel --target x86_64-unknown-none` in `/root/asterinas/kernel`.
   make-kernel   Run `make kernel` in `/root/asterinas`.
   ktest         Run one or more exact-name `cargo osdk test` commands in `/root/asterinas/kernel`.
-  pass          Run `make kernel`, then the requested exact-name ktests.
+  pass          Run `cargo check`, then `make kernel`, then the requested exact-name ktests.
 
 Options:
   --component ID              Parent meso-component identifier for checker lock metadata and receipt grouping.
@@ -78,7 +80,7 @@ parse_args() {
             usage
             exit 0
             ;;
-        make-kernel|ktest|pass)
+        cargo-check|make-kernel|ktest|pass)
             ;;
         *)
             usage >&2
@@ -146,7 +148,7 @@ parse_args() {
         ktest|pass)
             [ "${#tests[@]}" -gt 0 ] || { usage >&2; exit 64; }
             ;;
-        make-kernel)
+        cargo-check|make-kernel)
             [ "${#tests[@]}" -eq 0 ] || { usage >&2; exit 64; }
             ;;
     esac
@@ -224,6 +226,24 @@ run_make_kernel() {
     return 1
 }
 
+run_cargo_check() {
+    local quoted_repo
+    local command
+    local log_path
+
+    quoted_repo=$(shell_quote "$repo_dir")
+    command="cd $quoted_repo/kernel && cargo check -p aster-kernel --target x86_64-unknown-none"
+    log_path="$out_dir/00-cargo-check.log"
+
+    if run_logged_command "cargo-check" "$command" "$log_path"; then
+        append_summary "cargo-check" "0" "$command" "$log_path" ""
+        return 0
+    fi
+
+    append_summary "cargo-check" "1" "$command" "$log_path" ""
+    return 1
+}
+
 run_one_ktest() {
     local index=$1
     local test_name=$2
@@ -290,6 +310,9 @@ main() {
     trap '"$lock_tool" release > "$out_dir/checker-lock-release.toml"' EXIT
 
     case "$subcommand" in
+        cargo-check)
+            run_cargo_check || overall_status=1
+            ;;
         make-kernel)
             run_make_kernel || overall_status=1
             ;;
@@ -297,7 +320,9 @@ main() {
             run_ktests || overall_status=1
             ;;
         pass)
-            if ! run_make_kernel; then
+            if ! run_cargo_check; then
+                overall_status=1
+            elif ! run_make_kernel; then
                 overall_status=1
             elif ! run_ktests; then
                 overall_status=1

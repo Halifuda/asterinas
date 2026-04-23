@@ -14,6 +14,7 @@ use super::load_validated_mount;
 use crate::prelude::*;
 
 const DIRECTORY_ENTRY_SIZE: usize = 32;
+const BENIGN_UNRECOGNIZED_ENTRY_TYPE: u8 = 0xA0;
 const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
 const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
 const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
@@ -103,6 +104,20 @@ impl ExfatLookupTestDisk {
             self.root_entry_offset(entry_index),
             &[FILE_NAME_ENTRY_TYPE; DIRECTORY_ENTRY_SIZE],
         );
+        self.write_bytes(
+            self.root_entry_offset(entry_index + 1),
+            &[END_OF_DIRECTORY_ENTRY_TYPE; DIRECTORY_ENTRY_SIZE],
+        );
+    }
+
+    pub(in super::super) fn install_root_unrecognized_benign_entry(&self, entry_index: usize) {
+        let mut entry_set = [0u8; DIRECTORY_ENTRY_SIZE];
+        entry_set[0] = BENIGN_UNRECOGNIZED_ENTRY_TYPE;
+        entry_set[1] = 0;
+        let checksum = entry_set_checksum(&entry_set, 0);
+        entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
+
+        self.write_bytes(self.root_entry_offset(entry_index), &entry_set);
         self.write_bytes(
             self.root_entry_offset(entry_index + 1),
             &[END_OF_DIRECTORY_ENTRY_TYPE; DIRECTORY_ENTRY_SIZE],
