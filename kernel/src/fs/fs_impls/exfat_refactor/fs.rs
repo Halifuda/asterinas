@@ -493,10 +493,10 @@ impl ExfatMountOptions {
                         .split_once('=')
                         .map(|(_, value)| value)
                         .ok_or(MountVolumeStateError::InvalidMountInput)?;
-                    if iocharset.is_empty() {
+                    if !iocharset.eq_ignore_ascii_case("utf8") {
                         return Err(MountVolumeStateError::InvalidMountInput);
                     }
-                    options.iocharset = iocharset.to_string();
+                    options.iocharset = "utf8".to_string();
                 }
                 _ => return Err(MountVolumeStateError::InvalidMountInput),
             }

@@ -32,11 +32,11 @@
 
 ## 3. Lock-Guarded Evaluation Result
 
-*Document the results from the Checker Execution Lock stage. Prefer `.agents/tools/checker_run.sh` and include both the wrapper command and the underlying Docker command(s). If running manually, include the explicit `cargo osdk test` command executed in the Docker environment (`codex-asterinas-dev`).*
+*Document the results from the Checker Execution Lock stage. Prefer `.agents/tools/checker_run.sh` and include both the wrapper command and the underlying Docker command(s). If running manually, include the explicit container command executed in `codex-asterinas-dev`.*
 
-- **Reproduce Command**: `.agents/tools/checker_run.sh ktest --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE> --test <FULL_TESTNAME>` *(or the exact manual Docker command if the wrapper was not used)*
-- **Exact-Name Proof**: (Show precise output lines proving the targeted `#[ktest]` actually ran, not just a blind `cargo check`).
-- **qemu-serial.log Scan**: (Confirm absence of RCU stalls, TCG panics, or cyclic lock dependencies. If multiple ktests ran, list each archived serial-log path produced by `checker_run.sh` or manual per-test copies).
+- **Reproduce Command**: `.agents/tools/checker_run.sh cargo-check|make-kernel|ktest ...` *(or the exact manual Docker command if the wrapper was not used)*
+- **Execution Proof**: (For `ktest`, show exact-name proof lines proving the targeted `#[ktest]` actually ran. For `cargo-check` or `make-kernel`, show the compile/build command and the decisive success/failure lines.)
+- **qemu-serial.log Scan**: (Required for any QEMU-backed ktest run. If this pass only ran `cargo-check` or `make-kernel`, say `Not applicable`.)
 
 ## 4. Conclusion (Accepted OR Repair Batch)
 

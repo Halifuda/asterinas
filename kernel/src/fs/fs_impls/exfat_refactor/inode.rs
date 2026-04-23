@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::time::Duration;
 
 use aster_block::BlockDevice;
@@ -207,137 +207,30 @@ impl ExfatInode {
             match entry[0] {
                 END_OF_DIRECTORY_ENTRY_TYPE => return Ok(None),
                 0x01..=0x7F => {
-                    entry_index += 1;
+                    entry_index = entry_index
+                        .checked_add(1)
+                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
                 }
                 FILE_DIRECTORY_ENTRY_TYPE => {
                     let secondary_count = usize::from(entry[1]);
-                    let entry_set_len = secondary_count
-                        .checked_add(1)
-                        .and_then(|entries| entries.checked_mul(DIRECTORY_ENTRY_SIZE))
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    let entry_set_end = entry_offset
-                        .checked_add(entry_set_len)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    let entry_set = directory_bytes
-                        .get(entry_offset..entry_set_end)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
                     let expected_checksum = u16::from_le_bytes([entry[2], entry[3]]);
-                    if Self::entry_set_checksum(entry_set, entry[1]) != expected_checksum {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-
-                    let stream_entry = entry_set
-                        .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    if stream_entry[0] != STREAM_EXTENSION_ENTRY_TYPE {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-                    if stream_entry[1] & 0x01 == 0 {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-
-                    let name_length = usize::from(stream_entry[3]);
-                    if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-
-                    let name_entry_count = name_length.div_ceil(15);
-                    let required_secondary_count = name_entry_count
-                        .checked_add(1)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    if secondary_count < required_secondary_count {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-
+                    let entry_set = Self::validated_file_entry_set(
+                        &directory_bytes,
+                        entry_offset,
+                        secondary_count,
+                        expected_checksum,
+                    )?;
+                    let stream_entry = Self::file_stream_entry(entry_set)?;
                     let stored_name_hash = u16::from_le_bytes([stream_entry[4], stream_entry[5]]);
-                    let mut candidate_name = Vec::with_capacity(name_length);
-                    for name_entry_index in 0..name_entry_count {
-                        let name_entry_offset = (name_entry_index + 2)
-                            .checked_mul(DIRECTORY_ENTRY_SIZE)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        let name_entry_end = name_entry_offset
-                            .checked_add(DIRECTORY_ENTRY_SIZE)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        let name_entry = entry_set
-                            .get(name_entry_offset..name_entry_end)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        if name_entry[0] != FILE_NAME_ENTRY_TYPE {
-                            return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                        }
-                        for code_unit_bytes in name_entry[2..].chunks_exact(2) {
-                            if candidate_name.len() == name_length {
-                                break;
-                            }
-                            candidate_name.push(u16::from_le_bytes([
-                                code_unit_bytes[0],
-                                code_unit_bytes[1],
-                            ]));
-                        }
-                    }
-                    if candidate_name.len() != name_length {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
-
-                    for trailing_secondary_index in required_secondary_count..secondary_count {
-                        let trailing_secondary_offset = (trailing_secondary_index + 1)
-                            .checked_mul(DIRECTORY_ENTRY_SIZE)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        let trailing_secondary_end = trailing_secondary_offset
-                            .checked_add(DIRECTORY_ENTRY_SIZE)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        let trailing_secondary = entry_set
-                            .get(trailing_secondary_offset..trailing_secondary_end)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                        if trailing_secondary[0] & ENTRY_TYPE_IN_USE_BIT == 0
-                            || trailing_secondary[0] & ENTRY_TYPE_CATEGORY_BIT == 0
-                            || trailing_secondary[0] & ENTRY_TYPE_IMPORTANCE_BIT == 0
-                        {
-                            return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                        }
-                    }
+                    let candidate_name =
+                        Self::file_name(entry_set, secondary_count, stream_entry)?;
 
                     if stored_name_hash == lookup_name_hash
                         && upcase_table.names_equal(lookup_name, &candidate_name)
                     {
-                        let file_attributes = u16::from_le_bytes([entry[4], entry[5]]);
-                        let inode_type = if file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                            InodeType::Dir
-                        } else {
-                            InodeType::File
-                        };
-                        let first_cluster = u32::from_le_bytes([
-                            stream_entry[20],
-                            stream_entry[21],
-                            stream_entry[22],
-                            stream_entry[23],
-                        ]);
-                        let data_length = usize::try_from(u64::from_le_bytes([
-                            stream_entry[24],
-                            stream_entry[25],
-                            stream_entry[26],
-                            stream_entry[27],
-                            stream_entry[28],
-                            stream_entry[29],
-                            stream_entry[30],
-                            stream_entry[31],
-                        ]))
-                        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
-                        let no_fat_chain = stream_entry[1] & 0x02 != 0;
-                        if data_length != 0 {
-                            boot_region.validate_stream_data(
-                                first_cluster,
-                                u64::try_from(data_length)
-                                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
-                            )?;
-                        } else if first_cluster != 0 {
-                            return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                        }
-
-                        let ino = (u64::from(self.first_cluster) << 32)
-                            | u64::from(
-                                u32::try_from(entry_index)
-                                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
-                            );
+                        let (inode_type, first_cluster, data_length, no_fat_chain) =
+                            Self::file_entry_child_metadata(entry, stream_entry, boot_region)?;
+                        let ino = self.entry_location_ino(entry_index)?;
                         let child_inode: Arc<dyn Inode> = Self::new_child(
                             fs,
                             ino,
@@ -357,7 +250,9 @@ impl ExfatInode {
                 }
                 entry_type => {
                     if entry_type & ENTRY_TYPE_IN_USE_BIT == 0 {
-                        entry_index += 1;
+                        entry_index = entry_index
+                            .checked_add(1)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
                         continue;
                     }
                     let is_root_metadata = matches!(
@@ -367,7 +262,9 @@ impl ExfatInode {
                             | VOLUME_LABEL_ENTRY_TYPE
                     );
                     if self.data_length.is_none() && is_root_metadata {
-                        entry_index += 1;
+                        entry_index = entry_index
+                            .checked_add(1)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
                         continue;
                     }
                     if entry_type & ENTRY_TYPE_CATEGORY_BIT != 0 {
@@ -375,20 +272,13 @@ impl ExfatInode {
                     }
 
                     let secondary_count = usize::from(entry[1]);
-                    let entry_set_len = secondary_count
-                        .checked_add(1)
-                        .and_then(|entries| entries.checked_mul(DIRECTORY_ENTRY_SIZE))
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    let entry_set_end = entry_offset
-                        .checked_add(entry_set_len)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-                    let entry_set = directory_bytes
-                        .get(entry_offset..entry_set_end)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
                     let expected_checksum = u16::from_le_bytes([entry[2], entry[3]]);
-                    if Self::entry_set_checksum(entry_set, entry[1]) != expected_checksum {
-                        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                    }
+                    Self::validated_file_entry_set(
+                        &directory_bytes,
+                        entry_offset,
+                        secondary_count,
+                        expected_checksum,
+                    )?;
                     if entry_type & ENTRY_TYPE_IMPORTANCE_BIT == 0 {
                         return Err(MountVolumeStateError::InvalidOnDiskLayout);
                     }
@@ -402,9 +292,177 @@ impl ExfatInode {
         Ok(None)
     }
 
-    fn entry_set_checksum(entry_set: &[u8], secondary_count: u8) -> u16 {
+    fn validated_file_entry_set(
+        directory_bytes: &[u8],
+        entry_offset: usize,
+        secondary_count: usize,
+        expected_checksum: u16,
+    ) -> core::result::Result<&[u8], MountVolumeStateError> {
+        let entry_set_len = secondary_count
+            .checked_add(1)
+            .and_then(|entries| entries.checked_mul(DIRECTORY_ENTRY_SIZE))
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        let entry_set_end = entry_offset
+            .checked_add(entry_set_len)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        let entry_set = directory_bytes
+            .get(entry_offset..entry_set_end)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        if Self::entry_set_checksum(entry_set, secondary_count) != expected_checksum {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        Ok(entry_set)
+    }
+
+    fn file_stream_entry(
+        entry_set: &[u8],
+    ) -> core::result::Result<&[u8], MountVolumeStateError> {
+        let stream_entry = entry_set
+            .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        if stream_entry[0] != STREAM_EXTENSION_ENTRY_TYPE {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        if stream_entry[1] & 0x01 == 0 {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        Ok(stream_entry)
+    }
+
+    fn file_name(
+        entry_set: &[u8],
+        secondary_count: usize,
+        stream_entry: &[u8],
+    ) -> core::result::Result<Vec<u16>, MountVolumeStateError> {
+        let name_length = usize::from(stream_entry[3]);
+        if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+
+        let name_entry_count = name_length.div_ceil(15);
+        let required_secondary_count = name_entry_count
+            .checked_add(1)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        if secondary_count < required_secondary_count {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+
+        let mut candidate_name = Vec::with_capacity(name_length);
+        for name_entry_index in 0..name_entry_count {
+            let name_entry_offset = (name_entry_index + 2)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let name_entry_end = name_entry_offset
+                .checked_add(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let name_entry = entry_set
+                .get(name_entry_offset..name_entry_end)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            if name_entry[0] != FILE_NAME_ENTRY_TYPE {
+                return Err(MountVolumeStateError::InvalidOnDiskLayout);
+            }
+            for code_unit_bytes in name_entry[2..].chunks_exact(2) {
+                if candidate_name.len() == name_length {
+                    break;
+                }
+                candidate_name.push(u16::from_le_bytes([
+                    code_unit_bytes[0],
+                    code_unit_bytes[1],
+                ]));
+            }
+        }
+        if candidate_name.len() != name_length {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+
+        Self::validate_trailing_secondaries(
+            entry_set,
+            required_secondary_count,
+            secondary_count,
+        )?;
+        Ok(candidate_name)
+    }
+
+    fn validate_trailing_secondaries(
+        entry_set: &[u8],
+        required_secondary_count: usize,
+        secondary_count: usize,
+    ) -> core::result::Result<(), MountVolumeStateError> {
+        for trailing_secondary_index in required_secondary_count..secondary_count {
+            let trailing_secondary_offset = (trailing_secondary_index + 1)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let trailing_secondary_end = trailing_secondary_offset
+                .checked_add(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let trailing_secondary = entry_set
+                .get(trailing_secondary_offset..trailing_secondary_end)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            if trailing_secondary[0] & ENTRY_TYPE_IN_USE_BIT == 0
+                || trailing_secondary[0] & ENTRY_TYPE_CATEGORY_BIT == 0
+                || trailing_secondary[0] & ENTRY_TYPE_IMPORTANCE_BIT == 0
+            {
+                return Err(MountVolumeStateError::InvalidOnDiskLayout);
+            }
+        }
+        Ok(())
+    }
+
+    fn file_entry_child_metadata(
+        entry: &[u8],
+        stream_entry: &[u8],
+        boot_region: &BootRegion,
+    ) -> core::result::Result<(InodeType, u32, usize, bool), MountVolumeStateError> {
+        let file_attributes = u16::from_le_bytes([entry[4], entry[5]]);
+        let inode_type = if file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            InodeType::Dir
+        } else {
+            InodeType::File
+        };
+        let first_cluster = u32::from_le_bytes([
+            stream_entry[20],
+            stream_entry[21],
+            stream_entry[22],
+            stream_entry[23],
+        ]);
+        let data_length = usize::try_from(u64::from_le_bytes([
+            stream_entry[24],
+            stream_entry[25],
+            stream_entry[26],
+            stream_entry[27],
+            stream_entry[28],
+            stream_entry[29],
+            stream_entry[30],
+            stream_entry[31],
+        ]))
+        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+        let no_fat_chain = stream_entry[1] & 0x02 != 0;
+        if data_length != 0 {
+            boot_region.validate_stream_data(
+                first_cluster,
+                u64::try_from(data_length)
+                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+            )?;
+        } else if first_cluster != 0 {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        Ok((inode_type, first_cluster, data_length, no_fat_chain))
+    }
+
+    fn entry_location_ino(
+        &self,
+        entry_index: usize,
+    ) -> core::result::Result<u64, MountVolumeStateError> {
+        Ok((u64::from(self.first_cluster) << 32)
+            | u64::from(
+                u32::try_from(entry_index)
+                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+            ))
+    }
+
+    fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
         let mut checksum = 0u16;
-        let number_of_bytes = (usize::from(secondary_count) + 1) * DIRECTORY_ENTRY_SIZE;
+        let number_of_bytes = (secondary_count + 1) * DIRECTORY_ENTRY_SIZE;
         for (index, byte) in entry_set.iter().take(number_of_bytes).enumerate() {
             if index == 2 || index == 3 {
                 continue;
@@ -540,8 +598,17 @@ impl Inode for ExfatInode {
         if self.type_() != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
-        // TODO: Absorb this mount-only root seam once later inode passes own
-        // durable directory enumeration instead of only `.` and `..` exposure.
+
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (block_device, boot_region, _, _) =
+            fs.published_lookup_state().map_err(Error::from)?;
+        let directory_bytes = self
+            .read_directory_bytes(&block_device, &boot_region)
+            .map_err(Error::from)?;
+
         let mut next_offset = offset;
         if next_offset == 0 {
             visitor.visit(".", self.ino(), self.type_(), next_offset)?;
@@ -550,6 +617,99 @@ impl Inode for ExfatInode {
         if next_offset == 1 {
             visitor.visit("..", self.ino(), self.type_(), next_offset)?;
             next_offset += 1;
+        }
+
+        let mut visible_offset = 2usize;
+        let mut entry_index = 0usize;
+        while let Some(entry_offset) = entry_index.checked_mul(DIRECTORY_ENTRY_SIZE) {
+            let entry_end = entry_offset
+                .checked_add(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let Some(entry) = directory_bytes.get(entry_offset..entry_end) else {
+                break;
+            };
+
+            match entry[0] {
+                END_OF_DIRECTORY_ENTRY_TYPE => break,
+                0x01..=0x7F => {
+                    entry_index = entry_index
+                        .checked_add(1)
+                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                }
+                FILE_DIRECTORY_ENTRY_TYPE => {
+                    let secondary_count = usize::from(entry[1]);
+                    let expected_checksum = u16::from_le_bytes([entry[2], entry[3]]);
+                    let entry_set = Self::validated_file_entry_set(
+                        &directory_bytes,
+                        entry_offset,
+                        secondary_count,
+                        expected_checksum,
+                    )?;
+                    let stream_entry = Self::file_stream_entry(entry_set)?;
+                    let candidate_name =
+                        Self::file_name(entry_set, secondary_count, stream_entry)?;
+                    let (inode_type, _, _, _) =
+                        Self::file_entry_child_metadata(entry, stream_entry, &boot_region)?;
+
+                    if visible_offset >= offset {
+                        let entry_name = String::from_utf16(&candidate_name)
+                            .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+                        visitor.visit(
+                            &entry_name,
+                            self.entry_location_ino(entry_index)?,
+                            inode_type,
+                            visible_offset,
+                        )?;
+                        next_offset = visible_offset
+                            .checked_add(1)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                    }
+                    visible_offset = visible_offset
+                        .checked_add(1)
+                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                    entry_index = entry_index
+                        .checked_add(secondary_count + 1)
+                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                }
+                entry_type => {
+                    if entry_type & ENTRY_TYPE_IN_USE_BIT == 0 {
+                        entry_index = entry_index
+                            .checked_add(1)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                        continue;
+                    }
+                    let is_root_metadata = matches!(
+                        entry_type,
+                        ALLOCATION_BITMAP_ENTRY_TYPE
+                            | UPCASE_TABLE_ENTRY_TYPE
+                            | VOLUME_LABEL_ENTRY_TYPE
+                    );
+                    if self.data_length.is_none() && is_root_metadata {
+                        entry_index = entry_index
+                            .checked_add(1)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                        continue;
+                    }
+                    if entry_type & ENTRY_TYPE_CATEGORY_BIT != 0 {
+                        return Err(MountVolumeStateError::InvalidOnDiskLayout.into());
+                    }
+
+                    let secondary_count = usize::from(entry[1]);
+                    let expected_checksum = u16::from_le_bytes([entry[2], entry[3]]);
+                    Self::validated_file_entry_set(
+                        &directory_bytes,
+                        entry_offset,
+                        secondary_count,
+                        expected_checksum,
+                    )?;
+                    if entry_type & ENTRY_TYPE_IMPORTANCE_BIT == 0 {
+                        return Err(MountVolumeStateError::InvalidOnDiskLayout.into());
+                    }
+                    entry_index = entry_index
+                        .checked_add(secondary_count + 1)
+                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                }
+            }
         }
         Ok(next_offset.saturating_sub(offset))
     }
@@ -611,7 +771,6 @@ impl Inode for ExfatInode {
             return_errno!(Errno::ENAMETOOLONG);
         }
 
-        let _uses_utf8_lookup = options.iocharset.eq_ignore_ascii_case("utf8");
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         if let Some(child_inode) = self
             .lookup_child_by_name(

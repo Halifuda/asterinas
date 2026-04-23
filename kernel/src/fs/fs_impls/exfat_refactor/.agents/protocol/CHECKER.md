@@ -38,16 +38,19 @@ You must output:
 For manual execution, use the verified container command format:
 `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo osdk test <TESTNAME_FILTER>'`, where the `<TESTNAME_FILTER>` should be the exact test name.
 You must prove execution by grepping the test output for exact test names or unique panic strings, verifying the intended path was hit.
-7. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
+7. **Compile-Smoke Command**: When the packet asks for a minimal compile preflight before ktests or `make kernel`, prefer:
+`.agents/tools/checker_run.sh cargo-check --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
+For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo check -p aster-kernel --target x86_64-unknown-none'`, also under the checker execution lock. This smoke gate is for Rust compile fallout only; it does not replace the later exact-name ktest proof or any required `make kernel` receipt.
+8. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
 `.agents/tools/checker_run.sh make-kernel --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
 For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas && make kernel'`, also under the checker execution lock.
-8. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies. If one Checker run executes multiple ktests, use `checker_run.sh` or preserve each serial log before the next `cargo osdk test` overwrites it.
-9. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
+9. **Deep Log Evaluation**: File system deadlocks and memory corruption often pass cargo tests but hang or panic inside QEMU. You MUST inspect `qemu-serial.log` (or equivalent execution traces) to prove the absence of TCG errors, RCU stalls, or Lock cyclic dependencies. If one Checker run executes multiple ktests, use `checker_run.sh` or preserve each serial log before the next `cargo osdk test` overwrites it.
+10. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
    - `Reproduce Command`
    - `Failed Test`
    - `Evidence`
    These fields are mandatory before you write any repair advice.
-10. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+11. **Condense to Actionable Repairs (The Advisor Duty)**: If a test fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
 
 ## Allowed Edits
 
