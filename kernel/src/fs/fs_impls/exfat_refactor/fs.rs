@@ -214,6 +214,7 @@ impl ExfatFs {
         }
         if publication.options.iocharset != next_options.iocharset
             || publication.options.keep_last_dots != next_options.keep_last_dots
+            || publication.options.zero_size_dir != next_options.zero_size_dir
         {
             return Err(MountVolumeStateError::UnsupportedRemountDelta);
         }
@@ -318,7 +319,7 @@ impl ExfatFs {
         allocator_state.snapshot(&publication.boot_region)
     }
 
-    fn allocate_free_space(
+    pub(super) fn allocate_free_space(
         &self,
         requested_clusters: usize,
     ) -> core::result::Result<
@@ -346,7 +347,7 @@ impl ExfatFs {
         Ok((allocated_ranges, snapshot))
     }
 
-    fn free_allocated_space(
+    pub(super) fn free_allocated_space(
         &self,
         ranges: &[ClusterRange],
     ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
@@ -460,9 +461,10 @@ impl FileSystem for ExfatFs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExfatMountOptions {
     discard: bool,
-    fs_flags: FsFlags,
+    pub(super) fs_flags: FsFlags,
     pub(super) iocharset: String,
     pub(super) keep_last_dots: bool,
+    pub(super) zero_size_dir: bool,
 }
 
 impl ExfatMountOptions {
@@ -475,6 +477,7 @@ impl ExfatMountOptions {
             fs_flags,
             iocharset: "utf8".to_string(),
             keep_last_dots: false,
+            zero_size_dir: false,
         };
         let Some(args) = args else {
             return Ok(options);
@@ -488,6 +491,8 @@ impl ExfatMountOptions {
                 "nodiscard" => options.discard = false,
                 "keep_last_dots" => options.keep_last_dots = true,
                 "nokeep_last_dots" => options.keep_last_dots = false,
+                "zero_size_dir" => options.zero_size_dir = true,
+                "nozero_size_dir" => options.zero_size_dir = false,
                 _ if entry.starts_with("iocharset=") => {
                     let iocharset = entry
                         .split_once('=')

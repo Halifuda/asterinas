@@ -4,6 +4,7 @@
 
 mod bitmap;
 mod boot;
+mod direntry;
 #[cfg(ktest)]
 mod test_support;
 mod fat;

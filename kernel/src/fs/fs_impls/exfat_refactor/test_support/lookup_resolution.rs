@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{ffi::CString, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{ffi::CString, format, string::String, sync::Arc, vec, vec::Vec};
 
 use ostd::prelude::ktest;
 
@@ -14,7 +14,15 @@ use crate::fs::vfs::{
     registry::FsType,
 };
 
+const DIRECTORY_ENTRY_SIZE: usize = 32;
+const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+const FILE_ATTRIBUTE_REGULAR: u16 = 0x0020;
+const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
+const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const ROOT_FILE_ENTRY_INDEX: usize = 4;
+const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
+const TEST_PARENT_CLUSTER: u32 = 6;
+const TEST_PARENT_NAME: &str = "CreateParent";
 
 #[derive(Debug, Eq, PartialEq)]
 struct CapturedDirent {
@@ -89,12 +97,90 @@ fn mount_root(
     disk: &Arc<ExfatLookupTestDisk>,
     options: Option<&str>,
 ) -> (Arc<dyn FileSystem>, Arc<dyn Inode>) {
+    mount_root_with_flags(disk, FsFlags::empty(), options)
+}
+
+fn mount_root_with_flags(
+    disk: &Arc<ExfatLookupTestDisk>,
+    flags: FsFlags,
+    options: Option<&str>,
+) -> (Arc<dyn FileSystem>, Arc<dyn Inode>) {
     let args = options.map(|options| CString::new(options).unwrap());
-    let fs = ExfatFsType
-        .create(FsFlags::empty(), args, Some(disk.as_block_device()))
-        .unwrap();
+    let fs = ExfatFsType.create(flags, args, Some(disk.as_block_device())).unwrap();
     let root_inode = fs.root_inode();
     (fs, root_inode)
+}
+
+fn mount_create_parent(
+    disk: &Arc<ExfatLookupTestDisk>,
+    flags: FsFlags,
+    options: Option<&str>,
+) -> (Arc<dyn FileSystem>, Arc<dyn Inode>, Arc<dyn Inode>) {
+    disk.install_root_directory(ROOT_FILE_ENTRY_INDEX, TEST_PARENT_NAME, TEST_PARENT_CLUSTER);
+    let (fs, root_inode) = mount_root_with_flags(disk, flags, options);
+    let parent_inode = root_inode.lookup(TEST_PARENT_NAME).unwrap();
+    (fs, root_inode, parent_inode)
+}
+
+fn read_le_u16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+
+fn read_le_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn read_le_u64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
+    let mut checksum = 0u16;
+    let byte_count = (secondary_count + 1) * DIRECTORY_ENTRY_SIZE;
+    for (index, byte) in entry_set.iter().take(byte_count).enumerate() {
+        if index == 2 || index == 3 {
+            continue;
+        }
+        checksum = ((checksum & 1) << 15) + (checksum >> 1) + u16::from(*byte);
+    }
+    checksum
+}
+
+fn decode_entry_name(entry_set: &[u8]) -> Vec<u16> {
+    let name_length = usize::from(entry_set[DIRECTORY_ENTRY_SIZE + 3]);
+    let mut name = Vec::with_capacity(name_length);
+    for name_entry in entry_set[DIRECTORY_ENTRY_SIZE * 2..].chunks_exact(DIRECTORY_ENTRY_SIZE) {
+        if name_entry[0] != FILE_NAME_ENTRY_TYPE {
+            break;
+        }
+        for code_unit_bytes in name_entry[2..].chunks_exact(2) {
+            if name.len() == name_length {
+                break;
+            }
+            name.push(read_le_u16(code_unit_bytes));
+        }
+        if name.len() == name_length {
+            break;
+        }
+    }
+    name
+}
+
+fn entry_index_from_ino(ino: u64) -> usize {
+    usize::try_from(ino & u64::from(u32::MAX)).unwrap()
+}
+
+fn assert_parent_directory_unchanged(
+    disk: &Arc<ExfatLookupTestDisk>,
+    parent_inode: &Arc<dyn Inode>,
+    expected_bytes: &[u8],
+    expected_names: &[&str],
+) {
+    assert_eq!(disk.read_cluster(TEST_PARENT_CLUSTER), expected_bytes);
+    let (_visited_count, entries) = collect_dirents(parent_inode, 2);
+    assert_eq!(entry_names(&entries), expected_names);
 }
 
 #[ktest]
@@ -118,6 +204,261 @@ fn lookup_resolution_matches_mixed_case_and_trailing_dot_equivalence() {
         mixed_case.ino()
     );
     assert_eq!(lookup_error(&keep_last_dots_root, "MIXEDCASE..."), Errno::ENOENT);
+}
+
+#[ktest]
+fn directory_entry_mutation_create_file_publishes_checksum_valid_entry_set() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let (_fs, _root_inode, parent_inode) =
+        mount_create_parent(&disk, FsFlags::empty(), None);
+
+    let created = parent_inode
+        .create("CreateFile", InodeType::File, InodeMode::all())
+        .unwrap();
+    let lookup = parent_inode.lookup("createfile").unwrap();
+    let (_visited_count, entries) = collect_dirents(&parent_inode, 2);
+    let parent_cluster = disk.read_cluster(TEST_PARENT_CLUSTER);
+    let entry_set = parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
+
+    assert_eq!(created.ino(), lookup.ino());
+    assert_eq!(created.type_(), InodeType::File);
+    assert_eq!(created.size(), 0);
+    assert_eq!(entry_names(&entries), vec!["CreateFile"]);
+    assert_eq!(entry_index_from_ino(created.ino()), 0);
+    assert_eq!(entry_set[0], FILE_DIRECTORY_ENTRY_TYPE);
+    assert_eq!(usize::from(entry_set[1]), 2);
+    assert_eq!(read_le_u16(&entry_set[2..4]), entry_set_checksum(&entry_set, 2));
+    assert_eq!(read_le_u16(&entry_set[4..6]), FILE_ATTRIBUTE_REGULAR);
+    assert_eq!(entry_set[DIRECTORY_ENTRY_SIZE], STREAM_EXTENSION_ENTRY_TYPE);
+    assert_eq!(entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x01);
+    assert_eq!(
+        usize::from(entry_set[DIRECTORY_ENTRY_SIZE + 3]),
+        "CreateFile".encode_utf16().count()
+    );
+    assert_eq!(read_le_u32(&entry_set[DIRECTORY_ENTRY_SIZE + 20..]), 0);
+    assert_eq!(read_le_u64(&entry_set[DIRECTORY_ENTRY_SIZE + 24..]), 0);
+    assert_eq!(decode_entry_name(&entry_set), "CreateFile".encode_utf16().collect::<Vec<_>>());
+}
+
+#[ktest]
+fn directory_entry_mutation_mkdir_publishes_checksum_valid_entry_set() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let (_fs, _root_inode, parent_inode) =
+        mount_create_parent(&disk, FsFlags::empty(), None);
+
+    let created = parent_inode
+        .create("CreateDir", InodeType::Dir, InodeMode::all())
+        .unwrap();
+    let lookup = parent_inode.lookup("createdir").unwrap();
+    let (_visited_count, entries) = collect_dirents(&parent_inode, 2);
+    let parent_cluster = disk.read_cluster(TEST_PARENT_CLUSTER);
+    let entry_set = parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
+    let first_cluster = read_le_u32(&entry_set[DIRECTORY_ENTRY_SIZE + 20..]);
+
+    assert_eq!(created.ino(), lookup.ino());
+    assert_eq!(created.type_(), InodeType::Dir);
+    assert_eq!(created.size(), disk.root_cluster_size());
+    assert_eq!(entry_names(&entries), vec!["CreateDir"]);
+    assert_eq!(entry_index_from_ino(created.ino()), 0);
+    assert_eq!(entry_set[0], FILE_DIRECTORY_ENTRY_TYPE);
+    assert_eq!(usize::from(entry_set[1]), 2);
+    assert_eq!(read_le_u16(&entry_set[2..4]), entry_set_checksum(&entry_set, 2));
+    assert_eq!(read_le_u16(&entry_set[4..6]), FILE_ATTRIBUTE_DIRECTORY);
+    assert_eq!(entry_set[DIRECTORY_ENTRY_SIZE], STREAM_EXTENSION_ENTRY_TYPE);
+    assert_eq!(entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x03);
+    assert_ne!(first_cluster, 0);
+    assert_eq!(
+        usize::try_from(read_le_u64(&entry_set[DIRECTORY_ENTRY_SIZE + 24..])).unwrap(),
+        disk.root_cluster_size()
+    );
+    assert_eq!(decode_entry_name(&entry_set), "CreateDir".encode_utf16().collect::<Vec<_>>());
+    assert!(disk.read_cluster(first_cluster).iter().all(|byte| *byte == 0));
+}
+
+#[ktest]
+fn directory_entry_mutation_zero_size_dir_changes_only_newborn_shape() {
+    init_lookup_test_runtime();
+
+    let default_disk = ExfatLookupTestDisk::new();
+    let (_default_fs, _default_root_inode, default_parent_inode) =
+        mount_create_parent(&default_disk, FsFlags::empty(), None);
+    let default_child = default_parent_inode
+        .create("ShapeDir", InodeType::Dir, InodeMode::all())
+        .unwrap();
+    let (_default_visited_count, default_entries) = collect_dirents(&default_parent_inode, 2);
+    let default_parent_cluster = default_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let default_entry_set = default_parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
+
+    let zero_size_disk = ExfatLookupTestDisk::new();
+    let (_zero_size_fs, _zero_size_root_inode, zero_size_parent_inode) =
+        mount_create_parent(&zero_size_disk, FsFlags::empty(), Some("zero_size_dir"));
+    let zero_size_child = zero_size_parent_inode
+        .create("ShapeDir", InodeType::Dir, InodeMode::all())
+        .unwrap();
+    let (_zero_size_visited_count, zero_size_entries) =
+        collect_dirents(&zero_size_parent_inode, 2);
+    let zero_size_parent_cluster = zero_size_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let zero_size_entry_set = zero_size_parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
+
+    assert_eq!(default_child.type_(), InodeType::Dir);
+    assert_eq!(zero_size_child.type_(), InodeType::Dir);
+    assert_eq!(default_child.size(), default_disk.root_cluster_size());
+    assert_eq!(zero_size_child.size(), 0);
+    assert_eq!(entry_names(&default_entries), vec!["ShapeDir"]);
+    assert_eq!(entry_names(&zero_size_entries), vec!["ShapeDir"]);
+    assert_eq!(entry_index_from_ino(default_child.ino()), 0);
+    assert_eq!(entry_index_from_ino(zero_size_child.ino()), 0);
+    assert_eq!(usize::from(default_entry_set[1]), usize::from(zero_size_entry_set[1]));
+    assert_eq!(
+        decode_entry_name(&default_entry_set),
+        decode_entry_name(&zero_size_entry_set)
+    );
+    assert_eq!(
+        read_le_u16(&default_entry_set[4..6]),
+        read_le_u16(&zero_size_entry_set[4..6])
+    );
+    assert_eq!(default_entry_set[DIRECTORY_ENTRY_SIZE], STREAM_EXTENSION_ENTRY_TYPE);
+    assert_eq!(zero_size_entry_set[DIRECTORY_ENTRY_SIZE], STREAM_EXTENSION_ENTRY_TYPE);
+    assert_eq!(default_entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x03);
+    assert_eq!(zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x01);
+    assert_ne!(read_le_u32(&default_entry_set[DIRECTORY_ENTRY_SIZE + 20..]), 0);
+    assert_eq!(read_le_u32(&zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 20..]), 0);
+    assert_eq!(
+        usize::try_from(read_le_u64(&default_entry_set[DIRECTORY_ENTRY_SIZE + 24..])).unwrap(),
+        default_disk.root_cluster_size()
+    );
+    assert_eq!(read_le_u64(&zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 24..]), 0);
+    assert_eq!(read_le_u16(&default_entry_set[2..4]), entry_set_checksum(&default_entry_set, 2));
+    assert_eq!(
+        read_le_u16(&zero_size_entry_set[2..4]),
+        entry_set_checksum(&zero_size_entry_set, 2)
+    );
+}
+
+#[ktest]
+fn directory_entry_mutation_parent_growth_extends_directory_before_publication() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let (_fs, _root_inode, parent_inode) =
+        mount_create_parent(&disk, FsFlags::empty(), None);
+    let fill_count = disk.root_directory_entry_capacity() / 3;
+    let mut inserted_names = Vec::with_capacity(fill_count);
+    for index in 0..fill_count {
+        let name = format!("Fill{:02}", index);
+        parent_inode
+            .create(&name, InodeType::File, InodeMode::all())
+            .unwrap();
+        inserted_names.push(name);
+    }
+
+    let before_size = parent_inode.size();
+    let (_before_visited_count, before_entries) = collect_dirents(&parent_inode, 2);
+
+    let created = parent_inode
+        .create("GrowthFile", InodeType::File, InodeMode::all())
+        .unwrap();
+    let lookup = parent_inode.lookup("growthfile").unwrap();
+    let (_after_visited_count, after_entries) = collect_dirents(&parent_inode, 2);
+
+    assert_eq!(entry_names(&before_entries).len(), inserted_names.len());
+    assert_eq!(created.ino(), lookup.ino());
+    assert_eq!(created.type_(), InodeType::File);
+    assert_eq!(parent_inode.size(), before_size + disk.root_cluster_size());
+    assert!(entry_index_from_ino(created.ino()) >= disk.root_directory_entry_capacity() - 2);
+    assert_eq!(after_entries.len(), inserted_names.len() + 1);
+    assert_eq!(after_entries.last().unwrap().name, "GrowthFile");
+}
+
+#[ktest]
+fn directory_entry_mutation_create_refusals_preserve_parent_visibility() {
+    init_lookup_test_runtime();
+
+    let duplicate_disk = ExfatLookupTestDisk::new();
+    let (_duplicate_fs, _duplicate_root_inode, duplicate_parent_inode) =
+        mount_create_parent(&duplicate_disk, FsFlags::empty(), None);
+    duplicate_parent_inode
+        .create("Existing", InodeType::File, InodeMode::all())
+        .unwrap();
+    let duplicate_parent_bytes = duplicate_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let (_duplicate_visited_count, duplicate_entries) = collect_dirents(&duplicate_parent_inode, 2);
+    let duplicate_error = duplicate_parent_inode
+        .create("existing", InodeType::File, InodeMode::all())
+        .unwrap_err();
+    assert_eq!(duplicate_error.error(), Errno::EEXIST);
+    assert_parent_directory_unchanged(
+        &duplicate_disk,
+        &duplicate_parent_inode,
+        &duplicate_parent_bytes,
+        &entry_names(&duplicate_entries),
+    );
+
+    let invalid_disk = ExfatLookupTestDisk::new();
+    let (_invalid_fs, _invalid_root_inode, invalid_parent_inode) =
+        mount_create_parent(&invalid_disk, FsFlags::empty(), None);
+    let invalid_parent_bytes = invalid_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let invalid_error = invalid_parent_inode
+        .create("invalid/name", InodeType::File, InodeMode::all())
+        .unwrap_err();
+    assert_eq!(invalid_error.error(), Errno::EINVAL);
+    assert_parent_directory_unchanged(
+        &invalid_disk,
+        &invalid_parent_inode,
+        &invalid_parent_bytes,
+        &[],
+    );
+    let name_too_long_error = invalid_parent_inode
+        .create(&"a".repeat(256), InodeType::File, InodeMode::all())
+        .unwrap_err();
+    assert_eq!(name_too_long_error.error(), Errno::ENAMETOOLONG);
+    assert_parent_directory_unchanged(
+        &invalid_disk,
+        &invalid_parent_inode,
+        &invalid_parent_bytes,
+        &[],
+    );
+
+    let read_only_disk = ExfatLookupTestDisk::new();
+    let (_read_only_fs, _read_only_root_inode, read_only_parent_inode) =
+        mount_create_parent(&read_only_disk, FsFlags::RDONLY, None);
+    let read_only_parent_bytes = read_only_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let read_only_error = read_only_parent_inode
+        .create("ReadOnly", InodeType::File, InodeMode::all())
+        .unwrap_err();
+    assert_eq!(read_only_error.error(), Errno::EROFS);
+    assert_parent_directory_unchanged(
+        &read_only_disk,
+        &read_only_parent_inode,
+        &read_only_parent_bytes,
+        &[],
+    );
+
+    let unsupported_disk = ExfatLookupTestDisk::new();
+    let (_unsupported_fs, _unsupported_root_inode, unsupported_parent_inode) =
+        mount_create_parent(&unsupported_disk, FsFlags::empty(), None);
+    let unsupported_parent_bytes = unsupported_disk.read_cluster(TEST_PARENT_CLUSTER);
+    let link_error = unsupported_parent_inode
+        .link(&unsupported_parent_inode, "HardLink")
+        .unwrap_err();
+    assert_eq!(link_error.error(), Errno::EOPNOTSUPP);
+    let mknod_error = unsupported_parent_inode
+        .mknod("Node", InodeMode::all(), MknodType::CharDevice(0))
+        .unwrap_err();
+    assert_eq!(mknod_error.error(), Errno::EOPNOTSUPP);
+    let symlink_error = unsupported_parent_inode
+        .create("Link", InodeType::SymLink, InodeMode::all())
+        .unwrap_err();
+    assert_eq!(symlink_error.error(), Errno::EOPNOTSUPP);
+    assert_parent_directory_unchanged(
+        &unsupported_disk,
+        &unsupported_parent_inode,
+        &unsupported_parent_bytes,
+        &[],
+    );
 }
 
 #[ktest]

@@ -335,6 +335,7 @@ fn default_mount_options() -> ExfatMountOptions {
         fs_flags: FsFlags::empty(),
         iocharset: String::from("utf8"),
         keep_last_dots: false,
+        zero_size_dir: false,
     }
 }
 
