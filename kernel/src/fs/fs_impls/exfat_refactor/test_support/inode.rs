@@ -11,11 +11,13 @@ use device_id::DeviceId;
 use ostd::mm::{FrameAllocOptions, HasSize, PAGE_SIZE, Segment, VmIo, io::util::HasVmReaderWriter};
 
 use super::load_validated_mount;
-use crate::prelude::*;
 
 const DIRECTORY_ENTRY_SIZE: usize = 32;
+const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 const BENIGN_UNRECOGNIZED_ENTRY_TYPE: u8 = 0xA0;
 const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
+const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+const FILE_ATTRIBUTE_REGULAR: u16 = 0x0020;
 const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
 const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
@@ -42,6 +44,36 @@ impl ExfatLookupTestDisk {
     }
 
     pub(in super::super) fn install_root_file(&self, entry_index: usize, name: &str) {
+        self.install_root_entry_set(entry_index, name, FILE_ATTRIBUTE_REGULAR, 0, 0, false);
+    }
+
+    pub(in super::super) fn install_root_directory(
+        &self,
+        entry_index: usize,
+        name: &str,
+        first_cluster: u32,
+    ) {
+        self.mark_cluster_allocated(first_cluster);
+        self.write_cluster(first_cluster, &vec![0; self.root_cluster_size()]);
+        self.install_root_entry_set(
+            entry_index,
+            name,
+            FILE_ATTRIBUTE_DIRECTORY,
+            first_cluster,
+            self.root_cluster_size(),
+            true,
+        );
+    }
+
+    fn install_root_entry_set(
+        &self,
+        entry_index: usize,
+        name: &str,
+        file_attributes: u16,
+        first_cluster: u32,
+        data_length: usize,
+        no_fat_chain: bool,
+    ) {
         let validated_mount = self.validated_mount();
         let root_entry_offset = self.root_entry_offset(entry_index);
         let name_utf16: Vec<u16> = name.encode_utf16().collect();
@@ -51,13 +83,18 @@ impl ExfatLookupTestDisk {
 
         entry_set[0] = FILE_DIRECTORY_ENTRY_TYPE;
         entry_set[1] = u8::try_from(secondary_count).unwrap();
+        entry_set[4..6].copy_from_slice(&file_attributes.to_le_bytes());
 
         let stream_entry = &mut entry_set[DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2];
         stream_entry[0] = STREAM_EXTENSION_ENTRY_TYPE;
-        stream_entry[1] = 0x01;
+        stream_entry[1] = if no_fat_chain { 0x03 } else { 0x01 };
         stream_entry[3] = u8::try_from(name_utf16.len()).unwrap();
         stream_entry[4..6]
             .copy_from_slice(&validated_mount.upcase_table.name_hash(&name_utf16).to_le_bytes());
+        let data_length = u64::try_from(data_length).unwrap();
+        stream_entry[8..16].copy_from_slice(&data_length.to_le_bytes());
+        stream_entry[20..24].copy_from_slice(&first_cluster.to_le_bytes());
+        stream_entry[24..32].copy_from_slice(&data_length.to_le_bytes());
 
         for (name_entry_index, name_chunk) in name_utf16.chunks(15).enumerate() {
             let entry_offset = (name_entry_index + 2) * DIRECTORY_ENTRY_SIZE;
@@ -127,6 +164,66 @@ impl ExfatLookupTestDisk {
     pub(in super::super) fn root_directory_offset(&self) -> usize {
         let boot_region = self.validated_mount().boot_region;
         boot_region.cluster_offset(boot_region.root_dir_cluster).unwrap()
+    }
+
+    pub(in super::super) fn root_cluster_size(&self) -> usize {
+        self.validated_mount().boot_region.cluster_size
+    }
+
+    pub(in super::super) fn root_directory_entry_capacity(&self) -> usize {
+        self.root_cluster_size() / DIRECTORY_ENTRY_SIZE
+    }
+
+    pub(in super::super) fn read_cluster(&self, cluster: u32) -> Vec<u8> {
+        let boot_region = self.validated_mount().boot_region;
+        let mut bytes = vec![0; boot_region.cluster_size];
+        self.blocks
+            .read_bytes(boot_region.cluster_offset(cluster).unwrap(), &mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    pub(in super::super) fn read_root_entries(
+        &self,
+        entry_index: usize,
+        entry_count: usize,
+    ) -> Vec<u8> {
+        let mut bytes = vec![0; entry_count * DIRECTORY_ENTRY_SIZE];
+        self.blocks
+            .read_bytes(self.root_entry_offset(entry_index), &mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    fn allocation_bitmap_offset(&self) -> usize {
+        for entry_index in 0..self.root_directory_entry_capacity() {
+            let entry = self.read_root_entries(entry_index, 1);
+            if entry[0] == ALLOCATION_BITMAP_ENTRY_TYPE {
+                let first_cluster =
+                    u32::from_le_bytes([entry[20], entry[21], entry[22], entry[23]]);
+                return self
+                    .validated_mount()
+                    .boot_region
+                    .cluster_offset(first_cluster)
+                    .unwrap();
+            }
+        }
+        panic!("exFAT lookup test image has no allocation bitmap entry");
+    }
+
+    fn mark_cluster_allocated(&self, cluster: u32) {
+        let bit_index = usize::try_from(cluster.checked_sub(2).unwrap()).unwrap();
+        let byte_offset = self.allocation_bitmap_offset() + bit_index / 8;
+        let mut byte = [0u8; 1];
+        self.blocks.read_bytes(byte_offset, &mut byte).unwrap();
+        byte[0] |= 1 << (bit_index % 8);
+        self.write_bytes(byte_offset, &byte);
+    }
+
+    fn write_cluster(&self, cluster: u32, bytes: &[u8]) {
+        let boot_region = self.validated_mount().boot_region;
+        assert_eq!(bytes.len(), boot_region.cluster_size);
+        self.write_bytes(boot_region.cluster_offset(cluster).unwrap(), bytes);
     }
 
     fn validated_mount(&self) -> super::LoadedMountState {
