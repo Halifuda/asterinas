@@ -130,6 +130,7 @@ pub(crate) struct FreeSpaceSnapshot {
 pub(crate) struct ExfatFs {
     allocator: RwLock<Option<FreeSpaceAllocatorState>>,
     block_device: Arc<dyn BlockDevice>,
+    directory_mutation: Mutex<()>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     source: Option<String>,
     state: RwLock<Option<MountedVolumeState>>,
@@ -140,6 +141,7 @@ impl ExfatFs {
         Arc::new(Self {
             allocator: RwLock::new(None),
             block_device,
+            directory_mutation: Mutex::new(()),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             source,
             state: RwLock::new(None),
@@ -148,6 +150,10 @@ impl ExfatFs {
 
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
+    }
+
+    pub(super) fn begin_directory_mutation(&self) -> MutexGuard<'_, ()> {
+        self.directory_mutation.lock()
     }
 
     fn mount_candidate(

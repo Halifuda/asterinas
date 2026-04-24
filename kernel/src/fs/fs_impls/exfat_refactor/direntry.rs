@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+// This module is the exFAT-local byte-backed directory-entry scan and authoring
+// layer. On-disk entry-shape rules live here; higher-level mutation policy does
+// not.
+
 use alloc::{vec, vec::Vec};
 
 use super::{
@@ -22,6 +26,17 @@ const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
 const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
 const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
 const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+const FILE_ATTRIBUTES_OFFSET: usize = 4;
+const CREATE_TIMESTAMP_OFFSET: usize = 8;
+const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
+const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
+const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
+const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
+const CREATE_UTC_OFFSET_OFFSET: usize = 22;
+const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
+const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
+const STREAM_NAME_LENGTH_OFFSET: usize = 3;
+const STREAM_NAME_HASH_OFFSET: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DirectoryEntrySlotRange {
@@ -69,6 +84,8 @@ pub(super) enum DirectoryEntryAnomalyKind {
     UnexpectedSecondaryEntry,
 }
 
+// Borrowed read-only view produced only from one validated file entry set. This
+// is not a general mutable entry buffer.
 #[derive(Clone, Copy)]
 pub(super) struct FileEntrySetView<'a> {
     entry_set: &'a [u8],
@@ -175,6 +192,217 @@ pub(super) fn encode_file_entry_set(
     Ok(entry_set)
 }
 
+// Slot-aligned writable directory-entry bytes reserved by the owner for
+// invalidation, staging, or pre-publication cleanup. This does not prove the
+// bytes are a validated published file entry set.
+pub(super) struct WritableDirectoryEntrySlotSpan<'a> {
+    slot_span: &'a mut [u8],
+}
+
+impl<'a> WritableDirectoryEntrySlotSpan<'a> {
+    pub(super) fn new(
+        slot_range: DirectoryEntrySlotRange,
+        slot_span: &'a mut [u8],
+    ) -> core::result::Result<Self, MountVolumeStateError> {
+        let expected_len = slot_range
+            .entry_count()
+            .checked_mul(DIRECTORY_ENTRY_SIZE)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        if slot_span.is_empty()
+            || slot_span.len() != expected_len
+            || slot_span.len() % DIRECTORY_ENTRY_SIZE != 0
+        {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
+        Ok(Self { slot_span })
+    }
+
+    pub(super) fn bytes_mut(&mut self) -> &mut [u8] {
+        self.slot_span
+    }
+}
+
+pub(super) fn invalidate_entry_set(
+    slot_span: &mut WritableDirectoryEntrySlotSpan<'_>,
+) -> core::result::Result<(), MountVolumeStateError> {
+    for entry in slot_span.bytes_mut().chunks_exact_mut(DIRECTORY_ENTRY_SIZE) {
+        entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
+    }
+    Ok(())
+}
+
+// Recognized field updates for one already-admitted published file entry set.
+// This preserves the existing entry-set topology and refuses layout-changing
+// name rewrites.
+#[derive(Default)]
+pub(super) struct FileEntrySetFieldUpdates<'a> {
+    pub(super) create_fields: Option<([u8; 4], u8, u8)>,
+    pub(super) file_attributes: Option<u16>,
+    pub(super) last_accessed_fields: Option<([u8; 4], u8)>,
+    pub(super) last_modified_fields: Option<([u8; 4], u8, u8)>,
+    pub(super) name: Option<&'a [u16]>,
+    pub(super) name_hash: Option<u16>,
+}
+
+pub(super) fn republished_entry_set(
+    source_entry_set: FileEntrySetView<'_>,
+    updates: &FileEntrySetFieldUpdates<'_>,
+) -> core::result::Result<Vec<u8>, MountVolumeStateError> {
+    let mut republished_entry_set = source_entry_set.entry_set.to_vec();
+    let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
+
+    if let Some(file_attributes) = updates.file_attributes {
+        republished_entry_set[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2]
+            .copy_from_slice(&file_attributes.to_le_bytes());
+    }
+
+    if let Some((timestamp, ten_ms_increment, utc_offset)) = updates.create_fields {
+        republished_entry_set[CREATE_TIMESTAMP_OFFSET..CREATE_TIMESTAMP_OFFSET + 4]
+            .copy_from_slice(&timestamp);
+        republished_entry_set[CREATE_10MS_INCREMENT_OFFSET] = ten_ms_increment;
+        republished_entry_set[CREATE_UTC_OFFSET_OFFSET] = utc_offset;
+    }
+
+    if let Some((timestamp, ten_ms_increment, utc_offset)) = updates.last_modified_fields {
+        republished_entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
+            .copy_from_slice(&timestamp);
+        republished_entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] = ten_ms_increment;
+        republished_entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = utc_offset;
+    }
+
+    if let Some((timestamp, utc_offset)) = updates.last_accessed_fields {
+        republished_entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
+            .copy_from_slice(&timestamp);
+        republished_entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = utc_offset;
+    }
+
+    if let Some(name) = updates.name {
+        let current_name_entry_count =
+            usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
+        let requested_name_entry_count = file_entry_set_entry_count(name.len())?
+            .checked_sub(2)
+            .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+        if requested_name_entry_count != current_name_entry_count {
+            return Err(MountVolumeStateError::InvalidOperationInput);
+        }
+
+        republished_entry_set[stream_entry_offset + STREAM_NAME_LENGTH_OFFSET] =
+            u8::try_from(name.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+
+        for name_entry_index in 0..current_name_entry_count {
+            let name_entry_offset = (name_entry_index + 2)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            republished_entry_set[name_entry_offset + 2..name_entry_offset + DIRECTORY_ENTRY_SIZE]
+                .fill(0);
+        }
+
+        for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
+            let name_entry_offset = (name_entry_index + 2)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+            for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
+                let code_unit_offset = name_entry_offset
+                    .checked_add(2)
+                    .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
+                    .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+                republished_entry_set[code_unit_offset..code_unit_offset + 2]
+                    .copy_from_slice(&name_code_unit.to_le_bytes());
+            }
+        }
+    }
+
+    if let Some(name_hash) = updates.name_hash {
+        republished_entry_set[stream_entry_offset + STREAM_NAME_HASH_OFFSET
+            ..stream_entry_offset + STREAM_NAME_HASH_OFFSET + 2]
+            .copy_from_slice(&name_hash.to_le_bytes());
+    }
+
+    let checksum =
+        entry_set_checksum(&republished_entry_set, usize::from(source_entry_set.secondary_count));
+    republished_entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
+    Ok(republished_entry_set)
+}
+
+pub(super) fn renamed_entry_set(
+    source_entry_set: FileEntrySetView<'_>,
+    name: &[u16],
+    name_hash: u16,
+) -> core::result::Result<Vec<u8>, MountVolumeStateError> {
+    let entry_count = file_entry_set_entry_count(name.len())?;
+    let new_name_entry_count = entry_count
+        .checked_sub(2)
+        .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+    let current_name_entry_count =
+        usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
+    if new_name_entry_count == current_name_entry_count {
+        return republished_entry_set(
+            source_entry_set,
+            &FileEntrySetFieldUpdates {
+                name: Some(name),
+                name_hash: Some(name_hash),
+                ..Default::default()
+            },
+        );
+    }
+    let required_secondary_count = current_name_entry_count
+        .checked_add(1)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let trailing_secondary_count = source_entry_set
+        .secondary_count
+        .checked_sub(required_secondary_count)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let secondary_count = new_name_entry_count
+        .checked_add(1)
+        .and_then(|count| count.checked_add(trailing_secondary_count))
+        .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+    let secondary_count =
+        u8::try_from(secondary_count).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+    let entry_set_len = usize::from(secondary_count)
+        .checked_add(1)
+        .and_then(|entry_count| entry_count.checked_mul(DIRECTORY_ENTRY_SIZE))
+        .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+    let mut renamed_entry_set = vec![0; entry_set_len];
+    renamed_entry_set[..DIRECTORY_ENTRY_SIZE].copy_from_slice(source_entry_set.primary_entry);
+    renamed_entry_set[DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2]
+        .copy_from_slice(source_entry_set.stream_entry);
+    renamed_entry_set[1] = secondary_count;
+    renamed_entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET] =
+        u8::try_from(name.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+    renamed_entry_set
+        [DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
+        .copy_from_slice(&name_hash.to_le_bytes());
+
+    for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
+        let name_entry_offset = (name_entry_index + 2)
+            .checked_mul(DIRECTORY_ENTRY_SIZE)
+            .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+        renamed_entry_set[name_entry_offset] = FILE_NAME_ENTRY_TYPE;
+        for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
+            let code_unit_offset = name_entry_offset
+                .checked_add(2)
+                .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
+                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+            renamed_entry_set[code_unit_offset..code_unit_offset + 2]
+                .copy_from_slice(&name_code_unit.to_le_bytes());
+        }
+    }
+
+    let trailing_source_offset = (current_name_entry_count + 2)
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let trailing_destination_offset = (new_name_entry_count + 2)
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    renamed_entry_set[trailing_destination_offset..]
+        .copy_from_slice(&source_entry_set.entry_set[trailing_source_offset..]);
+
+    let checksum = entry_set_checksum(&renamed_entry_set, usize::from(secondary_count));
+    renamed_entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
+    Ok(renamed_entry_set)
+}
+
+// Scan result category, not a write-side capability object.
 #[derive(Clone, Copy)]
 pub(super) enum ScannedDirectoryEntry<'a> {
     Anomaly {

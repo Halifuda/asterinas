@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use aster_block::{
     BlockDevice, BlockDeviceMeta, SECTOR_SIZE,
@@ -27,6 +30,12 @@ pub(in super::super) struct ExfatLookupTestDisk {
     blocks: Segment<()>,
 }
 
+pub(in super::super) struct ExfatLookupToggleFailingWriteDisk {
+    fail_range: core::ops::Range<usize>,
+    fail_writes: AtomicBool,
+    inner: Arc<ExfatLookupTestDisk>,
+}
+
 impl ExfatLookupTestDisk {
     pub(in super::super) fn new() -> Arc<Self> {
         let blocks = FrameAllocOptions::new()
@@ -44,7 +53,15 @@ impl ExfatLookupTestDisk {
     }
 
     pub(in super::super) fn install_root_file(&self, entry_index: usize, name: &str) {
-        self.install_root_entry_set(entry_index, name, FILE_ATTRIBUTE_REGULAR, 0, 0, false);
+        self.install_directory_entry_set(
+            self.validated_mount().boot_region.root_dir_cluster,
+            entry_index,
+            name,
+            FILE_ATTRIBUTE_REGULAR,
+            0,
+            0,
+            false,
+        );
     }
 
     pub(in super::super) fn install_root_directory(
@@ -55,7 +72,8 @@ impl ExfatLookupTestDisk {
     ) {
         self.mark_cluster_allocated(first_cluster);
         self.write_cluster(first_cluster, &vec![0; self.root_cluster_size()]);
-        self.install_root_entry_set(
+        self.install_directory_entry_set(
+            self.validated_mount().boot_region.root_dir_cluster,
             entry_index,
             name,
             FILE_ATTRIBUTE_DIRECTORY,
@@ -65,8 +83,49 @@ impl ExfatLookupTestDisk {
         );
     }
 
-    fn install_root_entry_set(
+    pub(in super::super) fn install_directory_file(
         &self,
+        directory_cluster: u32,
+        entry_index: usize,
+        name: &str,
+        first_cluster: u32,
+        data_length: usize,
+    ) {
+        self.mark_cluster_allocated(first_cluster);
+        self.install_directory_entry_set(
+            directory_cluster,
+            entry_index,
+            name,
+            FILE_ATTRIBUTE_REGULAR,
+            first_cluster,
+            data_length,
+            true,
+        );
+    }
+
+    pub(in super::super) fn install_directory_subdirectory(
+        &self,
+        directory_cluster: u32,
+        entry_index: usize,
+        name: &str,
+        first_cluster: u32,
+    ) {
+        self.mark_cluster_allocated(first_cluster);
+        self.write_cluster(first_cluster, &vec![0; self.root_cluster_size()]);
+        self.install_directory_entry_set(
+            directory_cluster,
+            entry_index,
+            name,
+            FILE_ATTRIBUTE_DIRECTORY,
+            first_cluster,
+            self.root_cluster_size(),
+            true,
+        );
+    }
+
+    fn install_directory_entry_set(
+        &self,
+        directory_cluster: u32,
         entry_index: usize,
         name: &str,
         file_attributes: u16,
@@ -75,7 +134,7 @@ impl ExfatLookupTestDisk {
         no_fat_chain: bool,
     ) {
         let validated_mount = self.validated_mount();
-        let root_entry_offset = self.root_entry_offset(entry_index);
+        let entry_offset = self.directory_entry_offset(directory_cluster, entry_index);
         let name_utf16: Vec<u16> = name.encode_utf16().collect();
         let name_entry_count = name_utf16.len().div_ceil(15);
         let secondary_count = name_entry_count.checked_add(1).unwrap();
@@ -108,9 +167,9 @@ impl ExfatLookupTestDisk {
 
         let checksum = entry_set_checksum(&entry_set, u8::try_from(secondary_count).unwrap());
         entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
-        self.write_bytes(root_entry_offset, &entry_set);
+        self.write_bytes(entry_offset, &entry_set);
         self.write_bytes(
-            self.root_entry_offset(entry_index + secondary_count + 1),
+            self.directory_entry_offset(directory_cluster, entry_index + secondary_count + 1),
             &[END_OF_DIRECTORY_ENTRY_TYPE; DIRECTORY_ENTRY_SIZE],
         );
     }
@@ -188,11 +247,37 @@ impl ExfatLookupTestDisk {
         entry_index: usize,
         entry_count: usize,
     ) -> Vec<u8> {
+        self.read_directory_entries(
+            self.validated_mount().boot_region.root_dir_cluster,
+            entry_index,
+            entry_count,
+        )
+    }
+
+    pub(in super::super) fn read_directory_entries(
+        &self,
+        directory_cluster: u32,
+        entry_index: usize,
+        entry_count: usize,
+    ) -> Vec<u8> {
         let mut bytes = vec![0; entry_count * DIRECTORY_ENTRY_SIZE];
         self.blocks
-            .read_bytes(self.root_entry_offset(entry_index), &mut bytes)
+            .read_bytes(self.directory_entry_offset(directory_cluster, entry_index), &mut bytes)
             .unwrap();
         bytes
+    }
+
+    pub(in super::super) fn allocation_bitmap_byte_offset_for_cluster(&self, cluster: u32) -> usize {
+        let bit_index = usize::try_from(cluster.checked_sub(2).unwrap()).unwrap();
+        self.allocation_bitmap_offset() + bit_index / 8
+    }
+
+    pub(in super::super) fn is_cluster_allocated(&self, cluster: u32) -> bool {
+        let bit_index = usize::try_from(cluster.checked_sub(2).unwrap()).unwrap();
+        let byte_offset = self.allocation_bitmap_byte_offset_for_cluster(cluster);
+        let mut byte = [0u8; 1];
+        self.blocks.read_bytes(byte_offset, &mut byte).unwrap();
+        byte[0] & (1 << (bit_index % 8)) != 0
     }
 
     fn allocation_bitmap_offset(&self) -> usize {
@@ -242,6 +327,15 @@ impl ExfatLookupTestDisk {
             .unwrap()
     }
 
+    fn directory_entry_offset(&self, directory_cluster: u32, entry_index: usize) -> usize {
+        self.validated_mount()
+            .boot_region
+            .cluster_offset(directory_cluster)
+            .unwrap()
+            .checked_add(entry_index * DIRECTORY_ENTRY_SIZE)
+            .unwrap()
+    }
+
     fn sectors_count(&self) -> usize {
         self.blocks.size() / SECTOR_SIZE
     }
@@ -256,6 +350,38 @@ impl fmt::Debug for ExfatLookupTestDisk {
         formatter
             .debug_struct("ExfatLookupTestDisk")
             .field("sectors_count", &self.sectors_count())
+            .finish()
+    }
+}
+
+impl ExfatLookupToggleFailingWriteDisk {
+    pub(in super::super) fn new(
+        inner: Arc<ExfatLookupTestDisk>,
+        fail_offset: usize,
+        fail_len: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
+            fail_writes: AtomicBool::new(false),
+            inner,
+        })
+    }
+
+    pub(in super::super) fn enable_failures(&self) {
+        self.fail_writes.store(true, Ordering::Relaxed);
+    }
+
+    fn overlaps_failure_range(&self, start: usize, end: usize) -> bool {
+        start < self.fail_range.end && self.fail_range.start < end
+    }
+}
+
+impl fmt::Debug for ExfatLookupToggleFailingWriteDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatLookupToggleFailingWriteDisk")
+            .field("fail_range", &self.fail_range)
+            .field("sectors_count", &self.inner.sectors_count())
             .finish()
     }
 }
@@ -298,6 +424,58 @@ impl BlockDevice for ExfatLookupTestDisk {
 
     fn name(&self) -> &str {
         "exfat-lookup-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
+impl BlockDevice for ExfatLookupToggleFailingWriteDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        if bio_type == BioType::Flush {
+            bio.complete(BioStatus::Complete);
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let segment_end = current_offset.checked_add(segment.nbytes()).unwrap();
+            if bio_type == BioType::Write
+                && self.fail_writes.load(Ordering::Relaxed)
+                && self.overlaps_failure_range(current_offset, segment_end)
+            {
+                bio.complete(BioStatus::IoError);
+                return Ok(());
+            }
+
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-lookup-failing-write-test"
     }
 
     fn id(&self) -> DeviceId {
