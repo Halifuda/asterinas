@@ -287,7 +287,13 @@ impl ExfatFs {
     pub(super) fn published_lookup_state(
         &self,
     ) -> core::result::Result<
-        (Arc<dyn BlockDevice>, BootRegion, Arc<UpcaseTable>, ExfatMountOptions),
+        (
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            VolumeAnomalyState,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
         MountVolumeStateError,
     > {
         let state = self.state.read();
@@ -297,6 +303,7 @@ impl ExfatFs {
         Ok((
             self.block_device.clone(),
             publication.boot_region,
+            publication.anomaly,
             publication.upcase_table.clone(),
             publication.options.clone(),
         ))
