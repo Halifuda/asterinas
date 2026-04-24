@@ -4,7 +4,7 @@ use alloc::{string::String, vec, vec::Vec};
 use core::time::Duration;
 
 use aster_block::BlockDevice;
-use ostd::mm::VmIo;
+use ostd::mm::{FallibleVmWrite, VmIo, VmReader};
 
 use super::{
     bitmap::ClusterRange,
@@ -13,7 +13,7 @@ use super::{
         self, DIRECTORY_ENTRY_SIZE, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange,
         FileEntrySetView, ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
     },
-    fat::{ChainVisitControl, FatReader},
+    fat::{ChainVisitControl, FatChainStep, FatReader},
     fs::{ExfatFs, ExfatMountOptions, MountVolumeStateError},
     upcase::UpcaseTable,
 };
@@ -200,13 +200,141 @@ impl ExfatInode {
         Self::read_directory_bytes_for_stream(block_device, boot_region, *self.stream.read())
     }
 
-    fn next_directory_entry_scan<'a>(
+    fn read_revalidated_directory_bytes(
         &self,
-        directory_bytes: &'a [u8],
-        entry_index: usize,
-    ) -> core::result::Result<ScannedDirectoryEntry<'a>, MountVolumeStateError> {
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> core::result::Result<(ExfatInodeStream, Vec<u8>), MountVolumeStateError> {
+        loop {
+            let first_stream = *self.stream.read();
+            let first_directory_bytes =
+                Self::read_directory_bytes_for_stream(block_device, boot_region, first_stream)?;
+            let second_stream = *self.stream.read();
+            let second_directory_bytes =
+                Self::read_directory_bytes_for_stream(block_device, boot_region, second_stream)?;
+            if first_stream == second_stream && first_directory_bytes == second_directory_bytes {
+                return Ok((second_stream, second_directory_bytes));
+            }
+        }
+    }
+
+    fn read_regular_file_at(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        offset: usize,
+        writer: &mut VmWriter,
+    ) -> Result<usize> {
         let stream = self.stream.read();
-        Self::scan_directory_entry_at(stream.data_length.is_none(), directory_bytes, entry_index)
+        let Some(data_length) = stream.data_length else {
+            return_errno!(Errno::EINVAL);
+        };
+        if data_length == 0 || offset >= data_length || !writer.has_avail() {
+            return Ok(0);
+        }
+
+        let data_length_u64 = u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
+        boot_region
+            .validate_stream_data(stream.first_cluster, data_length_u64)
+            .map_err(Error::from)?;
+
+        let read_end = offset
+            .checked_add(writer.avail())
+            .ok_or_else(|| Error::new(Errno::EINVAL))?
+            .min(data_length);
+        let mut remaining = read_end
+            .checked_sub(offset)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        if remaining == 0 {
+            return Ok(0);
+        }
+
+        let cluster_size = boot_region.cluster_size;
+        let cluster_index = offset / cluster_size;
+        let mut cluster_offset = offset % cluster_size;
+        let mut copied_len = 0usize;
+
+        if stream.no_fat_chain {
+            let cluster_count = data_length.div_ceil(cluster_size);
+            let last_cluster = stream
+                .first_cluster
+                .checked_add(
+                    u32::try_from(cluster_count.saturating_sub(1))
+                        .map_err(|_| Error::new(Errno::EINVAL))?,
+                )
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            if !boot_region.is_valid_cluster(last_cluster) {
+                return_errno!(Errno::EINVAL);
+            }
+
+            let mut current_cluster = stream
+                .first_cluster
+                .checked_add(u32::try_from(cluster_index).map_err(|_| Error::new(Errno::EINVAL))?)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let mut cluster_buffer = vec![0; cluster_size];
+            while remaining != 0 {
+                let chunk_len = remaining.min(cluster_size - cluster_offset);
+                let cluster_start = boot_region
+                    .cluster_offset(current_cluster)
+                    .map_err(Error::from)?;
+                block_device
+                    .read_bytes(cluster_start, &mut cluster_buffer)
+                    .map_err(|_| Error::new(Errno::EIO))?;
+                let chunk_end = cluster_offset
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
+                copied_len = copied_len
+                    .checked_add(writer.write_fallible(&mut reader)?)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                remaining -= chunk_len;
+                cluster_offset = 0;
+                if remaining == 0 {
+                    break;
+                }
+                current_cluster = current_cluster
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            }
+            return Ok(copied_len);
+        }
+
+        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+        let mut cluster_buffer = vec![0; cluster_size];
+        let mut current_cluster = stream.first_cluster;
+        for _ in 0..cluster_index {
+            current_cluster = match fat_reader.next_cluster(current_cluster) {
+                Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
+                Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
+            };
+        }
+        while remaining != 0 {
+            let chunk_len = remaining.min(cluster_size - cluster_offset);
+            let cluster_start = boot_region
+                .cluster_offset(current_cluster)
+                .map_err(|_| Error::new(Errno::EIO))?;
+            block_device
+                .read_bytes(cluster_start, &mut cluster_buffer)
+                .map_err(|_| Error::new(Errno::EIO))?;
+            let chunk_end = cluster_offset
+                .checked_add(chunk_len)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
+            copied_len = copied_len
+                .checked_add(writer.write_fallible(&mut reader)?)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            remaining -= chunk_len;
+            cluster_offset = 0;
+            if remaining == 0 {
+                break;
+            }
+            current_cluster = match fat_reader.next_cluster(current_cluster) {
+                Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
+                Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
+            };
+        }
+
+        Ok(copied_len)
     }
 
     fn first_directory_child_scan<'a>(
@@ -415,50 +543,36 @@ impl ExfatInode {
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> core::result::Result<Option<Arc<dyn Inode>>, MountVolumeStateError> {
-        let directory_bytes = self.read_directory_bytes(block_device, boot_region)?;
-        let mut entry_index = 0usize;
-        loop {
-            match self.next_directory_entry_scan(&directory_bytes, entry_index)? {
-                ScannedDirectoryEntry::EndOfDirectory { .. } => return Ok(None),
-                ScannedDirectoryEntry::Vacant(slot_range) => {
-                    entry_index = slot_range.next_entry_index()?;
-                }
-                ScannedDirectoryEntry::File(entry_view) => {
-                    let candidate_name = entry_view.name()?;
-                    let stored_name_hash = entry_view.stored_name_hash();
-                    if stored_name_hash == lookup_name_hash
-                        && upcase_table.names_equal(lookup_name, &candidate_name)
-                    {
-                        let (inode_type, first_cluster, data_length, no_fat_chain) =
-                            entry_view.child_metadata(boot_region)?;
-                        let ino =
-                            self.entry_location_ino(entry_view.slot_range().first_entry_index())?;
-                        let child_inode: Arc<dyn Inode> = Self::new_child(
-                            fs,
-                            ino,
-                            inode_type,
-                            boot_region.cluster_size,
-                            data_length,
-                            first_cluster,
-                            data_length,
-                            no_fat_chain,
-                        );
-                        return Ok(Some(child_inode));
-                    }
-                    entry_index = entry_view.slot_range().next_entry_index()?;
-                }
-                ScannedDirectoryEntry::Anomaly {
-                    kind,
-                    slot_range,
-                } => {
-                    if kind == DirectoryEntryAnomalyKind::BenignUnrecognizedEntrySet {
-                        entry_index = slot_range.next_entry_index()?;
-                        continue;
-                    }
-                    return Err(MountVolumeStateError::InvalidOnDiskLayout);
-                }
-            }
-        }
+        let (stream, directory_bytes) =
+            self.read_revalidated_directory_bytes(block_device, boot_region)?;
+        let Some((slot_range, inode_type, first_cluster, data_length, no_fat_chain)) =
+            Self::locate_named_child(
+                &directory_bytes,
+                stream.data_length.is_none(),
+                boot_region,
+                upcase_table,
+                lookup_name,
+                lookup_name_hash,
+            )?
+        else {
+            return Ok(None);
+        };
+        let ino = (u64::from(stream.first_cluster) << 32)
+            | u64::from(
+                u32::try_from(slot_range.first_entry_index())
+                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+            );
+        let child_inode: Arc<dyn Inode> = Self::new_child(
+            fs,
+            ino,
+            inode_type,
+            boot_region.cluster_size,
+            data_length,
+            first_cluster,
+            data_length,
+            no_fat_chain,
+        );
+        Ok(Some(child_inode))
     }
 
     fn locate_named_child(
@@ -1144,14 +1258,27 @@ impl ExfatInode {
 impl crate::fs::vfs::inode::InodeIo for ExfatInode {
     fn read_at(
         &self,
-        _offset: usize,
-        _writer: &mut VmWriter,
+        offset: usize,
+        writer: &mut VmWriter,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
-        if self.type_() == InodeType::Dir {
-            return_errno!(Errno::EISDIR);
+        match self.type_() {
+            InodeType::Dir => return_errno!(Errno::EISDIR),
+            InodeType::File => {}
+            _ => return_errno!(Errno::EOPNOTSUPP),
         }
-        return_errno!(Errno::EOPNOTSUPP);
+
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (block_device, boot_region, anomaly, _, _) =
+            fs.published_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        self.read_regular_file_at(&block_device, &boot_region, offset, writer)
     }
 
     fn write_at(
@@ -1259,7 +1386,7 @@ impl Inode for ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let _directory_mutation = fs.begin_directory_mutation();
-        let (block_device, boot_region, upcase_table, options) =
+        let (block_device, boot_region, _, upcase_table, options) =
             fs.published_lookup_state().map_err(Error::from)?;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
@@ -1484,10 +1611,10 @@ impl Inode for ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (block_device, boot_region, _, _) =
+        let (block_device, boot_region, _, _, _) =
             fs.published_lookup_state().map_err(Error::from)?;
-        let directory_bytes = self
-            .read_directory_bytes(&block_device, &boot_region)
+        let (stream, directory_bytes) = self
+            .read_revalidated_directory_bytes(&block_device, &boot_region)
             .map_err(Error::from)?;
 
         let mut next_offset = offset;
@@ -1503,7 +1630,11 @@ impl Inode for ExfatInode {
         let mut visible_offset = 2usize;
         let mut entry_index = 0usize;
         loop {
-            match self.next_directory_entry_scan(&directory_bytes, entry_index)? {
+            match Self::scan_directory_entry_at(
+                stream.data_length.is_none(),
+                &directory_bytes,
+                entry_index,
+            )? {
                 ScannedDirectoryEntry::EndOfDirectory { .. } => break,
                 ScannedDirectoryEntry::Vacant(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
@@ -1515,9 +1646,14 @@ impl Inode for ExfatInode {
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
                             .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+                        let entry_ino = (u64::from(stream.first_cluster) << 32)
+                            | u64::from(
+                                u32::try_from(entry_view.slot_range().first_entry_index())
+                                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+                            );
                         visitor.visit(
                             &entry_name,
-                            self.entry_location_ino(entry_view.slot_range().first_entry_index())?,
+                            entry_ino,
                             inode_type,
                             visible_offset,
                         )?;
@@ -1558,7 +1694,8 @@ impl Inode for ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (block_device, boot_region, upcase_table, options) =
+        let _directory_mutation = fs.begin_directory_mutation();
+        let (block_device, boot_region, _, upcase_table, options) =
             fs.published_lookup_state().map_err(Error::from)?;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
@@ -1632,7 +1769,7 @@ impl Inode for ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let _directory_mutation = fs.begin_directory_mutation();
-        let (block_device, boot_region, upcase_table, options) =
+        let (block_device, boot_region, _, upcase_table, options) =
             fs.published_lookup_state().map_err(Error::from)?;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
@@ -1702,7 +1839,6 @@ impl Inode for ExfatInode {
         )
         .map_err(Error::from)?;
         drop(stream);
-        drop(_directory_mutation);
 
         if !allocated_cluster_ranges.is_empty() {
             let _ = fs.free_allocated_space(&allocated_cluster_ranges);
@@ -1726,7 +1862,7 @@ impl Inode for ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (block_device, boot_region, upcase_table, options) =
+        let (block_device, boot_region, _, upcase_table, options) =
             fs.published_lookup_state().map_err(Error::from)?;
 
         let lookup_name = Self::admitted_name(name, &options)?;
@@ -1774,7 +1910,7 @@ impl Inode for ExfatInode {
         }
 
         let _directory_mutation = fs.begin_directory_mutation();
-        let (block_device, boot_region, upcase_table, options) =
+        let (block_device, boot_region, _, upcase_table, options) =
             fs.published_lookup_state().map_err(Error::from)?;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);

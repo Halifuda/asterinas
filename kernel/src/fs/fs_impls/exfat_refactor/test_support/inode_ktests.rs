@@ -40,6 +40,7 @@ const RENAME_TARGET_DIRECTORY_CLUSTER: u32 = 15;
 const RENAME_TARGET_DIRECTORY_CHILD_CLUSTER: u32 = 16;
 const RENAME_SOURCE_PARENT_NAME: &str = "SrcParent";
 const RENAME_TARGET_PARENT_NAME: &str = "DstParent";
+const READ_AT_TEST_VOLUME_FLAGS: u16 = 0x000E;
 
 #[derive(Debug, Eq, PartialEq)]
 struct CapturedDirent {
@@ -1299,4 +1300,67 @@ fn directory_entry_mutation_integration_concurrency_linearizes_cross_directory_r
     assert_eq!(visible_name_count(&target_entries, "GrowthFile"), 1);
     assert_eq!(visible_name_count(&target_entries, "BusyDir"), 1);
     assert_eq!(entry_names(&busy_entries), vec!["Leaf"]);
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_read_at_reads_regular_file_bytes() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let expected = b"exfat read path";
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "ReadFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        expected,
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("ReadFile").unwrap();
+    let mut buffer = [0u8; 32];
+
+    let read_len = file_inode.read_bytes_at(0, &mut buffer).unwrap();
+
+    assert_eq!(read_len, expected.len());
+    assert_eq!(&buffer[..read_len], expected);
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_read_at_rejects_directory_before_anomaly_gate() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_directory(ROOT_FILE_ENTRY_INDEX, "DirOnly", TEST_CHILD_DIRECTORY_CLUSTER);
+    disk.set_volume_flags(READ_AT_TEST_VOLUME_FLAGS);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let directory_inode = root_inode.lookup("DirOnly").unwrap();
+    let mut buffer = [0u8; 8];
+
+    let error = directory_inode.read_bytes_at(0, &mut buffer).unwrap_err();
+
+    assert_eq!(error.error(), Errno::EISDIR);
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_read_at_fast_fails_on_imported_mount_anomaly() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "AnomalousFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"visible bytes",
+    );
+    disk.set_volume_flags(READ_AT_TEST_VOLUME_FLAGS);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("AnomalousFile").unwrap();
+    let mut buffer = [0xA5; 16];
+
+    let error = file_inode.read_bytes_at(0, &mut buffer).unwrap_err();
+
+    assert_eq!(error.error(), Errno::EIO);
+    assert_eq!(buffer, [0xA5; 16]);
 }

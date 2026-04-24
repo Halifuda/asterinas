@@ -24,6 +24,7 @@ const FILE_ATTRIBUTE_REGULAR: u16 = 0x0020;
 const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
 const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
+const VOLUME_FLAGS_OFFSET: usize = 106;
 static EXFAT_IMAGE: &[u8] = include_bytes!("../../../../../../test/initramfs/build/exfat.img");
 
 pub(in super::super) struct ExfatLookupTestDisk {
@@ -61,6 +62,30 @@ impl ExfatLookupTestDisk {
             0,
             0,
             false,
+        );
+    }
+
+    pub(in super::super) fn install_root_file_with_contents(
+        &self,
+        entry_index: usize,
+        name: &str,
+        first_cluster: u32,
+        contents: &[u8],
+    ) {
+        let cluster_size = self.root_cluster_size();
+        assert!(contents.len() <= cluster_size);
+        self.mark_cluster_allocated(first_cluster);
+        let mut cluster_bytes = vec![0; cluster_size];
+        cluster_bytes[..contents.len()].copy_from_slice(contents);
+        self.write_cluster(first_cluster, &cluster_bytes);
+        self.install_directory_entry_set(
+            self.validated_mount().boot_region.root_dir_cluster,
+            entry_index,
+            name,
+            FILE_ATTRIBUTE_REGULAR,
+            first_cluster,
+            contents.len(),
+            true,
         );
     }
 
@@ -223,6 +248,10 @@ impl ExfatLookupTestDisk {
     pub(in super::super) fn root_directory_offset(&self) -> usize {
         let boot_region = self.validated_mount().boot_region;
         boot_region.cluster_offset(boot_region.root_dir_cluster).unwrap()
+    }
+
+    pub(in super::super) fn set_volume_flags(&self, flags: u16) {
+        self.write_bytes(VOLUME_FLAGS_OFFSET, &flags.to_le_bytes());
     }
 
     pub(in super::super) fn root_cluster_size(&self) -> usize {
