@@ -16,7 +16,8 @@ use super::{
     super::{
         fs::{ExfatFs, ExfatFsType},
         test_support::inode::{
-            ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, ObservedBio,
+            ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk,
+            ExfatLookupToggleFailingWriteDisk, ObservedBio,
         },
     },
     *,
@@ -334,8 +335,49 @@ mod readdir_visibility;
 #[path = "directory_lookup_and_identity_integration.rs"]
 mod directory_lookup_and_identity_integration;
 
+#[path = "file_content_mapping_and_cached_io_integration.rs"]
+mod file_content_mapping_and_cached_io_integration;
+
 #[path = "directory_entry_field_update_substrate.rs"]
 mod directory_entry_field_update_substrate;
+
+#[ktest]
+fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir() {
+    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir();
+}
+
+#[ktest]
+fn directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries() {
+    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries();
+}
+
+#[ktest]
+fn directory_lookup_and_identity_integration_repeated_calls_stay_stable() {
+    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_repeated_calls_stay_stable();
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache() {
+    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache();
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility(
+) {
+    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility();
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping()
+{
+    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping();
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary(
+) {
+    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary();
+}
 
 #[ktest]
 fn directory_entry_mutation_create_file_publishes_checksum_valid_entry_set() {

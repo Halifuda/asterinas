@@ -41,6 +41,12 @@ pub(in super::super) struct ExfatLookupToggleFailingWriteDisk {
     inner: Arc<ExfatLookupTestDisk>,
 }
 
+pub(in super::super) struct ExfatLookupToggleFailingReadDisk {
+    fail_range: core::ops::Range<usize>,
+    fail_reads: AtomicBool,
+    inner: Arc<ExfatLookupTestDisk>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct ObservedBio {
     pub(in super::super) byte_range: Range<usize>,
@@ -370,6 +376,10 @@ impl ExfatLookupTestDisk {
         self.validated_mount().boot_region.cluster_size
     }
 
+    pub(in super::super) fn cluster_offset(&self, cluster: u32) -> usize {
+        self.validated_mount().boot_region.cluster_offset(cluster).unwrap()
+    }
+
     pub(in super::super) fn root_directory_entry_capacity(&self) -> usize {
         self.root_cluster_size() / DIRECTORY_ENTRY_SIZE
     }
@@ -527,10 +537,42 @@ impl ExfatLookupToggleFailingWriteDisk {
     }
 }
 
+impl ExfatLookupToggleFailingReadDisk {
+    pub(in super::super) fn new(
+        inner: Arc<ExfatLookupTestDisk>,
+        fail_offset: usize,
+        fail_len: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
+            fail_reads: AtomicBool::new(false),
+            inner,
+        })
+    }
+
+    pub(in super::super) fn enable_failures(&self) {
+        self.fail_reads.store(true, Ordering::Relaxed);
+    }
+
+    fn overlaps_failure_range(&self, start: usize, end: usize) -> bool {
+        start < self.fail_range.end && self.fail_range.start < end
+    }
+}
+
 impl fmt::Debug for ExfatLookupToggleFailingWriteDisk {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ExfatLookupToggleFailingWriteDisk")
+            .field("fail_range", &self.fail_range)
+            .field("sectors_count", &self.inner.sectors_count())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExfatLookupToggleFailingReadDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatLookupToggleFailingReadDisk")
             .field("fail_range", &self.fail_range)
             .field("sectors_count", &self.inner.sectors_count())
             .finish()
@@ -632,6 +674,58 @@ impl BlockDevice for ExfatLookupToggleFailingWriteDisk {
 
     fn name(&self) -> &str {
         "exfat-lookup-failing-write-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
+impl BlockDevice for ExfatLookupToggleFailingReadDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        if bio_type == BioType::Flush {
+            bio.complete(BioStatus::Complete);
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let segment_end = current_offset.checked_add(segment.nbytes()).unwrap();
+            if bio_type == BioType::Read
+                && self.fail_reads.load(Ordering::Relaxed)
+                && self.overlaps_failure_range(current_offset, segment_end)
+            {
+                bio.complete(BioStatus::IoError);
+                return Ok(());
+            }
+
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-lookup-failing-read-test"
     }
 
     fn id(&self) -> DeviceId {
