@@ -13,7 +13,10 @@ fn lookup_and_readdir_reject_non_utf8_iocharset_mount_option() {
     let (_fs, utf8_root) = mount_root(&utf8_disk, Some("iocharset=utf8"));
     let (_visited_count, utf8_entries) = collect_dirents(&utf8_root, 2);
 
-    assert_eq!(utf8_root.lookup("utf8name").unwrap().ino(), utf8_entries[0].ino);
+    assert_eq!(
+        utf8_root.lookup("utf8name").unwrap().ino(),
+        utf8_entries[0].ino
+    );
     assert_eq!(entry_names(&utf8_entries), vec!["Utf8Name"]);
 
     let non_utf8_disk = ExfatLookupTestDisk::new();
@@ -53,7 +56,10 @@ fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_rea
     assert_eq!(alias_canonical.ino(), alias_trailing_dot.ino());
     assert_ne!(mixed_canonical.ino(), alias_canonical.ino());
     assert_eq!(visited_count, 4);
-    assert_eq!(entry_names(&entries), vec![".", "..", "MixedCase", "AliasName"]);
+    assert_eq!(
+        entry_names(&entries),
+        vec![".", "..", "MixedCase", "AliasName"]
+    );
     assert_eq!(entries[2].ino, mixed_canonical.ino());
     assert_eq!(entries[3].ino, alias_canonical.ino());
 
@@ -66,7 +72,10 @@ fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_rea
         keep_last_dots_root.lookup("trailing").unwrap().ino(),
         keep_last_dots_entries[0].ino
     );
-    assert_eq!(lookup_error(&keep_last_dots_root, "TRAILING."), Errno::ENOENT);
+    assert_eq!(
+        lookup_error(&keep_last_dots_root, "TRAILING."),
+        Errno::ENOENT
+    );
     assert_eq!(entry_names(&keep_last_dots_entries), vec!["Trailing"]);
 }
 
@@ -85,7 +94,10 @@ fn directory_lookup_and_identity_integration_failure_path_preserves_typed_bounda
 
     assert_eq!(fractured_readdir_error.error(), Errno::EUCLEAN);
     assert_eq!(lookup_error(&fractured_root, "Broken"), Errno::EUCLEAN);
-    assert_eq!(entry_names(&fractured_entries), vec![".", "..", "BeforeBroken"]);
+    assert_eq!(
+        entry_names(&fractured_entries),
+        vec![".", "..", "BeforeBroken"]
+    );
 
     let critical_disk = ExfatLookupTestDisk::new();
     critical_disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "BeforeCritical");
@@ -98,7 +110,10 @@ fn directory_lookup_and_identity_integration_failure_path_preserves_typed_bounda
 
     assert_eq!(critical_readdir_error.error(), Errno::EUCLEAN);
     assert_eq!(lookup_error(&critical_root, "Missing"), Errno::EUCLEAN);
-    assert_eq!(entry_names(&critical_entries), vec![".", "..", "BeforeCritical"]);
+    assert_eq!(
+        entry_names(&critical_entries),
+        vec![".", "..", "BeforeCritical"]
+    );
 
     let benign_disk = ExfatLookupTestDisk::new();
     benign_disk.install_root_unrecognized_benign_entry(ROOT_FILE_ENTRY_INDEX);
@@ -107,12 +122,18 @@ fn directory_lookup_and_identity_integration_failure_path_preserves_typed_bounda
     let (_visited_count, benign_entries) = collect_dirents(&benign_root, 0);
 
     assert_eq!(lookup_error(&benign_root, "Missing"), Errno::ENOENT);
-    assert_eq!(benign_root.lookup("visible").unwrap().ino(), benign_entries[2].ino);
+    assert_eq!(
+        benign_root.lookup("visible").unwrap().ino(),
+        benign_entries[2].ino
+    );
     assert_eq!(entry_names(&benign_entries), vec![".", "..", "Visible"]);
 
     let stale_negative_disk = ExfatLookupTestDisk::new();
     let (_fs, stale_negative_root) = mount_root(&stale_negative_disk, None);
-    assert_eq!(lookup_error(&stale_negative_root, "FreshFile"), Errno::ENOENT);
+    assert_eq!(
+        lookup_error(&stale_negative_root, "FreshFile"),
+        Errno::ENOENT
+    );
 
     stale_negative_disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "FreshFile");
     let fresh_lookup = stale_negative_root.lookup("freshfile").unwrap();
@@ -144,7 +165,10 @@ fn directory_lookup_and_identity_integration_repeated_calls_stay_stable() {
     assert_eq!(first_count, second_count);
     assert_eq!(first_entries, second_entries);
     assert_eq!(visible_count, 2);
-    assert_eq!(entry_names(&visible_entries), vec!["RepeatOne", "RepeatTwo"]);
+    assert_eq!(
+        entry_names(&visible_entries),
+        vec!["RepeatOne", "RepeatTwo"]
+    );
     assert_eq!(visible_entries[0].ino, first_lookup.ino());
     assert_eq!(visible_entries[1].ino, second_lookup.ino());
 }
