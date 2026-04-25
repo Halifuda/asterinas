@@ -3,8 +3,16 @@
 use alloc::{string::String, vec, vec::Vec};
 use core::time::Duration;
 
-use aster_block::BlockDevice;
-use ostd::mm::{FallibleVmWrite, VmIo, VmReader};
+use aster_block::{
+    BlockDevice,
+    bio::{Bio, BioSegment, BioType, BioWaiter, BioDirection},
+    id::Sid,
+};
+use ostd::{
+    mm::{FallibleVmWrite, Segment, VmIo, VmReader, io::util::HasVmReaderWriter},
+    sync::{PreemptDisabled, RwLockReadGuard},
+};
+use spin::Once;
 
 use super::{
     bitmap::ClusterRange,
@@ -24,6 +32,7 @@ use crate::{
         vfs::{
             file_system::{FileSystem, FsFlags},
             inode::{Extension, FallocMode, Inode, Metadata, MknodType, SymbolicLink},
+            page_cache::{CachePage, PageCache, PageCacheBackend},
         },
     },
     prelude::*,
@@ -35,6 +44,7 @@ use crate::{
 struct ExfatInodeStream {
     data_length: Option<usize>,
     first_cluster: u32,
+    valid_data_length: Option<usize>,
     no_fat_chain: bool,
 }
 
@@ -42,6 +52,7 @@ pub(super) struct ExfatInode {
     extension: Extension,
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
+    page_cache: Once<Option<PageCache>>,
     stream: RwLock<ExfatInodeStream>,
     this: Weak<Self>,
 }
@@ -134,15 +145,18 @@ impl ExfatInode {
         metadata: Metadata,
         first_cluster: u32,
         data_length: Option<usize>,
+        valid_data_length: Option<usize>,
         no_fat_chain: bool,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),
+            page_cache: Once::new(),
             stream: RwLock::new(ExfatInodeStream {
                 data_length,
                 first_cluster,
+                valid_data_length,
                 no_fat_chain,
             }),
             this: weak_self.clone(),
@@ -161,7 +175,7 @@ impl ExfatInode {
             fs.container_device_id(),
         );
         metadata.size = cluster_size;
-        Self::new(fs, metadata, root_cluster, None, false)
+        Self::new(fs, metadata, root_cluster, None, None, false)
     }
 
     fn new_child(
@@ -172,6 +186,7 @@ impl ExfatInode {
         size: usize,
         first_cluster: u32,
         data_length: usize,
+        valid_data_length: usize,
         no_fat_chain: bool,
     ) -> Arc<Self> {
         let mut metadata = match inode_type {
@@ -189,7 +204,14 @@ impl ExfatInode {
             ),
         };
         metadata.size = size;
-        Self::new(fs, metadata, first_cluster, Some(data_length), no_fat_chain)
+        Self::new(
+            fs,
+            metadata,
+            first_cluster,
+            Some(data_length),
+            Some(valid_data_length),
+            no_fat_chain,
+        )
     }
 
     fn read_directory_bytes(
@@ -218,44 +240,56 @@ impl ExfatInode {
         }
     }
 
-    fn read_regular_file_at(
+    fn validated_regular_file_stream(
         &self,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        offset: usize,
-        writer: &mut VmWriter,
-    ) -> Result<usize> {
+    ) -> Result<RwLockReadGuard<'_, ExfatInodeStream, PreemptDisabled>> {
+        match self.type_() {
+            InodeType::Dir => return_errno!(Errno::EISDIR),
+            InodeType::File => {}
+            _ => return_errno!(Errno::EOPNOTSUPP),
+        }
+
         let stream = self.stream.read();
         let Some(data_length) = stream.data_length else {
             return_errno!(Errno::EINVAL);
         };
-        if data_length == 0 || offset >= data_length || !writer.has_avail() {
-            return Ok(0);
+        let Some(valid_data_length) = stream.valid_data_length else {
+            return_errno!(Errno::EINVAL);
+        };
+        if valid_data_length > data_length {
+            return_errno!(Errno::EINVAL);
         }
-
-        let data_length_u64 = u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
-        boot_region
-            .validate_stream_data(stream.first_cluster, data_length_u64)
-            .map_err(Error::from)?;
-
-        let read_end = offset
-            .checked_add(writer.avail())
-            .ok_or_else(|| Error::new(Errno::EINVAL))?
-            .min(data_length);
-        let mut remaining = read_end
-            .checked_sub(offset)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        if remaining == 0 {
-            return Ok(0);
+        if data_length == 0 && (stream.first_cluster != 0 || valid_data_length != 0) {
+            return_errno!(Errno::EINVAL);
         }
+        Ok(stream)
+    }
 
-        let cluster_size = boot_region.cluster_size;
-        let cluster_index = offset / cluster_size;
-        let mut cluster_offset = offset % cluster_size;
-        let mut copied_len = 0usize;
+    fn validate_regular_file_mapping_shape(
+        boot_region: &BootRegion,
+        stream: &ExfatInodeStream,
+        data_length: usize,
+    ) -> Result<()> {
+        let data_length_u64 =
+            u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
+        match boot_region.validate_stream_data(stream.first_cluster, data_length_u64) {
+            Ok(()) => Ok(()),
+            Err(_) => return_errno!(Errno::EINVAL),
+        }
+    }
 
+    fn mapped_regular_file_cluster(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        stream: &ExfatInodeStream,
+        data_length: usize,
+        cluster_index: usize,
+    ) -> Result<u32> {
         if stream.no_fat_chain {
-            let cluster_count = data_length.div_ceil(cluster_size);
+            let cluster_count = data_length.div_ceil(boot_region.cluster_size);
+            if cluster_index >= cluster_count {
+                return_errno!(Errno::EINVAL);
+            }
             let last_cluster = stream
                 .first_cluster
                 .checked_add(
@@ -266,41 +300,13 @@ impl ExfatInode {
             if !boot_region.is_valid_cluster(last_cluster) {
                 return_errno!(Errno::EINVAL);
             }
-
-            let mut current_cluster = stream
+            return stream
                 .first_cluster
                 .checked_add(u32::try_from(cluster_index).map_err(|_| Error::new(Errno::EINVAL))?)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let mut cluster_buffer = vec![0; cluster_size];
-            while remaining != 0 {
-                let chunk_len = remaining.min(cluster_size - cluster_offset);
-                let cluster_start = boot_region
-                    .cluster_offset(current_cluster)
-                    .map_err(Error::from)?;
-                block_device
-                    .read_bytes(cluster_start, &mut cluster_buffer)
-                    .map_err(|_| Error::new(Errno::EIO))?;
-                let chunk_end = cluster_offset
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
-                copied_len = copied_len
-                    .checked_add(writer.write_fallible(&mut reader)?)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                remaining -= chunk_len;
-                cluster_offset = 0;
-                if remaining == 0 {
-                    break;
-                }
-                current_cluster = current_cluster
-                    .checked_add(1)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            }
-            return Ok(copied_len);
+                .ok_or_else(|| Error::new(Errno::EINVAL));
         }
 
         let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-        let mut cluster_buffer = vec![0; cluster_size];
         let mut current_cluster = stream.first_cluster;
         for _ in 0..cluster_index {
             current_cluster = match fat_reader.next_cluster(current_cluster) {
@@ -308,31 +314,325 @@ impl ExfatInode {
                 Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
             };
         }
+        Ok(current_cluster)
+    }
+
+    fn map_regular_file_logical_offset(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        offset: usize,
+    ) -> Result<Option<usize>> {
+        let stream = self.validated_regular_file_stream()?;
+        let data_length = stream
+            .data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let valid_data_length = stream
+            .valid_data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        if data_length == 0 || offset >= data_length || offset >= valid_data_length {
+            return Ok(None);
+        }
+
+        Self::validate_regular_file_mapping_shape(boot_region, &stream, data_length)?;
+        let cluster_size = boot_region.cluster_size;
+        let cluster_index = offset / cluster_size;
+        let cluster = Self::mapped_regular_file_cluster(
+            block_device,
+            boot_region,
+            &stream,
+            data_length,
+            cluster_index,
+        )?;
+        let cluster_start = boot_region
+            .cluster_offset(cluster)
+            .map_err(|_| Error::new(Errno::EINVAL))?;
+        cluster_start
+            .checked_add(offset % cluster_size)
+            .map(Some)
+            .ok_or_else(|| Error::new(Errno::EINVAL))
+    }
+
+    fn regular_file_npages(&self) -> Result<usize> {
+        let stream = self.validated_regular_file_stream()?;
+        let data_length = stream
+            .data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        Ok(data_length.div_ceil(PAGE_SIZE))
+    }
+
+    fn regular_file_page_bio_ranges(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        stream: &ExfatInodeStream,
+        data_length: usize,
+        file_offset: usize,
+        len: usize,
+    ) -> Result<Vec<(usize, usize, usize)>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        Self::validate_regular_file_mapping_shape(boot_region, stream, data_length)?;
+
+        let cluster_size = boot_region.cluster_size;
+        let cluster_index = file_offset / cluster_size;
+        let mut cluster_offset = file_offset % cluster_size;
+        let mut current_cluster = Self::mapped_regular_file_cluster(
+            block_device,
+            boot_region,
+            stream,
+            data_length,
+            cluster_index,
+        )?;
+        let mut page_offset = 0usize;
+        let mut remaining = len;
+        let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
+        let mut fat_reader = (!stream.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
+
         while remaining != 0 {
             let chunk_len = remaining.min(cluster_size - cluster_offset);
-            let cluster_start = boot_region
+            let chunk_offset = boot_region
                 .cluster_offset(current_cluster)
-                .map_err(|_| Error::new(Errno::EIO))?;
-            block_device
-                .read_bytes(cluster_start, &mut cluster_buffer)
-                .map_err(|_| Error::new(Errno::EIO))?;
-            let chunk_end = cluster_offset
-                .checked_add(chunk_len)
+                .map_err(Error::from)?
+                .checked_add(cluster_offset)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
-            copied_len = copied_len
-                .checked_add(writer.write_fallible(&mut reader)?)
+
+            if let Some((last_page_offset, last_disk_offset, last_len)) = ranges.last_mut()
+                && last_page_offset
+                    .checked_add(*last_len)
+                    .zip(last_disk_offset.checked_add(*last_len))
+                    == Some((page_offset, chunk_offset))
+            {
+                *last_len = last_len
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            } else {
+                ranges.push((page_offset, chunk_offset, chunk_len));
+            }
+
+            page_offset = page_offset
+                .checked_add(chunk_len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
             remaining -= chunk_len;
             cluster_offset = 0;
             if remaining == 0 {
                 break;
             }
-            current_cluster = match fat_reader.next_cluster(current_cluster) {
-                Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
-                Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
+
+            current_cluster = if let Some(fat_reader) = fat_reader.as_mut() {
+                match fat_reader.next_cluster(current_cluster) {
+                    Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
+                    Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
+                }
+            } else {
+                current_cluster
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?
             };
         }
+
+        Ok(ranges)
+    }
+
+    fn regular_file_page_range(
+        &self,
+        idx: usize,
+    ) -> Result<(RwLockReadGuard<'_, ExfatInodeStream, PreemptDisabled>, usize, usize, usize)> {
+        let stream = self.validated_regular_file_stream()?;
+        let data_length = stream
+            .data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let valid_data_length = stream
+            .valid_data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let file_offset = idx
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        if file_offset >= data_length {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let page_end = file_offset
+            .checked_add(PAGE_SIZE)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?
+            .min(data_length);
+        let initialized_end = page_end.min(valid_data_length);
+        let initialized_len = initialized_end.saturating_sub(file_offset);
+
+        Ok((stream, data_length, file_offset, initialized_len))
+    }
+
+    fn regular_file_page_waiter(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        frame: &CachePage,
+        stream: &ExfatInodeStream,
+        data_length: usize,
+        file_offset: usize,
+        initialized_len: usize,
+        bio_type: BioType,
+    ) -> Result<BioWaiter> {
+        let page_ranges = Self::regular_file_page_bio_ranges(
+            block_device,
+            boot_region,
+            stream,
+            data_length,
+            file_offset,
+            initialized_len,
+        )?;
+        let page_segment: ostd::mm::USegment = Segment::from(frame.clone()).into();
+        let mut bio_waiter = BioWaiter::new();
+
+        for (page_offset, disk_offset, len) in page_ranges {
+            let page_end = page_offset
+                .checked_add(len)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let bio_segment = BioSegment::new_from_segment_slice(
+                page_segment.clone(),
+                page_offset..page_end,
+                match bio_type {
+                    BioType::Read => BioDirection::FromDevice,
+                    BioType::Write => BioDirection::ToDevice,
+                    BioType::Flush => return_errno!(Errno::EINVAL),
+                },
+            );
+            let bio = Bio::new(
+                bio_type,
+                Sid::from_offset(disk_offset),
+                vec![bio_segment],
+                None,
+            );
+            bio_waiter.concat(
+                bio.submit(block_device.as_ref())
+                    .map_err(Error::from)?,
+            );
+        }
+
+        Ok(bio_waiter)
+    }
+
+    fn read_regular_file_at(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        offset: usize,
+        writer: &mut VmWriter,
+    ) -> Result<usize> {
+        let stream = self.validated_regular_file_stream()?;
+        let data_length = stream
+            .data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let valid_data_length = stream
+            .valid_data_length
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        if !writer.has_avail() {
+            return Ok(0);
+        }
+        if data_length == 0 {
+            return Ok(0);
+        }
+
+        Self::validate_regular_file_mapping_shape(boot_region, &stream, data_length)?;
+        if offset >= data_length {
+            return Ok(0);
+        }
+
+        let read_end = offset
+            .checked_add(writer.avail())
+            .ok_or_else(|| Error::new(Errno::EINVAL))?
+            .min(data_length);
+        let initialized_end = read_end.min(valid_data_length);
+        let mut initialized_remaining = if offset >= initialized_end {
+            0
+        } else {
+            initialized_end
+                .checked_sub(offset)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?
+        };
+        let mut copied_len = 0usize;
+        if initialized_remaining != 0 {
+            let cluster_size = boot_region.cluster_size;
+            let cluster_index = offset / cluster_size;
+            let mut cluster_offset = offset % cluster_size;
+
+            if stream.no_fat_chain {
+                let mut current_cluster = Self::mapped_regular_file_cluster(
+                    block_device,
+                    boot_region,
+                    &stream,
+                    data_length,
+                    cluster_index,
+                )?;
+                let mut cluster_buffer = vec![0; cluster_size];
+                while initialized_remaining != 0 {
+                    let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
+                    let cluster_start = boot_region
+                        .cluster_offset(current_cluster)
+                        .map_err(Error::from)?;
+                    block_device
+                        .read_bytes(cluster_start, &mut cluster_buffer)
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                    let chunk_end = cluster_offset
+                        .checked_add(chunk_len)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
+                    copied_len = copied_len
+                        .checked_add(writer.write_fallible(&mut reader)?)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    initialized_remaining -= chunk_len;
+                    cluster_offset = 0;
+                    if initialized_remaining == 0 {
+                        break;
+                    }
+                    current_cluster = current_cluster
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                }
+            } else {
+                let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+                let mut cluster_buffer = vec![0; cluster_size];
+                let mut current_cluster = Self::mapped_regular_file_cluster(
+                    block_device,
+                    boot_region,
+                    &stream,
+                    data_length,
+                    cluster_index,
+                )?;
+                while initialized_remaining != 0 {
+                    let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
+                    let cluster_start = boot_region
+                        .cluster_offset(current_cluster)
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                    block_device
+                        .read_bytes(cluster_start, &mut cluster_buffer)
+                        .map_err(|_| Error::new(Errno::EIO))?;
+                    let chunk_end = cluster_offset
+                        .checked_add(chunk_len)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
+                    copied_len = copied_len
+                        .checked_add(writer.write_fallible(&mut reader)?)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    initialized_remaining -= chunk_len;
+                    cluster_offset = 0;
+                    if initialized_remaining == 0 {
+                        break;
+                    }
+                    current_cluster = match fat_reader.next_cluster(current_cluster) {
+                        Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
+                        Ok(FatChainStep::End) | Err(_) => return_errno!(Errno::EIO),
+                    };
+                }
+            }
+        }
+
+        let zeroed_len = read_end
+            .checked_sub(initialized_end)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        copied_len = copied_len
+            .checked_add(writer.fill_zeros(zeroed_len)?)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
         Ok(copied_len)
     }
@@ -545,7 +845,14 @@ impl ExfatInode {
     ) -> core::result::Result<Option<Arc<dyn Inode>>, MountVolumeStateError> {
         let (stream, directory_bytes) =
             self.read_revalidated_directory_bytes(block_device, boot_region)?;
-        let Some((slot_range, inode_type, first_cluster, data_length, no_fat_chain)) =
+        let Some((
+            slot_range,
+            inode_type,
+            first_cluster,
+            data_length,
+            valid_data_length,
+            no_fat_chain,
+        )) =
             Self::locate_named_child(
                 &directory_bytes,
                 stream.data_length.is_none(),
@@ -570,6 +877,7 @@ impl ExfatInode {
             data_length,
             first_cluster,
             data_length,
+            valid_data_length,
             no_fat_chain,
         );
         Ok(Some(child_inode))
@@ -583,7 +891,7 @@ impl ExfatInode {
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> core::result::Result<
-        Option<(DirectoryEntrySlotRange, InodeType, u32, usize, bool)>,
+        Option<(DirectoryEntrySlotRange, InodeType, u32, usize, usize, bool)>,
         MountVolumeStateError,
     > {
         let Some(entry_view) = Self::locate_named_child_view(
@@ -596,13 +904,35 @@ impl ExfatInode {
         else {
             return Ok(None);
         };
+        let slot_range = entry_view.slot_range();
         let (inode_type, first_cluster, data_length, no_fat_chain) =
             entry_view.child_metadata(boot_region)?;
+        let entry_set = directory_bytes
+            .get(Self::slot_range_bytes(slot_range)?)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        let stream_entry = entry_set
+            .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        let valid_data_length = usize::try_from(u64::from_le_bytes([
+            stream_entry[8],
+            stream_entry[9],
+            stream_entry[10],
+            stream_entry[11],
+            stream_entry[12],
+            stream_entry[13],
+            stream_entry[14],
+            stream_entry[15],
+        ]))
+        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+        if valid_data_length > data_length {
+            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+        }
         Ok(Some((
-            entry_view.slot_range(),
+            slot_range,
             inode_type,
             first_cluster,
             data_length,
+            valid_data_length,
             no_fat_chain,
         )))
     }
@@ -652,6 +982,7 @@ impl ExfatInode {
         inode_type: InodeType,
         first_cluster: u32,
         data_length: usize,
+        valid_data_length: usize,
         no_fat_chain: bool,
     ) -> core::result::Result<Arc<Self>, MountVolumeStateError> {
         let child_ino = (u64::from(parent_first_cluster) << 32)
@@ -667,6 +998,7 @@ impl ExfatInode {
             data_length,
             first_cluster,
             data_length,
+            valid_data_length,
             no_fat_chain,
         ))
     }
@@ -766,6 +1098,7 @@ impl ExfatInode {
                     target_view.slot_range(),
                     target_inode_type,
                     first_cluster,
+                    data_length,
                     data_length,
                     no_fat_chain,
                 )
@@ -957,6 +1290,7 @@ impl ExfatInode {
                         target_slot_range,
                         target_inode_type,
                         first_cluster,
+                        data_length,
                         data_length,
                         no_fat_chain,
                     )
@@ -1255,6 +1589,83 @@ impl ExfatInode {
     }
 }
 
+impl PageCacheBackend for ExfatInode {
+    fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (block_device, boot_region, anomaly, _, _) =
+            fs.published_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let (stream, data_length, file_offset, initialized_len) =
+            self.regular_file_page_range(idx)?;
+        let initialized_sector_len =
+            initialized_len - (initialized_len % boot_region.sector_size);
+        if initialized_sector_len < PAGE_SIZE {
+            frame
+                .writer()
+                .skip(initialized_sector_len)
+                .fill_zeros(PAGE_SIZE - initialized_sector_len);
+        }
+        if initialized_sector_len == 0 {
+            return Ok(BioWaiter::new());
+        }
+
+        Self::regular_file_page_waiter(
+            &block_device,
+            &boot_region,
+            frame,
+            &stream,
+            data_length,
+            file_offset,
+            initialized_sector_len,
+            BioType::Read,
+        )
+    }
+
+    fn write_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (block_device, boot_region, anomaly, _, options) =
+            fs.published_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+        if options.fs_flags.contains(FsFlags::RDONLY) {
+            return_errno!(Errno::EROFS);
+        }
+
+        let (stream, data_length, file_offset, initialized_len) =
+            self.regular_file_page_range(idx)?;
+        let initialized_sector_len =
+            initialized_len - (initialized_len % boot_region.sector_size);
+        if initialized_sector_len == 0 {
+            return Ok(BioWaiter::new());
+        }
+
+        Self::regular_file_page_waiter(
+            &block_device,
+            &boot_region,
+            frame,
+            &stream,
+            data_length,
+            file_offset,
+            initialized_sector_len,
+            BioType::Write,
+        )
+    }
+
+    fn npages(&self) -> usize {
+        self.regular_file_npages().unwrap_or(0)
+    }
+}
+
 impl crate::fs::vfs::inode::InodeIo for ExfatInode {
     fn read_at(
         &self,
@@ -1370,7 +1781,20 @@ impl Inode for ExfatInode {
     }
 
     fn page_cache(&self) -> Option<Arc<Vmo>> {
-        None
+        if self.type_() != InodeType::File {
+            return None;
+        }
+
+        self.page_cache
+            .call_once(|| {
+                let stream = self.validated_regular_file_stream().ok()?;
+                let data_length = stream.data_length?;
+                let this = self.this.upgrade()?;
+                let backend: Arc<dyn PageCacheBackend> = this;
+                PageCache::with_capacity(data_length, Arc::downgrade(&backend)).ok()
+            })
+            .as_ref()
+            .map(|page_cache| page_cache.pages().clone())
     }
 
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {
@@ -1583,6 +2007,7 @@ impl Inode for ExfatInode {
             child_size,
             first_cluster,
             data_length,
+            data_length,
             no_fat_chain,
         );
         child_inode.metadata.write().mode = mode;
@@ -1709,7 +2134,7 @@ impl Inode for ExfatInode {
         let directory_bytes =
             Self::read_directory_bytes_for_stream(&block_device, &boot_region, *stream)
                 .map_err(Error::from)?;
-        let Some((slot_range, inode_type, first_cluster, data_length, no_fat_chain)) =
+        let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
             Self::locate_named_child(
                 &directory_bytes,
                 is_root_directory,
@@ -1783,7 +2208,7 @@ impl Inode for ExfatInode {
         let directory_bytes =
             Self::read_directory_bytes_for_stream(&block_device, &boot_region, *stream)
                 .map_err(Error::from)?;
-        let Some((slot_range, inode_type, first_cluster, data_length, no_fat_chain)) =
+        let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
             Self::locate_named_child(
                 &directory_bytes,
                 is_root_directory,
@@ -1807,6 +2232,7 @@ impl Inode for ExfatInode {
             slot_range,
             inode_type,
             first_cluster,
+            data_length,
             data_length,
             no_fat_chain,
         )

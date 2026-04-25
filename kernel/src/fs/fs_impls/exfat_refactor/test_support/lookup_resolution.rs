@@ -24,7 +24,10 @@ fn lookup_resolution_matches_mixed_case_and_trailing_dot_equivalence() {
         keep_last_dots_root.lookup("mixedcase").unwrap().ino(),
         mixed_case.ino()
     );
-    assert_eq!(lookup_error(&keep_last_dots_root, "MIXEDCASE..."), Errno::ENOENT);
+    assert_eq!(
+        lookup_error(&keep_last_dots_root, "MIXEDCASE..."),
+        Errno::ENOENT
+    );
 }
 
 #[ktest]
@@ -53,7 +56,10 @@ fn lookup_resolution_distinguishes_absence_from_invalid_input() {
 
     assert_eq!(lookup_error(&root_inode, "missing"), Errno::ENOENT);
     assert_eq!(lookup_error(&root_inode, "invalid/name"), Errno::EINVAL);
-    assert_eq!(lookup_error(&root_inode, &"a".repeat(256)), Errno::ENAMETOOLONG);
+    assert_eq!(
+        lookup_error(&root_inode, &"a".repeat(256)),
+        Errno::ENAMETOOLONG
+    );
 }
 
 #[ktest]

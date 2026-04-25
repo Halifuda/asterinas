@@ -442,10 +442,20 @@ impl BioSegment {
     /// Constructs a new `BioSegment` with a given `USegment` and the bio direction.
     pub fn new_from_segment(segment: USegment, direction: BioDirection) -> Self {
         let len = segment.size();
+        Self::new_from_segment_slice(segment, 0..len, direction)
+    }
+
+    /// Constructs a new `BioSegment` from a byte subrange of a given `USegment`.
+    pub fn new_from_segment_slice(
+        segment: USegment,
+        range: Range<usize>,
+        direction: BioDirection,
+    ) -> Self {
+        assert!(is_sector_aligned(range.start) && is_sector_aligned(range.end));
         let dma_stream = DmaStream::map(segment, false).unwrap();
         Self {
             inner: Arc::new(BioSegmentInner {
-                dma_slice: Slice::new(Arc::new(dma_stream), 0..len),
+                dma_slice: Slice::new(Arc::new(dma_stream), range),
                 direction,
                 from_pool: false,
             }),

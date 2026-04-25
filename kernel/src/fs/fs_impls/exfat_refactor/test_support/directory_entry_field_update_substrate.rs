@@ -6,11 +6,13 @@ use core::sync::atomic::AtomicUsize;
 use aster_block::BlockDevice;
 use ostd::prelude::ktest;
 
-use super::super::super::direntry::{
-    self, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange, FileEntrySetFieldUpdates,
-    ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
+use super::{
+    super::super::direntry::{
+        self, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange, FileEntrySetFieldUpdates,
+        ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
+    },
+    *,
 };
-use super::*;
 
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
@@ -83,7 +85,10 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
         &republished_entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4],
         &[0xCC, 0xDD, 0xEE, 0x0F]
     );
-    assert_eq!(republished_entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET], 0x10);
+    assert_eq!(
+        republished_entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET],
+        0x10
+    );
     assert_eq!(republished_entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET], 0x11);
     assert_eq!(
         &republished_entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4],
@@ -125,30 +130,22 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
 }
 
 #[ktest]
-fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication()
-{
+fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
     let mut root_bytes = root_directory_bytes(&disk);
     let slot_range = DirectoryEntrySlotRange::new(ROOT_FILE_ENTRY_INDEX, 3).unwrap();
     let staging_name: Vec<u16> = "StageFile".encode_utf16().collect();
-    let staging_entry_set = direntry::encode_file_entry_set(
-        &staging_name,
-        0x31B5,
-        InodeType::File,
-        0,
-        0,
-        false,
-    )
-    .unwrap();
+    let staging_entry_set =
+        direntry::encode_file_entry_set(&staging_name, 0x31B5, InodeType::File, 0, 0, false)
+            .unwrap();
     root_bytes[root_slot_bytes(slot_range)].copy_from_slice(&staging_entry_set);
 
-    let reserved_slot_bytes = root_bytes
-        .get_mut(root_slot_bytes(slot_range))
-        .unwrap();
-    let mut reserved_slot_span = WritableDirectoryEntrySlotSpan::new(slot_range, reserved_slot_bytes)
-        .unwrap();
+    let reserved_slot_bytes = root_bytes.get_mut(root_slot_bytes(slot_range)).unwrap();
+    let mut reserved_slot_span =
+        WritableDirectoryEntrySlotSpan::new(slot_range, reserved_slot_bytes).unwrap();
     direntry::invalidate_entry_set(&mut reserved_slot_span).unwrap();
 
     let invalidated_entry_set = &root_bytes[root_slot_bytes(slot_range)];
@@ -328,7 +325,8 @@ fn directory_entry_field_update_substrate_integration_publish_republish_rescan_i
 
     parent_inode.unlink("GammaOne").unwrap();
 
-    let removed_entry_set = disk.read_directory_entries(TEST_PARENT_CLUSTER, created_entry_index, 3);
+    let removed_entry_set =
+        disk.read_directory_entries(TEST_PARENT_CLUSTER, created_entry_index, 3);
     let (_visited_count, removed_entries) = collect_dirents(&parent_inode, 2);
 
     assert_eq!(lookup_error(&parent_inode, "GammaOne"), Errno::ENOENT);
@@ -360,7 +358,10 @@ fn directory_entry_field_update_substrate_failure_maintenance_preserves_neighbor
     let (_visited_count, final_entries) = collect_dirents(&root_inode, 2);
 
     assert_eq!(rename_error.error(), Errno::EIO);
-    assert_eq!(disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 5), root_bytes_before);
+    assert_eq!(
+        disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 5),
+        root_bytes_before
+    );
     assert!(root_inode.lookup("alphaone").is_ok());
     assert_eq!(lookup_error(&root_inode, "GammaOne"), Errno::ENOENT);
     assert_eq!(entry_names(&final_entries), vec!["AlphaOne"]);
@@ -405,7 +406,9 @@ fn directory_entry_field_update_substrate_concurrency_serializes_republish_with_
 
         ThreadOptions::new(move || {
             wait_for_concurrent_start(&ready_count, 2);
-            let unlink_result = parent_inode.unlink("RaceFile").map_err(|error| error.error());
+            let unlink_result = parent_inode
+                .unlink("RaceFile")
+                .map_err(|error| error.error());
             let create_result = parent_inode
                 .create("ReuseNew", InodeType::File, InodeMode::all())
                 .map(|inode| inode.ino())

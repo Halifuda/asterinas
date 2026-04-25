@@ -92,7 +92,10 @@ fn readdir_visibility_preserves_progress_across_repeated_calls() {
     let (end_count, end_entries) = collect_dirents(&root_inode, 2 + visible_count);
 
     assert_eq!(full_count, 4);
-    assert_eq!(entry_names(&full_entries), vec![".", "..", "First", "Second"]);
+    assert_eq!(
+        entry_names(&full_entries),
+        vec![".", "..", "First", "Second"]
+    );
     assert_eq!(visible_count, 2);
     assert_eq!(entry_names(&visible_entries), vec!["First", "Second"]);
     assert_eq!(entry_offsets(&visible_entries), vec![2, 3]);
