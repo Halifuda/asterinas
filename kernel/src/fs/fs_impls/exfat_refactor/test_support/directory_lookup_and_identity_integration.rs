@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use ostd::prelude::ktest;
-
 use super::*;
 
 #[ktest]
@@ -33,8 +31,7 @@ fn lookup_and_readdir_reject_non_utf8_iocharset_mount_option() {
     assert_eq!(mount_error.error(), Errno::EINVAL);
 }
 
-#[ktest]
-fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir() {
+pub(super) fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir() {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -79,8 +76,7 @@ fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_rea
     assert_eq!(entry_names(&keep_last_dots_entries), vec!["Trailing"]);
 }
 
-#[ktest]
-fn directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries() {
+pub(super) fn directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries() {
     init_lookup_test_runtime();
 
     let fractured_disk = ExfatLookupTestDisk::new();
@@ -143,8 +139,7 @@ fn directory_lookup_and_identity_integration_failure_path_preserves_typed_bounda
     assert_eq!(fresh_lookup.ino(), refreshed_entries[0].ino);
 }
 
-#[ktest]
-fn directory_lookup_and_identity_integration_repeated_calls_stay_stable() {
+pub(super) fn directory_lookup_and_identity_integration_repeated_calls_stay_stable() {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

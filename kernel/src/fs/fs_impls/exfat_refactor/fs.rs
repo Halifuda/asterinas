@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use aster_block::{BlockDevice, bio::BioStatus};
+use ostd::sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard};
 
 use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
@@ -23,7 +24,7 @@ use crate::{
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
 #[derive(Clone)]
-struct MountedVolumeState {
+pub(super) struct MountedVolumeState {
     anomaly: VolumeAnomalyState,
     boot_region: BootRegion,
     flags: FsFlags,
@@ -130,10 +131,9 @@ pub(crate) struct FreeSpaceSnapshot {
 pub(crate) struct ExfatFs {
     allocator: RwLock<Option<FreeSpaceAllocatorState>>,
     block_device: Arc<dyn BlockDevice>,
-    directory_mutation: Mutex<()>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     source: Option<String>,
-    state: RwLock<Option<MountedVolumeState>>,
+    state: RwMutex<Option<MountedVolumeState>>,
 }
 
 impl ExfatFs {
@@ -141,19 +141,14 @@ impl ExfatFs {
         Arc::new(Self {
             allocator: RwLock::new(None),
             block_device,
-            directory_mutation: Mutex::new(()),
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             source,
-            state: RwLock::new(None),
+            state: RwMutex::new(None),
         })
     }
 
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
-    }
-
-    pub(super) fn begin_directory_mutation(&self) -> MutexGuard<'_, ()> {
-        self.directory_mutation.lock()
     }
 
     fn mount_candidate(
@@ -309,6 +304,73 @@ impl ExfatFs {
         ))
     }
 
+    pub(super) fn admitted_lookup_state(
+        &self,
+    ) -> core::result::Result<
+        (
+            RwMutexReadGuard<'_, Option<MountedVolumeState>>,
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            VolumeAnomalyState,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
+        MountVolumeStateError,
+    > {
+        let state = self.state.read();
+        let (boot_region, anomaly, upcase_table, options) = {
+            let publication = state
+                .as_ref()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            (
+                publication.boot_region,
+                publication.anomaly,
+                publication.upcase_table.clone(),
+                publication.options.clone(),
+            )
+        };
+        Ok((
+            state,
+            self.block_device.clone(),
+            boot_region,
+            anomaly,
+            upcase_table,
+            options,
+        ))
+    }
+
+    pub(super) fn admitted_mutation_state(
+        &self,
+    ) -> core::result::Result<
+        (
+            RwMutexWriteGuard<'_, Option<MountedVolumeState>>,
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
+        MountVolumeStateError,
+    > {
+        let mut state = self.state.write();
+        let (boot_region, upcase_table, options) = {
+            let publication = state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            (
+                publication.boot_region,
+                publication.upcase_table.clone(),
+                publication.options.clone(),
+            )
+        };
+        Ok((
+            state,
+            self.block_device.clone(),
+            boot_region,
+            upcase_table,
+            options,
+        ))
+    }
+
     fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, FreeSpaceAccountingError> {
         let snapshot = self.cached_free_space_snapshot()?;
         let state = self.state.read();
@@ -343,6 +405,28 @@ impl ExfatFs {
         let publication = state
             .as_ref()
             .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+        self.allocate_free_space_with_publication(publication, requested_clusters)
+    }
+
+    pub(super) fn free_allocated_space(
+        &self,
+        ranges: &[ClusterRange],
+    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+        let mut state = self.state.write();
+        let publication = state
+            .as_mut()
+            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+        self.free_allocated_space_with_publication(publication, ranges)
+    }
+
+    pub(super) fn allocate_free_space_with_publication(
+        &self,
+        publication: &MountedVolumeState,
+        requested_clusters: usize,
+    ) -> core::result::Result<
+        (Vec<ClusterRange>, FreeSpaceSnapshot),
+        FreeSpaceAccountingError,
+    > {
         if publication.flags.contains(FsFlags::RDONLY) {
             return Err(FreeSpaceAccountingError::ReadOnlyConflict);
         }
@@ -360,14 +444,11 @@ impl ExfatFs {
         Ok((allocated_ranges, snapshot))
     }
 
-    pub(super) fn free_allocated_space(
+    pub(super) fn free_allocated_space_with_publication(
         &self,
+        publication: &mut MountedVolumeState,
         ranges: &[ClusterRange],
     ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
-        let mut state = self.state.write();
-        let publication = state
-            .as_mut()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
         if publication.flags.contains(FsFlags::RDONLY) {
             return Err(FreeSpaceAccountingError::ReadOnlyConflict);
         }
