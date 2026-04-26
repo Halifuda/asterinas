@@ -346,18 +346,20 @@ impl ExfatFs {
             RwMutexWriteGuard<'_, Option<MountedVolumeState>>,
             Arc<dyn BlockDevice>,
             BootRegion,
+            VolumeAnomalyState,
             Arc<UpcaseTable>,
             ExfatMountOptions,
         ),
         MountVolumeStateError,
     > {
         let mut state = self.state.write();
-        let (boot_region, upcase_table, options) = {
+        let (boot_region, anomaly, upcase_table, options) = {
             let publication = state
                 .as_mut()
                 .ok_or(MountVolumeStateError::UnpublishedState)?;
             (
                 publication.boot_region,
+                publication.anomaly,
                 publication.upcase_table.clone(),
                 publication.options.clone(),
             )
@@ -366,6 +368,7 @@ impl ExfatFs {
             state,
             self.block_device.clone(),
             boot_region,
+            anomaly,
             upcase_table,
             options,
         ))
