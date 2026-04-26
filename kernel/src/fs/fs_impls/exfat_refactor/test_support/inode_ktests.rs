@@ -25,6 +25,7 @@ use super::{
 use crate::{
     fs::vfs::{
         file_system::{FileSystem, FsFlags},
+        inode::FallocMode,
         page_cache::{CachePage, CachePageExt, PageCacheBackend, PageState},
         registry::FsType,
     },
@@ -58,6 +59,9 @@ const READ_AT_TEST_VOLUME_FLAGS: u16 = 0x000E;
 const TEST_CONTIGUOUS_SECOND_CLUSTER: u32 = TEST_REGULAR_FILE_CLUSTER + 1;
 const TEST_FRAGMENTED_FIRST_CLUSTER: u32 = 18;
 const TEST_FRAGMENTED_SECOND_CLUSTER: u32 = 21;
+const FILE_ATTRIBUTES_OFFSET: usize = 4;
+const STREAM_DATA_LENGTH_OFFSET: usize = DIRECTORY_ENTRY_SIZE + 24;
+const STREAM_VALID_DATA_LENGTH_OFFSET: usize = DIRECTORY_ENTRY_SIZE + 8;
 
 #[derive(Debug, Eq, PartialEq)]
 struct CapturedDirent {
@@ -242,6 +246,42 @@ fn decode_entry_name(entry_set: &[u8]) -> Vec<u16> {
 
 fn entry_index_from_ino(ino: u64) -> usize {
     usize::try_from(ino & u64::from(u32::MAX)).unwrap()
+}
+
+fn root_entry_set(disk: &Arc<ExfatLookupTestDisk>, entry_index: usize) -> Vec<u8> {
+    let secondary_count = usize::from(disk.read_root_entries(entry_index, 1)[1]);
+    disk.read_root_entries(entry_index, secondary_count + 1)
+}
+
+fn stream_lengths(entry_set: &[u8]) -> (u64, u64) {
+    let valid_data_length = u64::from_le_bytes(
+        entry_set[STREAM_VALID_DATA_LENGTH_OFFSET..STREAM_VALID_DATA_LENGTH_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let data_length = u64::from_le_bytes(
+        entry_set[STREAM_DATA_LENGTH_OFFSET..STREAM_DATA_LENGTH_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    (valid_data_length, data_length)
+}
+
+fn assert_metadata_unchanged(actual: Metadata, expected: Metadata) {
+    assert_eq!(actual.ino, expected.ino);
+    assert_eq!(actual.size, expected.size);
+    assert_eq!(actual.optimal_block_size, expected.optimal_block_size);
+    assert_eq!(actual.nr_sectors_allocated, expected.nr_sectors_allocated);
+    assert_eq!(actual.last_access_at, expected.last_access_at);
+    assert_eq!(actual.last_modify_at, expected.last_modify_at);
+    assert_eq!(actual.last_meta_change_at, expected.last_meta_change_at);
+    assert_eq!(actual.type_, expected.type_);
+    assert_eq!(actual.mode, expected.mode);
+    assert_eq!(actual.nr_hard_links, expected.nr_hard_links);
+    assert_eq!(actual.uid, expected.uid);
+    assert_eq!(actual.gid, expected.gid);
+    assert_eq!(actual.container_dev_id, expected.container_dev_id);
+    assert_eq!(actual.self_dev_id, expected.self_dev_id);
 }
 
 fn assert_parent_directory_unchanged(
@@ -1491,6 +1531,194 @@ fn file_content_mapping_cached_io_read_at_reads_regular_file_bytes() {
 
     assert_eq!(read_len, expected.len());
     assert_eq!(&buffer[..read_len], expected);
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_write_at_updates_visible_bytes_without_growth() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "WriteFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"abcdefgh",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("WriteFile").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+
+    let written_len = file_inode.write_bytes_at(2, b"XYZ").unwrap();
+
+    assert_eq!(written_len, 3);
+    let mut visible_bytes = [0u8; 8];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, visible_bytes.len());
+    assert_eq!(&visible_bytes, b"abXYZfgh");
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let (valid_data_length, data_length) = stream_lengths(&entry_set_after);
+    assert_eq!((valid_data_length, data_length), (8, 8));
+    assert_eq!(
+        &entry_set_after[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2],
+        &entry_set_before[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2]
+    );
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_gap_write_zero_fills_exposed_range() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let mut backing_bytes = [0xA5; 16];
+    backing_bytes[..4].copy_from_slice(b"DATA");
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "GapWrite",
+        TEST_REGULAR_FILE_CLUSTER,
+        backing_bytes.len(),
+        4,
+        true,
+        &[TEST_REGULAR_FILE_CLUSTER],
+    );
+    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &backing_bytes);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("GapWrite").unwrap();
+
+    let written_len = file_inode.write_bytes_at(8, b"END").unwrap();
+
+    assert_eq!(written_len, 3);
+    let mut visible_bytes = [0xCC; 16];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, visible_bytes.len());
+    assert_eq!(&visible_bytes[..4], b"DATA");
+    assert_eq!(&visible_bytes[4..8], &[0; 4]);
+    assert_eq!(&visible_bytes[8..11], b"END");
+    assert_eq!(&visible_bytes[11..], &[0; 5]);
+
+    let cluster_bytes = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    assert_eq!(&cluster_bytes[..4], b"DATA");
+    assert_eq!(&cluster_bytes[4..8], &[0; 4]);
+    assert_eq!(&cluster_bytes[8..11], b"END");
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let (valid_data_length, data_length) = stream_lengths(&entry_set_after);
+    assert_eq!((valid_data_length, data_length), (11, 16));
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct_without_side_effects(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "DirectWrite",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"aligned-data",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("DirectWrite").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let cluster_before = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    let metadata_before = file_inode.metadata();
+
+    let error = file_inode.write_bytes_direct_at(1, b"BAD!").unwrap_err();
+
+    assert_eq!(error.error(), Errno::EINVAL);
+    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
+    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_fallocate_modes_return_eopnotsupp_without_side_effects() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "FallocateFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"stay-put",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("FallocateFile").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let cluster_before = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    let metadata_before = file_inode.metadata();
+
+    for mode in [
+        FallocMode::Allocate,
+        FallocMode::AllocateKeepSize,
+        FallocMode::AllocateUnshareRange,
+        FallocMode::PunchHoleKeepSize,
+        FallocMode::ZeroRange,
+        FallocMode::ZeroRangeKeepSize,
+        FallocMode::CollapseRange,
+        FallocMode::InsertRange,
+    ] {
+        let error = file_inode.fallocate(mode, 0, 4).unwrap_err();
+        assert_eq!(error.error(), Errno::EOPNOTSUPP);
+    }
+
+    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
+    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_write_at_rejects_directory_before_anomaly_gate() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "WriteDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
+    disk.set_volume_flags(READ_AT_TEST_VOLUME_FLAGS);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let directory_inode = root_inode.lookup("WriteDir").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+
+    let error = directory_inode.write_bytes_at(0, b"dir").unwrap_err();
+
+    assert_eq!(error.error(), Errno::EISDIR);
+    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+}
+
+#[ktest]
+fn file_content_mutation_write_boundary_write_at_fast_fails_on_imported_mount_anomaly() {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "AnomalousWrite",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"visible bytes",
+    );
+    disk.set_volume_flags(READ_AT_TEST_VOLUME_FLAGS);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("AnomalousWrite").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let cluster_before = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    let metadata_before = file_inode.metadata();
+
+    let error = file_inode.write_bytes_at(0, b"fail").unwrap_err();
+
+    assert_eq!(error.error(), Errno::EIO);
+    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
+    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
 
 #[ktest]
