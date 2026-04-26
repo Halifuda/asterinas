@@ -5,7 +5,7 @@ use core::time::Duration;
 
 use aster_block::{
     BlockDevice,
-    bio::{Bio, BioSegment, BioType, BioWaiter, BioDirection},
+    bio::{Bio, BioDirection, BioSegment, BioStatus, BioType, BioWaiter},
     id::Sid,
 };
 use ostd::{
@@ -962,6 +962,38 @@ impl ExfatInode {
             parent_stream,
         )
         .map_err(Error::from)
+    }
+
+    fn sync_regular_file(&self) -> Result<()> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (state_guard, block_device, _boot_region, anomaly, _upcase_table, _options) =
+            fs.admitted_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let (owner_guard, _stream, data_length, _valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        let page_cache = self
+            .page_cache
+            .get()
+            .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
+        drop(owner_guard);
+        drop(state_guard);
+
+        if let Some(page_cache) = page_cache {
+            if data_length != 0 {
+                page_cache.evict_range(0..data_length)?;
+            }
+        }
+
+        match block_device.sync()? {
+            BioStatus::Complete => Ok(()),
+            _ => return_errno!(Errno::EIO),
+        }
     }
 
     fn first_directory_child_scan<'a>(
@@ -3162,11 +3194,19 @@ impl Inode for ExfatInode {
     }
 
     fn sync_all(&self) -> Result<()> {
-        Ok(())
+        if self.type_() != InodeType::File {
+            return Ok(());
+        }
+
+        self.sync_regular_file()
     }
 
     fn sync_data(&self) -> Result<()> {
-        Ok(())
+        if self.type_() != InodeType::File {
+            return Ok(());
+        }
+
+        self.sync_regular_file()
     }
 
     fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {
