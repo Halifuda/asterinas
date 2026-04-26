@@ -7,7 +7,7 @@ use aster_block::{BlockDevice, SECTOR_SIZE};
 use ostd::mm::PAGE_SIZE;
 
 use super::*;
-use crate::thread::{Thread, kernel_thread::ThreadOptions};
+use crate::thread::{kernel_thread::ThreadOptions, Thread};
 
 struct FileSnapshot {
     entry_set: Vec<u8>,
@@ -184,7 +184,12 @@ pub(super) fn file_content_mutation_integration_success_path_write_append_grow_s
     assert_eq!(write_inode.write_bytes_at(2, b"XYZ").unwrap(), 3);
     assert_eq!(gap_inode.write_bytes_at(8, b"END").unwrap(), 3);
     assert_eq!(write_bytes_append(&append_inode, b"TAIL!").unwrap(), 5);
-    assert_eq!(fragment_inode.write_bytes_at(cluster_size, b"tail").unwrap(), 4);
+    assert_eq!(
+        fragment_inode
+            .write_bytes_at(cluster_size, b"tail")
+            .unwrap(),
+        4
+    );
 
     let fragmented_entry_set = root_entry_set(&disk, SUCCESS_FRAGMENT_ENTRY_INDEX);
     let fragmented_cluster = disk.fat_chain_step(SUCCESS_FRAGMENT_CLUSTER);
@@ -218,7 +223,10 @@ pub(super) fn file_content_mutation_integration_success_path_write_append_grow_s
         append_inode.read_bytes_at(0, &mut append_bytes).unwrap(),
         cluster_size + 5
     );
-    assert_eq!(&append_bytes[..cluster_size], append_initial_bytes.as_slice());
+    assert_eq!(
+        &append_bytes[..cluster_size],
+        append_initial_bytes.as_slice()
+    );
     assert_eq!(&append_bytes[cluster_size..], b"TAIL!");
     assert_eq!(
         shrink_inode
@@ -234,7 +242,10 @@ pub(super) fn file_content_mutation_integration_success_path_write_append_grow_s
         &shrink_visible_bytes[cluster_size..],
         &shrink_second_cluster_bytes[..2]
     );
-    assert_eq!(stream_lengths(&shrunk_entry_set), (shrink_size as u64, shrink_size as u64));
+    assert_eq!(
+        stream_lengths(&shrunk_entry_set),
+        (shrink_size as u64, shrink_size as u64)
+    );
     assert_eq!(
         stream_first_cluster(&shrunk_entry_set),
         SUCCESS_SHRINK_FIRST_CLUSTER
@@ -257,8 +268,16 @@ pub(super) fn file_content_mutation_integration_success_path_write_append_grow_s
     assert!(disk.is_cluster_allocated(SUCCESS_APPEND_CLUSTER));
     assert!(disk.is_cluster_allocated(SUCCESS_FRAGMENT_BLOCKER_CLUSTER));
     assert!(!disk.is_cluster_allocated(SUCCESS_SHRINK_THIRD_CLUSTER));
-    assert_eq!(published_page_count(&shrink_inode), shrink_size.div_ceil(PAGE_SIZE));
-    assert_eq!(shrink_inode.read_bytes_at(shrink_size, &mut eof_bytes).unwrap(), 0);
+    assert_eq!(
+        published_page_count(&shrink_inode),
+        shrink_size.div_ceil(PAGE_SIZE)
+    );
+    assert_eq!(
+        shrink_inode
+            .read_bytes_at(shrink_size, &mut eof_bytes)
+            .unwrap(),
+        0
+    );
     assert_eq!(eof_bytes, [0xDD; 4]);
 }
 
@@ -482,9 +501,18 @@ pub(super) fn file_content_mutation_integration_failure_maintenance_preserves_sa
     assert_eq!(shrink_error.error(), Errno::EIO);
     assert_eq!(shrink_inode.size(), shrink_size);
     assert_eq!(read_len, shrink_size);
-    assert_eq!(&visible_bytes[..cluster_size], first_cluster_bytes.as_slice());
-    assert_eq!(&visible_bytes[cluster_size..read_len], &second_cluster_bytes[..2]);
-    assert_eq!(stream_lengths(&shrink_entry_set), (shrink_size as u64, shrink_size as u64));
+    assert_eq!(
+        &visible_bytes[..cluster_size],
+        first_cluster_bytes.as_slice()
+    );
+    assert_eq!(
+        &visible_bytes[cluster_size..read_len],
+        &second_cluster_bytes[..2]
+    );
+    assert_eq!(
+        stream_lengths(&shrink_entry_set),
+        (shrink_size as u64, shrink_size as u64)
+    );
     assert_eq!(
         stream_first_cluster(&shrink_entry_set),
         TEST_FRAGMENTED_FIRST_CLUSTER
@@ -503,7 +531,12 @@ pub(super) fn file_content_mutation_integration_failure_maintenance_preserves_sa
         shrink_inode.metadata().nr_sectors_allocated,
         2 * cluster_size / SECTOR_SIZE
     );
-    assert_eq!(shrink_inode.read_bytes_at(shrink_size, &mut eof_bytes).unwrap(), 0);
+    assert_eq!(
+        shrink_inode
+            .read_bytes_at(shrink_size, &mut eof_bytes)
+            .unwrap(),
+        0
+    );
     assert_eq!(eof_bytes, [0xDD; 4]);
 }
 
@@ -636,13 +669,20 @@ pub(super) fn file_content_mutation_integration_concurrency_serializes_mutation_
 
     wait_for_flag(&observer_ready);
     let mut prefix = [0u8; 4];
-    assert_eq!(file_inode.read_bytes_at(0, &mut prefix).unwrap(), prefix.len());
+    assert_eq!(
+        file_inode.read_bytes_at(0, &mut prefix).unwrap(),
+        prefix.len()
+    );
     assert_eq!(&prefix, &initial_bytes[..4]);
     assert_eq!(
         lookup_exfat_inode(&file_inode)
             .map_regular_file_logical_offset(&block_device, &boot_region, 0)
             .unwrap(),
-        Some(boot_region.cluster_offset(TEST_REGULAR_FILE_CLUSTER).unwrap())
+        Some(
+            boot_region
+                .cluster_offset(TEST_REGULAR_FILE_CLUSTER)
+                .unwrap()
+        )
     );
 
     let append_result = Arc::new(spin::Mutex::new(None));
@@ -706,7 +746,10 @@ pub(super) fn file_content_mutation_integration_concurrency_serializes_mutation_
         resize_inode.read_bytes_at(0, &mut bytes).unwrap(),
         cluster_size * 3
     );
-    assert_eq!(&bytes[..cluster_size], resize_first_cluster_bytes.as_slice());
+    assert_eq!(
+        &bytes[..cluster_size],
+        resize_first_cluster_bytes.as_slice()
+    );
     assert_eq!(
         &bytes[cluster_size..cluster_size * 2],
         resize_second_cluster_bytes.as_slice()
@@ -719,7 +762,11 @@ pub(super) fn file_content_mutation_integration_concurrency_serializes_mutation_
         lookup_exfat_inode(&resize_inode)
             .map_regular_file_logical_offset(&block_device, &boot_region, cluster_size)
             .unwrap(),
-        Some(boot_region.cluster_offset(TEST_FRAGMENTED_SECOND_CLUSTER).unwrap())
+        Some(
+            boot_region
+                .cluster_offset(TEST_FRAGMENTED_SECOND_CLUSTER)
+                .unwrap()
+        )
     );
 
     let resize_result = Arc::new(spin::Mutex::new(None));
@@ -731,12 +778,11 @@ pub(super) fn file_content_mutation_integration_concurrency_serializes_mutation_
 
         ThreadOptions::new(move || {
             resize_started.store(true, Ordering::Relaxed);
-            *resize_result_for_thread.lock() =
-                Some(
-                    resize_inode
-                        .resize(cluster_size + 2)
-                        .map_err(|error| error.error()),
-                );
+            *resize_result_for_thread.lock() = Some(
+                resize_inode
+                    .resize(cluster_size + 2)
+                    .map_err(|error| error.error()),
+            );
             resize_completed.store(true, Ordering::Relaxed);
         })
         .spawn();

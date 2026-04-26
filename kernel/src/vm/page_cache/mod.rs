@@ -275,6 +275,15 @@ impl PageCache {
         vmo.flush_dirty_pages(&range)
     }
 
+    /// Returns whether the range contains dirty cached pages.
+    pub fn has_dirty_pages(&self, range: Range<usize>) -> bool {
+        let Some(vmo) = self.0.as_backed_vmo() else {
+            return false;
+        };
+
+        vmo.has_dirty_pages(&range)
+    }
+
     /// Evicts clean pages within the specified range from the page cache.
     ///
     /// Only pages in the `UpToDate` state are removed. Dirty and uninitialized

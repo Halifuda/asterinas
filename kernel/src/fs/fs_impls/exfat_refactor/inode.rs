@@ -50,8 +50,67 @@ struct ExfatInodeStream {
     no_fat_chain: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ExfatInodeDirtyState {
+    data_generation: u64,
+    required_metadata_generation: u64,
+    metadata_generation: u64,
+    persisted_data_generation: u64,
+    persisted_required_metadata_generation: u64,
+    persisted_metadata_generation: u64,
+}
+
+impl ExfatInodeDirtyState {
+    fn mark_content_publication(&mut self) {
+        self.data_generation = self.data_generation.saturating_add(1);
+        self.required_metadata_generation = self.required_metadata_generation.saturating_add(1);
+        self.metadata_generation = self.metadata_generation.saturating_add(1);
+    }
+
+    fn needs_sync_data(self) -> bool {
+        self.data_generation > self.persisted_data_generation
+            || self.required_metadata_generation > self.persisted_required_metadata_generation
+    }
+
+    fn needs_sync_all(self) -> bool {
+        self.needs_sync_data() || self.metadata_generation > self.persisted_metadata_generation
+    }
+
+    fn publish_data(&mut self, admitted: Self) {
+        self.persisted_data_generation = self
+            .persisted_data_generation
+            .max(admitted.data_generation);
+        self.persisted_required_metadata_generation = self
+            .persisted_required_metadata_generation
+            .max(admitted.required_metadata_generation);
+    }
+
+    fn publish_all(&mut self, admitted: Self) {
+        self.publish_data(admitted);
+        self.persisted_metadata_generation = self
+            .persisted_metadata_generation
+            .max(admitted.metadata_generation);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileSyncScope {
+    Data,
+    All,
+}
+
+impl FileSyncScope {
+    fn needs_device_sync(self, dirty_state: ExfatInodeDirtyState) -> bool {
+        match self {
+            Self::Data => dirty_state.needs_sync_data(),
+            Self::All => dirty_state.needs_sync_all(),
+        }
+    }
+}
+
 pub(super) struct ExfatInode {
     admission: RwMutex<()>,
+    dirty_state: RwLock<ExfatInodeDirtyState>,
     extension: Extension,
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
@@ -155,6 +214,7 @@ impl ExfatInode {
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             admission: RwMutex::new(()),
+            dirty_state: RwLock::new(ExfatInodeDirtyState::default()),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),
@@ -964,7 +1024,51 @@ impl ExfatInode {
         .map_err(Error::from)
     }
 
-    fn sync_regular_file(&self) -> Result<()> {
+    fn mark_content_publication_dirty(&self) {
+        self.dirty_state.write().mark_content_publication();
+    }
+
+    fn revalidate_sync_window(&self, fs: &ExfatFs) -> Result<()> {
+        let (state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
+            fs.admitted_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let (owner_guard, _stream, _data_length, _valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        drop(owner_guard);
+        drop(state_guard);
+        Ok(())
+    }
+
+    fn publish_sync_window(
+        &self,
+        fs: &ExfatFs,
+        scope: FileSyncScope,
+        admitted_dirty_state: ExfatInodeDirtyState,
+    ) -> Result<()> {
+        let (state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
+            fs.admitted_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let (owner_guard, _stream, _data_length, _valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        {
+            let mut dirty_state = self.dirty_state.write();
+            match scope {
+                FileSyncScope::Data => dirty_state.publish_data(admitted_dirty_state),
+                FileSyncScope::All => dirty_state.publish_all(admitted_dirty_state),
+            }
+        }
+        drop(owner_guard);
+        drop(state_guard);
+        Ok(())
+    }
+
+    fn sync_regular_file(&self, scope: FileSyncScope) -> Result<()> {
         let fs = self
             .fs
             .upgrade()
@@ -977,6 +1081,8 @@ impl ExfatInode {
 
         let (owner_guard, _stream, data_length, _valid_data_length) =
             self.admitted_regular_file_stream_snapshot()?;
+        let admitted_dirty_state = *self.dirty_state.read();
+        let needs_device_sync = scope.needs_device_sync(admitted_dirty_state);
         let page_cache = self
             .page_cache
             .get()
@@ -984,15 +1090,24 @@ impl ExfatInode {
         drop(owner_guard);
         drop(state_guard);
 
-        if let Some(page_cache) = page_cache {
-            if data_length != 0 {
+        let needs_page_writeback = page_cache.is_some_and(|page_cache| {
+            data_length != 0 && page_cache.has_dirty_pages(0..data_length)
+        });
+
+        if needs_page_writeback {
+            if let Some(page_cache) = page_cache {
                 page_cache.evict_range(0..data_length)?;
+                self.revalidate_sync_window(&fs)?;
             }
         }
 
-        match block_device.sync()? {
-            BioStatus::Complete => Ok(()),
-            _ => return_errno!(Errno::EIO),
+        if needs_page_writeback || needs_device_sync {
+            match block_device.sync()? {
+                BioStatus::Complete => self.publish_sync_window(&fs, scope, admitted_dirty_state),
+                _ => return_errno!(Errno::EIO),
+            }
+        } else {
+            Ok(())
         }
     }
 
@@ -2036,8 +2151,10 @@ impl PageCacheBackend for ExfatInode {
             self.admitted_regular_file_stream_snapshot()?;
         let (file_offset, initialized_len) =
             Self::regular_file_page_range(idx, data_length, valid_data_length)?;
-        let initialized_sector_len =
-            initialized_len - (initialized_len % boot_region.sector_size);
+        let initialized_sector_len = initialized_len
+            .div_ceil(boot_region.sector_size)
+            .checked_mul(boot_region.sector_size)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             return Ok(BioWaiter::new());
         }
@@ -2250,6 +2367,7 @@ impl crate::fs::vfs::inode::InodeIo for ExfatInode {
                 metadata.size = published_data_length;
             }
             *stream = published_stream;
+            self.mark_content_publication_dirty();
         }
         drop(state_guard);
         if status_flags.contains(StatusFlags::O_SYNC) {
@@ -2365,6 +2483,7 @@ impl Inode for ExfatInode {
                 metadata.size = new_size;
             }
             *stream = published_stream;
+            self.mark_content_publication_dirty();
             return Ok(());
         }
 
@@ -2467,6 +2586,7 @@ impl Inode for ExfatInode {
             metadata.size = new_size;
         }
         *stream = published_stream;
+        self.mark_content_publication_dirty();
 
         if retained_clusters != 0 && !published_stream.no_fat_chain {
             FatReader::new(block_device.as_ref(), &boot_region)
@@ -3198,7 +3318,7 @@ impl Inode for ExfatInode {
             return Ok(());
         }
 
-        self.sync_regular_file()
+        self.sync_regular_file(FileSyncScope::All)
     }
 
     fn sync_data(&self) -> Result<()> {
@@ -3206,7 +3326,7 @@ impl Inode for ExfatInode {
             return Ok(());
         }
 
-        self.sync_regular_file()
+        self.sync_regular_file(FileSyncScope::Data)
     }
 
     fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {

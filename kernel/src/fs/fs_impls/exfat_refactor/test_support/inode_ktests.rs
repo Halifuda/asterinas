@@ -16,7 +16,7 @@ use super::{
     super::{
         fs::{ExfatFs, ExfatFsType},
         test_support::inode::{
-            ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk,
+            ExfatLookupFlushControlDisk, ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk,
             ExfatLookupToggleFailingWriteDisk, ObservedBio,
         },
     },
@@ -192,7 +192,9 @@ fn read_cache_page_bytes(page: &CachePage) -> Vec<u8> {
 
 fn dirty_regular_file_first_page(file_inode: &Arc<dyn Inode>, bytes: &[u8]) {
     let page_cache = file_inode.page_cache().unwrap();
-    let page = page_cache.commit_on(0, CommitFlags::WILL_OVERWRITE).unwrap();
+    let page = page_cache
+        .commit_on(0, CommitFlags::WILL_OVERWRITE)
+        .unwrap();
     let page: ostd::mm::Frame<dyn ostd::mm::frame::meta::AnyFrameMeta> = page.into();
     let mut page = CachePage::try_from(page).unwrap();
     page.write_bytes(0, bytes).unwrap();
@@ -222,11 +224,15 @@ fn assert_sync_writeback_before_device_sync(observed_bios: &[ObservedBio]) {
     let write_index = observed_bios
         .iter()
         .position(|bio| bio.type_ == BioType::Write)
-        .unwrap_or_else(|| panic!("expected writeback BIO before device sync, got {observed_bios:?}"));
+        .unwrap_or_else(|| {
+            panic!("expected writeback BIO before device sync, got {observed_bios:?}")
+        });
     let flush_index = observed_bios
         .iter()
         .position(|bio| bio.type_ == BioType::Flush)
-        .unwrap_or_else(|| panic!("expected device-sync flush BIO after writeback, got {observed_bios:?}"));
+        .unwrap_or_else(|| {
+            panic!("expected device-sync flush BIO after writeback, got {observed_bios:?}")
+        });
 
     assert!(write_index < flush_index);
     assert!(observed_bios[..flush_index]
@@ -235,6 +241,17 @@ fn assert_sync_writeback_before_device_sync(observed_bios: &[ObservedBio]) {
     assert!(observed_bios[flush_index..]
         .iter()
         .all(|bio| bio.type_ == BioType::Flush));
+}
+
+fn assert_flush_only(observed_bios: &[ObservedBio]) {
+    assert!(
+        !observed_bios.is_empty(),
+        "expected a device-sync flush BIO, got no block I/O"
+    );
+    assert!(
+        observed_bios.iter().all(|bio| bio.type_ == BioType::Flush),
+        "expected only device-sync flush BIOs, got {observed_bios:?}"
+    );
 }
 
 fn mount_create_parent(
@@ -447,6 +464,9 @@ mod file_content_mapping_and_cached_io_integration;
 #[path = "file_content_mutation_integration.rs"]
 mod file_content_mutation_integration;
 
+#[path = "file_sync_and_persistence_integration.rs"]
+mod file_sync_and_persistence_integration;
+
 #[path = "directory_entry_field_update_substrate.rs"]
 mod directory_entry_field_update_substrate;
 
@@ -506,6 +526,29 @@ fn file_content_mutation_integration_repeated_calls_keep_state_stable() {
 #[ktest]
 fn file_content_mutation_integration_concurrency_serializes_mutation_and_observation() {
     file_content_mutation_integration::file_content_mutation_integration_concurrency_serializes_mutation_and_observation();
+}
+
+#[ktest]
+fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary(
+) {
+    file_sync_and_persistence_integration::file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary();
+}
+
+#[ktest]
+fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window(
+) {
+    file_sync_and_persistence_integration::file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window();
+}
+
+#[ktest]
+fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary(
+) {
+    file_sync_and_persistence_integration::file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary();
+}
+
+#[ktest]
+fn file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work() {
+    file_sync_and_persistence_integration::file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work();
 }
 
 #[ktest]
@@ -1715,7 +1758,10 @@ fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct
     let error = file_inode.write_bytes_direct_at(1, b"BAD!").unwrap_err();
 
     assert_eq!(error.error(), Errno::EINVAL);
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
@@ -1752,7 +1798,10 @@ fn file_content_mutation_write_boundary_fallocate_modes_return_eopnotsupp_withou
         assert_eq!(error.error(), Errno::EOPNOTSUPP);
     }
 
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
@@ -1776,7 +1825,10 @@ fn file_content_mutation_write_boundary_write_at_rejects_directory_before_anomal
     let error = directory_inode.write_bytes_at(0, b"dir").unwrap_err();
 
     assert_eq!(error.error(), Errno::EISDIR);
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
 }
 
 #[ktest]
@@ -1801,7 +1853,10 @@ fn file_content_mutation_write_boundary_write_at_fast_fails_on_imported_mount_an
     let error = file_inode.write_bytes_at(0, b"fail").unwrap_err();
 
     assert_eq!(error.error(), Errno::EIO);
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
@@ -1847,9 +1902,15 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_all
             u64::try_from(cluster_size + payload.len()).unwrap(),
         )
     );
-    assert_eq!(stream_first_cluster(&entry_set_after), TEST_REGULAR_FILE_CLUSTER);
+    assert_eq!(
+        stream_first_cluster(&entry_set_after),
+        TEST_REGULAR_FILE_CLUSTER
+    );
     assert_eq!(file_inode.size(), cluster_size + payload.len());
-    assert_eq!(file_inode.metadata().nr_sectors_allocated, 2 * cluster_size / SECTOR_SIZE);
+    assert_eq!(
+        file_inode.metadata().nr_sectors_allocated,
+        2 * cluster_size / SECTOR_SIZE
+    );
 }
 
 #[ktest]
@@ -1883,12 +1944,18 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_f
     let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
     assert_eq!(read_len, cluster_size + 7);
     assert_eq!(&visible_bytes[..4], b"DATA");
-    assert_eq!(&visible_bytes[4..cluster_size + 4], &vec![0; cluster_size][..]);
+    assert_eq!(
+        &visible_bytes[4..cluster_size + 4],
+        &vec![0; cluster_size][..]
+    );
     assert_eq!(&visible_bytes[cluster_size + 4..read_len], b"END");
 
     let first_cluster_after = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
     assert_eq!(&first_cluster_after[..4], b"DATA");
-    assert_eq!(&first_cluster_after[4..cluster_size], &vec![0; cluster_size - 4][..]);
+    assert_eq!(
+        &first_cluster_after[4..cluster_size],
+        &vec![0; cluster_size - 4][..]
+    );
 
     let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     let second_cluster = next_stream_cluster(&disk, &entry_set_after);
@@ -1947,7 +2014,10 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_gr
 
     let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     let appended_cluster = disk.fat_chain_step(TEST_REGULAR_FILE_CLUSTER);
-    assert_eq!(stream_first_cluster(&entry_set_after), TEST_REGULAR_FILE_CLUSTER);
+    assert_eq!(
+        stream_first_cluster(&entry_set_after),
+        TEST_REGULAR_FILE_CLUSTER
+    );
     assert!(!stream_has_no_fat_chain(&entry_set_after));
     assert_eq!(
         stream_lengths(&entry_set_after),
@@ -1957,10 +2027,7 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_gr
         )
     );
     assert_ne!(appended_cluster, TEST_REGULAR_FILE_CLUSTER + 1);
-    assert_eq!(
-        disk.fat_chain_step(appended_cluster),
-        FAT_END_OF_CHAIN
-    );
+    assert_eq!(disk.fat_chain_step(appended_cluster), FAT_END_OF_CHAIN);
     assert!(disk.is_cluster_allocated(appended_cluster));
 }
 
@@ -2012,10 +2079,16 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_rel
     let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
     assert_eq!(read_len, new_size);
     assert_eq!(&visible_bytes[..cluster_size], &first_cluster_bytes);
-    assert_eq!(&visible_bytes[cluster_size..read_len], &second_cluster_bytes[..2]);
+    assert_eq!(
+        &visible_bytes[cluster_size..read_len],
+        &second_cluster_bytes[..2]
+    );
 
     let mut eof_bytes = [0xDD; 4];
-    assert_eq!(file_inode.read_bytes_at(new_size, &mut eof_bytes).unwrap(), 0);
+    assert_eq!(
+        file_inode.read_bytes_at(new_size, &mut eof_bytes).unwrap(),
+        0
+    );
     assert_eq!(eof_bytes, [0xDD; 4]);
 
     let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
@@ -2042,7 +2115,10 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_rel
     assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_FIRST_CLUSTER));
     assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_SECOND_CLUSTER));
     assert!(!disk.is_cluster_allocated(TEST_FRAGMENTED_THIRD_CLUSTER));
-    assert_eq!(file_inode.metadata().nr_sectors_allocated, 2 * cluster_size / SECTOR_SIZE);
+    assert_eq!(
+        file_inode.metadata().nr_sectors_allocated,
+        2 * cluster_size / SECTOR_SIZE
+    );
 }
 
 #[ktest]
@@ -2082,7 +2158,10 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failu
     let error = write_bytes_append(&file_inode, b"boom").unwrap_err();
 
     assert_eq!(error.error(), Errno::EIO);
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
     assert_eq!(file_inode.size(), cluster_size);
 
@@ -2092,7 +2171,12 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failu
     assert_eq!(&visible_bytes[..read_len], &initial_bytes);
 
     let mut eof_bytes = [0xDD; 4];
-    assert_eq!(file_inode.read_bytes_at(cluster_size, &mut eof_bytes).unwrap(), 0);
+    assert_eq!(
+        file_inode
+            .read_bytes_at(cluster_size, &mut eof_bytes)
+            .unwrap(),
+        0
+    );
     assert_eq!(eof_bytes, [0xDD; 4]);
 }
 
@@ -2334,7 +2418,10 @@ fn file_content_mapping_cached_io_page_count_and_cache_holder_follow_published_f
     let file_inode = root_inode.lookup("PageCount").unwrap();
     let page_cache = file_inode.page_cache().unwrap();
 
-    assert_eq!(published_page_count(&file_inode), data_length.div_ceil(PAGE_SIZE));
+    assert_eq!(
+        published_page_count(&file_inode),
+        data_length.div_ceil(PAGE_SIZE)
+    );
     assert_eq!(
         page_cache.size(),
         published_page_count(&file_inode) * PAGE_SIZE
@@ -2708,7 +2795,10 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data
 
     let observed_bios = disk.take_observed_bios();
     assert_sync_writeback_before_device_sync(&observed_bios);
-    assert_eq!(&disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8], b"abXYZfgh");
+    assert_eq!(
+        &disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8],
+        b"abXYZfgh"
+    );
 }
 
 #[ktest]
@@ -2734,7 +2824,10 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_
 
     let observed_bios = disk.take_observed_bios();
     assert_sync_writeback_before_device_sync(&observed_bios);
-    assert_eq!(&disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8], b"abcdWXYZ");
+    assert_eq!(
+        &disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8],
+        b"abcdWXYZ"
+    );
 }
 
 #[ktest]
@@ -2762,7 +2855,178 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast
 
     assert_eq!(error.error(), Errno::EIO);
     assert!(disk.take_observed_bios().is_empty());
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
+}
+
+#[ktest]
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_sync_data_leaves_metadata_only_interval_for_sync_all(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "ScopedSync",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"abcdefgh",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("ScopedSync").unwrap();
+
+    assert_eq!(file_inode.write_bytes_at(0, b"ABCD").unwrap(), 4);
+    let _ = disk.take_observed_bios();
+
+    file_inode.sync_data().unwrap();
+    assert_flush_only(&disk.take_observed_bios());
+
+    file_inode.sync_data().unwrap();
+    assert!(disk.take_observed_bios().is_empty());
+
+    file_inode.sync_all().unwrap();
+    assert_flush_only(&disk.take_observed_bios());
+
+    file_inode.sync_all().unwrap();
+    assert!(disk.take_observed_bios().is_empty());
+}
+
+#[ktest]
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "CleanSync",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"still clean",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("CleanSync").unwrap();
+    assert!(file_inode.page_cache().is_some());
+
+    let _ = disk.take_observed_bios();
+    file_inode.sync_data().unwrap();
+    file_inode.sync_data().unwrap();
+    file_inode.sync_all().unwrap();
+    file_inode.sync_all().unwrap();
+
+    assert!(disk.take_observed_bios().is_empty());
+}
+
+#[ktest]
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_device_stage_failure_leaves_dirty_window_retryable(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "RetryableSync",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"retryable",
+    );
+    let flush_control_disk = ExfatLookupFlushControlDisk::new(disk.clone());
+    let block_device: Arc<dyn BlockDevice> = flush_control_disk.clone();
+    let (_fs, root_inode) = mount_root_from_block_device(block_device, FsFlags::empty(), None);
+    let file_inode = root_inode.lookup("RetryableSync").unwrap();
+
+    assert_eq!(file_inode.write_bytes_at(0, b"RETY").unwrap(), 4);
+    let _ = disk.take_observed_bios();
+
+    flush_control_disk.enable_flush_failures();
+    let error = file_inode.sync_data().unwrap_err();
+
+    assert_eq!(error.error(), Errno::EIO);
+    assert_flush_only(&disk.take_observed_bios());
+
+    flush_control_disk.disable_flush_failures();
+    file_inode.sync_data().unwrap();
+    assert_flush_only(&disk.take_observed_bios());
+
+    file_inode.sync_data().unwrap();
+    assert!(disk.take_observed_bios().is_empty());
+}
+
+#[ktest]
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "ConcurrentSync",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"abcdefgh",
+    );
+    let flush_control_disk = ExfatLookupFlushControlDisk::new(disk.clone());
+    let block_device: Arc<dyn BlockDevice> = flush_control_disk.clone();
+    let (_fs, root_inode) = mount_root_from_block_device(block_device, FsFlags::empty(), None);
+    let file_inode = root_inode.lookup("ConcurrentSync").unwrap();
+
+    assert_eq!(file_inode.write_bytes_at(0, b"FIRST").unwrap(), 5);
+    let _ = disk.take_observed_bios();
+
+    flush_control_disk.enable_blocking_flush();
+    let sync_result = Arc::new(Mutex::new(None));
+    let writer_result = Arc::new(Mutex::new(None));
+
+    let sync_thread = {
+        let file_inode = file_inode.clone();
+        let sync_result = sync_result.clone();
+        ThreadOptions::new(move || {
+            *sync_result.lock() = Some(file_inode.sync_data().map_err(|error| error.error()));
+        })
+        .spawn()
+    };
+
+    while !flush_control_disk.flush_started() {
+        Thread::yield_now();
+    }
+
+    let writer_thread = {
+        let file_inode = file_inode.clone();
+        let writer_result = writer_result.clone();
+        ThreadOptions::new(move || {
+            *writer_result.lock() = Some(
+                file_inode
+                    .write_bytes_at(0, b"LATER")
+                    .map_err(|error| error.error()),
+            );
+        })
+        .spawn()
+    };
+
+    let mut writer_completed_while_flush_blocked = false;
+    for _ in 0..10_000 {
+        if writer_result.lock().is_some() {
+            writer_completed_while_flush_blocked = true;
+            break;
+        }
+        Thread::yield_now();
+    }
+
+    flush_control_disk.release_blocked_flush();
+    sync_thread.join();
+    writer_thread.join();
+
+    assert!(writer_completed_while_flush_blocked);
+    assert_eq!(*writer_result.lock(), Some(Ok(5)));
+    assert_eq!(*sync_result.lock(), Some(Ok(())));
+    assert_eq!(&disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..5], b"LATER");
+
+    let _ = disk.take_observed_bios();
+    file_inode.sync_data().unwrap();
+    assert_flush_only(&disk.take_observed_bios());
+
+    file_inode.sync_data().unwrap();
+    assert!(disk.take_observed_bios().is_empty());
 }

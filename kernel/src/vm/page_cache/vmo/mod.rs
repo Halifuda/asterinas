@@ -711,6 +711,19 @@ impl<'a> BackedVmo<'a> {
         io_batch.wait_all().map_err(Into::into)
     }
 
+    /// Returns whether the specified byte range contains dirty cached pages.
+    pub(super) fn has_dirty_pages(&self, range: &Range<usize>) -> bool {
+        let locked_pages = self.vmo.pages.lock();
+        if range.start >= self.size() {
+            return false;
+        }
+
+        let page_idx_range = get_page_idx_range(range);
+        !self
+            .collect_pages_if(locked_pages, page_idx_range, |_, page| page.is_dirty())
+            .is_empty()
+    }
+
     /// Removes up-to-date (clean) pages in the specified byte range from the page cache.
     ///
     /// Only pages in the `UpToDate` state are removed. Dirty and uninitialized
