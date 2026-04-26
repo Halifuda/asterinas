@@ -94,7 +94,8 @@ fn wait_for_flag(flag: &AtomicBool) {
     }
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache() {
+pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -159,14 +160,20 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
 
     assert_eq!(
         entry_names(&root_entries),
-        vec!["ContiguousFile", "FragmentedFile", "PartialFile", "DirSidecar"]
+        vec![
+            "ContiguousFile",
+            "FragmentedFile",
+            "PartialFile",
+            "DirSidecar"
+        ]
     );
     assert_eq!(sidecar_directory.type_(), InodeType::Dir);
 
     let contiguous_inode = root_inode.lookup("contiguousfile").unwrap();
     let contiguous_state_before = regular_file_state(&contiguous_inode);
     let contiguous_exfat_inode = lookup_exfat_inode(&contiguous_inode);
-    let (contiguous_block_device, contiguous_boot_region) = published_lookup_state(&contiguous_inode);
+    let (contiguous_block_device, contiguous_boot_region) =
+        published_lookup_state(&contiguous_inode);
     let mut contiguous_buffer = vec![0; contiguous_len];
 
     let contiguous_read_len = contiguous_inode
@@ -198,16 +205,19 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     );
     assert_eq!(contiguous_waiter.wait(), Some(BioStatus::Complete));
     assert_eq!(
-        &read_cache_page_bytes(&contiguous_page)
-            [..PAGE_SIZE.min(contiguous_bytes.len())],
+        &read_cache_page_bytes(&contiguous_page)[..PAGE_SIZE.min(contiguous_bytes.len())],
         &contiguous_bytes[..PAGE_SIZE.min(contiguous_bytes.len())]
     );
-    assert_same_regular_file_state(contiguous_state_before, regular_file_state(&contiguous_inode));
+    assert_same_regular_file_state(
+        contiguous_state_before,
+        regular_file_state(&contiguous_inode),
+    );
 
     let fragmented_inode = root_inode.lookup("FragmentedFile").unwrap();
     let fragmented_state_before = regular_file_state(&fragmented_inode);
     let fragmented_exfat_inode = lookup_exfat_inode(&fragmented_inode);
-    let (fragmented_block_device, fragmented_boot_region) = published_lookup_state(&fragmented_inode);
+    let (fragmented_block_device, fragmented_boot_region) =
+        published_lookup_state(&fragmented_inode);
     let fragmented_probe_offset = PAGE_SIZE;
     let mut fragmented_buffer = vec![0; fragmented_len];
     let fragmented_read_len = fragmented_inode
@@ -223,7 +233,9 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     let fragmented_write_page_idx = fragmented_probe_offset / PAGE_SIZE;
     let fragmented_page = CachePage::alloc_zero(PageState::UpToDate).unwrap();
     let fragmented_page_bytes = patterned_bytes_with_seed(PAGE_SIZE, 0x7A);
-    fragmented_page.write_bytes(0, &fragmented_page_bytes).unwrap();
+    fragmented_page
+        .write_bytes(0, &fragmented_page_bytes)
+        .unwrap();
     let _ = disk.take_observed_bios();
     let fragmented_waiter = fragmented_exfat_inode
         .write_page_async(fragmented_write_page_idx, &fragmented_page)
@@ -253,12 +265,19 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     let mut partial_buffer = vec![0xEE; partial_len];
     let partial_read_len = partial_inode.read_bytes_at(0, &mut partial_buffer).unwrap();
     let partial_page = CachePage::alloc_uninit().unwrap();
-    let partial_waiter = partial_exfat_inode.read_page_async(0, &partial_page).unwrap();
+    let partial_waiter = partial_exfat_inode
+        .read_page_async(0, &partial_page)
+        .unwrap();
     let partial_page_bytes = read_cache_page_bytes(&partial_page);
 
     assert_eq!(partial_read_len, partial_len);
-    assert_eq!(&partial_buffer[..partial_valid_len], partial_prefix.as_slice());
-    assert!(partial_buffer[partial_valid_len..].iter().all(|byte| *byte == 0));
+    assert_eq!(
+        &partial_buffer[..partial_valid_len],
+        partial_prefix.as_slice()
+    );
+    assert!(partial_buffer[partial_valid_len..]
+        .iter()
+        .all(|byte| *byte == 0));
     assert_eq!(partial_waiter.wait(), Some(BioStatus::Complete));
     assert_eq!(
         &partial_page_bytes[..partial_valid_len],
@@ -267,7 +286,10 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     assert!(partial_page_bytes[partial_valid_len..]
         .iter()
         .all(|byte| *byte == 0));
-    assert_eq!(published_page_count(&partial_inode), partial_len.div_ceil(PAGE_SIZE));
+    assert_eq!(
+        published_page_count(&partial_inode),
+        partial_len.div_ceil(PAGE_SIZE)
+    );
     assert_same_regular_file_state(partial_state_before, regular_file_state(&partial_inode));
 }
 
@@ -278,7 +300,10 @@ pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_pre
     let broken_disk = ExfatLookupTestDisk::new();
     let cluster_size = broken_disk.root_cluster_size();
     let broken_len = cluster_size + SECTOR_SIZE;
-    let broken_clusters = [TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER];
+    let broken_clusters = [
+        TEST_FRAGMENTED_FIRST_CLUSTER,
+        TEST_FRAGMENTED_SECOND_CLUSTER,
+    ];
     let broken_bytes = patterned_bytes_with_seed(broken_len, 0x23);
     install_root_file_with_cluster_contents(
         &broken_disk,
@@ -356,7 +381,9 @@ pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_pre
     let failing_page = CachePage::alloc_uninit().unwrap();
 
     failing_device.enable_failures();
-    let failing_waiter = failing_exfat_inode.read_page_async(0, &failing_page).unwrap();
+    let failing_waiter = failing_exfat_inode
+        .read_page_async(0, &failing_page)
+        .unwrap();
 
     assert!(failing_waiter.wait().is_none());
     assert_eq!(failing_waiter.status(0), BioStatus::IoError);
@@ -364,7 +391,8 @@ pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_pre
     assert_same_regular_file_state(failing_state_before, regular_file_state(&failing_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping() {
+pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -592,5 +620,8 @@ pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_
 
     assert_eq!(*mapping_result.lock(), Some(Ok(expected_mapping)));
     assert_eq!(*page_result.lock(), Some(Ok(Some(BioStatus::Complete))));
-    assert_same_regular_file_state(serialized_state_before, regular_file_state(&serialized_inode));
+    assert_same_regular_file_state(
+        serialized_state_before,
+        regular_file_state(&serialized_inode),
+    );
 }

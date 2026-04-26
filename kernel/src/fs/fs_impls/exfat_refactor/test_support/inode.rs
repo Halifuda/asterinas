@@ -47,6 +47,13 @@ pub(in super::super) struct ExfatLookupToggleFailingReadDisk {
     inner: Arc<ExfatLookupTestDisk>,
 }
 
+pub(in super::super) struct ExfatLookupFlushControlDisk {
+    block_flush: AtomicBool,
+    fail_flush: AtomicBool,
+    flush_started: AtomicBool,
+    inner: Arc<ExfatLookupTestDisk>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct ObservedBio {
     pub(in super::super) byte_range: Range<usize>,
@@ -570,6 +577,38 @@ impl ExfatLookupToggleFailingReadDisk {
     }
 }
 
+impl ExfatLookupFlushControlDisk {
+    pub(in super::super) fn new(inner: Arc<ExfatLookupTestDisk>) -> Arc<Self> {
+        Arc::new(Self {
+            block_flush: AtomicBool::new(false),
+            fail_flush: AtomicBool::new(false),
+            flush_started: AtomicBool::new(false),
+            inner,
+        })
+    }
+
+    pub(in super::super) fn enable_blocking_flush(&self) {
+        self.flush_started.store(false, Ordering::Relaxed);
+        self.block_flush.store(true, Ordering::Relaxed);
+    }
+
+    pub(in super::super) fn release_blocked_flush(&self) {
+        self.block_flush.store(false, Ordering::Relaxed);
+    }
+
+    pub(in super::super) fn flush_started(&self) -> bool {
+        self.flush_started.load(Ordering::Relaxed)
+    }
+
+    pub(in super::super) fn enable_flush_failures(&self) {
+        self.fail_flush.store(true, Ordering::Relaxed);
+    }
+
+    pub(in super::super) fn disable_flush_failures(&self) {
+        self.fail_flush.store(false, Ordering::Relaxed);
+    }
+}
+
 impl fmt::Debug for ExfatLookupToggleFailingWriteDisk {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -585,6 +624,18 @@ impl fmt::Debug for ExfatLookupToggleFailingReadDisk {
         formatter
             .debug_struct("ExfatLookupToggleFailingReadDisk")
             .field("fail_range", &self.fail_range)
+            .field("sectors_count", &self.inner.sectors_count())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExfatLookupFlushControlDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatLookupFlushControlDisk")
+            .field("block_flush", &self.block_flush.load(Ordering::Relaxed))
+            .field("fail_flush", &self.fail_flush.load(Ordering::Relaxed))
+            .field("flush_started", &self.flush_started.load(Ordering::Relaxed))
             .field("sectors_count", &self.inner.sectors_count())
             .finish()
     }
@@ -737,6 +788,63 @@ impl BlockDevice for ExfatLookupToggleFailingReadDisk {
 
     fn name(&self) -> &str {
         "exfat-lookup-failing-read-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
+impl BlockDevice for ExfatLookupFlushControlDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        self.inner.observed_bios.lock().push(ObservedBio {
+            byte_range: bio.sid_range().start.to_offset()..bio.sid_range().end.to_offset(),
+            segment_lengths: bio.segments().iter().map(BioSegment::nbytes).collect(),
+            type_: bio_type,
+        });
+        if bio_type == BioType::Flush {
+            self.flush_started.store(true, Ordering::Relaxed);
+            while self.block_flush.load(Ordering::Relaxed) {
+                crate::thread::Thread::yield_now();
+            }
+            let flush_status = if self.fail_flush.load(Ordering::Relaxed) {
+                BioStatus::IoError
+            } else {
+                BioStatus::Complete
+            };
+            bio.complete(flush_status);
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-lookup-flush-control-test"
     }
 
     fn id(&self) -> DeviceId {

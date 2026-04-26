@@ -54,6 +54,11 @@ impl PageCache {
         &self.pages
     }
 
+    /// Returns whether the range contains dirty cached pages.
+    pub fn has_dirty_pages(&self, range: Range<usize>) -> bool {
+        self.manager.has_dirty_pages(range)
+    }
+
     /// Evict the data within a specified range from the page cache and persist
     /// them to the backend.
     pub fn evict_range(&self, range: Range<usize>) -> Result<()> {
@@ -349,6 +354,19 @@ impl PageCacheManager {
         for idx in page_idx_range {
             pages.pop(&idx);
         }
+    }
+
+    fn has_dirty_pages(&self, range: Range<usize>) -> bool {
+        let page_idx_range = get_page_idx_range(&range);
+        let mut pages = self.pages.lock();
+        for idx in page_idx_range {
+            if let Some(page) = pages.peek(&idx)
+                && page.load_state() == PageState::Dirty
+            {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn evict_range(&self, range: Range<usize>) -> Result<()> {
