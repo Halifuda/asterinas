@@ -33,6 +33,7 @@ use crate::{
         },
     },
     thread::{kernel_thread::ThreadOptions, Thread},
+    vm::vmo::CommitFlags,
 };
 
 const DIRECTORY_ENTRY_SIZE: usize = 32;
@@ -189,6 +190,15 @@ fn read_cache_page_bytes(page: &CachePage) -> Vec<u8> {
     bytes
 }
 
+fn dirty_regular_file_first_page(file_inode: &Arc<dyn Inode>, bytes: &[u8]) {
+    let page_cache = file_inode.page_cache().unwrap();
+    let page = page_cache.commit_on(0, CommitFlags::WILL_OVERWRITE).unwrap();
+    let page: ostd::mm::Frame<dyn ostd::mm::frame::meta::AnyFrameMeta> = page.into();
+    let mut page = CachePage::try_from(page).unwrap();
+    page.write_bytes(0, bytes).unwrap();
+    page.store_state(PageState::Dirty);
+}
+
 fn assert_observed_bios(
     observed_bios: &[ObservedBio],
     expected_type: BioType,
@@ -206,6 +216,25 @@ fn assert_observed_bios(
         );
         assert_eq!(observed_bio.segment_lengths, vec![expected_len]);
     }
+}
+
+fn assert_sync_writeback_before_device_sync(observed_bios: &[ObservedBio]) {
+    let write_index = observed_bios
+        .iter()
+        .position(|bio| bio.type_ == BioType::Write)
+        .unwrap_or_else(|| panic!("expected writeback BIO before device sync, got {observed_bios:?}"));
+    let flush_index = observed_bios
+        .iter()
+        .position(|bio| bio.type_ == BioType::Flush)
+        .unwrap_or_else(|| panic!("expected device-sync flush BIO after writeback, got {observed_bios:?}"));
+
+    assert!(write_index < flush_index);
+    assert!(observed_bios[..flush_index]
+        .iter()
+        .all(|bio| bio.type_ == BioType::Write));
+    assert!(observed_bios[flush_index..]
+        .iter()
+        .all(|bio| bio.type_ == BioType::Flush));
 }
 
 fn mount_create_parent(
@@ -2654,4 +2683,86 @@ fn file_content_mapping_cached_io_page_cache_backend_fast_fails_imported_anomaly
 
     assert_eq!(error.error(), Errno::EIO);
     assert!(disk.take_observed_bios().is_empty());
+}
+
+#[ktest]
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data_orders_file_writeback_before_device_sync(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "SyncDataFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"abcdefgh",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("SyncDataFile").unwrap();
+
+    dirty_regular_file_first_page(&file_inode, b"abXYZfgh");
+    let _ = disk.take_observed_bios();
+
+    file_inode.sync_data().unwrap();
+
+    let observed_bios = disk.take_observed_bios();
+    assert_sync_writeback_before_device_sync(&observed_bios);
+    assert_eq!(&disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8], b"abXYZfgh");
+}
+
+#[ktest]
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_orders_file_writeback_before_device_sync(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "SyncAllFile",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"abcdefgh",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("SyncAllFile").unwrap();
+
+    dirty_regular_file_first_page(&file_inode, b"abcdWXYZ");
+    let _ = disk.take_observed_bios();
+
+    file_inode.sync_all().unwrap();
+
+    let observed_bios = disk.take_observed_bios();
+    assert_sync_writeback_before_device_sync(&observed_bios);
+    assert_eq!(&disk.read_cluster(TEST_REGULAR_FILE_CLUSTER)[..8], b"abcdWXYZ");
+}
+
+#[ktest]
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast_fail_rejects_imported_mount_anomaly_before_writeback_or_device_sync(
+) {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    disk.install_root_file_with_contents(
+        ROOT_FILE_ENTRY_INDEX,
+        "SyncFail",
+        TEST_REGULAR_FILE_CLUSTER,
+        b"durable bytes",
+    );
+    disk.set_volume_flags(READ_AT_TEST_VOLUME_FLAGS);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("SyncFail").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let cluster_before = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    let metadata_before = file_inode.metadata();
+
+    let _ = disk.take_observed_bios();
+    let error = file_inode.sync_data().unwrap_err();
+
+    assert_eq!(error.error(), Errno::EIO);
+    assert!(disk.take_observed_bios().is_empty());
+    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(disk.read_cluster(TEST_REGULAR_FILE_CLUSTER), cluster_before);
+    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
