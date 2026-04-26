@@ -171,26 +171,19 @@ impl ExfatLookupTestDisk {
     }
 
     pub(in super::super) fn set_fat_chain_step(&self, cluster: u32, next_cluster: u32) {
-        let boot_region = self.validated_mount().boot_region;
-        let fat_offset = usize::try_from(
-            u64::from(boot_region.fat_offset_sectors)
-                .checked_mul(u64::try_from(boot_region.sector_size).unwrap())
-                .unwrap(),
-        )
-        .unwrap();
-        let entry_offset = fat_offset
-            .checked_add(
-                usize::try_from(cluster)
-                    .unwrap()
-                    .checked_mul(core::mem::size_of::<u32>())
-                    .unwrap(),
-            )
-            .unwrap();
-        self.write_bytes(entry_offset, &next_cluster.to_le_bytes());
+        self.write_bytes(self.fat_entry_offset(cluster), &next_cluster.to_le_bytes());
     }
 
     pub(in super::super) fn terminate_fat_chain(&self, cluster: u32) {
         self.set_fat_chain_step(cluster, FAT_END_OF_CHAIN);
+    }
+
+    pub(in super::super) fn fat_chain_step(&self, cluster: u32) -> u32 {
+        let mut entry_bytes = [0u8; 4];
+        self.blocks
+            .read_bytes(self.fat_entry_offset(cluster), &mut entry_bytes)
+            .unwrap();
+        u32::from_le_bytes(entry_bytes)
     }
 
     pub(in super::super) fn install_root_directory(
@@ -378,6 +371,24 @@ impl ExfatLookupTestDisk {
 
     pub(in super::super) fn cluster_offset(&self, cluster: u32) -> usize {
         self.validated_mount().boot_region.cluster_offset(cluster).unwrap()
+    }
+
+    pub(in super::super) fn fat_entry_offset(&self, cluster: u32) -> usize {
+        let boot_region = self.validated_mount().boot_region;
+        let fat_offset = usize::try_from(
+            u64::from(boot_region.fat_offset_sectors)
+                .checked_mul(u64::try_from(boot_region.sector_size).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        fat_offset
+            .checked_add(
+                usize::try_from(cluster)
+                    .unwrap()
+                    .checked_mul(core::mem::size_of::<u32>())
+                    .unwrap(),
+            )
+            .unwrap()
     }
 
     pub(in super::super) fn root_directory_entry_capacity(&self) -> usize {
