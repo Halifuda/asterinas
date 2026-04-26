@@ -333,15 +333,13 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, _, _, anomaly, _, _) = fs.admitted_lookup_state().map_err(Error::from)?;
+        let (_, _, anomaly, _, _) = fs.published_lookup_state().map_err(Error::from)?;
         if anomaly.clear_to_zero || anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, stream, data_length, valid_data_length) = {
-            let _state_guard = state_guard;
-            self.admitted_regular_file_stream_snapshot()?
-        };
+        let (_owner_guard, stream, data_length, valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
         }
@@ -363,23 +361,6 @@ impl ExfatInode {
             .checked_add(offset % cluster_size)
             .map(Some)
             .ok_or_else(|| Error::new(Errno::EINVAL))
-    }
-
-    fn regular_file_npages(&self) -> Result<usize> {
-        let fs = self
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, _, _, anomaly, _, _) = fs.admitted_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
-            return_errno!(Errno::EIO);
-        }
-
-        let (_owner_guard, _stream, data_length, _valid_data_length) = {
-            let _state_guard = state_guard;
-            self.admitted_regular_file_stream_snapshot()?
-        };
-        Ok(data_length.div_ceil(PAGE_SIZE))
     }
 
     fn regular_file_page_bio_ranges(
@@ -457,11 +438,10 @@ impl ExfatInode {
     }
 
     fn regular_file_page_range(
-        &self,
         idx: usize,
-    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream, usize, usize, usize)> {
-        let (owner, stream, data_length, valid_data_length) =
-            self.admitted_regular_file_stream_snapshot()?;
+        data_length: usize,
+        valid_data_length: usize,
+    ) -> Result<(usize, usize)> {
         let file_offset = idx
             .checked_mul(PAGE_SIZE)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
@@ -476,7 +456,7 @@ impl ExfatInode {
         let initialized_end = page_end.min(valid_data_length);
         let initialized_len = initialized_end.saturating_sub(file_offset);
 
-        Ok((owner, stream, data_length, file_offset, initialized_len))
+        Ok((file_offset, initialized_len))
     }
 
     fn regular_file_page_waiter(
@@ -529,14 +509,14 @@ impl ExfatInode {
     }
 
     fn read_regular_file_at(
-        &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
+        stream: ExfatInodeStream,
+        data_length: usize,
+        valid_data_length: usize,
         offset: usize,
         writer: &mut VmWriter,
     ) -> Result<usize> {
-        let (_owner_guard, stream, data_length, valid_data_length) =
-            self.admitted_regular_file_stream_snapshot()?;
         if !writer.has_avail() {
             return Ok(0);
         }
@@ -1633,16 +1613,16 @@ impl PageCacheBackend for ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, boot_region, anomaly, _, _) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
+        let (block_device, boot_region, anomaly, _, _) =
+            fs.published_lookup_state().map_err(Error::from)?;
         if anomaly.clear_to_zero || anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, stream, data_length, file_offset, initialized_len) = {
-            let _state_guard = state_guard;
-            self.regular_file_page_range(idx)?
-        };
+        let (_owner_guard, stream, data_length, valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        let (file_offset, initialized_len) =
+            Self::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len =
             initialized_len - (initialized_len % boot_region.sector_size);
         if initialized_sector_len < PAGE_SIZE {
@@ -1672,8 +1652,8 @@ impl PageCacheBackend for ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, boot_region, anomaly, _, options) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
+        let (block_device, boot_region, anomaly, _, options) =
+            fs.published_lookup_state().map_err(Error::from)?;
         if anomaly.clear_to_zero || anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
@@ -1681,10 +1661,10 @@ impl PageCacheBackend for ExfatInode {
             return_errno!(Errno::EROFS);
         }
 
-        let (_owner_guard, stream, data_length, file_offset, initialized_len) = {
-            let _state_guard = state_guard;
-            self.regular_file_page_range(idx)?
-        };
+        let (_owner_guard, stream, data_length, valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        let (file_offset, initialized_len) =
+            Self::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len =
             initialized_len - (initialized_len % boot_region.sector_size);
         if initialized_sector_len == 0 {
@@ -1704,7 +1684,7 @@ impl PageCacheBackend for ExfatInode {
     }
 
     fn npages(&self) -> usize {
-        self.regular_file_npages().unwrap_or(0)
+        self.metadata.read().size.div_ceil(PAGE_SIZE)
     }
 }
 
@@ -1733,7 +1713,17 @@ impl crate::fs::vfs::inode::InodeIo for ExfatInode {
 
         {
             let _state_guard = state_guard;
-            self.read_regular_file_at(&block_device, &boot_region, offset, writer)
+            let (_owner_guard, stream, data_length, valid_data_length) =
+                self.admitted_regular_file_stream_snapshot()?;
+            Self::read_regular_file_at(
+                &block_device,
+                &boot_region,
+                stream,
+                data_length,
+                valid_data_length,
+                offset,
+                writer,
+            )
         }
     }
 
@@ -1832,11 +1822,10 @@ impl Inode for ExfatInode {
 
         self.page_cache
             .call_once(|| {
-                let (_owner_guard, _stream, data_length, _valid_data_length) =
-                    self.admitted_regular_file_stream_snapshot().ok()?;
                 let this = self.this.upgrade()?;
                 let backend: Arc<dyn PageCacheBackend> = this;
-                PageCache::with_capacity(data_length, Arc::downgrade(&backend)).ok()
+                let capacity = self.metadata.read().size;
+                PageCache::with_capacity(capacity, Arc::downgrade(&backend)).ok()
             })
             .as_ref()
             .map(|page_cache| page_cache.pages().clone())
