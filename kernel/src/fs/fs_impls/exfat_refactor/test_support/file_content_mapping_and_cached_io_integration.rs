@@ -71,7 +71,7 @@ fn regular_file_state(inode: &Arc<dyn Inode>) -> (ExfatInodeStream, usize, usize
     (
         *exfat_inode.stream.read(),
         inode.size(),
-        exfat_inode.regular_file_npages().unwrap(),
+        published_page_count(inode),
     )
 }
 
@@ -267,7 +267,7 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     assert!(partial_page_bytes[partial_valid_len..]
         .iter()
         .all(|byte| *byte == 0));
-    assert_eq!(partial_exfat_inode.regular_file_npages().unwrap(), partial_len.div_ceil(PAGE_SIZE));
+    assert_eq!(published_page_count(&partial_inode), partial_len.div_ceil(PAGE_SIZE));
     assert_same_regular_file_state(partial_state_before, regular_file_state(&partial_inode));
 }
 

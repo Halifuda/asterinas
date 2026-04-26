@@ -157,12 +157,18 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
 
 ### `meso_06_file_content_mutation`
 
-**Decision:** Baseline Architect and Designer artifacts are accepted, but `lock_structure_repair_01` now requires a focused Designer repair before any Creator pass may be sliced.
+**Decision:** The focused post-`lock_structure_repair_01` Designer repair is accepted, and the first official Creator slice is now fixed: `pass_01_file_content_mutation_internal_helper_boundary_and_backend_dereentry`. That pass must close the parent helper-layer gap for the regular-file data path before any visible write / append / resize publication pass opens.
 
-| Candidate Pass Area | Current Decision | Rationale |
-| :--- | :--- | :--- |
-| File content mutation implementation | Blocked behind `lock_structure_repair_01` plus a focused Designer repair. | The accepted meso ownership remains valid, but the next allowed step is a post-lock-wave Designer repair that consumes the repaired shared substrate for mutation admission, publication ordering, release / revalidate boundaries, and allocator-last sequencing before Creator slicing begins. |
-| Meso integration validation | Blocked. | Integration Checker work waits for the focused Designer repair plus accepted implementation passes covering the target micro-features. |
+| Pass ID | Kind | Covered Boundary | Slicing Rationale | Decision State |
+| :--- | :--- | :--- | :--- | :--- |
+| `pass_01_file_content_mutation_internal_helper_boundary_and_backend_dereentry` | Creator-Synced Pass | Regular-file owner-internal admitted-state helper seam for the packeted `inode.rs` data path; backend-facing `page_cache` read / write / `npages` / initialization routing that must consume published facts plus already chosen file-local state without public-admission reentry; simplification or removal of regular-file helpers, thin forwarding wrappers, and snapshot-as-substitute routing whose only justification was the missing admitted-state seam; closure of the currently known child symptoms of that parent problem inside the regular-file data-path scope. This pass does **not** yet claim final user-visible write / append / resize publication, allocation growth, or sync-intent completion semantics. | Partial-page cached writes can force cache refill from inside an outer mutation path. If visible mutation work lands before this seam is repaired, the implementation either deadlocks or preserves the same architecture defect by bypassing generic `page_cache`, forbidding refill shapes, or carrying snapshot/workaround debt forward. The first pass must therefore repair the parent structure directly and collapse the known symptom surface instead of routing around it. | Accepted / closed through Creator, user-directed Creator repair 01, synchronized Checker, narrow Checker rerun 01, and Reviewer. |
+| Later mutation publication and topology passes | Not yet sliced. | Remaining visible byte publication, append placement, resize growth/shrink, allocation/free topology, `NoFatChain` transition, explicit fallocate refusal, and sync-intent handoff. | Hold until `pass_01_file_content_mutation_internal_helper_boundary_and_backend_dereentry` lands, so later mutation passes build on the repaired internal seam instead of freezing helper/workaround debt into the public write path. | Deferred. |
+
+**Deferred / Exit Notes:**
+
+- `pass_01_file_content_mutation_internal_helper_boundary_and_backend_dereentry` is required to solve the parent helper-layer gap directly. Do not reinterpret the pass as “implement writes first but avoid generic `page_cache`.”
+- The pass boundary explicitly includes cleanup of known regular-file helper/snapshot symptoms caused by the missing internal seam, but it does **not** reopen already accepted directory-side `meso_03` / `meso_04` routing work or the accepted `lock_structure_repair_01` wave.
+- Meso integration validation remains blocked until the first mutation pass and at least one later visible-mutation pass are accepted.
 
 ### `meso_07_file_sync_and_persistence`
 

@@ -162,6 +162,10 @@ fn published_lookup_state(
     (block_device, boot_region)
 }
 
+fn published_page_count(inode: &Arc<dyn Inode>) -> usize {
+    PageCacheBackend::npages(lookup_exfat_inode(inode))
+}
+
 fn patterned_bytes(len: usize) -> Vec<u8> {
     (0..len)
         .map(|index| u8::try_from(index % 251).unwrap())
@@ -1703,7 +1707,7 @@ fn file_content_mapping_cached_io_map_regular_file_logical_offset_follows_fragme
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_regular_file_npages_reports_ceiling_of_data_length() {
+fn file_content_mapping_cached_io_page_count_and_cache_holder_follow_published_file_size() {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1725,9 +1729,13 @@ fn file_content_mapping_cached_io_regular_file_npages_reports_ceiling_of_data_le
 
     let (_fs, root_inode) = mount_root(&disk, None);
     let file_inode = root_inode.lookup("PageCount").unwrap();
-    let exfat_inode = lookup_exfat_inode(&file_inode);
+    let page_cache = file_inode.page_cache().unwrap();
 
-    assert_eq!(exfat_inode.regular_file_npages().unwrap(), 2);
+    assert_eq!(published_page_count(&file_inode), data_length.div_ceil(PAGE_SIZE));
+    assert_eq!(
+        page_cache.size(),
+        published_page_count(&file_inode) * PAGE_SIZE
+    );
 }
 
 #[ktest]
@@ -1797,10 +1805,9 @@ fn file_content_mapping_cached_io_mapping_surfaces_reject_directories() {
     let mapping_error = exfat_inode
         .map_regular_file_logical_offset(&block_device, &boot_region, 0)
         .unwrap_err();
-    let npages_error = exfat_inode.regular_file_npages().unwrap_err();
 
     assert_eq!(mapping_error.error(), Errno::EISDIR);
-    assert_eq!(npages_error.error(), Errno::EISDIR);
+    assert!(directory_inode.page_cache().is_none());
 }
 
 #[ktest]
