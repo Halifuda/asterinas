@@ -31,6 +31,7 @@ pub(super) struct MountedVolumeState {
     options: ExfatMountOptions,
     root_inode: Arc<ExfatInode>,
     upcase_table: Arc<UpcaseTable>,
+    forced_shutdown: bool,
 }
 
 struct FreeSpaceAllocatorState {
@@ -177,6 +178,7 @@ impl ExfatFs {
             options: options.clone(),
             root_inode: root_inode.clone(),
             upcase_table,
+            forced_shutdown: false,
         };
         let allocator_state = FreeSpaceAllocatorState {
             bitmap,
@@ -357,6 +359,9 @@ impl ExfatFs {
             let publication = state
                 .as_mut()
                 .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.forced_shutdown {
+                return Err(MountVolumeStateError::DeviceIo);
+            }
             if publication.flags.contains(FsFlags::RDONLY) {
                 return Err(MountVolumeStateError::ReadOnlyConflict);
             }
@@ -423,6 +428,17 @@ impl ExfatFs {
             upcase_table,
             options,
         ))
+    }
+
+    pub(super) fn admit_forced_shutdown(
+        &self,
+    ) -> core::result::Result<(), MountVolumeStateError> {
+        let mut state = self.state.write();
+        let publication = state
+            .as_mut()
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
+        publication.forced_shutdown = true;
+        Ok(())
     }
 
     fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, FreeSpaceAccountingError> {
@@ -544,6 +560,9 @@ impl ExfatFs {
         let publication = state
             .as_ref()
             .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+        if publication.forced_shutdown {
+            return Err(Error::new(Errno::EIO));
+        }
         if publication.flags.contains(FsFlags::RDONLY) {
             return Err(FreeSpaceAccountingError::ReadOnlyConflict.into());
         }
@@ -567,6 +586,9 @@ impl FileSystem for ExfatFs {
             let publication = state
                 .as_mut()
                 .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.forced_shutdown {
+                return Err(Error::new(Errno::EIO));
+            }
             if publication.flags.contains(FsFlags::RDONLY) {
                 return Err(MountVolumeStateError::ReadOnlyConflict.into());
             }
@@ -596,6 +618,9 @@ impl FileSystem for ExfatFs {
             let publication = state
                 .as_mut()
                 .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.forced_shutdown {
+                return Err(Error::new(Errno::EIO));
+            }
             if publication.flags.contains(FsFlags::RDONLY) {
                 return Err(MountVolumeStateError::ReadOnlyConflict.into());
             }
