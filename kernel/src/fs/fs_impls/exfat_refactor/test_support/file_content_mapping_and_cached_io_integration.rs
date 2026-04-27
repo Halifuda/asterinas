@@ -94,8 +94,8 @@ fn wait_for_flag(flag: &AtomicBool) {
     }
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -275,17 +275,21 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
         &partial_buffer[..partial_valid_len],
         partial_prefix.as_slice()
     );
-    assert!(partial_buffer[partial_valid_len..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        partial_buffer[partial_valid_len..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_eq!(partial_waiter.wait(), Some(BioStatus::Complete));
     assert_eq!(
         &partial_page_bytes[..partial_valid_len],
         partial_prefix.as_slice()
     );
-    assert!(partial_page_bytes[partial_valid_len..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        partial_page_bytes[partial_valid_len..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_eq!(
         published_page_count(&partial_inode),
         partial_len.div_ceil(PAGE_SIZE)
@@ -293,8 +297,8 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     assert_same_regular_file_state(partial_state_before, regular_file_state(&partial_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility()
+ {
     init_lookup_test_runtime();
 
     let broken_disk = ExfatLookupTestDisk::new();
@@ -391,8 +395,8 @@ pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_pre
     assert_same_regular_file_state(failing_state_before, regular_file_state(&failing_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -467,14 +471,16 @@ pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_sta
     assert_eq!(first_cached, repeated_bytes[..cached_len]);
     assert_eq!(second_cached, first_cached);
     assert!(!first_cached_bios.is_empty());
-    assert!(second_cached_bios
-        .iter()
-        .all(|observed_bio| observed_bio.type_ == BioType::Read));
+    assert!(
+        second_cached_bios
+            .iter()
+            .all(|observed_bio| observed_bio.type_ == BioType::Read)
+    );
     assert_same_regular_file_state(repeated_state_before, regular_file_state(&repeated_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

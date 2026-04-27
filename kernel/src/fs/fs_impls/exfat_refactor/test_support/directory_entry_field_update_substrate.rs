@@ -66,6 +66,7 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
             last_modified_fields: Some(([0xCC, 0xDD, 0xEE, 0x0F], 0x10, 0x11)),
             name: Some(&republished_name),
             name_hash: Some(republished_name_hash),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -122,6 +123,7 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
             last_modified_fields: Some(([0xCC, 0xDD, 0xEE, 0x0F], 0x10, 0x11)),
             name: Some(&republished_name),
             name_hash: Some(republished_name_hash),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -130,8 +132,8 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
 }
 
 #[ktest]
-fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication(
-) {
+fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -288,8 +290,8 @@ fn directory_entry_field_update_substrate_repeated_republish_preserves_identity_
 }
 
 #[ktest]
-fn directory_entry_field_update_substrate_integration_publish_republish_rescan_invalidate_stays_coherent(
-) {
+fn directory_entry_field_update_substrate_integration_publish_republish_rescan_invalidate_stays_coherent()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

@@ -7,7 +7,7 @@ use aster_block::{BlockDevice, SECTOR_SIZE};
 use ostd::mm::PAGE_SIZE;
 
 use super::*;
-use crate::thread::{kernel_thread::ThreadOptions, Thread};
+use crate::thread::{Thread, kernel_thread::ThreadOptions};
 
 struct FileSnapshot {
     entry_set: Vec<u8>,

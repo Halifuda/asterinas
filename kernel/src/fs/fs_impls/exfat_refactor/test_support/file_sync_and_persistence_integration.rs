@@ -24,8 +24,8 @@ fn assert_metadata_only_device_sync(observed_bios: &[ObservedBio]) {
     );
 }
 
-pub(super) fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary(
-) {
+pub(super) fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -65,8 +65,8 @@ pub(super) fn file_sync_and_persistence_integration_success_path_sync_data_then_
     assert!(disk.take_observed_bios().is_empty());
 }
 
-pub(super) fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window(
-) {
+pub(super) fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -124,12 +124,12 @@ pub(super) fn file_sync_and_persistence_integration_failure_maintenance_device_s
     assert!(disk.take_observed_bios().is_empty());
 }
 
-pub(super) fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary(
-) {
+pub(super) fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary()
+ {
     file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state();
 }
 
-pub(super) fn file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work(
-) {
+pub(super) fn file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work()
+ {
     file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success();
 }

@@ -4,11 +4,11 @@ use alloc::{ffi::CString, format, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use aster_block::{
-    bio::{BioStatus, BioType},
     BlockDevice, SECTOR_SIZE,
+    bio::{BioStatus, BioType},
 };
 use ostd::{
-    mm::{VmIo, VmReader, PAGE_SIZE},
+    mm::{PAGE_SIZE, VmIo, VmReader},
     prelude::ktest,
 };
 
@@ -32,7 +32,7 @@ use crate::{
             registry::FsType,
         },
     },
-    thread::{kernel_thread::ThreadOptions, Thread},
+    thread::{Thread, kernel_thread::ThreadOptions},
     vm::vmo::CommitFlags,
 };
 
@@ -235,12 +235,16 @@ fn assert_sync_writeback_before_device_sync(observed_bios: &[ObservedBio]) {
         });
 
     assert!(write_index < flush_index);
-    assert!(observed_bios[..flush_index]
-        .iter()
-        .all(|bio| bio.type_ == BioType::Write));
-    assert!(observed_bios[flush_index..]
-        .iter()
-        .all(|bio| bio.type_ == BioType::Flush));
+    assert!(
+        observed_bios[..flush_index]
+            .iter()
+            .all(|bio| bio.type_ == BioType::Write)
+    );
+    assert!(
+        observed_bios[flush_index..]
+            .iter()
+            .all(|bio| bio.type_ == BioType::Flush)
+    );
 }
 
 fn assert_flush_only(observed_bios: &[ObservedBio]) {
@@ -458,6 +462,15 @@ mod readdir_visibility;
 #[path = "directory_lookup_and_identity_integration.rs"]
 mod directory_lookup_and_identity_integration;
 
+#[path = "file_metadata_projection_and_update_projection_substrate.rs"]
+mod file_metadata_projection_and_update_projection_substrate;
+
+#[path = "file_metadata_projection_and_update_policy_and_timestamp_mutation.rs"]
+mod file_metadata_projection_and_update_policy_and_timestamp_mutation;
+
+#[path = "file_metadata_projection_and_update_integration.rs"]
+mod file_metadata_projection_and_update_integration;
+
 #[path = "file_content_mapping_and_cached_io_integration.rs"]
 mod file_content_mapping_and_cached_io_integration;
 
@@ -491,8 +504,69 @@ fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility(
-) {
+fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state() {
+    file_metadata_projection_and_update_projection_substrate::file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups() {
+    file_metadata_projection_and_update_projection_substrate::file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state() {
+    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape() {
+    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families() {
+    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only()
+ {
+    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only();
+}
+
+#[ktest]
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state()
+ {
+    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state();
+}
+
+#[ktest]
+fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync()
+ {
+    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync();
+}
+
+#[ktest]
+fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry()
+ {
+    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry();
+}
+
+#[ktest]
+fn file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable()
+ {
+    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable();
+}
+
+#[ktest]
+fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates()
+ {
+    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates();
+}
+
+#[ktest]
+fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility()
+ {
     file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility();
 }
 
@@ -503,8 +577,8 @@ fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary(
-) {
+fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary()
+ {
     file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary();
 }
 
@@ -529,20 +603,20 @@ fn file_content_mutation_integration_concurrency_serializes_mutation_and_observa
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary(
-) {
+fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary()
+ {
     file_sync_and_persistence_integration::file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary();
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window(
-) {
+fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window()
+ {
     file_sync_and_persistence_integration::file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window();
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary(
-) {
+fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary()
+ {
     file_sync_and_persistence_integration::file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary();
 }
 
@@ -672,10 +746,11 @@ fn directory_entry_mutation_mkdir_publishes_checksum_valid_entry_set() {
         decode_entry_name(&entry_set),
         "CreateDir".encode_utf16().collect::<Vec<_>>()
     );
-    assert!(disk
-        .read_cluster(first_cluster)
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        disk.read_cluster(first_cluster)
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 }
 
 #[ktest]
@@ -1035,8 +1110,8 @@ fn directory_entry_mutation_delete_failure_maintenance_preserves_namespace_first
 }
 
 #[ktest]
-fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_duplicate_namespace(
-) {
+fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_duplicate_namespace()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1095,8 +1170,8 @@ fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_
 }
 
 #[ktest]
-fn directory_entry_mutation_rename_across_directories_publishes_destination_before_source_invalidation(
-) {
+fn directory_entry_mutation_rename_across_directories_publishes_destination_before_source_invalidation()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1354,8 +1429,8 @@ fn directory_entry_mutation_integration_success_path_create_rename_unlink_rmdir(
 }
 
 #[ktest]
-fn directory_entry_mutation_integration_failure_maintenance_preserves_namespace_and_typed_boundaries(
-) {
+fn directory_entry_mutation_integration_failure_maintenance_preserves_namespace_and_typed_boundaries()
+ {
     init_lookup_test_runtime();
 
     let rename_failure_disk = ExfatLookupTestDisk::new();
@@ -1521,8 +1596,8 @@ fn directory_entry_mutation_integration_failure_maintenance_preserves_namespace_
 }
 
 #[ktest]
-fn directory_entry_mutation_integration_concurrency_linearizes_cross_directory_rename_and_competing_mutations(
-) {
+fn directory_entry_mutation_integration_concurrency_linearizes_cross_directory_rename_and_competing_mutations()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1737,8 +1812,8 @@ fn file_content_mutation_write_boundary_gap_write_zero_fills_exposed_range() {
 }
 
 #[ktest]
-fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct_without_side_effects(
-) {
+fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct_without_side_effects()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1862,8 +1937,8 @@ fn file_content_mutation_write_boundary_write_at_fast_fails_on_imported_mount_an
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof(
-) {
+fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1914,8 +1989,8 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_all
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range(
-) {
+fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1974,8 +2049,8 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_f
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links(
-) {
+fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2032,8 +2107,8 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_gr
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain(
-) {
+fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2122,8 +2197,8 @@ fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_rel
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof(
-) {
+fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2300,8 +2375,8 @@ fn file_content_mapping_cached_io_read_at_fast_fails_on_imported_mount_anomaly()
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_map_regular_file_logical_offset_maps_contiguous_nofatchain_offsets(
-) {
+fn file_content_mapping_cached_io_map_regular_file_logical_offset_maps_contiguous_nofatchain_offsets()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2429,8 +2504,8 @@ fn file_content_mapping_cached_io_page_count_and_cache_holder_follow_published_f
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_map_regular_file_logical_offset_returns_none_for_eof_and_uninitialized_offsets(
-) {
+fn file_content_mapping_cached_io_map_regular_file_logical_offset_returns_none_for_eof_and_uninitialized_offsets()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2544,8 +2619,8 @@ fn file_content_mapping_cached_io_page_cache_backend_contiguous_read_returns_wai
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping(
-) {
+fn file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2705,9 +2780,11 @@ fn file_content_mapping_cached_io_page_cache_backend_zero_fills_mid_page_uniniti
         &page_bytes[..valid_data_length],
         initialized_prefix.as_slice()
     );
-    assert!(page_bytes[valid_data_length..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        page_bytes[valid_data_length..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_observed_bios(
         &disk.take_observed_bios(),
         BioType::Read,
@@ -2773,8 +2850,8 @@ fn file_content_mapping_cached_io_page_cache_backend_fast_fails_imported_anomaly
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data_orders_file_writeback_before_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data_orders_file_writeback_before_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2802,8 +2879,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_orders_file_writeback_before_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_orders_file_writeback_before_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2831,8 +2908,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast_fail_rejects_imported_mount_anomaly_before_writeback_or_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast_fail_rejects_imported_mount_anomaly_before_writeback_or_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2864,8 +2941,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_sync_data_leaves_metadata_only_interval_for_sync_all(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_sync_data_leaves_metadata_only_interval_for_sync_all()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2896,8 +2973,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2922,8 +2999,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_device_stage_failure_leaves_dirty_window_retryable(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_device_stage_failure_leaves_dirty_window_retryable()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2956,8 +3033,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
