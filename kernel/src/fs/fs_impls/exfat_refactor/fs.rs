@@ -353,6 +353,57 @@ impl ExfatFs {
         MountVolumeStateError,
     > {
         let mut state = self.state.write();
+        let dirty_anomaly = {
+            let publication = state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.flags.contains(FsFlags::RDONLY) {
+                return Err(MountVolumeStateError::ReadOnlyConflict);
+            }
+            (!publication.anomaly.volume_dirty).then_some(VolumeAnomalyState {
+                volume_dirty: true,
+                ..publication.anomaly
+            })
+        };
+        if let Some(dirty_anomaly) = dirty_anomaly {
+            let boot_region = state
+                .as_ref()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .boot_region;
+            if let Err(error) =
+                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), dirty_anomaly)
+            {
+                state
+                    .as_mut()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(error);
+            }
+            let flush_status = match self.block_device.sync() {
+                Ok(status) => status,
+                Err(_) => {
+                    state
+                        .as_mut()
+                        .ok_or(MountVolumeStateError::UnpublishedState)?
+                        .anomaly
+                        .volume_dirty = true;
+                    return Err(MountVolumeStateError::DeviceIo);
+                }
+            };
+            if flush_status != BioStatus::Complete {
+                state
+                    .as_mut()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(MountVolumeStateError::DeviceIo);
+            }
+            state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .anomaly = dirty_anomaly;
+        }
         let (boot_region, anomaly, upcase_table, options) = {
             let publication = state
                 .as_mut()
@@ -511,12 +562,100 @@ impl FileSystem for ExfatFs {
     }
 
     fn sync(&self) -> Result<()> {
-        // TODO: Replace this mount-only flush seam once `meso_08` owns dirty-state
-        // persistence and can clear or rewrite volume flags during steady-state sync.
-        match self.block_device.sync()? {
-            BioStatus::Complete => Ok(()),
-            _ => return_errno!(Errno::EIO),
+        let mut state = self.state.write();
+        {
+            let publication = state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.flags.contains(FsFlags::RDONLY) {
+                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+            }
         }
+
+        let flush_status = match self.block_device.sync() {
+            Ok(status) => status,
+            Err(_) => {
+                state
+                    .as_mut()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(Error::new(Errno::EIO));
+            }
+        };
+        if flush_status != BioStatus::Complete {
+            state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .anomaly
+                .volume_dirty = true;
+            return_errno!(Errno::EIO);
+        }
+
+        let clean_anomaly = {
+            let publication = state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.flags.contains(FsFlags::RDONLY) {
+                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+            }
+            if !publication.anomaly.volume_dirty {
+                return Ok(());
+            }
+            VolumeAnomalyState {
+                volume_dirty: false,
+                ..publication.anomaly
+            }
+        };
+        let boot_region = state
+            .as_ref()
+            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .boot_region;
+        if let Err(error) =
+            boot_region.write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
+        {
+            state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .anomaly
+                .volume_dirty = true;
+            return Err(error.into());
+        }
+
+        {
+            let publication = state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            if publication.flags.contains(FsFlags::RDONLY) {
+                publication.anomaly.volume_dirty = true;
+                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+            }
+        }
+
+        let flush_status = match self.block_device.sync() {
+            Ok(status) => status,
+            Err(_) => {
+                state
+                    .as_mut()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(Error::new(Errno::EIO));
+            }
+        };
+        if flush_status != BioStatus::Complete {
+            state
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .anomaly
+                .volume_dirty = true;
+            return_errno!(Errno::EIO);
+        }
+        state
+            .as_mut()
+            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .anomaly = clean_anomaly;
+        Ok(())
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {

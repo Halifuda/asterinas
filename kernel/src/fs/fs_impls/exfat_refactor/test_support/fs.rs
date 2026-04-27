@@ -3,7 +3,7 @@
 use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use aster_block::{
@@ -24,6 +24,7 @@ use crate::fs::{
 use crate::thread::{Thread, kernel_thread::ThreadOptions};
 
 const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
+const CLEAN_TEST_VOLUME_FLAGS: u16 = TEST_VOLUME_FLAGS & !0x0002;
 const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
 const TEST_VOLUME_FLAGS: u16 = 0x000E;
 const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
@@ -84,6 +85,18 @@ struct ExfatRefactorToggleFailingReadDisk {
     inner: Arc<ExfatRefactorMemoryDisk>,
 }
 
+struct ExfatRefactorToggleFailingWriteDisk {
+    fail_range: core::ops::Range<usize>,
+    fail_writes: AtomicBool,
+    inner: Arc<ExfatRefactorMemoryDisk>,
+}
+
+struct ExfatRefactorCountedFailingFlushDisk {
+    fail_flush_number: usize,
+    flush_count: AtomicUsize,
+    inner: Arc<ExfatRefactorMemoryDisk>,
+}
+
 impl ExfatRefactorFailingReadDisk {
     fn new(
         inner: Arc<ExfatRefactorMemoryDisk>,
@@ -123,6 +136,42 @@ impl ExfatRefactorToggleFailingReadDisk {
     }
 }
 
+impl ExfatRefactorToggleFailingWriteDisk {
+    fn new(
+        inner: Arc<ExfatRefactorMemoryDisk>,
+        fail_offset: usize,
+        fail_len: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
+            fail_writes: AtomicBool::new(false),
+            inner,
+        })
+    }
+
+    fn enable_failures(&self) {
+        self.fail_writes.store(true, Ordering::Relaxed);
+    }
+
+    fn overlaps_failure_range(&self, start: usize, end: usize) -> bool {
+        start < self.fail_range.end && self.fail_range.start < end
+    }
+}
+
+impl ExfatRefactorCountedFailingFlushDisk {
+    fn new(inner: Arc<ExfatRefactorMemoryDisk>, fail_flush_number: usize) -> Arc<Self> {
+        Arc::new(Self {
+            fail_flush_number,
+            flush_count: AtomicUsize::new(0),
+            inner,
+        })
+    }
+
+    fn should_fail_flush(&self) -> bool {
+        self.flush_count.fetch_add(1, Ordering::Relaxed) + 1 == self.fail_flush_number
+    }
+}
+
 impl fmt::Debug for ExfatRefactorFailingReadDisk {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -138,6 +187,26 @@ impl fmt::Debug for ExfatRefactorToggleFailingReadDisk {
         formatter
             .debug_struct("ExfatRefactorToggleFailingReadDisk")
             .field("fail_range", &self.fail_range)
+            .field("sectors_count", &self.inner.sectors_count())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExfatRefactorToggleFailingWriteDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatRefactorToggleFailingWriteDisk")
+            .field("fail_range", &self.fail_range)
+            .field("sectors_count", &self.inner.sectors_count())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExfatRefactorCountedFailingFlushDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatRefactorCountedFailingFlushDisk")
+            .field("fail_flush_number", &self.fail_flush_number)
             .field("sectors_count", &self.inner.sectors_count())
             .finish()
     }
@@ -290,6 +359,105 @@ impl BlockDevice for ExfatRefactorToggleFailingReadDisk {
     }
 }
 
+impl BlockDevice for ExfatRefactorToggleFailingWriteDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        if bio_type == BioType::Flush {
+            bio.complete(BioStatus::Complete);
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let segment_end = current_offset.checked_add(segment.nbytes()).unwrap();
+            if bio_type == BioType::Write
+                && self.fail_writes.load(Ordering::Relaxed)
+                && self.overlaps_failure_range(current_offset, segment_end)
+            {
+                bio.complete(BioStatus::IoError);
+                return Ok(());
+            }
+
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-refactor-toggle-failing-write-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
+impl BlockDevice for ExfatRefactorCountedFailingFlushDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        if bio_type == BioType::Flush {
+            bio.complete(if self.should_fail_flush() {
+                BioStatus::IoError
+            } else {
+                BioStatus::Complete
+            });
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-refactor-counted-failing-flush-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
 fn assert_same_super_block(left: &SuperBlock, right: &SuperBlock) {
     assert_eq!(left.magic, right.magic);
     assert_eq!(left.bsize, right.bsize);
@@ -431,6 +599,34 @@ fn assert_cached_reporting_matches_snapshot(fs: &Arc<ExfatFs>, expected: &FreeSp
 
     assert_eq!(cached_snapshot, *expected);
     assert_snapshot_matches_super_block(&cached_snapshot, &super_block);
+}
+
+fn assert_observed_volume_posture(
+    fs: &Arc<ExfatFs>,
+    expected_flags: FsFlags,
+    expected_volume_flags: u16,
+) {
+    let state = fs.state.read();
+    let publication = state.as_ref().unwrap();
+
+    assert_eq!(publication.flags, expected_flags);
+    assert_eq!(
+        publication.anomaly.volume_dirty,
+        expected_volume_flags & 0x0002 != 0
+    );
+    assert_eq!(
+        publication.anomaly.media_failure,
+        expected_volume_flags & 0x0004 != 0
+    );
+    assert_eq!(
+        publication.anomaly.clear_to_zero,
+        expected_volume_flags & 0x0008 != 0
+    );
+}
+
+fn boot_volume_flags(disk: &Arc<ExfatRefactorMemoryDisk>) -> u16 {
+    let volume_flags = disk.read_bytes(106, 2);
+    u16::from_le_bytes([volume_flags[0], volume_flags[1]])
 }
 
 fn next_cluster(
@@ -587,6 +783,161 @@ fn mount_volume_state_preserves_volume_anomaly_flags() {
     assert!(publication.anomaly.volume_dirty);
     assert!(publication.anomaly.media_failure);
     assert!(publication.anomaly.clear_to_zero);
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_posture_and_admission_boundary_observation_and_sync_preserve_anomaly_overlays_root_and_superblock_visibility(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, default_mount_options());
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+
+    fs.sync().unwrap();
+
+    assert_observed_volume_posture(&fs, FsFlags::empty(), CLEAN_TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_posture_and_admission_boundary_read_only_admission_and_sync_reject_without_state_drift(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let options = ExfatMountOptions {
+        fs_flags: FsFlags::RDONLY,
+        ..default_mount_options()
+    };
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, options);
+
+    assert_eq!(flags, FsFlags::RDONLY);
+    assert_eq!(super_block.flags, u64::from(FsFlags::RDONLY.bits()));
+    assert_observed_volume_posture(&fs, FsFlags::RDONLY, TEST_VOLUME_FLAGS);
+    assert_eq!(
+        fs.admitted_mutation_state().err(),
+        Some(MountVolumeStateError::ReadOnlyConflict)
+    );
+
+    let error = fs.sync().unwrap_err();
+    assert_eq!(error.error(), Errno::EROFS);
+
+    assert_observed_volume_posture(&fs, FsFlags::RDONLY, TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_dirty_admission_persists_dirty_boot_flag_and_preserves_existing_anomaly_overlays(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &CLEAN_TEST_VOLUME_FLAGS.to_le_bytes());
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, default_mount_options());
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), CLEAN_TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), CLEAN_TEST_VOLUME_FLAGS);
+
+    let (state_guard, _, _, anomaly, _, _) = fs.admitted_mutation_state().unwrap();
+
+    assert!(anomaly.volume_dirty);
+    assert!(anomaly.media_failure);
+    assert!(anomaly.clear_to_zero);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+    drop(state_guard);
+
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_sync_clears_only_volume_dirty_and_repeated_clean_syncs_stay_stable(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, default_mount_options());
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+
+    fs.sync().unwrap();
+
+    assert_observed_volume_posture(&fs, FsFlags::empty(), CLEAN_TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), CLEAN_TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+
+    for _ in 0..2 {
+        fs.sync().unwrap();
+        assert_observed_volume_posture(&fs, FsFlags::empty(), CLEAN_TEST_VOLUME_FLAGS);
+        assert_eq!(boot_volume_flags(&disk), CLEAN_TEST_VOLUME_FLAGS);
+        assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+        assert_same_super_block(&super_block, &fs.sb());
+    }
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_sync_boot_flag_write_failure_keeps_dirty_posture_and_anomaly_overlays(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let failing_disk = ExfatRefactorToggleFailingWriteDisk::new(disk.clone(), 0, SECTOR_SIZE);
+    let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
+    let (fs, root_inode, super_block, flags) =
+        mount_block_device(&block_device, default_mount_options()).unwrap();
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+
+    failing_disk.enable_failures();
+
+    let error = fs.sync().unwrap_err();
+    assert_eq!(error.error(), Errno::EIO);
+
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_sync_final_flush_failure_withholds_clean_publication_until_barrier_completion(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let failing_disk = ExfatRefactorCountedFailingFlushDisk::new(disk.clone(), 2);
+    let block_device: Arc<dyn BlockDevice> = failing_disk;
+    let (fs, root_inode, super_block, flags) =
+        mount_block_device(&block_device, default_mount_options()).unwrap();
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+
+    let error = fs.sync().unwrap_err();
+    assert_eq!(error.error(), Errno::EIO);
+
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), CLEAN_TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
 }
 
 #[ktest]
