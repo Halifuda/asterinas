@@ -7,21 +7,23 @@ use core::{
 };
 
 use aster_block::{
-    BlockDevice, BlockDeviceMeta, SECTOR_SIZE,
     bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
+    BlockDevice, BlockDeviceMeta, SECTOR_SIZE,
 };
 use device_id::DeviceId;
 use ostd::{
-    mm::{FrameAllocOptions, HasSize, PAGE_SIZE, Segment, VmIo, io::util::HasVmReaderWriter},
+    mm::{io::util::HasVmReaderWriter, FrameAllocOptions, HasSize, Segment, VmIo, PAGE_SIZE},
     prelude::ktest,
 };
 
 use super::*;
-use crate::fs::{
-    file::InodeType,
-    vfs::{file_system::FsFlags, inode::Inode},
+use crate::{
+    fs::{
+        file::InodeType,
+        vfs::{file_system::FsFlags, inode::Inode},
+    },
+    thread::{kernel_thread::ThreadOptions, Thread},
 };
-use crate::thread::{Thread, kernel_thread::ThreadOptions};
 
 const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 const CLEAN_TEST_VOLUME_FLAGS: u16 = TEST_VOLUME_FLAGS & !0x0002;
@@ -98,11 +100,7 @@ struct ExfatRefactorCountedFailingFlushDisk {
 }
 
 impl ExfatRefactorFailingReadDisk {
-    fn new(
-        inner: Arc<ExfatRefactorMemoryDisk>,
-        fail_offset: usize,
-        fail_len: usize,
-    ) -> Arc<Self> {
+    fn new(inner: Arc<ExfatRefactorMemoryDisk>, fail_offset: usize, fail_len: usize) -> Arc<Self> {
         Arc::new(Self {
             fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
             inner,
@@ -115,11 +113,7 @@ impl ExfatRefactorFailingReadDisk {
 }
 
 impl ExfatRefactorToggleFailingReadDisk {
-    fn new(
-        inner: Arc<ExfatRefactorMemoryDisk>,
-        fail_offset: usize,
-        fail_len: usize,
-    ) -> Arc<Self> {
+    fn new(inner: Arc<ExfatRefactorMemoryDisk>, fail_offset: usize, fail_len: usize) -> Arc<Self> {
         Arc::new(Self {
             fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
             fail_reads: AtomicBool::new(false),
@@ -137,11 +131,7 @@ impl ExfatRefactorToggleFailingReadDisk {
 }
 
 impl ExfatRefactorToggleFailingWriteDisk {
-    fn new(
-        inner: Arc<ExfatRefactorMemoryDisk>,
-        fail_offset: usize,
-        fail_len: usize,
-    ) -> Arc<Self> {
+    fn new(inner: Arc<ExfatRefactorMemoryDisk>, fail_offset: usize, fail_len: usize) -> Arc<Self> {
         Arc::new(Self {
             fail_range: fail_offset..fail_offset.checked_add(fail_len).unwrap(),
             fail_writes: AtomicBool::new(false),
@@ -511,8 +501,7 @@ fn find_directory_entry(
     disk: &Arc<ExfatRefactorMemoryDisk>,
     entry_type: u8,
 ) -> DirectoryEntryLocation {
-    let validated_mount = super::super::test_support::load_validated_mount(disk.as_ref())
-        .unwrap();
+    let validated_mount = super::super::test_support::load_validated_mount(disk.as_ref()).unwrap();
     let boot_region = validated_mount.boot_region;
     let mut current_cluster = boot_region.root_dir_cluster;
     let mut visited_clusters = BTreeSet::new();
@@ -545,10 +534,8 @@ fn init_mount_volume_state_test_runtime() {
 fn mount_disk(
     disk: &Arc<ExfatRefactorMemoryDisk>,
     options: ExfatMountOptions,
-) -> core::result::Result<
-    (Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags),
-    MountVolumeStateError,
-> {
+) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), MountVolumeStateError>
+{
     let block_device: Arc<dyn BlockDevice> = disk.clone();
     mount_block_device(&block_device, options)
 }
@@ -556,10 +543,8 @@ fn mount_disk(
 fn mount_block_device(
     block_device: &Arc<dyn BlockDevice>,
     options: ExfatMountOptions,
-) -> core::result::Result<
-    (Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags),
-    MountVolumeStateError,
-> {
+) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), MountVolumeStateError>
+{
     ExfatFs::mount_candidate(block_device, Some("exfat-refactor-test"), &options)
 }
 
@@ -570,10 +555,7 @@ fn mounted_fs(
     mount_disk(disk, options).unwrap()
 }
 
-fn assert_administrative_trim_rejection_preserves_state(
-    fs: &Arc<ExfatFs>,
-    expected_errno: Errno,
-) {
+fn assert_administrative_trim_rejection_preserves_state(fs: &Arc<ExfatFs>, expected_errno: Errno) {
     let before_snapshot = fs.cached_free_space_snapshot().unwrap();
     let before_super_block = fs.sb();
     let before_options = fs.current_options().unwrap();
@@ -677,6 +659,8 @@ fn allocation_bitmap_data_offset(disk: &Arc<ExfatRefactorMemoryDisk>) -> usize {
     ]);
     cluster_offset(&directory_entry.boot_region, first_cluster)
 }
+
+mod volume_sync_integration;
 
 #[ktest]
 fn mount_volume_state_mount_publishes_root_inode_superblock_and_defaults() {
@@ -941,6 +925,80 @@ fn filesystem_sync_and_volume_state_sync_final_flush_failure_withholds_clean_pub
 }
 
 #[ktest]
+fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_suppresses_mutation_and_trim(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    let options = ExfatMountOptions {
+        discard: true,
+        ..default_mount_options()
+    };
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, options.clone());
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_eq!(fs.current_options().unwrap(), options);
+    assert!(!fs.state.read().as_ref().unwrap().forced_shutdown);
+
+    fs.admit_forced_shutdown().unwrap();
+    fs.admit_forced_shutdown().unwrap();
+
+    {
+        let state = fs.state.read();
+        let publication = state.as_ref().unwrap();
+        assert!(publication.forced_shutdown);
+        assert_eq!(publication.flags, FsFlags::empty());
+        assert_eq!(publication.options, options);
+    }
+
+    assert_eq!(
+        fs.admitted_mutation_state().err(),
+        Some(MountVolumeStateError::DeviceIo)
+    );
+
+    let trim_error = fs.administrative_trim_free_space().unwrap_err();
+    assert_eq!(trim_error.error(), Errno::EIO);
+
+    let sync_error = fs.sync().unwrap_err();
+    assert_eq!(sync_error.error(), Errno::EIO);
+
+    assert!(fs.state.read().as_ref().unwrap().forced_shutdown);
+    assert_eq!(fs.current_options().unwrap(), options);
+    assert_eq!(fs.published_flags().unwrap(), FsFlags::empty());
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
+fn filesystem_sync_and_volume_state_forced_shutdown_sync_and_observation_preserve_existing_anomaly_posture(
+) {
+    init_mount_volume_state_test_runtime();
+
+    let disk = ExfatRefactorMemoryDisk::new();
+    disk.write_bytes(106, &TEST_VOLUME_FLAGS.to_le_bytes());
+    let (fs, root_inode, super_block, flags) = mounted_fs(&disk, default_mount_options());
+
+    assert_eq!(flags, FsFlags::empty());
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+
+    fs.admit_forced_shutdown().unwrap();
+
+    let sync_error = fs.sync().unwrap_err();
+    assert_eq!(sync_error.error(), Errno::EIO);
+    assert_eq!(
+        fs.admitted_mutation_state().err(),
+        Some(MountVolumeStateError::DeviceIo)
+    );
+
+    assert!(fs.state.read().as_ref().unwrap().forced_shutdown);
+    assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
+    assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
+    assert!(Arc::ptr_eq(&root_inode, &fs.root_inode()));
+    assert_same_super_block(&super_block, &fs.sb());
+}
+
+#[ktest]
 fn mount_volume_state_rejects_invalid_boot_region() {
     init_mount_volume_state_test_runtime();
 
@@ -1093,8 +1151,8 @@ fn administrative_trim_free_space_rejects_read_only_before_unsupported_trim() {
 }
 
 #[ktest]
-fn free_space_accounting_and_discard_integration_allocate_free_updates_superblock_and_discard_policy()
-{
+fn free_space_accounting_and_discard_integration_allocate_free_updates_superblock_and_discard_policy(
+) {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -1136,8 +1194,7 @@ fn free_space_accounting_and_discard_integration_failures_preserve_snapshot_and_
 
     let disk = ExfatRefactorMemoryDisk::new();
     let bitmap_offset = allocation_bitmap_data_offset(&disk);
-    let failing_disk =
-        ExfatRefactorToggleFailingReadDisk::new(disk, bitmap_offset, SECTOR_SIZE);
+    let failing_disk = ExfatRefactorToggleFailingReadDisk::new(disk, bitmap_offset, SECTOR_SIZE);
     let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
     let options = ExfatMountOptions {
         discard: true,
@@ -1309,7 +1366,10 @@ fn free_space_accounting_and_discard_integration_snapshot_linearizes_under_alloc
             }
 
             let freed_snapshot = fs.free_allocated_space(&allocated_ranges).unwrap();
-            assert_eq!(freed_snapshot.total_clusters, initial_snapshot.total_clusters);
+            assert_eq!(
+                freed_snapshot.total_clusters,
+                initial_snapshot.total_clusters
+            );
             assert_eq!(freed_snapshot.free_clusters, initial_snapshot.free_clusters);
             assert_eq!(freed_snapshot.used_clusters, initial_snapshot.used_clusters);
             assert_snapshot_matches_super_block(&freed_snapshot, &fs.sb());
@@ -1333,7 +1393,10 @@ fn free_space_accounting_and_discard_integration_snapshot_linearizes_under_alloc
     }));
 
     let final_snapshot = fs.cached_free_space_snapshot().unwrap();
-    assert_eq!(final_snapshot.total_clusters, initial_snapshot.total_clusters);
+    assert_eq!(
+        final_snapshot.total_clusters,
+        initial_snapshot.total_clusters
+    );
     assert_eq!(final_snapshot.free_clusters, initial_snapshot.free_clusters);
     assert_eq!(final_snapshot.used_clusters, initial_snapshot.used_clusters);
     assert_snapshot_matches_super_block(&final_snapshot, &fs.sb());
