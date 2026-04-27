@@ -6,7 +6,7 @@ use core::{ops::Range, time::Duration};
 use aster_block::BlockDevice;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
-use super::*;
+use super::{super::super::test_support::inode::entry_set_checksum, *};
 use crate::process::{Gid, Uid};
 
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
@@ -58,7 +58,7 @@ fn expected_timestamp(date: Date, time: Time, offset: UtcOffset) -> Duration {
     Duration::from_nanos(u64::try_from(timestamp.unix_timestamp_nanos()).unwrap())
 }
 
-fn set_regular_file_entry_metadata(
+fn set_directory_entry_metadata(
     disk: &Arc<ExfatLookupTestDisk>,
     entry_index: usize,
     file_attributes: u16,
@@ -88,13 +88,13 @@ fn set_regular_file_entry_metadata(
     entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] = modified_ten_ms_increment;
     entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(modified.2);
 
-    let checksum = entry_set_checksum(&entry_set, usize::from(entry_set[1]));
+    let checksum = entry_set_checksum(&entry_set, entry_set[1]);
     entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
     disk.write_root_entries(entry_index, &entry_set);
 }
 
 fn assert_valid_entry_set_checksum(entry_set: &[u8]) {
-    let checksum = entry_set_checksum(entry_set, usize::from(entry_set[1]));
+    let checksum = entry_set_checksum(entry_set, entry_set[1]);
     assert_eq!(u16::from_le_bytes([entry_set[2], entry_set[3]]), checksum);
 }
 
@@ -112,40 +112,43 @@ fn assert_bytes_unchanged_except(before: &[u8], after: &[u8], allowed_ranges: &[
     }
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state()
+pub(super) fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_updates_only_dos_read_only_for_ordinary_directories()
  {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
-    disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "ModeFile");
-    set_regular_file_entry_metadata(
+    disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "ModeDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
+    set_directory_entry_metadata(
         &disk,
         ROOT_FILE_ENTRY_INDEX,
-        FILE_ATTRIBUTE_REGULAR,
+        FILE_ATTRIBUTE_DIRECTORY,
         (
-            Date::from_calendar_date(2026, Month::January, 4).unwrap(),
+            Date::from_calendar_date(2026, Month::January, 14).unwrap(),
             Time::from_hms_milli(1, 2, 4, 120).unwrap(),
             UtcOffset::from_whole_seconds(2 * 60 * 60).unwrap(),
         ),
         (
-            Date::from_calendar_date(2026, Month::January, 7).unwrap(),
+            Date::from_calendar_date(2026, Month::January, 18).unwrap(),
             UtcOffset::from_whole_seconds(60 * 60).unwrap(),
         ),
         (
-            Date::from_calendar_date(2026, Month::January, 9).unwrap(),
+            Date::from_calendar_date(2026, Month::January, 22).unwrap(),
             Time::from_hms_milli(5, 6, 8, 230).unwrap(),
-            UtcOffset::from_whole_seconds(90 * 60).unwrap(),
+            UtcOffset::from_whole_seconds(-90 * 60).unwrap(),
         ),
     );
 
     let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("ModeFile").unwrap();
-    let metadata_before = file_inode.metadata();
+    let directory_inode = root_inode.lookup("ModeDir").unwrap();
+    let metadata_before = directory_inode.metadata();
     let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
 
     let requested_mode = chmod!(metadata_before.mode, a-w);
-    let _ = disk.take_observed_bios();
-    file_inode.set_mode(requested_mode).unwrap();
+    directory_inode.set_mode(requested_mode).unwrap();
 
     let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     assert_valid_entry_set_checksum(&entry_set_after);
@@ -154,46 +157,46 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
             entry_set_after[FILE_ATTRIBUTES_OFFSET],
             entry_set_after[FILE_ATTRIBUTES_OFFSET + 1],
         ]),
-        FILE_ATTRIBUTE_REGULAR | FILE_ATTRIBUTE_READ_ONLY
+        FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READ_ONLY
     );
     assert_bytes_unchanged_except(&entry_set_before, &entry_set_after, &[2..6]);
-    assert_eq!(file_inode.mode().unwrap(), requested_mode);
-    assert_eq!(file_inode.metadata().mode, requested_mode);
-
-    let _ = disk.take_observed_bios();
-    file_inode.sync_data().unwrap();
-    assert!(disk.take_observed_bios().is_empty());
-
-    file_inode.sync_all().unwrap();
-    assert_flush_only(&disk.take_observed_bios());
-
-    file_inode.sync_all().unwrap();
-    assert!(disk.take_observed_bios().is_empty());
+    assert_eq!(directory_inode.type_(), InodeType::Dir);
+    assert_eq!(directory_inode.mode().unwrap(), requested_mode);
+    assert_eq!(directory_inode.metadata().mode, requested_mode);
+    assert_eq!(directory_inode.metadata().size, metadata_before.size);
+    assert_eq!(
+        directory_inode.metadata().nr_sectors_allocated,
+        metadata_before.nr_sectors_allocated
+    );
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape()
+pub(super) fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_follow_mount_envelope()
  {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
-    disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "OwnerFile");
+    disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "OwnerDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
 
     let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("OwnerFile").unwrap();
-    let metadata_before = file_inode.metadata();
+    let directory_inode = root_inode.lookup("OwnerDir").unwrap();
+    let metadata_before = directory_inode.metadata();
     let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
 
-    assert_eq!(file_inode.owner().unwrap(), Uid::new_root());
-    assert_eq!(file_inode.group().unwrap(), Gid::new_root());
+    assert_eq!(directory_inode.owner().unwrap(), Uid::new_root());
+    assert_eq!(directory_inode.group().unwrap(), Gid::new_root());
 
-    file_inode.set_owner(Uid::new_root()).unwrap();
-    file_inode.set_group(Gid::new_root()).unwrap();
+    directory_inode.set_owner(Uid::new_root()).unwrap();
+    directory_inode.set_group(Gid::new_root()).unwrap();
     assert_eq!(
-        file_inode.set_owner(Uid::new(42)).unwrap_err().error(),
+        directory_inode.set_owner(Uid::new(42)).unwrap_err().error(),
         Errno::EPERM
     );
     assert_eq!(
-        file_inode.set_group(Gid::new(24)).unwrap_err().error(),
+        directory_inode.set_group(Gid::new(24)).unwrap_err().error(),
         Errno::EPERM
     );
 
@@ -201,15 +204,19 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
         entry_set_before
     );
-    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
+    assert_metadata_unchanged(directory_inode.metadata(), metadata_before);
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families()
+pub(super) fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_directory_timestamp_families()
  {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
-    disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "TimeFile");
+    disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "TimeDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
 
     let create_date = Date::from_calendar_date(2026, Month::February, 2).unwrap();
     let create_time = Time::from_hms_milli(3, 4, 6, 120).unwrap();
@@ -219,18 +226,18 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     let modified_date = Date::from_calendar_date(2026, Month::February, 9).unwrap();
     let modified_time = Time::from_hms_milli(10, 12, 14, 230).unwrap();
     let modified_offset = UtcOffset::from_whole_seconds(-2 * 60 * 60).unwrap();
-    set_regular_file_entry_metadata(
+    set_directory_entry_metadata(
         &disk,
         ROOT_FILE_ENTRY_INDEX,
-        FILE_ATTRIBUTE_REGULAR,
+        FILE_ATTRIBUTE_DIRECTORY,
         (create_date, create_time, create_offset),
         (accessed_date, accessed_offset),
         (modified_date, modified_time, modified_offset),
     );
 
     let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("TimeFile").unwrap();
-    let modified_before = file_inode.mtime();
+    let directory_inode = root_inode.lookup("TimeDir").unwrap();
+    let modified_before = directory_inode.mtime();
     let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
 
     let requested_atime = expected_timestamp(
@@ -238,7 +245,7 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         Time::from_hms(16, 14, 0).unwrap(),
         accessed_offset,
     );
-    file_inode.set_atime(requested_atime);
+    directory_inode.set_atime(requested_atime);
 
     let entry_set_after_atime = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     assert_valid_entry_set_checksum(&entry_set_after_atime);
@@ -259,15 +266,21 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         entry_set_after_atime[LAST_ACCESSED_UTC_OFFSET_OFFSET],
         encode_valid_utc_offset_byte(accessed_offset)
     );
-    assert_eq!(file_inode.atime(), requested_atime);
-    assert_eq!(file_inode.mtime(), modified_before);
+    let expected_projected_atime = expected_timestamp(
+        Date::from_calendar_date(2026, Month::March, 12).unwrap(),
+        Time::MIDNIGHT,
+        accessed_offset,
+    );
+    assert_eq!(directory_inode.atime(), expected_projected_atime);
+    assert_eq!(directory_inode.mtime(), modified_before);
+    assert_eq!(directory_inode.ctime(), modified_before);
 
     let requested_mtime = expected_timestamp(
         Date::from_calendar_date(2026, Month::April, 18).unwrap(),
         Time::from_hms_milli(20, 22, 24, 170).unwrap(),
         modified_offset,
     );
-    file_inode.set_mtime(requested_mtime);
+    directory_inode.set_mtime(requested_mtime);
 
     let entry_set_after_mtime = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     let (expected_modified_timestamp, expected_modified_ten_ms_increment) = encode_exfat_date_time(
@@ -309,20 +322,25 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         entry_set_after_mtime[CREATE_UTC_OFFSET_OFFSET],
         entry_set_before[CREATE_UTC_OFFSET_OFFSET]
     );
-    assert_eq!(file_inode.atime(), requested_atime);
-    assert_eq!(file_inode.mtime(), requested_mtime);
+    assert_eq!(directory_inode.atime(), expected_projected_atime);
+    assert_eq!(directory_inode.mtime(), requested_mtime);
+    assert_eq!(directory_inode.ctime(), requested_mtime);
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only()
+pub(super) fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_and_ctime_requests_stay_bounded()
  {
     init_lookup_test_runtime();
 
-    let disk = ExfatLookupTestDisk::new();
-    disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "SyntheticCtime");
-    set_regular_file_entry_metadata(
-        &disk,
+    let ordinary_disk = ExfatLookupTestDisk::new();
+    ordinary_disk.install_root_directory(
         ROOT_FILE_ENTRY_INDEX,
-        FILE_ATTRIBUTE_REGULAR,
+        "SyntheticDirCtime",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
+    set_directory_entry_metadata(
+        &ordinary_disk,
+        ROOT_FILE_ENTRY_INDEX,
+        FILE_ATTRIBUTE_DIRECTORY,
         (
             Date::from_calendar_date(2026, Month::May, 1).unwrap(),
             Time::from_hms_milli(4, 6, 8, 120).unwrap(),
@@ -339,63 +357,117 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         ),
     );
 
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("SyntheticCtime").unwrap();
-    let metadata_before = file_inode.metadata();
-    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    let requested_ctime = expected_timestamp(
+    let (_fs, ordinary_root_inode) = mount_root(&ordinary_disk, None);
+    let ordinary_directory_inode = ordinary_root_inode.lookup("SyntheticDirCtime").unwrap();
+    let metadata_before = ordinary_directory_inode.metadata();
+    let entry_set_before = root_entry_set(&ordinary_disk, ROOT_FILE_ENTRY_INDEX);
+    ordinary_directory_inode.set_ctime(expected_timestamp(
         Date::from_calendar_date(2026, Month::June, 9).unwrap(),
         Time::from_hms_milli(7, 8, 10, 340).unwrap(),
         UtcOffset::UTC,
-    );
-
-    let _ = disk.take_observed_bios();
-    file_inode.set_ctime(requested_ctime);
+    ));
 
     assert_eq!(
-        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        root_entry_set(&ordinary_disk, ROOT_FILE_ENTRY_INDEX),
         entry_set_before
     );
-    assert_eq!(file_inode.atime(), metadata_before.last_access_at);
-    assert_eq!(file_inode.mtime(), metadata_before.last_modify_at);
-    assert_eq!(file_inode.ctime(), requested_ctime);
-    assert_eq!(file_inode.metadata().last_meta_change_at, requested_ctime);
+    assert_metadata_unchanged(ordinary_directory_inode.metadata(), metadata_before);
+    assert_eq!(
+        ordinary_directory_inode.atime(),
+        metadata_before.last_access_at
+    );
+    assert_eq!(
+        ordinary_directory_inode.mtime(),
+        metadata_before.last_modify_at
+    );
+    assert_eq!(
+        ordinary_directory_inode.ctime(),
+        metadata_before.last_meta_change_at
+    );
 
-    let _ = disk.take_observed_bios();
-    file_inode.sync_all().unwrap();
-    assert!(disk.take_observed_bios().is_empty());
+    let root_disk = ExfatLookupTestDisk::new();
+    root_disk.install_root_fractured_entry_set(ROOT_FILE_ENTRY_INDEX, "BrokenRootNeighbor");
+
+    let (_fs, root_inode) = mount_root(&root_disk, None);
+    let root_metadata_before = root_inode.metadata();
+    assert_eq!(
+        root_inode
+            .set_mode(chmod!(root_metadata_before.mode, a-w))
+            .unwrap_err()
+            .error(),
+        Errno::EOPNOTSUPP
+    );
+    root_inode.set_atime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::July, 3).unwrap(),
+        Time::from_hms(13, 0, 0).unwrap(),
+        UtcOffset::UTC,
+    ));
+    root_inode.set_mtime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::July, 5).unwrap(),
+        Time::from_hms_milli(18, 20, 22, 120).unwrap(),
+        UtcOffset::UTC,
+    ));
+    root_inode.set_ctime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::July, 7).unwrap(),
+        Time::from_hms_milli(9, 10, 12, 340).unwrap(),
+        UtcOffset::UTC,
+    ));
+
+    assert_metadata_unchanged(root_inode.metadata(), root_metadata_before);
+    assert_eq!(
+        lookup_error(&root_inode, "BrokenRootNeighbor"),
+        Errno::EUCLEAN
+    );
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state()
+pub(super) fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state()
  {
     init_lookup_test_runtime();
 
     let read_only_disk = ExfatLookupTestDisk::new();
-    read_only_disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "DeniedFile");
+    read_only_disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "DeniedDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
     let denied_entry_set_before = root_entry_set(&read_only_disk, ROOT_FILE_ENTRY_INDEX);
     let (_fs, read_only_root) = mount_root_with_flags(&read_only_disk, FsFlags::RDONLY, None);
-    let denied_file = read_only_root.lookup("DeniedFile").unwrap();
-    let denied_metadata_before = denied_file.metadata();
+    let denied_directory = read_only_root.lookup("DeniedDir").unwrap();
+    let denied_metadata_before = denied_directory.metadata();
 
     assert_eq!(
-        denied_file
+        denied_directory
             .set_mode(chmod!(denied_metadata_before.mode, a-w))
             .unwrap_err()
             .error(),
         Errno::EROFS
     );
-    denied_file.set_atime(expected_timestamp(
-        Date::from_calendar_date(2026, Month::July, 3).unwrap(),
+    assert_eq!(
+        denied_directory
+            .set_owner(Uid::new_root())
+            .unwrap_err()
+            .error(),
+        Errno::EROFS
+    );
+    assert_eq!(
+        denied_directory
+            .set_group(Gid::new_root())
+            .unwrap_err()
+            .error(),
+        Errno::EROFS
+    );
+    denied_directory.set_atime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::August, 3).unwrap(),
         Time::from_hms(13, 0, 0).unwrap(),
         UtcOffset::UTC,
     ));
-    denied_file.set_mtime(expected_timestamp(
-        Date::from_calendar_date(2026, Month::July, 5).unwrap(),
+    denied_directory.set_mtime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::August, 5).unwrap(),
         Time::from_hms_milli(18, 20, 22, 120).unwrap(),
         UtcOffset::UTC,
     ));
-    denied_file.set_ctime(expected_timestamp(
-        Date::from_calendar_date(2026, Month::July, 7).unwrap(),
+    denied_directory.set_ctime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::August, 7).unwrap(),
         Time::from_hms_milli(9, 10, 12, 340).unwrap(),
         UtcOffset::UTC,
     ));
@@ -404,25 +476,74 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         root_entry_set(&read_only_disk, ROOT_FILE_ENTRY_INDEX),
         denied_entry_set_before
     );
-    assert_metadata_unchanged(denied_file.metadata(), denied_metadata_before);
+    assert_metadata_unchanged(denied_directory.metadata(), denied_metadata_before);
+
+    let integrity_disk = ExfatLookupTestDisk::new();
+    integrity_disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "BrokenDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
+    let (_fs, integrity_root) = mount_root(&integrity_disk, None);
+    let broken_directory = integrity_root.lookup("BrokenDir").unwrap();
+    let integrity_metadata_before = broken_directory.metadata();
+    let integrity_entry_set_before = root_entry_set(&integrity_disk, ROOT_FILE_ENTRY_INDEX);
+    let mut corrupted_entry_set = integrity_entry_set_before.clone();
+    corrupted_entry_set[2] ^= 0x5A;
+    integrity_disk.write_root_entries(ROOT_FILE_ENTRY_INDEX, &corrupted_entry_set);
+    let metadata_after_corruption = broken_directory.metadata();
+    assert_eq!(metadata_after_corruption.ino, integrity_metadata_before.ino);
+    assert_eq!(
+        metadata_after_corruption.size,
+        integrity_metadata_before.size
+    );
+    assert_eq!(metadata_after_corruption.type_, InodeType::Dir);
+
+    assert_eq!(
+        broken_directory
+            .set_mode(chmod!(integrity_metadata_before.mode, a-w))
+            .unwrap_err()
+            .error(),
+        Errno::EUCLEAN
+    );
+    broken_directory.set_atime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::September, 2).unwrap(),
+        Time::from_hms(6, 0, 0).unwrap(),
+        UtcOffset::UTC,
+    ));
+    broken_directory.set_mtime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::September, 4).unwrap(),
+        Time::from_hms_milli(8, 10, 12, 140).unwrap(),
+        UtcOffset::UTC,
+    ));
+
+    assert_eq!(
+        root_entry_set(&integrity_disk, ROOT_FILE_ENTRY_INDEX),
+        corrupted_entry_set
+    );
+    assert_metadata_unchanged(broken_directory.metadata(), metadata_after_corruption);
 
     let writable_disk = ExfatLookupTestDisk::new();
-    writable_disk.install_root_file(ROOT_FILE_ENTRY_INDEX, "IoFailureFile");
-    set_regular_file_entry_metadata(
+    writable_disk.install_root_directory(
+        ROOT_FILE_ENTRY_INDEX,
+        "IoFailureDir",
+        TEST_CHILD_DIRECTORY_CLUSTER,
+    );
+    set_directory_entry_metadata(
         &writable_disk,
         ROOT_FILE_ENTRY_INDEX,
-        FILE_ATTRIBUTE_REGULAR,
+        FILE_ATTRIBUTE_DIRECTORY,
         (
-            Date::from_calendar_date(2026, Month::August, 1).unwrap(),
+            Date::from_calendar_date(2026, Month::October, 1).unwrap(),
             Time::from_hms_milli(2, 4, 6, 120).unwrap(),
             UtcOffset::UTC,
         ),
         (
-            Date::from_calendar_date(2026, Month::August, 3).unwrap(),
+            Date::from_calendar_date(2026, Month::October, 3).unwrap(),
             UtcOffset::from_whole_seconds(60 * 60).unwrap(),
         ),
         (
-            Date::from_calendar_date(2026, Month::August, 5).unwrap(),
+            Date::from_calendar_date(2026, Month::October, 5).unwrap(),
             Time::from_hms_milli(8, 10, 12, 140).unwrap(),
             UtcOffset::from_whole_seconds(-60 * 60).unwrap(),
         ),
@@ -434,20 +555,20 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     );
     let block_device: Arc<dyn BlockDevice> = failing_write_disk.clone();
     let (_fs, io_root) = mount_root_from_block_device(block_device, FsFlags::empty(), None);
-    let io_file = io_root.lookup("IoFailureFile").unwrap();
+    let io_directory = io_root.lookup("IoFailureDir").unwrap();
     let io_entry_set_before = root_entry_set(&writable_disk, ROOT_FILE_ENTRY_INDEX);
-    let io_metadata_before = io_file.metadata();
+    let io_metadata_before = io_directory.metadata();
 
     failing_write_disk.enable_failures();
     assert_eq!(
-        io_file
+        io_directory
             .set_mode(chmod!(io_metadata_before.mode, a-w))
             .unwrap_err()
             .error(),
         Errno::EIO
     );
-    io_file.set_mtime(expected_timestamp(
-        Date::from_calendar_date(2026, Month::August, 9).unwrap(),
+    io_directory.set_mtime(expected_timestamp(
+        Date::from_calendar_date(2026, Month::October, 9).unwrap(),
         Time::from_hms_milli(14, 16, 18, 160).unwrap(),
         UtcOffset::from_whole_seconds(-60 * 60).unwrap(),
     ));
@@ -456,5 +577,5 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
         root_entry_set(&writable_disk, ROOT_FILE_ENTRY_INDEX),
         io_entry_set_before
     );
-    assert_metadata_unchanged(io_file.metadata(), io_metadata_before);
+    assert_metadata_unchanged(io_directory.metadata(), io_metadata_before);
 }

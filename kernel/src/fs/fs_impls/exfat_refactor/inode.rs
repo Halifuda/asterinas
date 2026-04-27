@@ -397,8 +397,9 @@ impl ExfatInode {
             << 9)
             | (u16::from(encoded_month) << 5)
             | u16::from(encoded_day);
-        let time =
-            (u16::from(encoded_hour) << 11) | (u16::from(encoded_minute) << 5) | u16::from(encoded_second / 2);
+        let time = (u16::from(encoded_hour) << 11)
+            | (u16::from(encoded_minute) << 5)
+            | u16::from(encoded_second / 2);
         let date_bytes = date.to_le_bytes();
         let time_bytes = time.to_le_bytes();
         let hundredths_increment = u16::from(encoded_second % 2) * 100 + (encoded_millisecond / 10);
@@ -409,8 +410,226 @@ impl ExfatInode {
         ))
     }
 
+    fn directory_metadata_projection(&self) -> Result<Metadata> {
+        let mut metadata = *self.metadata.read();
+        if metadata.type_ != InodeType::Dir {
+            return Ok(metadata);
+        }
+
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (_state_guard, block_device, boot_region, anomaly, _upcase_table, _options) =
+            fs.admitted_lookup_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let Some(parent) = self.parent.upgrade() else {
+            if self.stream.read().data_length.is_none() {
+                return Ok(metadata);
+            }
+            return Err(Error::with_message(
+                Errno::EIO,
+                "ordinary exFAT directory parent is not published",
+            ));
+        };
+        let _parent_guard = parent.admission.read();
+        let parent_stream = *parent.stream.read();
+        let directory_bytes =
+            Self::read_directory_bytes_for_stream(&block_device, &boot_region, parent_stream)
+                .map_err(Error::from)?;
+        let entry_index =
+            usize::try_from(metadata.ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let entry_view = match Self::scan_directory_entry_at(
+            parent_stream.data_length.is_none(),
+            &directory_bytes,
+            entry_index,
+        )
+        .map_err(Error::from)?
+        {
+            ScannedDirectoryEntry::File(entry_view) => entry_view,
+            _ => return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout)),
+        };
+        if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+        }
+
+        let (inode_type, _first_cluster, data_length, _no_fat_chain) = entry_view
+            .child_metadata(&boot_region)
+            .map_err(Error::from)?;
+        if inode_type != InodeType::Dir {
+            return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+        }
+
+        let entry_set = directory_bytes
+            .get(Self::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let create_timestamp = entry_set
+            .get(direntry::CREATE_TIMESTAMP_OFFSET..direntry::CREATE_TIMESTAMP_OFFSET + 4)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?
+            .try_into()
+            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+        let create_ten_ms_increment = *entry_set
+            .get(direntry::CREATE_10MS_INCREMENT_OFFSET)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let create_utc_offset = *entry_set
+            .get(direntry::CREATE_UTC_OFFSET_OFFSET)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let _create_at = Self::decoded_exfat_timestamp(
+            create_timestamp,
+            Some(create_ten_ms_increment),
+            create_utc_offset,
+        )
+        .map_err(Error::from)?;
+        let last_accessed_timestamp = entry_set
+            .get(
+                direntry::LAST_ACCESSED_TIMESTAMP_OFFSET
+                    ..direntry::LAST_ACCESSED_TIMESTAMP_OFFSET + 4,
+            )
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?
+            .try_into()
+            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+        let last_accessed_utc_offset = *entry_set
+            .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let last_access_at =
+            Self::decoded_exfat_timestamp(last_accessed_timestamp, None, last_accessed_utc_offset)
+                .map_err(Error::from)?;
+        let last_modified_timestamp = entry_set
+            .get(
+                direntry::LAST_MODIFIED_TIMESTAMP_OFFSET
+                    ..direntry::LAST_MODIFIED_TIMESTAMP_OFFSET + 4,
+            )
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?
+            .try_into()
+            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+        let last_modified_ten_ms_increment = *entry_set
+            .get(direntry::LAST_MODIFIED_10MS_INCREMENT_OFFSET)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let last_modified_utc_offset = *entry_set
+            .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let last_modify_at = Self::decoded_exfat_timestamp(
+            last_modified_timestamp,
+            Some(last_modified_ten_ms_increment),
+            last_modified_utc_offset,
+        )
+        .map_err(Error::from)?;
+        let writable_bits = metadata.mode & mkmod!(a+w);
+        metadata.mode = chmod!(metadata.mode, a-w);
+        if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_READ_ONLY == 0 {
+            metadata.mode |= writable_bits;
+        }
+        metadata.last_access_at = last_access_at;
+        metadata.last_meta_change_at = last_modify_at;
+        metadata.last_modify_at = last_modify_at;
+        metadata.nr_sectors_allocated =
+            Self::regular_file_allocated_sectors(&boot_region, data_length).map_err(Error::from)?;
+        metadata.size = data_length;
+        Ok(metadata)
+    }
+
+    fn rewrite_directory_self_entry_set(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>, &[u8]) -> Result<Option<Vec<u8>>>,
+        update_metadata_fn: impl FnOnce(&mut Metadata),
+    ) -> Result<bool> {
+        let parent = self.parent.upgrade().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "ordinary exFAT directory parent is not published",
+            )
+        })?;
+        let parent_stream = {
+            let _directory_guards =
+                Self::ordered_directory_write_guards(vec![self, parent.as_ref()]);
+            *parent.stream.read()
+        };
+        let mut directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
+                .map_err(Error::from)?;
+        let entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let (slot_range_bytes, republished_entry_set) = {
+            let _directory_guards =
+                Self::ordered_directory_write_guards(vec![self, parent.as_ref()]);
+            if *parent.stream.read() != parent_stream {
+                return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            }
+            let entry_view = match Self::scan_directory_entry_at(
+                parent_stream.data_length.is_none(),
+                &directory_bytes,
+                entry_index,
+            )
+            .map_err(Error::from)?
+            {
+                ScannedDirectoryEntry::File(entry_view) => entry_view,
+                _ => return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout)),
+            };
+            if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            }
+            let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
+                .child_metadata(boot_region)
+                .map_err(Error::from)?;
+            if inode_type != InodeType::Dir {
+                return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            }
+
+            let slot_range_bytes =
+                Self::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?;
+            let source_entry_set = directory_bytes
+                .get(slot_range_bytes.clone())
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+                .map_err(Error::from)?;
+            let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view, source_entry_set)?
+            else {
+                return Ok(false);
+            };
+            (slot_range_bytes, republished_entry_set)
+        };
+        let destination_entry_set = directory_bytes
+            .get_mut(slot_range_bytes)
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        destination_entry_set.copy_from_slice(&republished_entry_set);
+        Self::write_directory_bytes_for_stream(
+            block_device,
+            boot_region,
+            &directory_bytes,
+            parent_stream,
+        )
+        .map_err(Error::from)?;
+        {
+            let _directory_guards =
+                Self::ordered_directory_write_guards(vec![self, parent.as_ref()]);
+            if *parent.stream.read() != parent_stream {
+                return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            }
+            let mut metadata = self.metadata.write();
+            update_metadata_fn(&mut metadata);
+        }
+        Ok(true)
+    }
+
     fn metadata_projection(&self) -> Metadata {
         let mut metadata = *self.metadata.read();
+        if metadata.type_ == InodeType::Dir {
+            return self.directory_metadata_projection().unwrap_or(metadata);
+        }
         if metadata.type_ != InodeType::File {
             return metadata;
         }
@@ -495,8 +714,8 @@ impl ExfatInode {
     fn ordered_directory_write_guards<'a>(
         mut directories: Vec<&'a ExfatInode>,
     ) -> Vec<RwMutexWriteGuard<'a, ()>> {
-        directories.sort_by_key(|directory| directory.ino());
-        directories.dedup_by_key(|directory| directory.ino());
+        directories.sort_by_key(|directory| directory.metadata.read().ino);
+        directories.dedup_by_key(|directory| directory.metadata.read().ino);
         directories
             .into_iter()
             .map(|directory| directory.admission.write())
@@ -1092,11 +1311,7 @@ impl ExfatInode {
 
         let (timestamp_bytes, hundredths_increment, utc_offset_byte) =
             Self::encoded_exfat_timestamp_fields(timestamp, 0)?;
-        let last_modified_fields = (
-            timestamp_bytes,
-            hundredths_increment,
-            utc_offset_byte,
-        );
+        let last_modified_fields = (timestamp_bytes, hundredths_increment, utc_offset_byte);
         self.rewrite_regular_file_entry_set(
             block_device,
             boot_region,
@@ -1143,8 +1358,8 @@ impl ExfatInode {
         let mut directory_bytes =
             Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
                 .map_err(Error::from)?;
-        let entry_index = usize::try_from(self.metadata.read().ino as u32)
-            .map_err(|_| Error::new(Errno::EIO))?;
+        let entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
         let entry_view = match Self::scan_directory_entry_at(
             parent_stream.data_length.is_none(),
             &directory_bytes,
@@ -1161,7 +1376,8 @@ impl ExfatInode {
             .get(slot_range_bytes.clone())
             .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
-        let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view, source_entry_set)? else {
+        let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view, source_entry_set)?
+        else {
             return Ok(false);
         };
         let destination_entry_set = directory_bytes
@@ -2835,10 +3051,76 @@ impl Inode for ExfatInode {
     }
 
     fn mode(&self) -> Result<InodeMode> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return self
+                .directory_metadata_projection()
+                .map(|metadata| metadata.mode);
+        }
         Ok(self.metadata_projection().mode)
     }
 
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let fs = self.fs.upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
+            })?;
+            let (_state_guard, block_device, boot_region, anomaly, _upcase_table, _options) =
+                fs.admitted_mutation_state().map_err(Error::from)?;
+            if anomaly.clear_to_zero || anomaly.media_failure {
+                return_errno!(Errno::EIO);
+            }
+
+            let requested_writable = mode.intersects(mkmod!(a+w));
+            if self.stream.read().data_length.is_none() {
+                let current_writable = self.metadata.read().mode.intersects(mkmod!(a+w));
+                if requested_writable == current_writable {
+                    return Ok(());
+                }
+                return_errno!(Errno::EOPNOTSUPP);
+            }
+
+            let durable_updated = self.rewrite_directory_self_entry_set(
+                &block_device,
+                &boot_region,
+                |entry_view, _source_entry_set| {
+                    let current_attributes = entry_view.file_attributes();
+                    let current_writable =
+                        current_attributes & direntry::FILE_ATTRIBUTE_READ_ONLY == 0;
+                    if requested_writable == current_writable {
+                        return Ok(None);
+                    }
+
+                    let mut file_attributes =
+                        current_attributes | direntry::FILE_ATTRIBUTE_DIRECTORY;
+                    if requested_writable {
+                        file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
+                    } else {
+                        file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
+                    }
+                    direntry::republished_entry_set(
+                        entry_view,
+                        &direntry::FileEntrySetFieldUpdates {
+                            file_attributes: Some(file_attributes),
+                            ..Default::default()
+                        },
+                    )
+                    .map(Some)
+                    .map_err(Error::from)
+                },
+                |metadata| {
+                    let writable_bits = metadata.mode & mkmod!(a+w);
+                    metadata.mode = chmod!(metadata.mode, a-w);
+                    if requested_writable {
+                        metadata.mode |= writable_bits;
+                    }
+                },
+            )?;
+            if durable_updated {
+                self.mark_metadata_publication_dirty();
+            }
+            return Ok(());
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().mode = mode;
             return Ok(());
@@ -2899,10 +3181,32 @@ impl Inode for ExfatInode {
     }
 
     fn owner(&self) -> Result<Uid> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return self
+                .directory_metadata_projection()
+                .map(|metadata| metadata.uid);
+        }
         Ok(self.metadata_projection().uid)
     }
 
     fn set_owner(&self, uid: Uid) -> Result<()> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let fs = self.fs.upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
+            })?;
+            let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
+                fs.admitted_mutation_state().map_err(Error::from)?;
+            if anomaly.clear_to_zero || anomaly.media_failure {
+                return_errno!(Errno::EIO);
+            }
+
+            let _owner_guard = self.admission.write();
+            if self.metadata.read().uid == uid {
+                return Ok(());
+            }
+            return_errno!(Errno::EPERM);
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().uid = uid;
             return Ok(());
@@ -2926,10 +3230,32 @@ impl Inode for ExfatInode {
     }
 
     fn group(&self) -> Result<Gid> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return self
+                .directory_metadata_projection()
+                .map(|metadata| metadata.gid);
+        }
         Ok(self.metadata_projection().gid)
     }
 
     fn set_group(&self, gid: Gid) -> Result<()> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let fs = self.fs.upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
+            })?;
+            let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
+                fs.admitted_mutation_state().map_err(Error::from)?;
+            if anomaly.clear_to_zero || anomaly.media_failure {
+                return_errno!(Errno::EIO);
+            }
+
+            let _owner_guard = self.admission.write();
+            if self.metadata.read().gid == gid {
+                return Ok(());
+            }
+            return_errno!(Errno::EPERM);
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().gid = gid;
             return Ok(());
@@ -2957,6 +3283,63 @@ impl Inode for ExfatInode {
     }
 
     fn set_atime(&self, time: Duration) {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let Some(fs) = self.fs.upgrade() else {
+                return;
+            };
+            // TODO: Directory timestamp setters still admit through the generic mounted-mutation
+            // gate and reuse the currently stored exFAT UTC-offset byte because `ExfatMountOptions`
+            // does not yet own explicit `allow_utime` / timezone policy. Once the later
+            // `meso_09` mount-policy follow-up publishes that owner-local policy under `ExfatFs`,
+            // remove this seam and route timestamp admission plus UTC-offset selection through that
+            // dedicated path.
+            let Ok((_state_guard, block_device, boot_region, anomaly, _upcase_table, _options)) =
+                fs.admitted_mutation_state().map_err(Error::from)
+            else {
+                return;
+            };
+            if anomaly.clear_to_zero
+                || anomaly.media_failure
+                || self.stream.read().data_length.is_none()
+            {
+                return;
+            }
+
+            if self
+                .rewrite_directory_self_entry_set(
+                    &block_device,
+                    &boot_region,
+                    |entry_view, source_entry_set| {
+                        let utc_offset_byte = *source_entry_set
+                            .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+                            .map_err(Error::from)?;
+                        let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
+                            Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                        direntry::republished_entry_set(
+                            entry_view,
+                            &direntry::FileEntrySetFieldUpdates {
+                                last_accessed_fields: Some((
+                                    [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                    encoded_utc_offset_byte,
+                                )),
+                                ..Default::default()
+                            },
+                        )
+                        .map(Some)
+                        .map_err(Error::from)
+                    },
+                    |metadata| {
+                        metadata.last_access_at = time;
+                    },
+                )
+                .is_ok_and(|updated| updated)
+            {
+                self.mark_metadata_publication_dirty();
+            }
+            return;
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().last_access_at = time;
             return;
@@ -3020,6 +3403,64 @@ impl Inode for ExfatInode {
     }
 
     fn set_mtime(&self, time: Duration) {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let Some(fs) = self.fs.upgrade() else {
+                return;
+            };
+            // TODO: `set_mtime()` still shares the generic mounted-mutation gate and reuses the
+            // currently stored exFAT UTC-offset byte because `ExfatMountOptions` does not yet own
+            // explicit `allow_utime` / timezone policy. Once the later `meso_09` mount-policy
+            // follow-up publishes that owner-local policy under `ExfatFs`, remove this seam and
+            // route timestamp admission plus UTC-offset selection through that dedicated path.
+            let Ok((_state_guard, block_device, boot_region, anomaly, _upcase_table, _options)) =
+                fs.admitted_mutation_state().map_err(Error::from)
+            else {
+                return;
+            };
+            if anomaly.clear_to_zero
+                || anomaly.media_failure
+                || self.stream.read().data_length.is_none()
+            {
+                return;
+            }
+
+            if self
+                .rewrite_directory_self_entry_set(
+                    &block_device,
+                    &boot_region,
+                    |entry_view, source_entry_set| {
+                        let utc_offset_byte = *source_entry_set
+                            .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
+                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+                            .map_err(Error::from)?;
+                        let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                            Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                        direntry::republished_entry_set(
+                            entry_view,
+                            &direntry::FileEntrySetFieldUpdates {
+                                last_modified_fields: Some((
+                                    timestamp_bytes,
+                                    ten_ms_increment,
+                                    encoded_utc_offset_byte,
+                                )),
+                                ..Default::default()
+                            },
+                        )
+                        .map(Some)
+                        .map_err(Error::from)
+                    },
+                    |metadata| {
+                        metadata.last_meta_change_at = time;
+                        metadata.last_modify_at = time;
+                    },
+                )
+                .is_ok_and(|updated| updated)
+            {
+                self.mark_metadata_publication_dirty();
+            }
+            return;
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().last_modify_at = time;
             return;
@@ -3084,6 +3525,25 @@ impl Inode for ExfatInode {
     }
 
     fn set_ctime(&self, time: Duration) {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let Some(fs) = self.fs.upgrade() else {
+                return;
+            };
+            // TODO: Directory `set_ctime()` remains a bounded synthetic no-op until the later
+            // `meso_09` mount-policy follow-up gives `ExfatFs` an explicit owner-local
+            // `allow_utime` admission path and the broader metadata policy decides whether this
+            // VFS-facing request should keep refusing or be absorbed into another durable family.
+            let Ok((_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options)) =
+                fs.admitted_mutation_state().map_err(Error::from)
+            else {
+                return;
+            };
+            if anomaly.clear_to_zero || anomaly.media_failure {
+                return;
+            }
+            return;
+        }
+
         if self.metadata.read().type_ != InodeType::File {
             self.metadata.write().last_meta_change_at = time;
             return;
