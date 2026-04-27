@@ -625,6 +625,60 @@ impl ExfatInode {
         Ok(true)
     }
 
+    fn refresh_directory_metadata_after_namespace_mutation(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        timestamp: Duration,
+    ) -> Result<()> {
+        if self.metadata.read().type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+
+        if self.stream.read().data_length.is_none() {
+            let mut metadata = self.metadata.write();
+            metadata.last_meta_change_at = timestamp;
+            metadata.last_modify_at = timestamp;
+            drop(metadata);
+            self.mark_metadata_publication_dirty();
+            return Ok(());
+        }
+
+        let durable_updated = self.rewrite_directory_self_entry_set(
+            block_device,
+            boot_region,
+            |entry_view, source_entry_set| {
+                let utc_offset_byte = *source_entry_set
+                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
+                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+                    .map_err(Error::from)?;
+                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                    Self::encoded_exfat_timestamp_fields(timestamp, utc_offset_byte)?;
+                direntry::republished_entry_set(
+                    entry_view,
+                    &direntry::FileEntrySetFieldUpdates {
+                        last_modified_fields: Some((
+                            timestamp_bytes,
+                            ten_ms_increment,
+                            encoded_utc_offset_byte,
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .map(Some)
+                .map_err(Error::from)
+            },
+            |metadata| {
+                metadata.last_meta_change_at = timestamp;
+                metadata.last_modify_at = timestamp;
+            },
+        )?;
+        if durable_updated {
+            self.mark_metadata_publication_dirty();
+        }
+        Ok(())
+    }
+
     fn metadata_projection(&self) -> Metadata {
         let mut metadata = *self.metadata.read();
         if metadata.type_ == InodeType::Dir {
@@ -1979,7 +2033,7 @@ impl ExfatInode {
         old_name_hash: u16,
         new_name: &[u16],
         new_name_hash: u16,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let current_directory_bytes =
             Self::read_directory_bytes_for_stream(block_device, boot_region, stream)
                 .map_err(Error::from)?;
@@ -2009,7 +2063,7 @@ impl ExfatInode {
             .is_some_and(|slot_range| slot_range == current_source_slot_range)
             && source_name == new_name
         {
-            return Ok(());
+            return Ok(false);
         }
         let current_renamed_entry_set =
             direntry::renamed_entry_set(current_source_view, new_name, new_name_hash)
@@ -2156,7 +2210,7 @@ impl ExfatInode {
         if !replaced_target_ranges.is_empty() {
             let _ = fs.free_allocated_space_with_publication(publication, &replaced_target_ranges);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn rename_across_directories(
@@ -3606,122 +3660,133 @@ impl Inode for ExfatInode {
         let name_hash = upcase_table.name_hash(&admitted_name);
         let required_entry_count =
             direntry::file_entry_set_entry_count(admitted_name.len()).map_err(Error::from)?;
-        let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
-        let stream = *self.stream.read();
-        let current_directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
-                .map_err(Error::from)?;
-        if Self::locate_named_child_view(
-            &current_directory_bytes,
-            stream.data_length.is_none(),
-            &upcase_table,
-            &admitted_name,
-            name_hash,
-        )
-        .map_err(Error::from)?
-        .is_some()
-        {
-            return_errno!(Errno::EEXIST);
-        }
-
-        let publication = state_guard
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)
-            .map_err(Error::from)?;
-        let (stream, mut published_directory_bytes, slot_range) = self
-            .reserve_directory_entry_slots(
-                stream,
-                publication,
-                &fs,
-                &block_device,
-                &boot_region,
-                required_entry_count,
+        let child_inode = {
+            let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
+            let stream = *self.stream.read();
+            let current_directory_bytes =
+                Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+                    .map_err(Error::from)?;
+            if Self::locate_named_child_view(
+                &current_directory_bytes,
+                stream.data_length.is_none(),
+                &upcase_table,
+                &admitted_name,
+                name_hash,
             )
-            .map_err(Error::from)?;
+            .map_err(Error::from)?
+            .is_some()
+            {
+                return_errno!(Errno::EEXIST);
+            }
 
-        let mut allocated_directory_ranges = None;
-        let (first_cluster, data_length, no_fat_chain) = if type_ == InodeType::Dir
-            && !options.zero_size_dir
-        {
-            let (allocated_ranges, _) = fs
-                .allocate_free_space_with_publication(publication, 1)
+            let publication = state_guard
+                .as_mut()
+                .ok_or(MountVolumeStateError::UnpublishedState)
                 .map_err(Error::from)?;
-            let allocated_cluster = match allocated_ranges.as_slice() {
-                [allocated_range] if allocated_range.cluster_count == 1 => {
-                    allocated_range.start_cluster
-                }
-                _ => {
+            let (stream, mut published_directory_bytes, slot_range) = self
+                .reserve_directory_entry_slots(
+                    stream,
+                    publication,
+                    &fs,
+                    &block_device,
+                    &boot_region,
+                    required_entry_count,
+                )
+                .map_err(Error::from)?;
+
+            let mut allocated_directory_ranges = None;
+            let (first_cluster, data_length, no_fat_chain) = if type_ == InodeType::Dir
+                && !options.zero_size_dir
+            {
+                let (allocated_ranges, _) = fs
+                    .allocate_free_space_with_publication(publication, 1)
+                    .map_err(Error::from)?;
+                let allocated_cluster = match allocated_ranges.as_slice() {
+                    [allocated_range] if allocated_range.cluster_count == 1 => {
+                        allocated_range.start_cluster
+                    }
+                    _ => {
+                        let _ = fs
+                            .free_allocated_space_with_publication(publication, &allocated_ranges);
+                        return Err(Error::from(MountVolumeStateError::InconsistentAccounting));
+                    }
+                };
+                if let Err(error) = Self::initialize_directory_cluster(
+                    &block_device,
+                    &boot_region,
+                    allocated_cluster,
+                ) {
                     let _ =
                         fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-                    return Err(Error::from(MountVolumeStateError::InconsistentAccounting));
+                    return Err(Error::from(error));
                 }
+                allocated_directory_ranges = Some(allocated_ranges);
+                (allocated_cluster, boot_region.cluster_size, true)
+            } else {
+                (0, 0, false)
             };
-            if let Err(error) =
-                Self::initialize_directory_cluster(&block_device, &boot_region, allocated_cluster)
-            {
-                let _ = fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-                return Err(Error::from(error));
-            }
-            allocated_directory_ranges = Some(allocated_ranges);
-            (allocated_cluster, boot_region.cluster_size, true)
-        } else {
-            (0, 0, false)
-        };
 
-        let entry_set = direntry::encode_file_entry_set(
-            &admitted_name,
-            name_hash,
-            type_,
-            first_cluster,
-            data_length,
-            no_fat_chain,
-        )
-        .map_err(|error| {
-            if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-            }
-            Error::from(error)
-        })?;
-        let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(|error| {
-            if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-            }
-            Error::from(error)
-        })?;
-        published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
-        Self::write_directory_bytes_for_stream(
+            let entry_set = direntry::encode_file_entry_set(
+                &admitted_name,
+                name_hash,
+                type_,
+                first_cluster,
+                data_length,
+                no_fat_chain,
+            )
+            .map_err(|error| {
+                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
+                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
+                }
+                Error::from(error)
+            })?;
+            let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(|error| {
+                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
+                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
+                }
+                Error::from(error)
+            })?;
+            published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
+            Self::write_directory_bytes_for_stream(
+                &block_device,
+                &boot_region,
+                &published_directory_bytes,
+                stream,
+            )
+            .map_err(|error| {
+                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
+                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
+                }
+                Error::from(error)
+            })?;
+
+            let child_size = if type_ == InodeType::Dir {
+                data_length
+            } else {
+                0
+            };
+            let child_inode = Self::new_child(
+                &fs,
+                self.this.clone(),
+                self.entry_location_ino(slot_range.first_entry_index())
+                    .map_err(Error::from)?,
+                type_,
+                boot_region.cluster_size,
+                child_size,
+                first_cluster,
+                data_length,
+                data_length,
+                no_fat_chain,
+            );
+            child_inode.metadata.write().mode = mode;
+            let child_inode: Arc<dyn Inode> = child_inode;
+            child_inode
+        };
+        self.refresh_directory_metadata_after_namespace_mutation(
             &block_device,
             &boot_region,
-            &published_directory_bytes,
-            stream,
-        )
-        .map_err(|error| {
-            if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-            }
-            Error::from(error)
-        })?;
-
-        let child_size = if type_ == InodeType::Dir {
-            data_length
-        } else {
-            0
-        };
-        let child_inode = Self::new_child(
-            &fs,
-            self.this.clone(),
-            self.entry_location_ino(slot_range.first_entry_index())
-                .map_err(Error::from)?,
-            type_,
-            boot_region.cluster_size,
-            child_size,
-            first_cluster,
-            data_length,
-            data_length,
-            no_fat_chain,
-        );
-        child_inode.metadata.write().mode = mode;
-        let child_inode: Arc<dyn Inode> = child_inode;
+            RealTimeCoarseClock::get().read_time(),
+        )?;
         Ok(child_inode)
     }
 
@@ -3832,55 +3897,58 @@ impl Inode for ExfatInode {
         let admitted_name = Self::admitted_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&admitted_name);
 
-        let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
-        let stream = *self.stream.read();
-        let is_root_directory = stream.data_length.is_none();
-        let directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
-                .map_err(Error::from)?;
-        let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
-            Self::locate_named_child(
-                &directory_bytes,
-                is_root_directory,
+        let allocated_cluster_ranges = {
+            let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
+            let stream = *self.stream.read();
+            let is_root_directory = stream.data_length.is_none();
+            let directory_bytes =
+                Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+                    .map_err(Error::from)?;
+            let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
+                Self::locate_named_child(
+                    &directory_bytes,
+                    is_root_directory,
+                    &boot_region,
+                    &upcase_table,
+                    &admitted_name,
+                    lookup_name_hash,
+                )
+                .map_err(Error::from)?
+            else {
+                return_errno!(Errno::ENOENT);
+            };
+            if inode_type == InodeType::Dir {
+                return_errno!(Errno::EISDIR);
+            }
+
+            let allocated_cluster_ranges = Self::allocated_cluster_ranges(
+                &block_device,
                 &boot_region,
-                &upcase_table,
-                &admitted_name,
-                lookup_name_hash,
+                first_cluster,
+                data_length,
+                no_fat_chain,
             )
-            .map_err(Error::from)?
-        else {
-            return_errno!(Errno::ENOENT);
-        };
-        if inode_type == InodeType::Dir {
-            return_errno!(Errno::EISDIR);
-        }
-
-        let allocated_cluster_ranges = Self::allocated_cluster_ranges(
-            &block_device,
-            &boot_region,
-            first_cluster,
-            data_length,
-            no_fat_chain,
-        )
-        .map_err(Error::from)?;
-
-        let mut invalidated_directory_bytes = directory_bytes;
-        let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(Error::from)?;
-        let removed_entry_set = invalidated_directory_bytes
-            .get_mut(slot_range_bytes)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
-        let mut removed_entry_set =
-            WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
+
+            let mut invalidated_directory_bytes = directory_bytes;
+            let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(Error::from)?;
+            let removed_entry_set = invalidated_directory_bytes
+                .get_mut(slot_range_bytes)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
                 .map_err(Error::from)?;
-        direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
-        Self::write_directory_bytes_for_stream(
-            &block_device,
-            &boot_region,
-            &invalidated_directory_bytes,
-            stream,
-        )
-        .map_err(Error::from)?;
+            let mut removed_entry_set =
+                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
+                    .map_err(Error::from)?;
+            direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
+            Self::write_directory_bytes_for_stream(
+                &block_device,
+                &boot_region,
+                &invalidated_directory_bytes,
+                stream,
+            )
+            .map_err(Error::from)?;
+            allocated_cluster_ranges
+        };
 
         if !allocated_cluster_ranges.is_empty() {
             let publication = state_guard
@@ -3890,6 +3958,11 @@ impl Inode for ExfatInode {
             let _ =
                 fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
         }
+        self.refresh_directory_metadata_after_namespace_mutation(
+            &block_device,
+            &boot_region,
+            RealTimeCoarseClock::get().read_time(),
+        )?;
         Ok(())
     }
 
@@ -3911,69 +3984,72 @@ impl Inode for ExfatInode {
         let admitted_name = Self::admitted_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&admitted_name);
 
-        let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
-        let stream = *self.stream.read();
-        let directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
-                .map_err(Error::from)?;
-        let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
-            Self::locate_named_child(
-                &directory_bytes,
-                stream.data_length.is_none(),
+        let allocated_cluster_ranges = {
+            let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
+            let stream = *self.stream.read();
+            let directory_bytes =
+                Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+                    .map_err(Error::from)?;
+            let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
+                Self::locate_named_child(
+                    &directory_bytes,
+                    stream.data_length.is_none(),
+                    &boot_region,
+                    &upcase_table,
+                    &admitted_name,
+                    lookup_name_hash,
+                )
+                .map_err(Error::from)?
+            else {
+                return_errno!(Errno::ENOENT);
+            };
+            if inode_type != InodeType::Dir {
+                return_errno!(Errno::ENOTDIR);
+            }
+
+            let child_inode = Self::child_inode_from_directory_entry(
+                self,
+                &fs,
                 &boot_region,
-                &upcase_table,
-                &admitted_name,
-                lookup_name_hash,
+                stream.first_cluster,
+                slot_range,
+                inode_type,
+                first_cluster,
+                data_length,
+                data_length,
+                no_fat_chain,
             )
-            .map_err(Error::from)?
-        else {
-            return_errno!(Errno::ENOENT);
-        };
-        if inode_type != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-
-        let child_inode = Self::child_inode_from_directory_entry(
-            self,
-            &fs,
-            &boot_region,
-            stream.first_cluster,
-            slot_range,
-            inode_type,
-            first_cluster,
-            data_length,
-            data_length,
-            no_fat_chain,
-        )
-        .map_err(Error::from)?;
-        Self::ensure_directory_entry_is_empty(&child_inode, &block_device, &boot_region)?;
-
-        let allocated_cluster_ranges = Self::allocated_cluster_ranges(
-            &block_device,
-            &boot_region,
-            first_cluster,
-            data_length,
-            no_fat_chain,
-        )
-        .map_err(Error::from)?;
-
-        let mut invalidated_directory_bytes = directory_bytes;
-        let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(Error::from)?;
-        let removed_entry_set = invalidated_directory_bytes
-            .get_mut(slot_range_bytes)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
-        let mut removed_entry_set =
-            WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
+            Self::ensure_directory_entry_is_empty(&child_inode, &block_device, &boot_region)?;
+
+            let allocated_cluster_ranges = Self::allocated_cluster_ranges(
+                &block_device,
+                &boot_region,
+                first_cluster,
+                data_length,
+                no_fat_chain,
+            )
+            .map_err(Error::from)?;
+
+            let mut invalidated_directory_bytes = directory_bytes;
+            let slot_range_bytes = Self::slot_range_bytes(slot_range).map_err(Error::from)?;
+            let removed_entry_set = invalidated_directory_bytes
+                .get_mut(slot_range_bytes)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
                 .map_err(Error::from)?;
-        direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
-        Self::write_directory_bytes_for_stream(
-            &block_device,
-            &boot_region,
-            &invalidated_directory_bytes,
-            stream,
-        )
-        .map_err(Error::from)?;
+            let mut removed_entry_set =
+                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
+                    .map_err(Error::from)?;
+            direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
+            Self::write_directory_bytes_for_stream(
+                &block_device,
+                &boot_region,
+                &invalidated_directory_bytes,
+                stream,
+            )
+            .map_err(Error::from)?;
+            allocated_cluster_ranges
+        };
 
         if !allocated_cluster_ranges.is_empty() {
             let publication = state_guard
@@ -3983,6 +4059,11 @@ impl Inode for ExfatInode {
             let _ =
                 fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
         }
+        self.refresh_directory_metadata_after_namespace_mutation(
+            &block_device,
+            &boot_region,
+            RealTimeCoarseClock::get().read_time(),
+        )?;
         Ok(())
     }
 
@@ -4062,32 +4143,100 @@ impl Inode for ExfatInode {
         let old_name_hash = upcase_table.name_hash(&admitted_old_name);
         let new_name_hash = upcase_table.name_hash(&admitted_new_name);
 
-        if self.ino() == target_directory.ino() {
-            let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
-            let stream = *self.stream.read();
-            let directory_bytes =
-                Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+        if self.metadata.read().ino == target_directory.metadata.read().ino {
+            let renamed = {
+                let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
+                let stream = *self.stream.read();
+                let directory_bytes =
+                    Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+                        .map_err(Error::from)?;
+                let Some(source_view) = Self::locate_named_child_view(
+                    &directory_bytes,
+                    stream.data_length.is_none(),
+                    &upcase_table,
+                    &admitted_old_name,
+                    old_name_hash,
+                )
+                .map_err(Error::from)?
+                else {
+                    return_errno!(Errno::ENOENT);
+                };
+                let target_child_inode = Self::locate_named_child_view(
+                    &directory_bytes,
+                    stream.data_length.is_none(),
+                    &upcase_table,
+                    &admitted_new_name,
+                    new_name_hash,
+                )
+                .map_err(Error::from)?
+                .filter(|target_view| target_view.slot_range() != source_view.slot_range())
+                .map(|target_view| {
+                    let (target_inode_type, first_cluster, data_length, no_fat_chain) =
+                        target_view.child_metadata(&boot_region)?;
+                    if target_inode_type != InodeType::Dir {
+                        return Ok(None);
+                    }
+                    Self::child_inode_from_directory_entry(
+                        self,
+                        &fs,
+                        &boot_region,
+                        stream.first_cluster,
+                        target_view.slot_range(),
+                        target_inode_type,
+                        first_cluster,
+                        data_length,
+                        data_length,
+                        no_fat_chain,
+                    )
+                    .map(Some)
+                })
+                .transpose()
+                .map_err(Error::from)?
+                .flatten();
+                let publication = state_guard
+                    .as_mut()
+                    .ok_or(MountVolumeStateError::UnpublishedState)
                     .map_err(Error::from)?;
-            let Some(source_view) = Self::locate_named_child_view(
-                &directory_bytes,
-                stream.data_length.is_none(),
-                &upcase_table,
-                &admitted_old_name,
-                old_name_hash,
-            )
-            .map_err(Error::from)?
-            else {
-                return_errno!(Errno::ENOENT);
+                let stream = *self.stream.read();
+                self.rename_within_directory(
+                    stream,
+                    target_child_inode.as_ref(),
+                    publication,
+                    &fs,
+                    &block_device,
+                    &boot_region,
+                    &upcase_table,
+                    &admitted_old_name,
+                    old_name_hash,
+                    &admitted_new_name,
+                    new_name_hash,
+                )?
             };
+            if renamed {
+                self.refresh_directory_metadata_after_namespace_mutation(
+                    &block_device,
+                    &boot_region,
+                    RealTimeCoarseClock::get().read_time(),
+                )?;
+            }
+            return Ok(());
+        }
+
+        {
+            let _directory_guards =
+                Self::ordered_directory_write_guards(vec![self, target_directory]);
+            let target_stream = *target_directory.stream.read();
+            let target_directory_bytes =
+                Self::read_directory_bytes_for_stream(&block_device, &boot_region, target_stream)
+                    .map_err(Error::from)?;
             let target_child_inode = Self::locate_named_child_view(
-                &directory_bytes,
-                stream.data_length.is_none(),
+                &target_directory_bytes,
+                target_stream.data_length.is_none(),
                 &upcase_table,
                 &admitted_new_name,
                 new_name_hash,
             )
             .map_err(Error::from)?
-            .filter(|target_view| target_view.slot_range() != source_view.slot_range())
             .map(|target_view| {
                 let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                     target_view.child_metadata(&boot_region)?;
@@ -4095,10 +4244,10 @@ impl Inode for ExfatInode {
                     return Ok(None);
                 }
                 Self::child_inode_from_directory_entry(
-                    self,
+                    target_directory,
                     &fs,
                     &boot_region,
-                    stream.first_cluster,
+                    target_stream.first_cluster,
                     target_view.slot_range(),
                     target_inode_type,
                     first_cluster,
@@ -4115,9 +4264,12 @@ impl Inode for ExfatInode {
                 .as_mut()
                 .ok_or(MountVolumeStateError::UnpublishedState)
                 .map_err(Error::from)?;
-            let stream = *self.stream.read();
-            return self.rename_within_directory(
-                stream,
+            let source_stream = *self.stream.read();
+            let target_stream = *target_directory.stream.read();
+            self.rename_across_directories(
+                source_stream,
+                target_directory,
+                target_stream,
                 target_child_inode.as_ref(),
                 publication,
                 &fs,
@@ -4128,65 +4280,18 @@ impl Inode for ExfatInode {
                 old_name_hash,
                 &admitted_new_name,
                 new_name_hash,
-            );
+            )?;
         }
-
-        let _directory_guards = Self::ordered_directory_write_guards(vec![self, target_directory]);
-        let target_stream = *target_directory.stream.read();
-        let target_directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, target_stream)
-                .map_err(Error::from)?;
-        let target_child_inode = Self::locate_named_child_view(
-            &target_directory_bytes,
-            target_stream.data_length.is_none(),
-            &upcase_table,
-            &admitted_new_name,
-            new_name_hash,
-        )
-        .map_err(Error::from)?
-        .map(|target_view| {
-            let (target_inode_type, first_cluster, data_length, no_fat_chain) =
-                target_view.child_metadata(&boot_region)?;
-            if target_inode_type != InodeType::Dir {
-                return Ok(None);
-            }
-            Self::child_inode_from_directory_entry(
-                target_directory,
-                &fs,
-                &boot_region,
-                target_stream.first_cluster,
-                target_view.slot_range(),
-                target_inode_type,
-                first_cluster,
-                data_length,
-                data_length,
-                no_fat_chain,
-            )
-            .map(Some)
-        })
-        .transpose()
-        .map_err(Error::from)?
-        .flatten();
-        let publication = state_guard
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)
-            .map_err(Error::from)?;
-        let source_stream = *self.stream.read();
-        let target_stream = *target_directory.stream.read();
-        self.rename_across_directories(
-            source_stream,
-            target_directory,
-            target_stream,
-            target_child_inode.as_ref(),
-            publication,
-            &fs,
+        let timestamp = RealTimeCoarseClock::get().read_time();
+        self.refresh_directory_metadata_after_namespace_mutation(
             &block_device,
             &boot_region,
-            &upcase_table,
-            &admitted_old_name,
-            old_name_hash,
-            &admitted_new_name,
-            new_name_hash,
+            timestamp,
+        )?;
+        target_directory.refresh_directory_metadata_after_namespace_mutation(
+            &block_device,
+            &boot_region,
+            timestamp,
         )
     }
 

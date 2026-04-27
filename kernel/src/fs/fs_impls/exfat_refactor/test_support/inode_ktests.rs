@@ -474,6 +474,9 @@ mod file_metadata_projection_and_update_policy_and_timestamp_mutation;
 #[path = "directory_metadata_projection_and_update_policy_and_timestamp_mutation.rs"]
 mod directory_metadata_projection_and_update_policy_and_timestamp_mutation;
 
+#[path = "directory_metadata_projection_and_update_namespace_refresh.rs"]
+mod directory_metadata_projection_and_update_namespace_refresh;
+
 #[path = "file_metadata_projection_and_update_integration.rs"]
 mod file_metadata_projection_and_update_integration;
 
@@ -597,6 +600,30 @@ fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_a
 fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state()
  {
     directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp()
+ {
+    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp()
+ {
+    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories()
+ {
+    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state()
+ {
+    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state();
 }
 
 #[ktest]
