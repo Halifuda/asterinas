@@ -869,14 +869,14 @@ impl BlockDevice for ExfatLookupFlushControlDisk {
     }
 }
 
-fn entry_set_checksum(entry_set: &[u8], secondary_count: u8) -> u16 {
+pub(in super::super) fn entry_set_checksum(entry_set: &[u8], secondary_count: u8) -> u16 {
     let mut checksum = 0u16;
     let number_of_bytes = (usize::from(secondary_count) + 1) * DIRECTORY_ENTRY_SIZE;
     for (index, byte) in entry_set.iter().take(number_of_bytes).enumerate() {
         if index == 2 || index == 3 {
             continue;
         }
-        checksum = ((checksum & 1) << 15) + (checksum >> 1) + u16::from(*byte);
+        checksum = checksum.rotate_right(1).wrapping_add(u16::from(*byte));
     }
     checksum
 }

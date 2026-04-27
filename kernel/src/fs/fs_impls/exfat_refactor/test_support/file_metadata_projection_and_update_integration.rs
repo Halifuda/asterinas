@@ -105,8 +105,7 @@ fn assert_bytes_unchanged_except(before: &[u8], after: &[u8], allowed_ranges: &[
             continue;
         }
         assert_eq!(
-            after[index],
-            before[index],
+            after[index], before[index],
             "unexpected durable byte change at offset {index}",
         );
     }
@@ -126,7 +125,8 @@ fn wait_for_blocked_flush(flush_control_disk: &ExfatLookupFlushControlDisk) {
     }
 }
 
-pub(super) fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync() {
+pub(super) fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -203,7 +203,10 @@ pub(super) fn file_metadata_projection_update_integration_success_path_live_and_
         stream_lengths(&entry_set_after),
         (file_size as u64, file_size as u64)
     );
-    assert_eq!(decode_entry_name(&entry_set_after), "IntegratedMeta".encode_utf16().collect::<Vec<_>>());
+    assert_eq!(
+        decode_entry_name(&entry_set_after),
+        "IntegratedMeta".encode_utf16().collect::<Vec<_>>()
+    );
     assert_valid_entry_set_checksum(&entry_set_after);
     assert_bytes_unchanged_except(
         &entry_set_before,
@@ -229,7 +232,8 @@ pub(super) fn file_metadata_projection_update_integration_success_path_live_and_
     );
 }
 
-pub(super) fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry() {
+pub(super) fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry()
+ {
     init_lookup_test_runtime();
 
     let denied_disk = ExfatLookupTestDisk::new();
@@ -320,7 +324,10 @@ pub(super) fn file_metadata_projection_update_integration_failure_maintenance_pr
     let retry_entry_set = root_entry_set(&writable_disk, ROOT_FILE_ENTRY_INDEX);
     assert_valid_entry_set_checksum(&retry_entry_set);
     assert_eq!(retry_file.mtime(), retry_mtime);
-    assert_eq!(retry_file.mode().unwrap(), chmod!(mkmod!(u+rw, g+r, o+r), a-w));
+    assert_eq!(
+        retry_file.mode().unwrap(),
+        chmod!(mkmod!(u+rw, g+r, o+r), a-w)
+    );
 }
 
 pub(super) fn file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable() {
@@ -361,18 +368,17 @@ pub(super) fn file_metadata_projection_update_integration_repeated_calls_keep_me
         file_inode.set_group(Gid::new_root()).unwrap();
         file_inode.set_mode(file_inode.mode().unwrap()).unwrap();
     }
-    assert_eq!(root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX), entry_set_before);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 
     let read_only_mode = chmod!(file_inode.mode().unwrap(), a-w);
     file_inode.set_mode(read_only_mode).unwrap();
     let entry_set_after_transition = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
     assert_valid_entry_set_checksum(&entry_set_after_transition);
-    assert_bytes_unchanged_except(
-        &entry_set_before,
-        &entry_set_after_transition,
-        &[2..6],
-    );
+    assert_bytes_unchanged_except(&entry_set_before, &entry_set_after_transition, &[2..6]);
 
     file_inode.set_mode(read_only_mode).unwrap();
     assert_eq!(
@@ -384,7 +390,8 @@ pub(super) fn file_metadata_projection_update_integration_repeated_calls_keep_me
     assert_eq!(file_inode.group().unwrap(), Gid::new_root());
 }
 
-pub(super) fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates() {
+pub(super) fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -465,7 +472,10 @@ pub(super) fn file_metadata_projection_update_integration_concurrency_serializes
 
     assert_eq!(reread_inode.atime(), requested_atime);
     assert_eq!(reread_inode.size(), initial_size + 4);
-    assert_eq!(reread_inode.read_bytes_at(0, &mut visible_bytes).unwrap(), 12);
+    assert_eq!(
+        reread_inode.read_bytes_at(0, &mut visible_bytes).unwrap(),
+        12
+    );
     assert_eq!(visible_bytes.as_slice(), b"abcdefghTAIL");
     assert_eq!(
         stream_lengths(&entry_set_after),

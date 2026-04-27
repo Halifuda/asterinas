@@ -22,14 +22,14 @@ const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
 const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
 const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
 pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
-const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+pub(super) const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
-const CREATE_TIMESTAMP_OFFSET: usize = 8;
+pub(super) const CREATE_TIMESTAMP_OFFSET: usize = 8;
 pub(super) const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
 pub(super) const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
-const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
+pub(super) const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
 pub(super) const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
-const CREATE_UTC_OFFSET_OFFSET: usize = 22;
+pub(super) const CREATE_UTC_OFFSET_OFFSET: usize = 22;
 pub(super) const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 pub(super) const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 const STREAM_FLAGS_OFFSET: usize = 1;
@@ -751,7 +751,7 @@ fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
         if index == 2 || index == 3 {
             continue;
         }
-        checksum = ((checksum & 1) << 15) + (checksum >> 1) + u16::from(*byte);
+        checksum = checksum.rotate_right(1).wrapping_add(u16::from(*byte));
     }
     checksum
 }

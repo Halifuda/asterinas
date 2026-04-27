@@ -53,7 +53,8 @@ fn expected_timestamp(date: Date, time: Time, offset: UtcOffset) -> Duration {
     Duration::from_nanos(u64::try_from(timestamp.unix_timestamp_nanos()).unwrap())
 }
 
-pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state() {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -83,15 +84,13 @@ pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_
             .copy_from_slice(&(FILE_ATTRIBUTE_REGULAR | FILE_ATTRIBUTE_READ_ONLY).to_le_bytes());
         entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
             .copy_from_slice(&encode_exfat_date_only(accessed_date));
-        entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] =
-            encode_valid_utc_offset_byte(accessed_offset);
+        entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(accessed_offset);
         let (modified_timestamp_bytes, modified_ten_ms_increment) =
             encode_exfat_date_time(modified_date, modified_time);
         entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
             .copy_from_slice(&modified_timestamp_bytes);
         entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] = modified_ten_ms_increment;
-        entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] =
-            encode_valid_utc_offset_byte(modified_offset);
+        entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(modified_offset);
         let checksum = entry_set_checksum(&entry_set, usize::from(entry_set[1]));
         entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
         disk.write_root_entries(ROOT_FILE_ENTRY_INDEX, &entry_set);
@@ -123,7 +122,8 @@ pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_
     assert_eq!(file_inode.ctime(), expected_mtime);
 }
 
-pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups() {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -155,5 +155,8 @@ pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_i
         ),
         broken_entry_set
     );
-    assert_eq!(root_inode.lookup("Healthy").unwrap().ino(), healthy_lookup.ino());
+    assert_eq!(
+        root_inode.lookup("Healthy").unwrap().ino(),
+        healthy_lookup.ino()
+    );
 }
