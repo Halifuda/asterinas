@@ -6,11 +6,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use super::{
-    boot::BootRegion,
-    fs::MountVolumeStateError,
-    upcase::UpcaseTable,
-};
+use super::{boot::BootRegion, fs::MountVolumeStateError, upcase::UpcaseTable};
 use crate::fs::file::InodeType;
 
 pub(super) const DIRECTORY_ENTRY_SIZE: usize = 32;
@@ -25,18 +21,23 @@ const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
 const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
 const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
+pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
-const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
-const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
+pub(super) const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
+pub(super) const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
 const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
-const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
+pub(super) const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
 const CREATE_UTC_OFFSET_OFFSET: usize = 22;
-const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
-const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
+pub(super) const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
+pub(super) const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
+const STREAM_FLAGS_OFFSET: usize = 1;
 const STREAM_NAME_LENGTH_OFFSET: usize = 3;
 const STREAM_NAME_HASH_OFFSET: usize = 4;
+const STREAM_VALID_DATA_LENGTH_OFFSET: usize = 8;
+const STREAM_FIRST_CLUSTER_OFFSET: usize = 20;
+const STREAM_DATA_LENGTH_OFFSET: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DirectoryEntrySlotRange {
@@ -109,6 +110,13 @@ impl FileEntrySetView<'_> {
 
     pub(super) fn slot_range(self) -> DirectoryEntrySlotRange {
         self.slot_range
+    }
+
+    pub(super) fn file_attributes(self) -> u16 {
+        u16::from_le_bytes([
+            self.primary_entry[FILE_ATTRIBUTES_OFFSET],
+            self.primary_entry[FILE_ATTRIBUTES_OFFSET + 1],
+        ])
     }
 
     pub(super) fn stored_name_hash(self) -> u16 {
@@ -237,11 +245,15 @@ pub(super) fn invalidate_entry_set(
 #[derive(Default)]
 pub(super) struct FileEntrySetFieldUpdates<'a> {
     pub(super) create_fields: Option<([u8; 4], u8, u8)>,
+    pub(super) data_length: Option<u64>,
     pub(super) file_attributes: Option<u16>,
+    pub(super) first_cluster: Option<u32>,
     pub(super) last_accessed_fields: Option<([u8; 4], u8)>,
     pub(super) last_modified_fields: Option<([u8; 4], u8, u8)>,
     pub(super) name: Option<&'a [u16]>,
     pub(super) name_hash: Option<u16>,
+    pub(super) stream_flags: Option<u8>,
+    pub(super) valid_data_length: Option<u64>,
 }
 
 pub(super) fn republished_entry_set(
@@ -318,8 +330,32 @@ pub(super) fn republished_entry_set(
             .copy_from_slice(&name_hash.to_le_bytes());
     }
 
-    let checksum =
-        entry_set_checksum(&republished_entry_set, usize::from(source_entry_set.secondary_count));
+    if let Some(stream_flags) = updates.stream_flags {
+        republished_entry_set[stream_entry_offset + STREAM_FLAGS_OFFSET] = stream_flags;
+    }
+
+    if let Some(valid_data_length) = updates.valid_data_length {
+        republished_entry_set[stream_entry_offset + STREAM_VALID_DATA_LENGTH_OFFSET
+            ..stream_entry_offset + STREAM_VALID_DATA_LENGTH_OFFSET + 8]
+            .copy_from_slice(&valid_data_length.to_le_bytes());
+    }
+
+    if let Some(first_cluster) = updates.first_cluster {
+        republished_entry_set[stream_entry_offset + STREAM_FIRST_CLUSTER_OFFSET
+            ..stream_entry_offset + STREAM_FIRST_CLUSTER_OFFSET + 4]
+            .copy_from_slice(&first_cluster.to_le_bytes());
+    }
+
+    if let Some(data_length) = updates.data_length {
+        republished_entry_set[stream_entry_offset + STREAM_DATA_LENGTH_OFFSET
+            ..stream_entry_offset + STREAM_DATA_LENGTH_OFFSET + 8]
+            .copy_from_slice(&data_length.to_le_bytes());
+    }
+
+    let checksum = entry_set_checksum(
+        &republished_entry_set,
+        usize::from(source_entry_set.secondary_count),
+    );
     republished_entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
     Ok(republished_entry_set)
 }
@@ -369,8 +405,8 @@ pub(super) fn renamed_entry_set(
     renamed_entry_set[1] = secondary_count;
     renamed_entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET] =
         u8::try_from(name.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
-    renamed_entry_set
-        [DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
+    renamed_entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET
+        ..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
         .copy_from_slice(&name_hash.to_le_bytes());
 
     for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
@@ -448,7 +484,9 @@ pub(super) fn scan_directory_entry(
 
                 let is_root_metadata = matches!(
                     entry_type,
-                    ALLOCATION_BITMAP_ENTRY_TYPE | UPCASE_TABLE_ENTRY_TYPE | VOLUME_LABEL_ENTRY_TYPE
+                    ALLOCATION_BITMAP_ENTRY_TYPE
+                        | UPCASE_TABLE_ENTRY_TYPE
+                        | VOLUME_LABEL_ENTRY_TYPE
                 );
                 if is_root_directory && is_root_metadata {
                     entry_index = entry_index
@@ -537,8 +575,13 @@ fn scan_unrecognized_entry_set<'a>(
             .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
     )?;
     let expected_checksum = u16::from_le_bytes([primary_entry[2], primary_entry[3]]);
-    if validated_file_entry_set(directory_bytes, entry_offset, secondary_count, expected_checksum)
-        .is_err()
+    if validated_file_entry_set(
+        directory_bytes,
+        entry_offset,
+        secondary_count,
+        expected_checksum,
+    )
+    .is_err()
     {
         return Ok(ScannedDirectoryEntry::Anomaly {
             kind: DirectoryEntryAnomalyKind::BrokenEntrySet,
@@ -625,10 +668,7 @@ fn file_name(
             if candidate_name.len() == name_length {
                 break;
             }
-            candidate_name.push(u16::from_le_bytes([
-                code_unit_bytes[0],
-                code_unit_bytes[1],
-            ]));
+            candidate_name.push(u16::from_le_bytes([code_unit_bytes[0], code_unit_bytes[1]]));
         }
     }
     if candidate_name.len() != name_length {

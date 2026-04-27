@@ -423,6 +423,14 @@ impl ExfatLookupTestDisk {
         )
     }
 
+    pub(in super::super) fn write_root_entries(&self, entry_index: usize, bytes: &[u8]) {
+        self.write_directory_entries(
+            self.validated_mount().boot_region.root_dir_cluster,
+            entry_index,
+            bytes,
+        );
+    }
+
     pub(in super::super) fn read_directory_entries(
         &self,
         directory_cluster: u32,
@@ -437,6 +445,15 @@ impl ExfatLookupTestDisk {
             )
             .unwrap();
         bytes
+    }
+
+    pub(in super::super) fn write_directory_entries(
+        &self,
+        directory_cluster: u32,
+        entry_index: usize,
+        bytes: &[u8],
+    ) {
+        self.write_bytes(self.directory_entry_offset(directory_cluster, entry_index), bytes);
     }
 
     pub(in super::super) fn take_observed_bios(&self) -> Vec<ObservedBio> {
