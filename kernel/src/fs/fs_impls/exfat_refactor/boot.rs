@@ -257,6 +257,34 @@ impl BootRegion {
         Ok(())
     }
 
+    pub(super) fn write_volume_anomaly_state(
+        &self,
+        block_device: &dyn BlockDevice,
+        anomaly: VolumeAnomalyState,
+    ) -> core::result::Result<(), MountVolumeStateError> {
+        let mut boot_sector = vec![0; self.sector_size];
+        block_device
+            .read_bytes(0, &mut boot_sector)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
+
+        let mut volume_flags = 0u16;
+        if anomaly.volume_dirty {
+            volume_flags |= 0x0002;
+        }
+        if anomaly.media_failure {
+            volume_flags |= 0x0004;
+        }
+        if anomaly.clear_to_zero {
+            volume_flags |= 0x0008;
+        }
+        boot_sector[106..108].copy_from_slice(&volume_flags.to_le_bytes());
+
+        block_device
+            .write_bytes(0, &boot_sector)
+            .map_err(|_| MountVolumeStateError::DeviceIo)?;
+        Ok(())
+    }
+
     fn validate_checksum(
         &self,
         block_device: &dyn BlockDevice,
