@@ -6,7 +6,7 @@ use core::mem;
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::super::boot::BootRegion;
+use super::{super::boot::BootRegion, checksum::boot_region_checksum};
 
 const MAX_CLUSTER_SIZE: usize = 32 * 1024 * 1024;
 
@@ -187,15 +187,4 @@ fn diagnose_validate_boot_geometry(
         return Err("validate_boot_geometry:fat_overlaps_cluster_heap");
     }
     Ok(())
-}
-
-fn boot_region_checksum(bytes: &[u8]) -> u32 {
-    let mut checksum = 0u32;
-    for (offset, byte) in bytes.iter().enumerate() {
-        if offset == 106 || offset == 107 || offset == 112 {
-            continue;
-        }
-        checksum = checksum.rotate_right(1).wrapping_add(u32::from(*byte));
-    }
-    checksum
 }

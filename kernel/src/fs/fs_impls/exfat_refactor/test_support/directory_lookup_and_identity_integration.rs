@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use super::{
+    collect_dirents, entry_names, init_lookup_test_runtime, lookup_error, mount_root, CString,
+    Errno, ExfatFsType, ExfatLookupTestDisk, FsFlags, ROOT_FILE_ENTRY_INDEX,
+};
 
 #[ktest]
 fn lookup_and_readdir_reject_non_utf8_iocharset_mount_option() {

@@ -2,7 +2,11 @@
 
 use ostd::prelude::ktest;
 
-use super::*;
+use super::{
+    collect_dirents, entry_names, entry_offsets, init_lookup_test_runtime, lookup_error,
+    mount_root, CapturedDirent, Errno, ExfatLookupTestDisk, InodeType, RejectingDirentVisitor, Vec,
+    ROOT_FILE_ENTRY_INDEX,
+};
 
 #[ktest]
 fn readdir_visibility_emits_visible_entries_in_scan_order() {

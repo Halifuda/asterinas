@@ -6,53 +6,24 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use aster_block::{BlockDevice, SECTOR_SIZE};
 use ostd::mm::PAGE_SIZE;
 
-use super::*;
-use crate::thread::{Thread, kernel_thread::ThreadOptions};
+use super::{
+    assert_metadata_unchanged, init_lookup_test_runtime, install_root_file_with_cluster_contents,
+    lookup_exfat_inode, mount_root, mount_root_from_block_device, next_stream_cluster,
+    published_lookup_state, published_page_count, root_entry_set, stream_first_cluster,
+    stream_has_no_fat_chain, stream_lengths, wait_for_concurrent_start, wait_for_flag,
+    write_bytes_append, ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FsFlags, Inode,
+    Metadata, DIRECTORY_ENTRY_SIZE, FAT_END_OF_CHAIN, FILE_ATTRIBUTES_OFFSET,
+    ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX, ROOT_THIRD_FILE_ENTRY_INDEX,
+    TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER,
+    TEST_FRAGMENTED_THIRD_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+};
+use crate::thread::{kernel_thread::ThreadOptions, Thread};
 
 struct FileSnapshot {
     entry_set: Vec<u8>,
     metadata: Metadata,
     page_count: usize,
     visible_bytes: Vec<u8>,
-}
-
-fn install_root_file_with_cluster_contents(
-    disk: &Arc<ExfatLookupTestDisk>,
-    entry_index: usize,
-    name: &str,
-    clusters: &[u32],
-    data_length: usize,
-    valid_data_length: usize,
-    no_fat_chain: bool,
-    contents: &[u8],
-) {
-    assert_eq!(contents.len(), data_length);
-    disk.install_root_file_with_cluster_chain(
-        entry_index,
-        name,
-        clusters[0],
-        data_length,
-        valid_data_length,
-        no_fat_chain,
-        clusters,
-    );
-
-    let cluster_size = disk.root_cluster_size();
-    for (cluster_index, cluster) in clusters.iter().enumerate() {
-        let start = cluster_index * cluster_size;
-        if start >= contents.len() {
-            break;
-        }
-        let end = (start + cluster_size).min(contents.len());
-        disk.write_cluster_prefix(*cluster, &contents[start..end]);
-    }
-
-    if !no_fat_chain {
-        for cluster_pair in clusters.windows(2) {
-            disk.set_fat_chain_step(cluster_pair[0], cluster_pair[1]);
-        }
-        disk.terminate_fat_chain(*clusters.last().unwrap());
-    }
 }
 
 fn visible_file_bytes(inode: &Arc<dyn Inode>) -> Vec<u8> {
@@ -80,12 +51,6 @@ fn assert_same_snapshot(actual: FileSnapshot, expected: &FileSnapshot) {
     assert_metadata_unchanged(actual.metadata, expected.metadata);
     assert_eq!(actual.page_count, expected.page_count);
     assert_eq!(actual.visible_bytes, expected.visible_bytes);
-}
-
-fn wait_for_flag(flag: &AtomicBool) {
-    while !flag.load(Ordering::Relaxed) {
-        Thread::yield_now();
-    }
 }
 
 pub(super) fn file_content_mutation_integration_success_path_write_append_grow_shrink_readback() {

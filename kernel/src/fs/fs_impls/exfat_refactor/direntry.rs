@@ -852,7 +852,7 @@ fn file_entry_child_metadata(
     Ok((inode_type, first_cluster, data_length, no_fat_chain))
 }
 
-fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
+pub(super) fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
     let mut checksum = 0u16;
     let number_of_bytes = (secondary_count + 1) * DIRECTORY_ENTRY_SIZE;
     for (index, byte) in entry_set.iter().take(number_of_bytes).enumerate() {

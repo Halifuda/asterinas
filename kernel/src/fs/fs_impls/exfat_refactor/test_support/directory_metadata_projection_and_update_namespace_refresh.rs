@@ -6,7 +6,16 @@ use core::{ops::Range, time::Duration};
 use aster_block::BlockDevice;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
-use super::{super::super::test_support::inode::entry_set_checksum, *};
+use super::{
+    assert_bytes_unchanged_except, assert_metadata_unchanged, assert_valid_entry_set_checksum,
+    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    encode_valid_utc_offset_byte, expected_timestamp, init_lookup_test_runtime, lookup_error,
+    mount_root, root_entry_set, set_directory_entry_metadata, ExfatLookupTestDisk,
+    ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTE_DIRECTORY, RENAME_SOURCE_FILE_CLUSTER,
+    RENAME_SOURCE_PARENT_CLUSTER, RENAME_SOURCE_PARENT_NAME, RENAME_TARGET_PARENT_CLUSTER,
+    RENAME_TARGET_PARENT_NAME, ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX,
+    TEST_CHILD_DIRECTORY_CLUSTER, TEST_PARENT_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+};
 
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
 const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
@@ -16,76 +25,6 @@ const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
 const CREATE_UTC_OFFSET_OFFSET: usize = 22;
 const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
-
-fn encode_exfat_date(date: Date) -> u16 {
-    let year = u16::try_from(date.year() - 1980).unwrap();
-    let month = u16::from(u8::from(date.month()));
-    let day = u16::from(date.day());
-    (year << 9) | (month << 5) | day
-}
-
-fn encode_exfat_date_only(date: Date) -> [u8; 4] {
-    let date_bytes = encode_exfat_date(date).to_le_bytes();
-    [0, 0, date_bytes[0], date_bytes[1]]
-}
-
-fn encode_exfat_date_time(date: Date, time: Time) -> ([u8; 4], u8) {
-    assert_eq!(time.second() % 2, 0);
-    assert_eq!(time.millisecond() % 10, 0);
-
-    let encoded_time = (u16::from(time.hour()) << 11)
-        | (u16::from(time.minute()) << 5)
-        | u16::from(time.second() / 2);
-    let time_bytes = encoded_time.to_le_bytes();
-    let date_bytes = encode_exfat_date(date).to_le_bytes();
-    let ten_ms_increment = u8::try_from(time.millisecond() / 10).unwrap();
-    (
-        [time_bytes[0], time_bytes[1], date_bytes[0], date_bytes[1]],
-        ten_ms_increment,
-    )
-}
-
-fn encode_valid_utc_offset_byte(offset: UtcOffset) -> u8 {
-    let quarter_hours = offset.whole_seconds() / (15 * 60);
-    assert!((-64..=63).contains(&quarter_hours));
-    0x80 | (u8::try_from(quarter_hours.rem_euclid(128)).unwrap() & 0x7f)
-}
-
-fn expected_timestamp(date: Date, time: Time, offset: UtcOffset) -> Duration {
-    let timestamp = PrimitiveDateTime::new(date, time).assume_offset(offset);
-    Duration::from_nanos(u64::try_from(timestamp.unix_timestamp_nanos()).unwrap())
-}
-
-fn set_directory_entry_metadata(
-    disk: &Arc<ExfatLookupTestDisk>,
-    entry_index: usize,
-    create: (Date, Time, UtcOffset),
-    accessed: (Date, UtcOffset),
-    modified: (Date, Time, UtcOffset),
-) {
-    let mut entry_set = root_entry_set(disk, entry_index);
-
-    let (create_timestamp, create_ten_ms_increment) = encode_exfat_date_time(create.0, create.1);
-    entry_set[CREATE_TIMESTAMP_OFFSET..CREATE_TIMESTAMP_OFFSET + 4]
-        .copy_from_slice(&create_timestamp);
-    entry_set[CREATE_10MS_INCREMENT_OFFSET] = create_ten_ms_increment;
-    entry_set[CREATE_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(create.2);
-
-    entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
-        .copy_from_slice(&encode_exfat_date_only(accessed.0));
-    entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(accessed.1);
-
-    let (modified_timestamp, modified_ten_ms_increment) =
-        encode_exfat_date_time(modified.0, modified.1);
-    entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
-        .copy_from_slice(&modified_timestamp);
-    entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] = modified_ten_ms_increment;
-    entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = encode_valid_utc_offset_byte(modified.2);
-
-    let checksum = entry_set_checksum(&entry_set, entry_set[1]);
-    entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
-    disk.write_root_entries(entry_index, &entry_set);
-}
 
 fn install_timestamped_root_directory(
     disk: &Arc<ExfatLookupTestDisk>,
@@ -100,6 +39,7 @@ fn install_timestamped_root_directory(
     set_directory_entry_metadata(
         disk,
         entry_index,
+        FILE_ATTRIBUTE_DIRECTORY,
         (
             Date::from_calendar_date(2020, Month::January, 1).unwrap(),
             Time::from_hms_milli(2, 4, 6, 120).unwrap(),
@@ -112,25 +52,6 @@ fn install_timestamped_root_directory(
         (modified_date, modified_time, modified_offset),
     );
     expected_timestamp(modified_date, modified_time, modified_offset)
-}
-
-fn assert_valid_entry_set_checksum(entry_set: &[u8]) {
-    let checksum = entry_set_checksum(entry_set, entry_set[1]);
-    assert_eq!(u16::from_le_bytes([entry_set[2], entry_set[3]]), checksum);
-}
-
-fn assert_bytes_unchanged_except(before: &[u8], after: &[u8], allowed_ranges: &[Range<usize>]) {
-    assert_eq!(before.len(), after.len());
-
-    for index in 0..before.len() {
-        if allowed_ranges.iter().any(|range| range.contains(&index)) {
-            continue;
-        }
-        assert_eq!(
-            after[index], before[index],
-            "unexpected durable byte change at offset {index}",
-        );
-    }
 }
 
 fn assert_namespace_refresh_published(
@@ -177,8 +98,8 @@ fn assert_namespace_refresh_published(
     entry_set_after
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp()
- {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp(
+) {
     init_lookup_test_runtime();
 
     let create_disk = ExfatLookupTestDisk::new();
@@ -240,8 +161,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp()
- {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp(
+) {
     init_lookup_test_runtime();
 
     let unlink_disk = ExfatLookupTestDisk::new();
@@ -304,8 +225,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories()
- {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories(
+) {
     init_lookup_test_runtime();
 
     let same_directory_disk = ExfatLookupTestDisk::new();
@@ -421,8 +342,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state()
- {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state(
+) {
     init_lookup_test_runtime();
 
     let writable_disk = ExfatLookupTestDisk::new();

@@ -2,7 +2,10 @@
 
 use ostd::prelude::ktest;
 
-use super::*;
+use super::{
+    init_lookup_test_runtime, lookup_error, mount_root, Errno, ExfatLookupTestDisk,
+    ROOT_FILE_ENTRY_INDEX,
+};
 
 #[ktest]
 fn lookup_resolution_matches_mixed_case_and_trailing_dot_equivalence() {
