@@ -177,8 +177,8 @@ fn assert_namespace_refresh_published(
     entry_set_after
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp()
+ {
     init_lookup_test_runtime();
 
     let create_disk = ExfatLookupTestDisk::new();
@@ -240,8 +240,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp()
+ {
     init_lookup_test_runtime();
 
     let unlink_disk = ExfatLookupTestDisk::new();
@@ -304,8 +304,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories()
+ {
     init_lookup_test_runtime();
 
     let same_directory_disk = ExfatLookupTestDisk::new();
@@ -421,8 +421,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state()
+ {
     init_lookup_test_runtime();
 
     let writable_disk = ExfatLookupTestDisk::new();

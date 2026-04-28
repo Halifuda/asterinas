@@ -15,12 +15,16 @@ const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
 const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
 const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
+const VOLUME_GUID_ENTRY_TYPE: u8 = 0xA0;
 const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
 const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
 const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
 const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
 const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
+const VOLUME_LABEL_ENTRY_LENGTH_OFFSET: usize = 1;
+const VOLUME_LABEL_UTF16_OFFSET: usize = 2;
+const VOLUME_LABEL_MAX_CODE_UNITS: usize = 11;
 pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 pub(super) const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
@@ -236,6 +240,64 @@ pub(super) fn invalidate_entry_set(
     for entry in slot_span.bytes_mut().chunks_exact_mut(DIRECTORY_ENTRY_SIZE) {
         entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
     }
+    Ok(())
+}
+
+pub(super) fn read_volume_label(
+    directory_bytes: &[u8],
+) -> core::result::Result<Option<Vec<u16>>, MountVolumeStateError> {
+    let Some(entry_index) = locate_volume_label_entry(directory_bytes)? else {
+        return Ok(None);
+    };
+    let entry = directory_entry_bytes(directory_bytes, entry_index)?;
+    let label_length = usize::from(entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET]);
+    if label_length > VOLUME_LABEL_MAX_CODE_UNITS {
+        return Err(MountVolumeStateError::InvalidOnDiskLayout);
+    }
+    if label_length == 0 {
+        return Ok(None);
+    }
+
+    let mut label = Vec::with_capacity(label_length);
+    let label_end = VOLUME_LABEL_UTF16_OFFSET
+        .checked_add(
+            label_length
+                .checked_mul(2)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+        )
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    for code_unit_bytes in entry[VOLUME_LABEL_UTF16_OFFSET..label_end].chunks_exact(2) {
+        label.push(u16::from_le_bytes([code_unit_bytes[0], code_unit_bytes[1]]));
+    }
+    Ok(Some(label))
+}
+
+pub(super) fn write_volume_label(
+    directory_bytes: &mut [u8],
+    label: Option<&[u16]>,
+) -> core::result::Result<(), MountVolumeStateError> {
+    let existing_entry_index = locate_volume_label_entry(directory_bytes)?;
+    let Some(label) = label.filter(|label| !label.is_empty()) else {
+        if let Some(existing_entry_index) = existing_entry_index {
+            let slot_range = DirectoryEntrySlotRange::new(existing_entry_index, 1)?;
+            let slot_range_bytes = slot_range_bytes(slot_range)?;
+            let slot_bytes = directory_bytes
+                .get_mut(slot_range_bytes)
+                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            let mut slot_span = WritableDirectoryEntrySlotSpan::new(slot_range, slot_bytes)?;
+            invalidate_entry_set(&mut slot_span)?;
+        }
+        return Ok(());
+    };
+
+    let destination_entry_index = match existing_entry_index {
+        Some(existing_entry_index) => existing_entry_index,
+        None => locate_identity_insertion_entry(directory_bytes)?
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+    };
+    let encoded_entry = encode_volume_label_entry(label)?;
+    let entry = directory_entry_bytes_mut(directory_bytes, destination_entry_index)?;
+    entry.copy_from_slice(&encoded_entry);
     Ok(())
 }
 
@@ -487,6 +549,7 @@ pub(super) fn scan_directory_entry(
                     ALLOCATION_BITMAP_ENTRY_TYPE
                         | UPCASE_TABLE_ENTRY_TYPE
                         | VOLUME_LABEL_ENTRY_TYPE
+                        | VOLUME_GUID_ENTRY_TYPE
                 );
                 if is_root_directory && is_root_metadata {
                     entry_index = entry_index
@@ -754,4 +817,117 @@ fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
         checksum = checksum.rotate_right(1).wrapping_add(u16::from(*byte));
     }
     checksum
+}
+
+fn locate_identity_insertion_entry(
+    directory_bytes: &[u8],
+) -> core::result::Result<Option<usize>, MountVolumeStateError> {
+    if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
+        return Err(MountVolumeStateError::InvalidOnDiskLayout);
+    }
+
+    for (entry_index, entry) in directory_bytes
+        .chunks_exact(DIRECTORY_ENTRY_SIZE)
+        .enumerate()
+    {
+        if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE || entry[0] & ENTRY_TYPE_IN_USE_BIT == 0 {
+            return Ok(Some(entry_index));
+        }
+    }
+    Ok(None)
+}
+
+fn locate_volume_label_entry(
+    directory_bytes: &[u8],
+) -> core::result::Result<Option<usize>, MountVolumeStateError> {
+    if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
+        return Err(MountVolumeStateError::InvalidOnDiskLayout);
+    }
+
+    let mut label_entry_index = None;
+    for (entry_index, entry) in directory_bytes
+        .chunks_exact(DIRECTORY_ENTRY_SIZE)
+        .enumerate()
+    {
+        if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE {
+            break;
+        }
+        if entry[0] == VOLUME_LABEL_ENTRY_TYPE {
+            if label_entry_index.replace(entry_index).is_some() {
+                return Err(MountVolumeStateError::InvalidOnDiskLayout);
+            }
+        }
+    }
+    Ok(label_entry_index)
+}
+
+fn encode_volume_label_entry(
+    label: &[u16],
+) -> core::result::Result<[u8; DIRECTORY_ENTRY_SIZE], MountVolumeStateError> {
+    if label.is_empty() || label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
+        return Err(MountVolumeStateError::InvalidOperationInput);
+    }
+
+    let mut entry = [0u8; DIRECTORY_ENTRY_SIZE];
+    entry[0] = VOLUME_LABEL_ENTRY_TYPE;
+    entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET] =
+        u8::try_from(label.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+    for (index, code_unit) in label.iter().enumerate() {
+        let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
+            .checked_add(
+                index
+                    .checked_mul(2)
+                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+            )
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        entry[code_unit_offset..code_unit_offset + 2].copy_from_slice(&code_unit.to_le_bytes());
+    }
+    Ok(entry)
+}
+
+fn directory_entry_bytes(
+    directory_bytes: &[u8],
+    entry_index: usize,
+) -> core::result::Result<&[u8], MountVolumeStateError> {
+    let entry_offset = entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    directory_bytes
+        .get(entry_offset..entry_end)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+}
+
+fn directory_entry_bytes_mut(
+    directory_bytes: &mut [u8],
+    entry_index: usize,
+) -> core::result::Result<&mut [u8], MountVolumeStateError> {
+    let entry_offset = entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    directory_bytes
+        .get_mut(entry_offset..entry_end)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+}
+
+fn slot_range_bytes(
+    slot_range: DirectoryEntrySlotRange,
+) -> core::result::Result<core::ops::Range<usize>, MountVolumeStateError> {
+    let byte_start = slot_range
+        .first_entry_index()
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let byte_len = slot_range
+        .entry_count()
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let byte_end = byte_start
+        .checked_add(byte_len)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    Ok(byte_start..byte_end)
 }

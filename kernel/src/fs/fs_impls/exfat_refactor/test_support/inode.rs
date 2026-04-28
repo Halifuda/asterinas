@@ -8,11 +8,11 @@ use core::{
 };
 
 use aster_block::{
-    bio::{BioEnqueueError, BioSegment, BioStatus, BioType, SubmittedBio},
     BlockDevice, BlockDeviceMeta, SECTOR_SIZE,
+    bio::{BioEnqueueError, BioSegment, BioStatus, BioType, SubmittedBio},
 };
 use device_id::DeviceId;
-use ostd::mm::{io::util::HasVmReaderWriter, FrameAllocOptions, HasSize, Segment, VmIo, PAGE_SIZE};
+use ostd::mm::{FrameAllocOptions, HasSize, PAGE_SIZE, Segment, VmIo, io::util::HasVmReaderWriter};
 use spin::Mutex;
 
 use super::load_validated_mount;
@@ -377,7 +377,10 @@ impl ExfatLookupTestDisk {
     }
 
     pub(in super::super) fn cluster_offset(&self, cluster: u32) -> usize {
-        self.validated_mount().boot_region.cluster_offset(cluster).unwrap()
+        self.validated_mount()
+            .boot_region
+            .cluster_offset(cluster)
+            .unwrap()
     }
 
     pub(in super::super) fn fat_entry_offset(&self, cluster: u32) -> usize {
@@ -453,7 +456,10 @@ impl ExfatLookupTestDisk {
         entry_index: usize,
         bytes: &[u8],
     ) {
-        self.write_bytes(self.directory_entry_offset(directory_cluster, entry_index), bytes);
+        self.write_bytes(
+            self.directory_entry_offset(directory_cluster, entry_index),
+            bytes,
+        );
     }
 
     pub(in super::super) fn take_observed_bios(&self) -> Vec<ObservedBio> {

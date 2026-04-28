@@ -5,11 +5,11 @@
 mod bitmap;
 mod boot;
 mod direntry;
-#[cfg(ktest)]
-mod test_support;
 mod fat;
 mod fs;
 mod inode;
+#[cfg(ktest)]
+mod test_support;
 mod upcase;
 
 pub(super) use fs::init;

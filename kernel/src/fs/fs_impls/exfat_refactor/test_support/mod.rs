@@ -29,14 +29,8 @@ pub(super) struct LoadedMountState {
 pub(super) fn load_validated_mount(
     block_device: &dyn BlockDevice,
 ) -> core::result::Result<LoadedMountState, MountVolumeStateError> {
-    let (
-        boot_region,
-        anomaly,
-        bitmap,
-        upcase_table,
-        used_clusters,
-        used_clusters_from_recount,
-    ) = BootRegion::load_mount_state(block_device)?;
+    let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
+        BootRegion::load_mount_state(block_device)?;
     Ok(LoadedMountState {
         anomaly,
         bitmap,
@@ -47,8 +41,6 @@ pub(super) fn load_validated_mount(
     })
 }
 
-pub(super) fn diagnose_invalid_on_disk_layout_gate(
-    block_device: &dyn BlockDevice,
-) -> &'static str {
+pub(super) fn diagnose_invalid_on_disk_layout_gate(block_device: &dyn BlockDevice) -> &'static str {
     mount_diagnostics::diagnose_invalid_on_disk_layout_gate(block_device)
 }

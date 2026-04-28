@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{
-    collections::BTreeSet,
-    vec,
-};
+use alloc::{collections::BTreeSet, vec};
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -106,7 +103,9 @@ pub(super) fn diagnose_count_used_clusters(
             Ok(FatChainStep::End) => {
                 return Err("count_used_clusters:stream_shorter_than_bitmap");
             }
-            Err(MountVolumeStateError::DeviceIo) => return Err("count_used_clusters:fat_device_io"),
+            Err(MountVolumeStateError::DeviceIo) => {
+                return Err("count_used_clusters:fat_device_io");
+            }
             Err(_) => return Err("count_used_clusters:fat_chain_invalid"),
         };
     }

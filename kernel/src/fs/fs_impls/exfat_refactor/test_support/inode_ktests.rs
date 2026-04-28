@@ -621,8 +621,7 @@ fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_a
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state()
- {
+fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state() {
     directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state();
 }
 

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{
-    collections::BTreeSet,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::ops;
 
 use aster_block::BlockDevice;
@@ -417,8 +413,8 @@ impl AllocationBitmap {
         if relevant_bits == u8::BITS as usize {
             return Ok(u8::MAX);
         }
-        let shift =
-            u32::try_from(relevant_bits).map_err(|_| MountVolumeStateError::InconsistentAccounting)?;
+        let shift = u32::try_from(relevant_bits)
+            .map_err(|_| MountVolumeStateError::InconsistentAccounting)?;
         let shifted = 1u16
             .checked_shl(shift)
             .ok_or(MountVolumeStateError::InconsistentAccounting)?;
