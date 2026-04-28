@@ -1219,7 +1219,7 @@ fn free_space_accounting_and_discard_integration_failures_preserve_snapshot_and_
 
     assert_eq!(
         fs.recount_free_space().err(),
-        Some(FreeSpaceAccountingError::DeviceIo)
+        Some(MountVolumeStateError::DeviceIo)
     );
     assert_cached_reporting_matches_snapshot(&fs, &preserved_snapshot);
     assert_same_super_block(&preserved_super_block, &fs.sb());
