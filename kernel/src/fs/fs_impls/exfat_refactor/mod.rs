@@ -11,5 +11,6 @@ mod inode;
 #[cfg(ktest)]
 mod test_support;
 mod upcase;
+mod volume;
 
 pub(super) use fs::init;

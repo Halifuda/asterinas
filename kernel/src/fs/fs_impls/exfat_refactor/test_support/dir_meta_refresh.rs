@@ -7,14 +7,15 @@ use aster_block::BlockDevice;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    assert_bytes_unchanged_except, assert_metadata_unchanged, assert_valid_entry_set_checksum,
-    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
-    encode_valid_utc_offset_byte, expected_timestamp, init_lookup_test_runtime, lookup_error,
-    mount_root, root_entry_set, set_directory_entry_metadata, ExfatLookupTestDisk,
-    ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTE_DIRECTORY, RENAME_SOURCE_FILE_CLUSTER,
-    RENAME_SOURCE_PARENT_CLUSTER, RENAME_SOURCE_PARENT_NAME, RENAME_TARGET_PARENT_CLUSTER,
-    RENAME_TARGET_PARENT_NAME, ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX,
-    TEST_CHILD_DIRECTORY_CLUSTER, TEST_PARENT_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+    ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTE_DIRECTORY,
+    RENAME_SOURCE_FILE_CLUSTER, RENAME_SOURCE_PARENT_CLUSTER, RENAME_SOURCE_PARENT_NAME,
+    RENAME_TARGET_PARENT_CLUSTER, RENAME_TARGET_PARENT_NAME, ROOT_FILE_ENTRY_INDEX,
+    ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CHILD_DIRECTORY_CLUSTER, TEST_PARENT_CLUSTER,
+    TEST_REGULAR_FILE_CLUSTER, assert_bytes_unchanged_except, assert_metadata_unchanged,
+    assert_valid_entry_set_checksum, encode_exfat_date, encode_exfat_date_only,
+    encode_exfat_date_time, encode_valid_utc_offset_byte, expected_timestamp,
+    init_lookup_test_runtime, lookup_error, mount_root, root_entry_set,
+    set_directory_entry_metadata,
 };
 
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
@@ -98,8 +99,8 @@ fn assert_namespace_refresh_published(
     entry_set_after
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp()
+ {
     init_lookup_test_runtime();
 
     let create_disk = ExfatLookupTestDisk::new();
@@ -161,8 +162,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_create_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp()
+ {
     init_lookup_test_runtime();
 
     let unlink_disk = ExfatLookupTestDisk::new();
@@ -225,8 +226,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_unlink_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories()
+ {
     init_lookup_test_runtime();
 
     let same_directory_disk = ExfatLookupTestDisk::new();
@@ -342,8 +343,8 @@ pub(super) fn directory_metadata_projection_and_update_namespace_refresh_rename_
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state(
-) {
+pub(super) fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state()
+ {
     init_lookup_test_runtime();
 
     let writable_disk = ExfatLookupTestDisk::new();

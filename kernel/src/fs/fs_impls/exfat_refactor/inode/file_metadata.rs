@@ -1,8 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use core::time::Duration;
+
+use aster_block::BlockDevice;
+
+use super::{
+    super::{
+        boot::BootRegion,
+        direntry::{self, FileEntrySetFieldUpdates},
+        fs::ExfatFsError,
+    },
+    ExfatFs, ExfatInode, InodeRewriteTarget, InodeTimestampField,
+};
+use crate::{
+    fs::{
+        file::{InodeMode, InodeType, chmod, mkmod},
+        vfs::inode::Metadata,
+    },
+    prelude::*,
+    process::{Gid, Uid},
+    time::clocks::RealTimeCoarseClock,
+};
 
 impl ExfatInode {
+    // Read projection
+
     pub(super) fn metadata_projection(&self) -> Metadata {
         let mut metadata = *self.metadata.read();
         if metadata.type_ == InodeType::Dir {
@@ -44,183 +66,6 @@ impl ExfatInode {
         metadata
     }
 
-    pub(super) fn reject_published_identity_change(
-        &self,
-        matches_requested_fn: impl FnOnce(&Metadata) -> bool,
-    ) -> Result<()> {
-        let fs = self
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
-            return_errno!(Errno::EIO);
-        }
-
-        let _owner_guard = self.admission.write();
-        let metadata = self.metadata.read();
-        if matches_requested_fn(&metadata) {
-            return Ok(());
-        }
-        return_errno!(Errno::EPERM);
-    }
-
-    pub(super) fn rewrite_timestamp(
-        &self,
-        target: RewriteTarget,
-        field_kind: TimestampFieldKind,
-        time: Duration,
-    ) {
-        let Some(fs) = self.fs.upgrade() else {
-            return;
-        };
-        // TODO: These timestamp setters still admit through the generic mounted-mutation gate and
-        // reuse the currently stored exFAT UTC-offset byte because `ExfatMountOptions` does not
-        // yet own explicit `allow_utime` / timezone policy. Once the later `meso_09`
-        // mount-policy follow-up publishes that owner-local policy under `ExfatFs`, remove this
-        // seam and route timestamp admission plus UTC-offset selection through that dedicated path.
-        let Ok((_state_guard, block_device, boot_region, anomaly, _upcase_table, _options)) =
-            fs.admitted_mutation_state().map_err(Error::from)
-        else {
-            return;
-        };
-        if anomaly.clear_to_zero || anomaly.media_failure {
-            return;
-        }
-
-        match target {
-            RewriteTarget::Directory => {
-                if self.stream.read().data_length.is_none() {
-                    return;
-                }
-                if self
-                    .rewrite_inode_entry_set(
-                        RewriteTarget::Directory,
-                        &block_device,
-                        &boot_region,
-                        |entry_view, source_entry_set| match field_kind {
-                            TimestampFieldKind::Accessed => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-                                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_accessed_fields: Some((
-                                            [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
-                                            encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                            TimestampFieldKind::Modified => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_modified_fields: Some((
-                                            timestamp_bytes,
-                                            ten_ms_increment,
-                                            encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                        },
-                        |metadata| match field_kind {
-                            TimestampFieldKind::Accessed => metadata.last_access_at = time,
-                            TimestampFieldKind::Modified => {
-                                metadata.last_meta_change_at = time;
-                                metadata.last_modify_at = time;
-                            }
-                        },
-                    )
-                    .is_ok_and(|updated| updated)
-                {
-                    self.mark_metadata_publication_dirty();
-                }
-            }
-            RewriteTarget::RegularFile => {
-                if self
-                    .rewrite_inode_entry_set(
-                        RewriteTarget::RegularFile,
-                        &block_device,
-                        &boot_region,
-                        |entry_view, source_entry_set| match field_kind {
-                            TimestampFieldKind::Accessed => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-                                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_accessed_fields: Some((
-                                            [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
-                                            encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                            TimestampFieldKind::Modified => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_modified_fields: Some((
-                                            timestamp_bytes,
-                                            ten_ms_increment,
-                                            encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                        },
-                        |_| {},
-                    )
-                    .is_ok()
-                {
-                    let mut metadata = self.metadata.write();
-                    match field_kind {
-                        TimestampFieldKind::Accessed => metadata.last_access_at = time,
-                        TimestampFieldKind::Modified => metadata.last_modify_at = time,
-                    }
-                    metadata.last_meta_change_at = RealTimeCoarseClock::get().read_time();
-                    drop(metadata);
-                    self.mark_metadata_publication_dirty();
-                }
-            }
-        }
-    }
-
     pub(super) fn metadata_impl(&self) -> Metadata {
         self.metadata_projection()
     }
@@ -241,6 +86,38 @@ impl ExfatInode {
         }
         Ok(self.metadata_projection().mode)
     }
+
+    pub(super) fn owner_impl(&self) -> Result<Uid> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return self
+                .directory_metadata_projection()
+                .map(|metadata| metadata.uid);
+        }
+        Ok(self.metadata_projection().uid)
+    }
+
+    pub(super) fn group_impl(&self) -> Result<Gid> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return self
+                .directory_metadata_projection()
+                .map(|metadata| metadata.gid);
+        }
+        Ok(self.metadata_projection().gid)
+    }
+
+    pub(super) fn atime_impl(&self) -> Duration {
+        self.metadata_projection().last_access_at
+    }
+
+    pub(super) fn mtime_impl(&self) -> Duration {
+        self.metadata_projection().last_modify_at
+    }
+
+    pub(super) fn ctime_impl(&self) -> Duration {
+        self.metadata_projection().last_meta_change_at
+    }
+
+    // Write path
 
     pub(super) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
         if self.metadata.read().type_ == InodeType::Dir {
@@ -263,7 +140,7 @@ impl ExfatInode {
             }
 
             let durable_updated = self.rewrite_inode_entry_set(
-                RewriteTarget::Directory,
+                InodeRewriteTarget::Directory,
                 &block_device,
                 &boot_region,
                 |entry_view, _source_entry_set| {
@@ -322,7 +199,7 @@ impl ExfatInode {
 
         let requested_writable = mode.intersects(mkmod!(a+w));
         let durable_updated = self.rewrite_inode_entry_set(
-            RewriteTarget::RegularFile,
+            InodeRewriteTarget::RegularFile,
             &block_device,
             &boot_region,
             |entry_view, _source_entry_set| {
@@ -365,84 +242,38 @@ impl ExfatInode {
         Ok(())
     }
 
-    pub(super) fn owner_impl(&self) -> Result<Uid> {
-        if self.metadata.read().type_ == InodeType::Dir {
-            return self
-                .directory_metadata_projection()
-                .map(|metadata| metadata.uid);
-        }
-        Ok(self.metadata_projection().uid)
-    }
-
-    pub(super) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
-        let inode_type = self.metadata.read().type_;
-        if !matches!(inode_type, InodeType::Dir | InodeType::File) {
-            self.metadata.write().uid = uid;
-            return Ok(());
-        }
-        self.reject_published_identity_change(|metadata| metadata.uid == uid)
-    }
-
-    pub(super) fn group_impl(&self) -> Result<Gid> {
-        if self.metadata.read().type_ == InodeType::Dir {
-            return self
-                .directory_metadata_projection()
-                .map(|metadata| metadata.gid);
-        }
-        Ok(self.metadata_projection().gid)
-    }
-
-    pub(super) fn set_group_impl(&self, gid: Gid) -> Result<()> {
-        let inode_type = self.metadata.read().type_;
-        if !matches!(inode_type, InodeType::Dir | InodeType::File) {
-            self.metadata.write().gid = gid;
-            return Ok(());
-        }
-        self.reject_published_identity_change(|metadata| metadata.gid == gid)
-    }
-
-    pub(super) fn atime_impl(&self) -> Duration {
-        self.metadata_projection().last_access_at
-    }
-
     pub(super) fn set_atime_impl(&self, time: Duration) {
         let inode_type = self.metadata.read().type_;
         match inode_type {
-            InodeType::Dir => {
-                self.rewrite_timestamp(RewriteTarget::Directory, TimestampFieldKind::Accessed, time)
-            }
+            InodeType::Dir => self.rewrite_timestamp(
+                InodeRewriteTarget::Directory,
+                InodeTimestampField::Accessed,
+                time,
+            ),
             InodeType::File => self.rewrite_timestamp(
-                RewriteTarget::RegularFile,
-                TimestampFieldKind::Accessed,
+                InodeRewriteTarget::RegularFile,
+                InodeTimestampField::Accessed,
                 time,
             ),
             _ => self.metadata.write().last_access_at = time,
         }
     }
 
-    pub(super) fn mtime_impl(&self) -> Duration {
-        self.metadata_projection().last_modify_at
-    }
-
     pub(super) fn set_mtime_impl(&self, time: Duration) {
         let inode_type = self.metadata.read().type_;
         match inode_type {
             InodeType::Dir => self.rewrite_timestamp(
-                RewriteTarget::Directory,
-                TimestampFieldKind::Modified,
+                InodeRewriteTarget::Directory,
+                InodeTimestampField::Modified,
                 time,
             ),
             InodeType::File => self.rewrite_timestamp(
-                RewriteTarget::RegularFile,
-                TimestampFieldKind::Modified,
+                InodeRewriteTarget::RegularFile,
+                InodeTimestampField::Modified,
                 time,
             ),
             _ => self.metadata.write().last_modify_at = time,
         }
-    }
-
-    pub(super) fn ctime_impl(&self) -> Duration {
-        self.metadata_projection().last_meta_change_at
     }
 
     pub(super) fn set_ctime_impl(&self, time: Duration) {
@@ -487,5 +318,202 @@ impl ExfatInode {
 
         let _owner_guard = self.admission.write();
         self.metadata.write().last_meta_change_at = time;
+    }
+
+    pub(super) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
+        let inode_type = self.metadata.read().type_;
+        if !matches!(inode_type, InodeType::Dir | InodeType::File) {
+            self.metadata.write().uid = uid;
+            return Ok(());
+        }
+        self.reject_published_identity_change(|metadata| metadata.uid == uid)
+    }
+
+    pub(super) fn set_group_impl(&self, gid: Gid) -> Result<()> {
+        let inode_type = self.metadata.read().type_;
+        if !matches!(inode_type, InodeType::Dir | InodeType::File) {
+            self.metadata.write().gid = gid;
+            return Ok(());
+        }
+        self.reject_published_identity_change(|metadata| metadata.gid == gid)
+    }
+
+    // Write helpers
+
+    pub(super) fn reject_published_identity_change(
+        &self,
+        matches_requested_fn: impl FnOnce(&Metadata) -> bool,
+    ) -> Result<()> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
+            fs.admitted_mutation_state().map_err(Error::from)?;
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+
+        let _owner_guard = self.admission.write();
+        let metadata = self.metadata.read();
+        if matches_requested_fn(&metadata) {
+            return Ok(());
+        }
+        return_errno!(Errno::EPERM);
+    }
+
+    pub(super) fn rewrite_timestamp(
+        &self,
+        target: InodeRewriteTarget,
+        field_kind: InodeTimestampField,
+        time: Duration,
+    ) {
+        let Some(fs) = self.fs.upgrade() else {
+            return;
+        };
+        // TODO: These timestamp setters still admit through the generic mounted-mutation gate and
+        // reuse the currently stored exFAT UTC-offset byte because `ExfatMountOptions` does not
+        // yet own explicit `allow_utime` / timezone policy. Once the later `meso_09`
+        // mount-policy follow-up publishes that owner-local policy under `ExfatFs`, remove this
+        // seam and route timestamp admission plus UTC-offset selection through that dedicated path.
+        let Ok((_state_guard, block_device, boot_region, anomaly, _upcase_table, _options)) =
+            fs.admitted_mutation_state().map_err(Error::from)
+        else {
+            return;
+        };
+        if anomaly.clear_to_zero || anomaly.media_failure {
+            return;
+        }
+
+        match target {
+            InodeRewriteTarget::Directory => {
+                if self.stream.read().data_length.is_none() {
+                    return;
+                }
+                if self
+                    .rewrite_inode_entry_set(
+                        InodeRewriteTarget::Directory,
+                        &block_device,
+                        &boot_region,
+                        |entry_view, source_entry_set| match field_kind {
+                            InodeTimestampField::Accessed => {
+                                let utc_offset_byte = *source_entry_set
+                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
+                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                                    .map_err(Error::from)?;
+                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
+                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                                direntry::republished_entry_set(
+                                    entry_view,
+                                    &direntry::FileEntrySetFieldUpdates {
+                                        last_accessed_fields: Some((
+                                            [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                            encoded_utc_offset_byte,
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map(Some)
+                                .map_err(Error::from)
+                            }
+                            InodeTimestampField::Modified => {
+                                let utc_offset_byte = *source_entry_set
+                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
+                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                                    .map_err(Error::from)?;
+                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                                direntry::republished_entry_set(
+                                    entry_view,
+                                    &direntry::FileEntrySetFieldUpdates {
+                                        last_modified_fields: Some((
+                                            timestamp_bytes,
+                                            ten_ms_increment,
+                                            encoded_utc_offset_byte,
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map(Some)
+                                .map_err(Error::from)
+                            }
+                        },
+                        |metadata| match field_kind {
+                            InodeTimestampField::Accessed => metadata.last_access_at = time,
+                            InodeTimestampField::Modified => {
+                                metadata.last_meta_change_at = time;
+                                metadata.last_modify_at = time;
+                            }
+                        },
+                    )
+                    .is_ok_and(|updated| updated)
+                {
+                    self.mark_metadata_publication_dirty();
+                }
+            }
+            InodeRewriteTarget::RegularFile => {
+                if self
+                    .rewrite_inode_entry_set(
+                        InodeRewriteTarget::RegularFile,
+                        &block_device,
+                        &boot_region,
+                        |entry_view, source_entry_set| match field_kind {
+                            InodeTimestampField::Accessed => {
+                                let utc_offset_byte = *source_entry_set
+                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
+                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                                    .map_err(Error::from)?;
+                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
+                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                                direntry::republished_entry_set(
+                                    entry_view,
+                                    &direntry::FileEntrySetFieldUpdates {
+                                        last_accessed_fields: Some((
+                                            [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                            encoded_utc_offset_byte,
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map(Some)
+                                .map_err(Error::from)
+                            }
+                            InodeTimestampField::Modified => {
+                                let utc_offset_byte = *source_entry_set
+                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
+                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                                    .map_err(Error::from)?;
+                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
+                                direntry::republished_entry_set(
+                                    entry_view,
+                                    &direntry::FileEntrySetFieldUpdates {
+                                        last_modified_fields: Some((
+                                            timestamp_bytes,
+                                            ten_ms_increment,
+                                            encoded_utc_offset_byte,
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map(Some)
+                                .map_err(Error::from)
+                            }
+                        },
+                        |_| {},
+                    )
+                    .is_ok()
+                {
+                    let mut metadata = self.metadata.write();
+                    match field_kind {
+                        InodeTimestampField::Accessed => metadata.last_access_at = time,
+                        InodeTimestampField::Modified => metadata.last_modify_at = time,
+                    }
+                    metadata.last_meta_change_at = RealTimeCoarseClock::get().read_time();
+                    drop(metadata);
+                    self.mark_metadata_publication_dirty();
+                }
+            }
+        }
     }
 }

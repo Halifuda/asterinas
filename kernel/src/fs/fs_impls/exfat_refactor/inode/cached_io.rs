@@ -1,6 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use aster_block::{
+    BlockDevice,
+    bio::{Bio, BioDirection, BioSegment, BioType, BioWaiter},
+    id::Sid,
+};
+use ostd::mm::{Segment, VmIo};
+
+use super::{
+    super::{
+        boot::BootRegion,
+        fat::{FatChainStep, FatReader},
+        fs::ExfatFsError,
+    },
+    ExfatInode, ExfatInodeStream,
+};
+use crate::{
+    fs::{
+        file::{InodeType, StatusFlags},
+        vfs::{inode::Inode, page_cache::CachePage},
+    },
+    prelude::*,
+};
 
 impl ExfatInode {
     pub(super) fn validate_regular_file_mapping_shape(
@@ -285,7 +306,7 @@ impl ExfatInode {
                 let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
                 let cluster_start = boot_region.cluster_offset(current_cluster).map_err(|_| {
                     if stream.no_fat_chain {
-                        Error::from(MountVolumeStateError::InvalidOnDiskLayout)
+                        Error::from(ExfatFsError::InvalidOnDiskLayout)
                     } else {
                         Error::new(Errno::EIO)
                     }
@@ -306,7 +327,8 @@ impl ExfatInode {
                     break;
                 }
                 let using_fat_chain = fat_reader.is_some();
-                current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut()) {
+                current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())
+                {
                     Ok(Some(next_cluster)) => next_cluster,
                     Ok(None) | Err(_) if using_fat_chain => return_errno!(Errno::EIO),
                     Ok(None) | Err(_) => return_errno!(Errno::EINVAL),

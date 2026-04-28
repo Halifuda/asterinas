@@ -3,9 +3,9 @@
 use ostd::prelude::ktest;
 
 use super::{
-    collect_dirents, entry_names, entry_offsets, init_lookup_test_runtime, lookup_error,
-    mount_root, CapturedDirent, Errno, ExfatLookupTestDisk, InodeType, RejectingDirentVisitor, Vec,
-    ROOT_FILE_ENTRY_INDEX,
+    CapturedDirent, Errno, ExfatLookupTestDisk, InodeType, ROOT_FILE_ENTRY_INDEX,
+    RejectingDirentVisitor, Vec, collect_dirents, entry_names, entry_offsets,
+    init_lookup_test_runtime, lookup_error, mount_root,
 };
 
 #[ktest]

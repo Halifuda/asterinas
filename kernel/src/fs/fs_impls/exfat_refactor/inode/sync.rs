@@ -1,9 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use aster_block::bio::BioStatus;
+
+use super::{ExfatInode, state::ExfatInodeDirtyState};
+use crate::prelude::*;
+
+#[derive(Clone, Copy)]
+pub(super) enum InodeSyncScope {
+    Data,
+    All,
+}
+
+impl InodeSyncScope {
+    fn needs_device_sync(self, dirty_state: ExfatInodeDirtyState) -> bool {
+        match self {
+            Self::Data => dirty_state.needs_sync_data(),
+            Self::All => dirty_state.needs_sync_all(),
+        }
+    }
+}
 
 impl ExfatInode {
-    pub(super) fn sync_regular_file(&self, scope: FileSyncScope) -> Result<()> {
+    pub(super) fn sync_regular_file(&self, scope: InodeSyncScope) -> Result<()> {
         let fs = self
             .fs
             .upgrade()
@@ -46,8 +64,14 @@ impl ExfatInode {
         if needs_page_writeback || needs_device_sync {
             match block_device.sync()? {
                 BioStatus::Complete => {
-                    let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
-                        fs.admitted_lookup_state().map_err(Error::from)?;
+                    let (
+                        _state_guard,
+                        _block_device,
+                        _boot_region,
+                        anomaly,
+                        _upcase_table,
+                        _options,
+                    ) = fs.admitted_lookup_state().map_err(Error::from)?;
                     if anomaly.clear_to_zero || anomaly.media_failure {
                         return_errno!(Errno::EIO);
                     }
@@ -56,8 +80,8 @@ impl ExfatInode {
                         self.admitted_regular_file_stream_snapshot()?;
                     let mut dirty_state = self.dirty_state.write();
                     match scope {
-                        FileSyncScope::Data => dirty_state.publish_data(admitted_dirty_state),
-                        FileSyncScope::All => dirty_state.publish_all(admitted_dirty_state),
+                        InodeSyncScope::Data => dirty_state.publish_data(admitted_dirty_state),
+                        InodeSyncScope::All => dirty_state.publish_all(admitted_dirty_state),
                     }
                     Ok(())
                 }

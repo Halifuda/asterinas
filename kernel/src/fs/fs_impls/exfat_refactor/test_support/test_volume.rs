@@ -16,12 +16,22 @@ use ostd::{
     prelude::ktest,
 };
 
-use super::*;
+use super::{
+    super::{
+        fs::{EXFAT_SUPER_MAGIC, ExfatFs, ExfatFsError, ExfatMountOptions, FreeSpaceSnapshot},
+        volume,
+    },
+    LoadedMountState, diagnose_invalid_on_disk_layout_gate, load_validated_mount,
+};
 use crate::{
     fs::{
         file::InodeType,
-        vfs::{file_system::FsFlags, inode::Inode},
+        vfs::{
+            file_system::{FsFlags, SuperBlock},
+            inode::Inode,
+        },
     },
+    prelude::*,
     thread::{Thread, kernel_thread::ThreadOptions},
 };
 
@@ -534,8 +544,7 @@ fn init_mount_volume_state_test_runtime() {
 fn mount_disk(
     disk: &Arc<ExfatRefactorMemoryDisk>,
     options: ExfatMountOptions,
-) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), MountVolumeStateError>
-{
+) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), ExfatFsError> {
     let block_device: Arc<dyn BlockDevice> = disk.clone();
     mount_block_device(&block_device, options)
 }
@@ -543,8 +552,7 @@ fn mount_disk(
 fn mount_block_device(
     block_device: &Arc<dyn BlockDevice>,
     options: ExfatMountOptions,
-) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), MountVolumeStateError>
-{
+) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), ExfatFsError> {
     ExfatFs::mount_candidate(block_device, Some("exfat-refactor-test"), &options)
 }
 
@@ -561,7 +569,7 @@ fn assert_administrative_trim_rejection_preserves_state(fs: &Arc<ExfatFs>, expec
     let before_options = fs.current_options().unwrap();
     let before_flags = fs.published_flags().unwrap();
 
-    let error = fs.administrative_trim_free_space().unwrap_err();
+    let error = volume::administrative_trim_free_space(fs).unwrap_err();
     assert_eq!(error.error(), expected_errno);
 
     let after_snapshot = fs.cached_free_space_snapshot().unwrap();
@@ -812,7 +820,7 @@ fn filesystem_sync_and_volume_state_posture_and_admission_boundary_read_only_adm
     assert_observed_volume_posture(&fs, FsFlags::RDONLY, TEST_VOLUME_FLAGS);
     assert_eq!(
         fs.admitted_mutation_state().err(),
-        Some(MountVolumeStateError::ReadOnlyConflict)
+        Some(ExfatFsError::ReadOnlyConflict)
     );
 
     let error = fs.sync().unwrap_err();
@@ -946,8 +954,8 @@ fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_s
     assert_eq!(fs.current_options().unwrap(), options);
     assert!(!fs.state.read().as_ref().unwrap().forced_shutdown);
 
-    fs.admit_forced_shutdown().unwrap();
-    fs.admit_forced_shutdown().unwrap();
+    volume::admit_forced_shutdown(&fs).unwrap();
+    volume::admit_forced_shutdown(&fs).unwrap();
 
     {
         let state = fs.state.read();
@@ -959,10 +967,10 @@ fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_s
 
     assert_eq!(
         fs.admitted_mutation_state().err(),
-        Some(MountVolumeStateError::DeviceIo)
+        Some(ExfatFsError::DeviceIo)
     );
 
-    let trim_error = fs.administrative_trim_free_space().unwrap_err();
+    let trim_error = volume::administrative_trim_free_space(&fs).unwrap_err();
     assert_eq!(trim_error.error(), Errno::EIO);
 
     let sync_error = fs.sync().unwrap_err();
@@ -988,13 +996,13 @@ fn filesystem_sync_and_volume_state_forced_shutdown_sync_and_observation_preserv
     assert_observed_volume_posture(&fs, FsFlags::empty(), TEST_VOLUME_FLAGS);
     assert_eq!(boot_volume_flags(&disk), TEST_VOLUME_FLAGS);
 
-    fs.admit_forced_shutdown().unwrap();
+    volume::admit_forced_shutdown(&fs).unwrap();
 
     let sync_error = fs.sync().unwrap_err();
     assert_eq!(sync_error.error(), Errno::EIO);
     assert_eq!(
         fs.admitted_mutation_state().err(),
-        Some(MountVolumeStateError::DeviceIo)
+        Some(ExfatFsError::DeviceIo)
     );
 
     assert!(fs.state.read().as_ref().unwrap().forced_shutdown);
@@ -1013,7 +1021,7 @@ fn mount_volume_state_rejects_invalid_boot_region() {
 
     assert_eq!(
         mount_disk(&disk, default_mount_options()).err(),
-        Some(MountVolumeStateError::InvalidOnDiskLayout)
+        Some(ExfatFsError::InvalidOnDiskLayout)
     );
 }
 
@@ -1027,7 +1035,7 @@ fn mount_volume_state_rejects_boot_region_device_io() {
 
     assert_eq!(
         mount_block_device(&block_device, default_mount_options()).err(),
-        Some(MountVolumeStateError::DeviceIo)
+        Some(ExfatFsError::DeviceIo)
     );
 }
 
@@ -1041,7 +1049,7 @@ fn mount_volume_state_rejects_inconsistent_allocation_bitmap() {
 
     assert_eq!(
         mount_disk(&disk, default_mount_options()).err(),
-        Some(MountVolumeStateError::InconsistentAccounting)
+        Some(ExfatFsError::InconsistentAccounting)
     );
 }
 
@@ -1056,7 +1064,7 @@ fn mount_volume_state_rejects_allocation_bitmap_device_io() {
 
     assert_eq!(
         mount_block_device(&block_device, default_mount_options()).err(),
-        Some(MountVolumeStateError::DeviceIo)
+        Some(ExfatFsError::DeviceIo)
     );
 }
 
@@ -1071,7 +1079,7 @@ fn mount_volume_state_rejects_invalid_upcase_table() {
 
     assert_eq!(
         mount_disk(&disk, default_mount_options()).err(),
-        Some(MountVolumeStateError::InvalidOnDiskLayout)
+        Some(ExfatFsError::InvalidOnDiskLayout)
     );
 }
 
@@ -1106,7 +1114,7 @@ fn mount_volume_state_remount_allows_discard_and_rejects_immutable_delta() {
     assert_eq!(
         fs.remount_published(unsupported_flags, &unsupported_options)
             .err(),
-        Some(MountVolumeStateError::UnsupportedRemountDelta)
+        Some(ExfatFsError::UnsupportedRemountDelta)
     );
 
     let state = fs.state.read();
@@ -1217,14 +1225,11 @@ fn free_space_accounting_and_discard_integration_failures_preserve_snapshot_and_
 
     failing_disk.enable_failures();
 
-    assert_eq!(
-        fs.recount_free_space().err(),
-        Some(MountVolumeStateError::DeviceIo)
-    );
+    assert_eq!(fs.recount_free_space().err(), Some(ExfatFsError::DeviceIo));
     assert_cached_reporting_matches_snapshot(&fs, &preserved_snapshot);
     assert_same_super_block(&preserved_super_block, &fs.sb());
 
-    let trim_error = fs.administrative_trim_free_space().unwrap_err();
+    let trim_error = volume::administrative_trim_free_space(&fs).unwrap_err();
     assert_eq!(trim_error.error(), Errno::EOPNOTSUPP);
     assert_cached_reporting_matches_snapshot(&fs, &preserved_snapshot);
     assert_same_super_block(&preserved_super_block, &fs.sb());
@@ -1255,7 +1260,7 @@ fn free_space_accounting_and_discard_integration_repeated_snapshots_and_trim_rej
     }
 
     for _ in 0..2 {
-        let trim_error = fs.administrative_trim_free_space().unwrap_err();
+        let trim_error = volume::administrative_trim_free_space(&fs).unwrap_err();
         assert_eq!(trim_error.error(), Errno::EOPNOTSUPP);
         assert_cached_reporting_matches_snapshot(&fs, &stable_snapshot);
         assert_same_super_block(&stable_super_block, &fs.sb());

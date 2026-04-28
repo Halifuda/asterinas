@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::{
-    collect_dirents, entry_names, init_lookup_test_runtime, lookup_error, mount_root, CString,
-    Errno, ExfatFsType, ExfatLookupTestDisk, FsFlags, ROOT_FILE_ENTRY_INDEX,
+    CString, Errno, ExfatFsType, ExfatLookupTestDisk, FsFlags, ROOT_FILE_ENTRY_INDEX,
+    collect_dirents, entry_names, init_lookup_test_runtime, lookup_error, mount_root,
 };
 
 #[ktest]

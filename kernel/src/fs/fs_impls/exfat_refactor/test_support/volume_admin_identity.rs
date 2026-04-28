@@ -4,8 +4,23 @@ use alloc::vec::Vec;
 
 use ostd::prelude::ktest;
 
-use super::*;
-use crate::process::credentials::capabilities::CapSet;
+use super::{
+    super::super::{
+        fs::{ExfatFs, ExfatMountOptions, FreeSpaceSnapshot},
+        volume::{
+            self, VolumeAdminRequest, VolumeIdentityEntries, VolumeIdentityQuery,
+            VolumeIdentityUpdate,
+        },
+    },
+    END_OF_DIRECTORY_ENTRY_TYPE, ExfatRefactorMemoryDisk, ExfatRefactorToggleFailingWriteDisk,
+    assert_same_super_block, cluster_offset, default_mount_options, find_directory_entry,
+    init_mount_volume_state_test_runtime, mount_block_device, mounted_fs, next_cluster,
+};
+use crate::{
+    fs::vfs::file_system::{FsFlags, SuperBlock},
+    prelude::*,
+    process::credentials::capabilities::CapSet,
+};
 
 const VOLUME_GUID_ENTRY_TYPE: u8 = 0xA0;
 const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
@@ -24,7 +39,7 @@ pub(super) fn query_identity(
     fs: &Arc<ExfatFs>,
     query: VolumeIdentityQuery,
 ) -> Result<VolumeIdentityEntries> {
-    fs.query_volume_identity(query)
+    volume::query_volume_identity(fs, query)
 }
 
 pub(super) fn handle_admin_request(
@@ -33,12 +48,17 @@ pub(super) fn handle_admin_request(
     request: VolumeAdminRequest,
 ) -> Result<()> {
     if !effective_capset.contains(CapSet::SYS_ADMIN) {
-        return_errno_with_message!(Errno::EPERM, "exFAT volume administration requires SYS_ADMIN");
+        return_errno_with_message!(
+            Errno::EPERM,
+            "exFAT volume administration requires SYS_ADMIN"
+        );
     }
     match request {
-        VolumeAdminRequest::ForceShutdown => fs.admit_forced_shutdown().map_err(Error::from),
-        VolumeAdminRequest::TrimFreeSpace => fs.administrative_trim_free_space(),
-        VolumeAdminRequest::UpdateIdentity(update) => fs.update_volume_identity(update),
+        VolumeAdminRequest::ForceShutdown => {
+            volume::admit_forced_shutdown(fs).map_err(Error::from)
+        }
+        VolumeAdminRequest::TrimFreeSpace => volume::administrative_trim_free_space(fs),
+        VolumeAdminRequest::UpdateIdentity(update) => volume::update_volume_identity(fs, update),
     }
 }
 
@@ -196,9 +216,8 @@ fn volume_admin_identity_query_update_round_trips_lossless_label_and_preserves_r
     let ordinary_entries_before =
         ordinary_root_namespace_entries(&read_root_directory_bytes(&disk));
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
-    let initial_label = expect_identity_label(
-        query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
-    );
+    let initial_label =
+        expect_identity_label(query_identity(&fs, VolumeIdentityQuery::Label).unwrap());
     let updated_label = next_volume_label(initial_label.as_deref());
 
     assert_eq!(
@@ -208,15 +227,11 @@ fn volume_admin_identity_query_update_round_trips_lossless_label_and_preserves_r
     handle_admin_request(
         &fs,
         CapSet::SYS_ADMIN,
-        VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(
-            updated_label.into(),
-        ))),
+        VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(updated_label.into()))),
     )
     .unwrap();
     assert_eq!(
-        expect_identity_label(
-            query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
-        ),
+        expect_identity_label(query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),),
         Some(updated_label.into())
     );
 
@@ -426,9 +441,7 @@ fn volume_admin_identity_write_failure_preserves_prior_label_and_mount_state() {
     assert_eq!(error.error(), Errno::EIO);
     assert_volume_admin_state_matches(&fs, &before);
     assert_eq!(
-        expect_identity_label(
-            query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
-        ),
+        expect_identity_label(query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),),
         before.label
     );
 }

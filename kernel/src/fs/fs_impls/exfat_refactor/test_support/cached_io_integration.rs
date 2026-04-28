@@ -2,15 +2,18 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use aster_block::{SECTOR_SIZE, bio::BioStatus};
+use ostd::mm::PAGE_SIZE;
+
 use super::{
-    assert_observed_bios, collect_dirents, entry_names, init_lookup_test_runtime,
-    install_root_file_with_cluster_contents, lookup_exfat_inode, mount_root,
-    mount_root_from_block_device, patterned_bytes, published_lookup_state, published_page_count,
-    read_cache_page_bytes, wait_for_flag, Arc, BioType, BlockDevice, BootRegion, CachePage,
-    ExfatInodeStream, ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk, FsFlags, Inode,
-    InodeType, PageState, Thread, ThreadOptions, Vec, ROOT_FILE_ENTRY_INDEX,
-    ROOT_SECOND_FILE_ENTRY_INDEX, ROOT_THIRD_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER,
-    TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+    Arc, BioType, BlockDevice, BootRegion, CachePage, ExfatInodeStream, ExfatLookupTestDisk,
+    ExfatLookupToggleFailingReadDisk, FsFlags, Inode, InodeType, ObservedBio, PageState,
+    ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX, ROOT_THIRD_FILE_ENTRY_INDEX,
+    TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER,
+    TEST_REGULAR_FILE_CLUSTER, Thread, ThreadOptions, Vec, assert_observed_bios, collect_dirents,
+    entry_names, init_lookup_test_runtime, install_root_file_with_cluster_contents,
+    lookup_exfat_inode, mount_root, mount_root_from_block_device, patterned_bytes,
+    published_lookup_state, published_page_count, read_cache_page_bytes, wait_for_flag,
 };
 
 const PARTIAL_FILE_FIRST_CLUSTER: u32 = 24;
@@ -58,8 +61,8 @@ fn second_cluster_page_idx(cluster_size: usize) -> usize {
     cluster_size / PAGE_SIZE
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -239,17 +242,21 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
         &partial_buffer[..partial_valid_len],
         partial_prefix.as_slice()
     );
-    assert!(partial_buffer[partial_valid_len..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        partial_buffer[partial_valid_len..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_eq!(partial_waiter.wait(), Some(BioStatus::Complete));
     assert_eq!(
         &partial_page_bytes[..partial_valid_len],
         partial_prefix.as_slice()
     );
-    assert!(partial_page_bytes[partial_valid_len..]
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        partial_page_bytes[partial_valid_len..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
     assert_eq!(
         published_page_count(&partial_inode),
         partial_len.div_ceil(PAGE_SIZE)
@@ -257,8 +264,8 @@ pub(super) fn file_content_mapping_cached_io_integration_success_path_coheres_re
     assert_same_regular_file_state(partial_state_before, regular_file_state(&partial_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility()
+ {
     init_lookup_test_runtime();
 
     let broken_disk = ExfatLookupTestDisk::new();
@@ -355,8 +362,8 @@ pub(super) fn file_content_mapping_cached_io_integration_failure_maintenance_pre
     assert_same_regular_file_state(failing_state_before, regular_file_state(&failing_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -431,14 +438,16 @@ pub(super) fn file_content_mapping_cached_io_integration_repeated_calls_stay_sta
     assert_eq!(first_cached, repeated_bytes[..cached_len]);
     assert_eq!(second_cached, first_cached);
     assert!(!first_cached_bios.is_empty());
-    assert!(second_cached_bios
-        .iter()
-        .all(|observed_bio| observed_bio.type_ == BioType::Read));
+    assert!(
+        second_cached_bios
+            .iter()
+            .all(|observed_bio| observed_bio.type_ == BioType::Read)
+    );
     assert_same_regular_file_state(repeated_state_before, regular_file_state(&repeated_inode));
 }
 
-pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary(
-) {
+pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -587,5 +596,180 @@ pub(super) fn file_content_mapping_cached_io_integration_concurrency_serializes_
     assert_same_regular_file_state(
         serialized_state_before,
         regular_file_state(&serialized_inode),
+    );
+}
+
+pub(super) fn file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let page_idx = cluster_size.div_ceil(PAGE_SIZE);
+    let file_offset = page_idx * PAGE_SIZE;
+    let data_length = file_offset + PAGE_SIZE;
+    let cluster_count = data_length.div_ceil(cluster_size);
+    let clusters: Vec<u32> = (0..cluster_count)
+        .map(|index| TEST_FRAGMENTED_FIRST_CLUSTER + u32::try_from(index * 3).unwrap())
+        .collect();
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "FragmentedWriteback",
+        clusters[0],
+        data_length,
+        data_length,
+        false,
+        &clusters,
+    );
+    for cluster_pair in clusters.windows(2) {
+        disk.set_fat_chain_step(cluster_pair[0], cluster_pair[1]);
+    }
+    disk.terminate_fat_chain(*clusters.last().unwrap());
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("FragmentedWriteback").unwrap();
+    let exfat_inode = lookup_exfat_inode(&file_inode);
+    let (_block_device, boot_region) = published_lookup_state(&file_inode);
+    let page_pattern = patterned_bytes(PAGE_SIZE);
+    let page = CachePage::alloc_zero(PageState::UpToDate).unwrap();
+    page.write_bytes(0, &page_pattern).unwrap();
+    let start_cluster_index = file_offset / cluster_size;
+    let start_cluster_offset = file_offset % cluster_size;
+    let mut remaining = PAGE_SIZE;
+    let mut expected_ranges = Vec::new();
+    let mut expected_cluster_prefixes = Vec::new();
+    let mut cluster_offset = start_cluster_offset;
+
+    for cluster in clusters.iter().skip(start_cluster_index) {
+        if remaining == 0 {
+            break;
+        }
+
+        let chunk_len = remaining.min(cluster_size - cluster_offset);
+        expected_ranges.push((
+            boot_region.cluster_offset(*cluster).unwrap() + cluster_offset,
+            chunk_len,
+        ));
+        expected_cluster_prefixes.push((*cluster, cluster_offset, chunk_len));
+        remaining -= chunk_len;
+        cluster_offset = 0;
+    }
+
+    let _ = disk.take_observed_bios();
+    let waiter = exfat_inode.write_page_async(page_idx, &page).unwrap();
+
+    assert!(waiter.nreqs() > 0);
+    assert_eq!(waiter.wait(), Some(BioStatus::Complete));
+    let mut page_offset = 0usize;
+    for (cluster, cluster_offset, chunk_len) in expected_cluster_prefixes {
+        let cluster_bytes = disk.read_cluster(cluster);
+        assert_eq!(
+            &cluster_bytes[cluster_offset..cluster_offset + chunk_len],
+            &page_pattern[page_offset..page_offset + chunk_len],
+        );
+        page_offset += chunk_len;
+    }
+    let observed_bios = disk.take_observed_bios();
+    let write_bios: Vec<_> = observed_bios
+        .into_iter()
+        .filter(|bio| bio.type_ == BioType::Write)
+        .collect();
+    assert!(!write_bios.is_empty());
+    assert_eq!(
+        write_bios
+            .iter()
+            .map(|bio| bio.byte_range.end - bio.byte_range.start)
+            .sum::<usize>(),
+        PAGE_SIZE,
+    );
+    let mut touched_expected_ranges = vec![false; expected_ranges.len()];
+    for observed_bio in &write_bios {
+        let mut matched = false;
+        for (index, (expected_start, expected_len)) in expected_ranges.iter().enumerate() {
+            let expected_end = expected_start + expected_len;
+            if *expected_start <= observed_bio.byte_range.start
+                && observed_bio.byte_range.end <= expected_end
+            {
+                touched_expected_ranges[index] = true;
+                matched = true;
+                break;
+            }
+        }
+        assert!(matched);
+    }
+    if expected_ranges.len() > 1 {
+        assert!(
+            touched_expected_ranges
+                .iter()
+                .filter(|touched| **touched)
+                .count()
+                > 1
+        );
+    }
+}
+pub(super) fn file_content_mapping_cached_io_page_cache_backend_zero_fills_mid_page_uninitialized_suffix()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let data_length = PAGE_SIZE.min(cluster_size * 2);
+    let valid_data_length = SECTOR_SIZE;
+    assert!(valid_data_length < data_length);
+    let cluster_count = data_length.div_ceil(cluster_size);
+    let clusters: Vec<u32> = (0..cluster_count)
+        .map(|index| TEST_REGULAR_FILE_CLUSTER + u32::try_from(index).unwrap())
+        .collect();
+    let initialized_prefix = patterned_bytes(valid_data_length);
+    let mut on_disk_bytes = vec![0xD7; data_length];
+    on_disk_bytes[..valid_data_length].copy_from_slice(&initialized_prefix);
+
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "ZeroPageTail",
+        clusters[0],
+        data_length,
+        valid_data_length,
+        true,
+        &clusters,
+    );
+    for (cluster_index, cluster) in clusters.iter().enumerate() {
+        let start = cluster_index * cluster_size;
+        if start >= on_disk_bytes.len() {
+            break;
+        }
+        let end = (start + cluster_size).min(on_disk_bytes.len());
+        disk.write_cluster_prefix(*cluster, &on_disk_bytes[start..end]);
+    }
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("ZeroPageTail").unwrap();
+    let exfat_inode = lookup_exfat_inode(&file_inode);
+    let (_block_device, boot_region) = published_lookup_state(&file_inode);
+
+    let _ = disk.take_observed_bios();
+    let page = CachePage::alloc_uninit().unwrap();
+    let waiter = exfat_inode.read_page_async(0, &page).unwrap();
+
+    assert_eq!(waiter.nreqs(), 1);
+    assert_eq!(waiter.wait(), Some(BioStatus::Complete));
+
+    let page_bytes = read_cache_page_bytes(&page);
+    assert_eq!(
+        &page_bytes[..valid_data_length],
+        initialized_prefix.as_slice()
+    );
+    assert!(
+        page_bytes[valid_data_length..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    assert_observed_bios(
+        &disk.take_observed_bios(),
+        BioType::Read,
+        &[(
+            boot_region.cluster_offset(clusters[0]).unwrap(),
+            valid_data_length,
+        )],
     );
 }

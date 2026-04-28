@@ -7,12 +7,12 @@ use aster_block::BlockDevice;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    assert_bytes_unchanged_except, assert_flush_only, assert_metadata_unchanged,
-    assert_valid_entry_set_checksum, encode_exfat_date, encode_exfat_date_only,
-    encode_exfat_date_time, encode_valid_utc_offset_byte, expected_timestamp,
-    init_lookup_test_runtime, mount_root, root_entry_set, set_regular_file_entry_metadata,
-    ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTES_OFFSET,
-    FILE_ATTRIBUTE_REGULAR, ROOT_FILE_ENTRY_INDEX,
+    ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTE_REGULAR,
+    FILE_ATTRIBUTES_OFFSET, ROOT_FILE_ENTRY_INDEX, assert_bytes_unchanged_except,
+    assert_flush_only, assert_metadata_unchanged, assert_valid_entry_set_checksum,
+    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    encode_valid_utc_offset_byte, expected_timestamp, init_lookup_test_runtime, mount_root,
+    root_entry_set, set_regular_file_entry_metadata,
 };
 use crate::process::{Gid, Uid};
 
@@ -26,8 +26,8 @@ const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state(
-) {
+pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -85,8 +85,8 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     assert!(disk.take_observed_bios().is_empty());
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape(
-) {
+pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -118,8 +118,8 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     assert_metadata_unchanged(file_inode.metadata(), metadata_before);
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families(
-) {
+pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -227,8 +227,8 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     assert_eq!(file_inode.mtime(), requested_mtime);
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only(
-) {
+pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -280,8 +280,8 @@ pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_
     assert!(disk.take_observed_bios().is_empty());
 }
 
-pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state(
-) {
+pub(super) fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state()
+ {
     init_lookup_test_runtime();
 
     let read_only_disk = ExfatLookupTestDisk::new();

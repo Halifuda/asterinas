@@ -5,11 +5,11 @@ use core::time::Duration;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    DIRECTORY_ENTRY_SIZE, ExfatLookupTestDisk, FILE_ATTRIBUTE_REGULAR, FILE_ATTRIBUTES_OFFSET,
+    ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER,
+    TEST_REGULAR_FILE_CLUSTER, encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
     encode_valid_utc_offset_byte, entry_set_checksum, expected_timestamp, init_lookup_test_runtime,
-    lookup_error, mount_root, root_entry_set, ExfatLookupTestDisk, DIRECTORY_ENTRY_SIZE,
-    FILE_ATTRIBUTES_OFFSET, FILE_ATTRIBUTE_REGULAR, ROOT_FILE_ENTRY_INDEX,
-    ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+    lookup_error, mount_root, root_entry_set,
 };
 use crate::process::{Gid, Uid};
 
@@ -20,8 +20,8 @@ const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
 const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 
-pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state(
-) {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -89,8 +89,8 @@ pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_
     assert_eq!(file_inode.ctime(), expected_mtime);
 }
 
-pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups(
-) {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

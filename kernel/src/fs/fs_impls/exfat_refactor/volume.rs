@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
-use crate::process::credentials::capabilities::CapSet;
+use alloc::{string::String, vec::Vec};
+
+use super::{
+    direntry,
+    fs::{ExfatFs, ExfatFsError},
+};
+use crate::{
+    fs::vfs::file_system::FsFlags, prelude::*, process::credentials::capabilities::CapSet,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct VolumeIdentityEntries {
@@ -78,7 +85,7 @@ pub(super) fn query_volume_identity(
                 fs.admitted_lookup_state()?;
             let root_inode = state
                 .as_ref()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .root_inode
                 .clone();
             let label = root_inode.read_root_directory(
@@ -89,7 +96,7 @@ pub(super) fn query_volume_identity(
             let label = match label {
                 Some(label) => String::from_utf16(&label)
                     .map(Some)
-                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout.into())?,
+                    .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?,
                 None => None,
             };
             Ok(VolumeIdentityEntries { guid: None, label })
@@ -121,7 +128,7 @@ pub(super) fn update_volume_identity(fs: &ExfatFs, update: VolumeIdentityUpdate)
                 fs.admitted_mutation_state()?;
             let root_inode = state
                 .as_ref()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .root_inode
                 .clone();
 
@@ -140,27 +147,21 @@ pub(super) fn update_volume_identity(fs: &ExfatFs, update: VolumeIdentityUpdate)
     }
 }
 
-pub(super) fn admit_forced_shutdown(
-    fs: &ExfatFs,
-) -> core::result::Result<(), MountVolumeStateError> {
+pub(super) fn admit_forced_shutdown(fs: &ExfatFs) -> core::result::Result<(), ExfatFsError> {
     let mut state = fs.state.write();
-    let publication = state
-        .as_mut()
-        .ok_or(MountVolumeStateError::UnpublishedState)?;
+    let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
     publication.forced_shutdown = true;
     Ok(())
 }
 
 pub(super) fn administrative_trim_free_space(fs: &ExfatFs) -> Result<()> {
     let state = fs.state.write();
-    let publication = state
-        .as_ref()
-        .ok_or(MountVolumeStateError::UnpublishedState)?;
+    let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
     if publication.forced_shutdown {
         return Err(Error::new(Errno::EIO));
     }
     if publication.flags.contains(FsFlags::RDONLY) {
-        return Err(MountVolumeStateError::ReadOnlyConflict.into());
+        return Err(ExfatFsError::ReadOnlyConflict.into());
     }
 
     Err(Error::new(Errno::EOPNOTSUPP))

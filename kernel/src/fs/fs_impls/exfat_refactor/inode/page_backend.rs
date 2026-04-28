@@ -1,6 +1,24 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use aster_block::{
+    BlockDevice,
+    bio::{BioType, BioWaiter},
+};
+use ostd::mm::io::util::HasVmReaderWriter;
+
+use super::{super::boot::BootRegion, ExfatInode, ExfatInodeStream};
+use crate::{
+    fs::{
+        file::InodeType,
+        vfs::{
+            file_system::FsFlags,
+            inode::Inode,
+            page_cache::{CachePage, PageCache, PageCacheBackend},
+        },
+    },
+    prelude::*,
+    vm::vmo::Vmo,
+};
 
 pub(super) struct ExfatFilePageBackend {
     inode: Arc<ExfatInode>,
@@ -14,11 +32,10 @@ impl ExfatFilePageBackend {
 
 impl PageCacheBackend for ExfatFilePageBackend {
     fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
-        let fs = self
-            .inode
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let fs =
+            self.inode.fs.upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
+            })?;
         let (block_device, boot_region, anomaly, _, _) =
             fs.published_lookup_state().map_err(Error::from)?;
         if anomaly.clear_to_zero || anomaly.media_failure {
@@ -53,11 +70,10 @@ impl PageCacheBackend for ExfatFilePageBackend {
     }
 
     fn write_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
-        let fs = self
-            .inode
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let fs =
+            self.inode.fs.upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
+            })?;
         let (block_device, boot_region, anomaly, _, options) =
             fs.published_lookup_state().map_err(Error::from)?;
         if anomaly.clear_to_zero || anomaly.media_failure {

@@ -7,19 +7,19 @@ use aster_block::{BlockDevice, SECTOR_SIZE};
 use ostd::mm::PAGE_SIZE;
 
 use super::{
-    assert_metadata_unchanged, init_lookup_test_runtime, install_root_file_with_cluster_contents,
-    lookup_exfat_inode, mount_root, mount_root_from_block_device, next_stream_cluster,
-    published_lookup_state, published_page_count, root_entry_set, stream_first_cluster,
-    stream_has_no_fat_chain, stream_lengths, wait_for_concurrent_start, wait_for_flag,
-    write_bytes_append, ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FsFlags, Inode,
-    Metadata, DIRECTORY_ENTRY_SIZE, FAT_END_OF_CHAIN, FILE_ATTRIBUTES_OFFSET,
-    ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX, ROOT_THIRD_FILE_ENTRY_INDEX,
-    TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER,
-    TEST_FRAGMENTED_THIRD_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+    DIRECTORY_ENTRY_SIZE, Errno, ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk,
+    FAT_END_OF_CHAIN, FILE_ATTRIBUTES_OFFSET, FsFlags, Inode, Metadata, ROOT_FILE_ENTRY_INDEX,
+    ROOT_SECOND_FILE_ENTRY_INDEX, ROOT_THIRD_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER,
+    TEST_FRAGMENTED_FIRST_CLUSTER, TEST_FRAGMENTED_SECOND_CLUSTER, TEST_FRAGMENTED_THIRD_CLUSTER,
+    TEST_REGULAR_FILE_CLUSTER, assert_metadata_unchanged, init_lookup_test_runtime,
+    install_root_file_with_cluster_contents, lookup_exfat_inode, mount_root,
+    mount_root_from_block_device, next_stream_cluster, published_lookup_state,
+    published_page_count, root_entry_set, stream_first_cluster, stream_has_no_fat_chain,
+    stream_lengths, wait_for_concurrent_start, wait_for_flag, write_bytes_append,
 };
-use crate::thread::{kernel_thread::ThreadOptions, Thread};
+use crate::thread::{Thread, kernel_thread::ThreadOptions};
 
-struct FileSnapshot {
+struct FileContentSnapshot {
     entry_set: Vec<u8>,
     metadata: Metadata,
     page_count: usize,
@@ -37,8 +37,8 @@ fn snapshot_regular_file(
     disk: &Arc<ExfatLookupTestDisk>,
     inode: &Arc<dyn Inode>,
     entry_index: usize,
-) -> FileSnapshot {
-    FileSnapshot {
+) -> FileContentSnapshot {
+    FileContentSnapshot {
         entry_set: root_entry_set(disk, entry_index),
         metadata: inode.metadata(),
         page_count: published_page_count(inode),
@@ -46,7 +46,7 @@ fn snapshot_regular_file(
     }
 }
 
-fn assert_same_snapshot(actual: FileSnapshot, expected: &FileSnapshot) {
+fn assert_same_snapshot(actual: FileContentSnapshot, expected: &FileContentSnapshot) {
     assert_eq!(actual.entry_set, expected.entry_set);
     assert_metadata_unchanged(actual.metadata, expected.metadata);
     assert_eq!(actual.page_count, expected.page_count);
@@ -827,4 +827,318 @@ pub(super) fn file_content_mutation_integration_concurrency_serializes_mutation_
             .unwrap(),
         Some(boot_region.cluster_offset(final_appended_cluster).unwrap())
     );
+}
+
+pub(super) fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let initial_bytes = vec![b'A'; cluster_size];
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "AppendGrowth",
+        TEST_REGULAR_FILE_CLUSTER,
+        cluster_size,
+        cluster_size,
+        true,
+        &[TEST_REGULAR_FILE_CLUSTER],
+    );
+    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("AppendGrowth").unwrap();
+    let payload = b"TAIL!";
+
+    let written_len = write_bytes_append(&file_inode, payload).unwrap();
+
+    assert_eq!(written_len, payload.len());
+
+    let mut visible_bytes = vec![0xCC; cluster_size + payload.len()];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, cluster_size + payload.len());
+    assert_eq!(&visible_bytes[..cluster_size], &initial_bytes);
+    assert_eq!(&visible_bytes[cluster_size..read_len], payload);
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    assert_eq!(
+        stream_lengths(&entry_set_after),
+        (
+            u64::try_from(cluster_size + payload.len()).unwrap(),
+            u64::try_from(cluster_size + payload.len()).unwrap(),
+        )
+    );
+    assert_eq!(
+        stream_first_cluster(&entry_set_after),
+        TEST_REGULAR_FILE_CLUSTER
+    );
+    assert_eq!(file_inode.size(), cluster_size + payload.len());
+    assert_eq!(
+        file_inode.metadata().nr_sectors_allocated,
+        2 * cluster_size / SECTOR_SIZE
+    );
+}
+
+pub(super) fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let mut first_cluster_bytes = vec![0xA5; cluster_size];
+    first_cluster_bytes[..4].copy_from_slice(b"DATA");
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "GapGrowth",
+        TEST_REGULAR_FILE_CLUSTER,
+        cluster_size,
+        4,
+        true,
+        &[TEST_REGULAR_FILE_CLUSTER],
+    );
+    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &first_cluster_bytes);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("GapGrowth").unwrap();
+
+    let written_len = file_inode.write_bytes_at(cluster_size + 4, b"END").unwrap();
+
+    assert_eq!(written_len, 3);
+
+    let mut visible_bytes = vec![0xCC; cluster_size + 7];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, cluster_size + 7);
+    assert_eq!(&visible_bytes[..4], b"DATA");
+    assert_eq!(
+        &visible_bytes[4..cluster_size + 4],
+        &vec![0; cluster_size][..]
+    );
+    assert_eq!(&visible_bytes[cluster_size + 4..read_len], b"END");
+
+    let first_cluster_after = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
+    assert_eq!(&first_cluster_after[..4], b"DATA");
+    assert_eq!(
+        &first_cluster_after[4..cluster_size],
+        &vec![0; cluster_size - 4][..]
+    );
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let second_cluster = next_stream_cluster(&disk, &entry_set_after);
+    let second_cluster_after = disk.read_cluster(second_cluster);
+    assert_eq!(&second_cluster_after[..4], &[0; 4]);
+    assert_eq!(&second_cluster_after[4..7], b"END");
+    assert_eq!(
+        stream_lengths(&entry_set_after),
+        (
+            u64::try_from(cluster_size + 7).unwrap(),
+            u64::try_from(cluster_size + 7).unwrap(),
+        )
+    );
+    assert!(disk.is_cluster_allocated(second_cluster));
+    assert_ne!(second_cluster, TEST_REGULAR_FILE_CLUSTER);
+}
+
+pub(super) fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let initial_bytes = vec![b'Q'; cluster_size];
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "FragmentGrow",
+        TEST_REGULAR_FILE_CLUSTER,
+        cluster_size,
+        cluster_size,
+        true,
+        &[TEST_REGULAR_FILE_CLUSTER],
+    );
+    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
+    disk.install_root_file_with_contents(
+        ROOT_SECOND_FILE_ENTRY_INDEX,
+        "Blocker",
+        TEST_CONTIGUOUS_SECOND_CLUSTER,
+        b"busy",
+    );
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("FragmentGrow").unwrap();
+    let payload = b"tail";
+
+    let written_len = file_inode.write_bytes_at(cluster_size, payload).unwrap();
+
+    assert_eq!(written_len, payload.len());
+
+    let mut visible_bytes = vec![0xCC; cluster_size + payload.len()];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, cluster_size + payload.len());
+    assert_eq!(&visible_bytes[..cluster_size], &initial_bytes);
+    assert_eq!(&visible_bytes[cluster_size..read_len], payload);
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let appended_cluster = disk.fat_chain_step(TEST_REGULAR_FILE_CLUSTER);
+    assert_eq!(
+        stream_first_cluster(&entry_set_after),
+        TEST_REGULAR_FILE_CLUSTER
+    );
+    assert!(!stream_has_no_fat_chain(&entry_set_after));
+    assert_eq!(
+        stream_lengths(&entry_set_after),
+        (
+            u64::try_from(cluster_size + payload.len()).unwrap(),
+            u64::try_from(cluster_size + payload.len()).unwrap(),
+        )
+    );
+    assert_ne!(appended_cluster, TEST_REGULAR_FILE_CLUSTER + 1);
+    assert_eq!(disk.fat_chain_step(appended_cluster), FAT_END_OF_CHAIN);
+    assert!(disk.is_cluster_allocated(appended_cluster));
+}
+
+pub(super) fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let first_cluster_bytes = vec![b'A'; cluster_size];
+    let second_cluster_bytes = vec![b'B'; cluster_size];
+    let third_cluster_bytes = vec![b'C'; cluster_size];
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "ShrinkFile",
+        TEST_FRAGMENTED_FIRST_CLUSTER,
+        cluster_size * 3,
+        cluster_size * 3,
+        false,
+        &[
+            TEST_FRAGMENTED_FIRST_CLUSTER,
+            TEST_FRAGMENTED_SECOND_CLUSTER,
+            TEST_FRAGMENTED_THIRD_CLUSTER,
+        ],
+    );
+    disk.set_fat_chain_step(
+        TEST_FRAGMENTED_FIRST_CLUSTER,
+        TEST_FRAGMENTED_SECOND_CLUSTER,
+    );
+    disk.set_fat_chain_step(
+        TEST_FRAGMENTED_SECOND_CLUSTER,
+        TEST_FRAGMENTED_THIRD_CLUSTER,
+    );
+    disk.terminate_fat_chain(TEST_FRAGMENTED_THIRD_CLUSTER);
+    disk.write_cluster_prefix(TEST_FRAGMENTED_FIRST_CLUSTER, &first_cluster_bytes);
+    disk.write_cluster_prefix(TEST_FRAGMENTED_SECOND_CLUSTER, &second_cluster_bytes);
+    disk.write_cluster_prefix(TEST_FRAGMENTED_THIRD_CLUSTER, &third_cluster_bytes);
+
+    let (_fs, root_inode) = mount_root(&disk, None);
+    let file_inode = root_inode.lookup("ShrinkFile").unwrap();
+    let new_size = cluster_size + 2;
+
+    file_inode.resize(new_size).unwrap();
+
+    assert_eq!(file_inode.size(), new_size);
+
+    let mut visible_bytes = vec![0xCC; new_size];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, new_size);
+    assert_eq!(&visible_bytes[..cluster_size], &first_cluster_bytes);
+    assert_eq!(
+        &visible_bytes[cluster_size..read_len],
+        &second_cluster_bytes[..2]
+    );
+
+    let mut eof_bytes = [0xDD; 4];
+    assert_eq!(
+        file_inode.read_bytes_at(new_size, &mut eof_bytes).unwrap(),
+        0
+    );
+    assert_eq!(eof_bytes, [0xDD; 4]);
+
+    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    assert_eq!(
+        stream_lengths(&entry_set_after),
+        (
+            u64::try_from(new_size).unwrap(),
+            u64::try_from(new_size).unwrap(),
+        )
+    );
+    assert_eq!(
+        stream_first_cluster(&entry_set_after),
+        TEST_FRAGMENTED_FIRST_CLUSTER
+    );
+    assert!(!stream_has_no_fat_chain(&entry_set_after));
+    assert_eq!(
+        disk.fat_chain_step(TEST_FRAGMENTED_FIRST_CLUSTER),
+        TEST_FRAGMENTED_SECOND_CLUSTER
+    );
+    assert_eq!(
+        disk.fat_chain_step(TEST_FRAGMENTED_SECOND_CLUSTER),
+        FAT_END_OF_CHAIN
+    );
+    assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_FIRST_CLUSTER));
+    assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_SECOND_CLUSTER));
+    assert!(!disk.is_cluster_allocated(TEST_FRAGMENTED_THIRD_CLUSTER));
+    assert_eq!(
+        file_inode.metadata().nr_sectors_allocated,
+        2 * cluster_size / SECTOR_SIZE
+    );
+}
+
+pub(super) fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof()
+ {
+    init_lookup_test_runtime();
+
+    let disk = ExfatLookupTestDisk::new();
+    let cluster_size = disk.root_cluster_size();
+    let initial_bytes = vec![b'P'; cluster_size];
+    disk.install_root_file_with_cluster_chain(
+        ROOT_FILE_ENTRY_INDEX,
+        "PublishFail",
+        TEST_REGULAR_FILE_CLUSTER,
+        cluster_size,
+        cluster_size,
+        true,
+        &[TEST_REGULAR_FILE_CLUSTER],
+    );
+    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
+
+    let stream_extension_offset = disk.root_directory_offset()
+        + ROOT_FILE_ENTRY_INDEX * DIRECTORY_ENTRY_SIZE
+        + DIRECTORY_ENTRY_SIZE;
+    let failing_disk = ExfatLookupToggleFailingWriteDisk::new(
+        disk.clone(),
+        stream_extension_offset,
+        DIRECTORY_ENTRY_SIZE,
+    );
+    let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
+    let (_fs, root_inode) = mount_root_from_block_device(block_device, FsFlags::empty(), None);
+    let file_inode = root_inode.lookup("PublishFail").unwrap();
+    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
+    let metadata_before = file_inode.metadata();
+
+    failing_disk.enable_failures();
+    let error = write_bytes_append(&file_inode, b"boom").unwrap_err();
+
+    assert_eq!(error.error(), Errno::EIO);
+    assert_eq!(
+        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
+        entry_set_before
+    );
+    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
+    assert_eq!(file_inode.size(), cluster_size);
+
+    let mut visible_bytes = vec![0xCC; cluster_size];
+    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
+    assert_eq!(read_len, cluster_size);
+    assert_eq!(&visible_bytes[..read_len], &initial_bytes);
+
+    let mut eof_bytes = [0xDD; 4];
+    assert_eq!(
+        file_inode
+            .read_bytes_at(cluster_size, &mut eof_bytes)
+            .unwrap(),
+        0
+    );
+    assert_eq!(eof_bytes, [0xDD; 4]);
 }

@@ -9,7 +9,7 @@ use super::super::{
     bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmap},
     boot::BootRegion,
     fat::{FatChainStep, FatReader},
-    fs::MountVolumeStateError,
+    fs::ExfatFsError,
     upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseRecord},
 };
 
@@ -58,7 +58,7 @@ pub(super) fn diagnose_scan_root_directory(
         current_cluster = match fat_reader.next_cluster(current_cluster) {
             Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
             Ok(FatChainStep::End) => return finalize_root_records(bitmap, upcase),
-            Err(MountVolumeStateError::DeviceIo) => {
+            Err(ExfatFsError::DeviceIo) => {
                 return Err("scan_root_directory:fat_device_io");
             }
             Err(_) => return Err("scan_root_directory:fat_chain_invalid"),
