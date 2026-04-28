@@ -4,7 +4,13 @@ use core::time::Duration;
 
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
-use super::*;
+use super::{
+    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    encode_valid_utc_offset_byte, entry_set_checksum, expected_timestamp, init_lookup_test_runtime,
+    lookup_error, mount_root, root_entry_set, ExfatLookupTestDisk, DIRECTORY_ENTRY_SIZE,
+    FILE_ATTRIBUTES_OFFSET, FILE_ATTRIBUTE_REGULAR, ROOT_FILE_ENTRY_INDEX,
+    ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_REGULAR_FILE_CLUSTER,
+};
 use crate::process::{Gid, Uid};
 
 const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
@@ -14,47 +20,8 @@ const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
 const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 
-fn encode_exfat_date(date: Date) -> u16 {
-    let year = u16::try_from(date.year() - 1980).unwrap();
-    let month = u16::from(u8::from(date.month()));
-    let day = u16::from(date.day());
-    (year << 9) | (month << 5) | day
-}
-
-fn encode_exfat_date_only(date: Date) -> [u8; 4] {
-    let date_bytes = encode_exfat_date(date).to_le_bytes();
-    [0, 0, date_bytes[0], date_bytes[1]]
-}
-
-fn encode_exfat_date_time(date: Date, time: Time) -> ([u8; 4], u8) {
-    assert_eq!(time.second() % 2, 0);
-    assert_eq!(time.millisecond() % 10, 0);
-
-    let encoded_time = (u16::from(time.hour()) << 11)
-        | (u16::from(time.minute()) << 5)
-        | u16::from(time.second() / 2);
-    let time_bytes = encoded_time.to_le_bytes();
-    let date_bytes = encode_exfat_date(date).to_le_bytes();
-    let ten_ms_increment = u8::try_from(time.millisecond() / 10).unwrap();
-    (
-        [time_bytes[0], time_bytes[1], date_bytes[0], date_bytes[1]],
-        ten_ms_increment,
-    )
-}
-
-fn encode_valid_utc_offset_byte(offset: UtcOffset) -> u8 {
-    let quarter_hours = offset.whole_seconds() / (15 * 60);
-    assert!((-64..=63).contains(&quarter_hours));
-    0x80 | (u8::try_from(quarter_hours.rem_euclid(128)).unwrap() & 0x7f)
-}
-
-fn expected_timestamp(date: Date, time: Time, offset: UtcOffset) -> Duration {
-    let timestamp = PrimitiveDateTime::new(date, time).assume_offset(offset);
-    Duration::from_nanos(u64::try_from(timestamp.unix_timestamp_nanos()).unwrap())
-}
-
-pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state()
- {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -122,8 +89,8 @@ pub(super) fn file_metadata_projection_and_update_projection_substrate_projects_
     assert_eq!(file_inode.ctime(), expected_mtime);
 }
 
-pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups()
- {
+pub(super) fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

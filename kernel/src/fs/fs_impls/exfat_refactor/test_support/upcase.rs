@@ -5,11 +5,14 @@ use alloc::{collections::BTreeSet, vec, vec::Vec};
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::super::{
-    boot::BootRegion,
-    fat::{FatChainStep, FatReader},
-    fs::MountVolumeStateError,
-    upcase::UpcaseRecord,
+use super::{
+    super::{
+        boot::BootRegion,
+        fat::{FatChainStep, FatReader},
+        fs::MountVolumeStateError,
+        upcase::UpcaseRecord,
+    },
+    checksum::stream_checksum,
 };
 
 pub(super) fn diagnose_load_upcase_table(
@@ -146,12 +149,4 @@ fn diagnose_decode_mapping(table_bytes: &[u8]) -> core::result::Result<(), &'sta
         }
     }
     Ok(())
-}
-
-fn stream_checksum(bytes: &[u8]) -> u32 {
-    let mut checksum = 0u32;
-    for byte in bytes {
-        checksum = checksum.rotate_right(1).wrapping_add(u32::from(*byte));
-    }
-    checksum
 }

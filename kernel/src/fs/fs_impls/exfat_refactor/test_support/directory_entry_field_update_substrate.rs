@@ -11,7 +11,13 @@ use super::{
         self, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange, FileEntrySetFieldUpdates,
         ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
     },
-    *,
+    collect_dirents, decode_entry_name, entry_index_from_ino, entry_names, entry_set_checksum,
+    init_lookup_test_runtime, lookup_error, mount_create_parent, mount_root,
+    mount_root_from_block_device, visible_name_count, wait_for_concurrent_start, Errno,
+    ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FsFlags, InodeMode, InodeType,
+    MountVolumeStateError, Ordering, ThreadOptions, DIRECTORY_ENTRY_SIZE, FILE_ATTRIBUTES_OFFSET,
+    FILE_ATTRIBUTE_REGULAR, FILE_DIRECTORY_ENTRY_TYPE, FILE_NAME_ENTRY_TYPE, ROOT_FILE_ENTRY_INDEX,
+    ROOT_SECOND_FILE_ENTRY_INDEX, STREAM_EXTENSION_ENTRY_TYPE, TEST_PARENT_CLUSTER,
 };
 
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
@@ -132,8 +138,8 @@ fn directory_entry_field_update_substrate_republish_reopens_without_layout_drift
 }
 
 #[ktest]
-fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication()
- {
+fn directory_entry_field_update_substrate_slot_cleanup_invalidates_reserved_bytes_without_publication(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -290,8 +296,8 @@ fn directory_entry_field_update_substrate_repeated_republish_preserves_identity_
 }
 
 #[ktest]
-fn directory_entry_field_update_substrate_integration_publish_republish_rescan_invalidate_stays_coherent()
- {
+fn directory_entry_field_update_substrate_integration_publish_republish_rescan_invalidate_stays_coherent(
+) {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

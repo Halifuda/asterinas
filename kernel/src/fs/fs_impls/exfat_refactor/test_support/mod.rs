@@ -2,9 +2,14 @@
 
 mod bitmap;
 mod boot_region;
-pub(super) mod inode;
+pub(super) mod checksum;
+pub(super) mod concurrency_helpers;
+pub(super) mod disk;
+pub(super) mod helpers;
+pub(super) mod metadata_helpers;
 mod mount_diagnostics;
 mod root_directory;
+pub(super) mod timestamp;
 mod upcase;
 
 use aster_block::BlockDevice;
