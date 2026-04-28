@@ -17,7 +17,7 @@ use super::{
         fs::{ExfatFs, ExfatFsType},
         test_support::inode::{
             ExfatLookupFlushControlDisk, ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk,
-            ExfatLookupToggleFailingWriteDisk, ObservedBio,
+            ExfatLookupToggleFailingWriteDisk, ExfatLookupWriteControlDisk, ObservedBio,
         },
     },
     *,
@@ -477,6 +477,9 @@ mod directory_metadata_projection_and_update_policy_and_timestamp_mutation;
 #[path = "directory_metadata_projection_and_update_namespace_refresh.rs"]
 mod directory_metadata_projection_and_update_namespace_refresh;
 
+#[path = "directory_metadata_projection_and_update_integration.rs"]
+mod directory_metadata_projection_and_update_integration;
+
 #[path = "file_metadata_projection_and_update_integration.rs"]
 mod file_metadata_projection_and_update_integration;
 
@@ -623,6 +626,24 @@ fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_a
 #[ktest]
 fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state() {
     directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets()
+ {
+    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication()
+ {
+    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication();
+}
+
+#[ktest]
+fn directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views()
+ {
+    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views();
 }
 
 #[ktest]

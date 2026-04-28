@@ -54,6 +54,13 @@ pub(in super::super) struct ExfatLookupFlushControlDisk {
     inner: Arc<ExfatLookupTestDisk>,
 }
 
+pub(in super::super) struct ExfatLookupWriteControlDisk {
+    block_range: Range<usize>,
+    block_writes: AtomicBool,
+    inner: Arc<ExfatLookupTestDisk>,
+    write_started: AtomicBool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct ObservedBio {
     pub(in super::super) byte_range: Range<usize>,
@@ -632,6 +639,38 @@ impl ExfatLookupFlushControlDisk {
     }
 }
 
+impl ExfatLookupWriteControlDisk {
+    pub(in super::super) fn new(
+        inner: Arc<ExfatLookupTestDisk>,
+        block_offset: usize,
+        block_len: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            block_range: block_offset..block_offset.checked_add(block_len).unwrap(),
+            block_writes: AtomicBool::new(false),
+            inner,
+            write_started: AtomicBool::new(false),
+        })
+    }
+
+    pub(in super::super) fn enable_blocking_writes(&self) {
+        self.write_started.store(false, Ordering::Relaxed);
+        self.block_writes.store(true, Ordering::Relaxed);
+    }
+
+    pub(in super::super) fn release_blocked_writes(&self) {
+        self.block_writes.store(false, Ordering::Relaxed);
+    }
+
+    pub(in super::super) fn write_started(&self) -> bool {
+        self.write_started.load(Ordering::Relaxed)
+    }
+
+    fn overlaps_block_range(&self, start: usize, end: usize) -> bool {
+        start < self.block_range.end && self.block_range.start < end
+    }
+}
+
 impl fmt::Debug for ExfatLookupToggleFailingWriteDisk {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -659,6 +698,18 @@ impl fmt::Debug for ExfatLookupFlushControlDisk {
             .field("block_flush", &self.block_flush.load(Ordering::Relaxed))
             .field("fail_flush", &self.fail_flush.load(Ordering::Relaxed))
             .field("flush_started", &self.flush_started.load(Ordering::Relaxed))
+            .field("sectors_count", &self.inner.sectors_count())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ExfatLookupWriteControlDisk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExfatLookupWriteControlDisk")
+            .field("block_range", &self.block_range)
+            .field("block_writes", &self.block_writes.load(Ordering::Relaxed))
+            .field("write_started", &self.write_started.load(Ordering::Relaxed))
             .field("sectors_count", &self.inner.sectors_count())
             .finish()
     }
@@ -868,6 +919,60 @@ impl BlockDevice for ExfatLookupFlushControlDisk {
 
     fn name(&self) -> &str {
         "exfat-lookup-flush-control-test"
+    }
+
+    fn id(&self) -> DeviceId {
+        DeviceId::null()
+    }
+}
+
+impl BlockDevice for ExfatLookupWriteControlDisk {
+    fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
+        let bio_type = bio.type_();
+        if bio_type == BioType::Flush {
+            bio.complete(BioStatus::Complete);
+            return Ok(());
+        }
+
+        let mut current_offset = bio.sid_range().start.to_offset();
+        for segment in bio.segments() {
+            let segment_end = current_offset.checked_add(segment.nbytes()).unwrap();
+            if bio_type == BioType::Write
+                && self.block_writes.load(Ordering::Relaxed)
+                && self.overlaps_block_range(current_offset, segment_end)
+            {
+                self.write_started.store(true, Ordering::Relaxed);
+                while self.block_writes.load(Ordering::Relaxed) {
+                    crate::thread::Thread::yield_now();
+                }
+            }
+
+            let size = match bio_type {
+                BioType::Read => segment
+                    .inner_dma_slice()
+                    .writer()
+                    .unwrap()
+                    .write(self.inner.blocks.reader().skip(current_offset)),
+                BioType::Write => self
+                    .inner
+                    .blocks
+                    .writer()
+                    .skip(current_offset)
+                    .write(&mut segment.inner_dma_slice().reader().unwrap()),
+                _ => 0,
+            };
+            current_offset += size;
+        }
+        bio.complete(BioStatus::Complete);
+        Ok(())
+    }
+
+    fn metadata(&self) -> BlockDeviceMeta {
+        self.inner.metadata()
+    }
+
+    fn name(&self) -> &str {
+        "exfat-lookup-write-control-test"
     }
 
     fn id(&self) -> DeviceId {
