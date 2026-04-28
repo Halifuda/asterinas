@@ -257,6 +257,9 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
 
 ## Process Notes From Cleanup Gaps
 
+- `production_code_quality_cleanup_20260428` is a user-directed post-acceptance cleanup wave over already accepted production code. It is intentionally sliced into three serialized Creator cleanup packets instead of reopening Architect / Designer gates: `pass_01_02_production_code_quality_cleanup_creator`, `pass_03_04_production_code_quality_cleanup_creator`, and `pass_05_06_production_code_quality_cleanup_creator`.
+- The first packet owns Phase 1 safety / dead-code / dedup / inline cleanup and Phase 2 timestamp plus owner/group body-isomorphism cleanup. The second owns Phase 3 rewrite / NoFatChain cleanup and Phase 4 error / admin-carrier / visibility cleanup. The third owns Phase 5 `inode/` module split and Phase 6 `admin.rs` split.
+- This wave uses dispatch stubs and live handoff recording from the protocol, but the user explicitly directed that the full protocol should not constrain code-structure changes needed for the cleanup plan.
 - `meso_02` cleanup split happened because the original cleanup packet grouped owner/helper placement and carrier/error-boundary work together; visible progress on Line A was briefly mistaken for full cleanup closure.
 - Future cleanup packets must list structural objectives individually, and Creator / Reviewer artifacts must disposition each objective independently.
 - Checker run archives now live under `.agents/checker-runs/<meso-component>/...` so evidence remains grouped by parent meso-component.

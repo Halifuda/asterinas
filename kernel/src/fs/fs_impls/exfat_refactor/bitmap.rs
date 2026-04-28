@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
-use core::ops;
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -207,9 +206,40 @@ impl AllocationBitmap {
         cluster_ranges: &[ClusterRange],
         update: AllocationBitmapUpdate,
     ) -> core::result::Result<usize, MountVolumeStateError> {
+        if cluster_ranges.is_empty() {
+            return Err(MountVolumeStateError::InvalidOperationInput);
+        }
+
         let cluster_count = boot_region.cluster_count_usize()?;
-        let normalized_ranges = Self::normalize_cluster_ranges(boot_region, cluster_ranges)?;
-        let expected_cluster_count = Self::total_clusters_in_ranges(&normalized_ranges)?;
+        let mut normalized_ranges = Vec::with_capacity(cluster_ranges.len());
+        for cluster_range in cluster_ranges {
+            if cluster_range.cluster_count == 0 {
+                return Err(MountVolumeStateError::InvalidOperationInput);
+            }
+
+            let start_index = boot_region
+                .cluster_index(cluster_range.start_cluster)
+                .map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+            let end_index = start_index
+                .checked_add(cluster_range.cluster_count)
+                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+            if end_index > cluster_count {
+                return Err(MountVolumeStateError::InvalidOperationInput);
+            }
+            normalized_ranges.push(start_index..end_index);
+        }
+        normalized_ranges.sort_by_key(|range| range.start);
+        for window in normalized_ranges.windows(2) {
+            if window[0].end > window[1].start {
+                return Err(MountVolumeStateError::InvalidOperationInput);
+            }
+        }
+        let mut expected_cluster_count = 0usize;
+        for normalized_range in &normalized_ranges {
+            expected_cluster_count = expected_cluster_count
+                .checked_add(normalized_range.end - normalized_range.start)
+                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
+        }
         let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
         let mut cluster_buffer = vec![0; boot_region.cluster_size];
         let mut current_cluster = self.first_cluster;
@@ -368,42 +398,6 @@ impl AllocationBitmap {
         Ok(*requested_clusters_remaining == 0)
     }
 
-    fn normalize_cluster_ranges(
-        boot_region: &BootRegion,
-        cluster_ranges: &[ClusterRange],
-    ) -> core::result::Result<Vec<ops::Range<usize>>, MountVolumeStateError> {
-        if cluster_ranges.is_empty() {
-            return Err(MountVolumeStateError::InvalidOperationInput);
-        }
-
-        let cluster_count = boot_region.cluster_count_usize()?;
-        let mut normalized_ranges = Vec::with_capacity(cluster_ranges.len());
-        for cluster_range in cluster_ranges {
-            if cluster_range.cluster_count == 0 {
-                return Err(MountVolumeStateError::InvalidOperationInput);
-            }
-
-            let start_index = boot_region
-                .cluster_index(cluster_range.start_cluster)
-                .map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
-            let end_index = start_index
-                .checked_add(cluster_range.cluster_count)
-                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
-            if end_index > cluster_count {
-                return Err(MountVolumeStateError::InvalidOperationInput);
-            }
-            normalized_ranges.push(start_index..end_index);
-        }
-
-        normalized_ranges.sort_by_key(|range| range.start);
-        for window in normalized_ranges.windows(2) {
-            if window[0].end > window[1].start {
-                return Err(MountVolumeStateError::InvalidOperationInput);
-            }
-        }
-        Ok(normalized_ranges)
-    }
-
     fn relevant_bitmap_mask(
         relevant_bits: usize,
     ) -> core::result::Result<u8, MountVolumeStateError> {
@@ -419,18 +413,6 @@ impl AllocationBitmap {
             .checked_shl(shift)
             .ok_or(MountVolumeStateError::InconsistentAccounting)?;
         Ok((shifted - 1) as u8)
-    }
-
-    fn total_clusters_in_ranges(
-        normalized_ranges: &[ops::Range<usize>],
-    ) -> core::result::Result<usize, MountVolumeStateError> {
-        let mut total_clusters = 0usize;
-        for normalized_range in normalized_ranges {
-            total_clusters = total_clusters
-                .checked_add(normalized_range.end - normalized_range.start)
-                .ok_or(MountVolumeStateError::InvalidOperationInput)?;
-        }
-        Ok(total_clusters)
     }
 }
 

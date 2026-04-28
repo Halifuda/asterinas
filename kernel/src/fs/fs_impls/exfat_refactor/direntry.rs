@@ -249,7 +249,15 @@ pub(super) fn read_volume_label(
     let Some(entry_index) = locate_volume_label_entry(directory_bytes)? else {
         return Ok(None);
     };
-    let entry = directory_entry_bytes(directory_bytes, entry_index)?;
+    let entry_offset = entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry = directory_bytes
+        .get(entry_offset..entry_end)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
     let label_length = usize::from(entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET]);
     if label_length > VOLUME_LABEL_MAX_CODE_UNITS {
         return Err(MountVolumeStateError::InvalidOnDiskLayout);
@@ -289,14 +297,51 @@ pub(super) fn write_volume_label(
         }
         return Ok(());
     };
+    if label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
+        return Err(MountVolumeStateError::InvalidOperationInput);
+    }
 
     let destination_entry_index = match existing_entry_index {
         Some(existing_entry_index) => existing_entry_index,
-        None => locate_identity_insertion_entry(directory_bytes)?
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+        None => {
+            let mut destination_entry_index = None;
+            for (entry_index, entry) in directory_bytes
+                .chunks_exact(DIRECTORY_ENTRY_SIZE)
+                .enumerate()
+            {
+                if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE || entry[0] & ENTRY_TYPE_IN_USE_BIT == 0
+                {
+                    destination_entry_index = Some(entry_index);
+                    break;
+                }
+            }
+            destination_entry_index.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?
+        }
     };
-    let encoded_entry = encode_volume_label_entry(label)?;
-    let entry = directory_entry_bytes_mut(directory_bytes, destination_entry_index)?;
+    let mut encoded_entry = [0u8; DIRECTORY_ENTRY_SIZE];
+    encoded_entry[0] = VOLUME_LABEL_ENTRY_TYPE;
+    encoded_entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET] =
+        u8::try_from(label.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
+    for (index, code_unit) in label.iter().enumerate() {
+        let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
+            .checked_add(
+                index
+                    .checked_mul(2)
+                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
+            )
+            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+        encoded_entry[code_unit_offset..code_unit_offset + 2]
+            .copy_from_slice(&code_unit.to_le_bytes());
+    }
+    let entry_offset = destination_entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+    let entry = directory_bytes
+        .get_mut(entry_offset..entry_end)
+        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
     entry.copy_from_slice(&encoded_entry);
     Ok(())
 }
@@ -819,24 +864,6 @@ fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
     checksum
 }
 
-fn locate_identity_insertion_entry(
-    directory_bytes: &[u8],
-) -> core::result::Result<Option<usize>, MountVolumeStateError> {
-    if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
-        return Err(MountVolumeStateError::InvalidOnDiskLayout);
-    }
-
-    for (entry_index, entry) in directory_bytes
-        .chunks_exact(DIRECTORY_ENTRY_SIZE)
-        .enumerate()
-    {
-        if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE || entry[0] & ENTRY_TYPE_IN_USE_BIT == 0 {
-            return Ok(Some(entry_index));
-        }
-    }
-    Ok(None)
-}
-
 fn locate_volume_label_entry(
     directory_bytes: &[u8],
 ) -> core::result::Result<Option<usize>, MountVolumeStateError> {
@@ -861,61 +888,7 @@ fn locate_volume_label_entry(
     Ok(label_entry_index)
 }
 
-fn encode_volume_label_entry(
-    label: &[u16],
-) -> core::result::Result<[u8; DIRECTORY_ENTRY_SIZE], MountVolumeStateError> {
-    if label.is_empty() || label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
-        return Err(MountVolumeStateError::InvalidOperationInput);
-    }
-
-    let mut entry = [0u8; DIRECTORY_ENTRY_SIZE];
-    entry[0] = VOLUME_LABEL_ENTRY_TYPE;
-    entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET] =
-        u8::try_from(label.len()).map_err(|_| MountVolumeStateError::InvalidOperationInput)?;
-    for (index, code_unit) in label.iter().enumerate() {
-        let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
-            .checked_add(
-                index
-                    .checked_mul(2)
-                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
-            )
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-        entry[code_unit_offset..code_unit_offset + 2].copy_from_slice(&code_unit.to_le_bytes());
-    }
-    Ok(entry)
-}
-
-fn directory_entry_bytes(
-    directory_bytes: &[u8],
-    entry_index: usize,
-) -> core::result::Result<&[u8], MountVolumeStateError> {
-    let entry_offset = entry_index
-        .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-    let entry_end = entry_offset
-        .checked_add(DIRECTORY_ENTRY_SIZE)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-    directory_bytes
-        .get(entry_offset..entry_end)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-}
-
-fn directory_entry_bytes_mut(
-    directory_bytes: &mut [u8],
-    entry_index: usize,
-) -> core::result::Result<&mut [u8], MountVolumeStateError> {
-    let entry_offset = entry_index
-        .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-    let entry_end = entry_offset
-        .checked_add(DIRECTORY_ENTRY_SIZE)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
-    directory_bytes
-        .get_mut(entry_offset..entry_end)
-        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-}
-
-fn slot_range_bytes(
+pub(super) fn slot_range_bytes(
     slot_range: DirectoryEntrySlotRange,
 ) -> core::result::Result<core::ops::Range<usize>, MountVolumeStateError> {
     let byte_start = slot_range
