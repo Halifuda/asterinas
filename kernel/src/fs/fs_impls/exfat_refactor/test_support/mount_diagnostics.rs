@@ -10,9 +10,7 @@ use super::{
     upcase::diagnose_load_upcase_table,
 };
 
-pub(super) fn diagnose_invalid_on_disk_layout_gate(
-    block_device: &dyn BlockDevice,
-) -> &'static str {
+pub(super) fn diagnose_invalid_on_disk_layout_gate(block_device: &dyn BlockDevice) -> &'static str {
     let boot_region = match diagnose_boot_region(block_device) {
         Ok(boot_region) => boot_region,
         Err(gate) => return gate,

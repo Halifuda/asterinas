@@ -206,6 +206,50 @@ impl ExfatInode {
         Ok(directory_bytes)
     }
 
+    pub(super) fn read_root_directory<T>(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        read_root_directory_fn: impl FnOnce(&[u8]) -> core::result::Result<T, MountVolumeStateError>,
+    ) -> core::result::Result<T, MountVolumeStateError> {
+        let _directory_guard = self.admission.read();
+        let stream = *self.stream.read();
+        if stream.data_length.is_some() {
+            return Err(MountVolumeStateError::InvalidOperationInput);
+        }
+
+        let directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
+        read_root_directory_fn(&directory_bytes)
+    }
+
+    pub(super) fn rewrite_root_directory<T>(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_root_directory_fn: impl FnOnce(
+            &mut Vec<u8>,
+        )
+            -> core::result::Result<T, MountVolumeStateError>,
+    ) -> core::result::Result<T, MountVolumeStateError> {
+        let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
+        let stream = *self.stream.read();
+        if stream.data_length.is_some() {
+            return Err(MountVolumeStateError::InvalidOperationInput);
+        }
+
+        let mut directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
+        let rewrite_result = rewrite_root_directory_fn(&mut directory_bytes)?;
+        Self::write_directory_bytes_for_stream(
+            block_device,
+            boot_region,
+            &directory_bytes,
+            stream,
+        )?;
+        Ok(rewrite_result)
+    }
+
     fn new(
         fs: &Arc<ExfatFs>,
         metadata: Metadata,

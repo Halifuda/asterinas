@@ -7,8 +7,8 @@ use core::{
 };
 
 use aster_block::{
-    bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
     BlockDevice, BlockDeviceMeta,
+    bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
 };
 use device_id::DeviceId;
 use ostd::mm::io::util::HasVmReaderWriter;
@@ -148,8 +148,8 @@ fn assert_mount_surface_stable(
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_integration_success_path_preserves_root_publication_and_clears_dirty_only_after_sync(
-) {
+fn filesystem_sync_and_volume_state_integration_success_path_preserves_root_publication_and_clears_dirty_only_after_sync()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -186,8 +186,8 @@ fn filesystem_sync_and_volume_state_integration_success_path_preserves_root_publ
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_integration_failure_maintenance_preserves_conservative_state_across_sync_failure_and_shutdown_suppression(
-) {
+fn filesystem_sync_and_volume_state_integration_failure_maintenance_preserves_conservative_state_across_sync_failure_and_shutdown_suppression()
+ {
     init_mount_volume_state_test_runtime();
 
     let sync_failure_disk = ExfatRefactorMemoryDisk::new();
@@ -249,8 +249,8 @@ fn filesystem_sync_and_volume_state_integration_failure_maintenance_preserves_co
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_integration_repeated_sync_and_observation_remain_stable_without_new_dirty_work(
-) {
+fn filesystem_sync_and_volume_state_integration_repeated_sync_and_observation_remain_stable_without_new_dirty_work()
+ {
     init_mount_volume_state_test_runtime();
 
     let quiesced_disk = ExfatRefactorMemoryDisk::new();
@@ -287,8 +287,8 @@ fn filesystem_sync_and_volume_state_integration_repeated_sync_and_observation_re
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_integration_concurrent_sync_observation_and_shutdown_linearize_without_deadlock(
-) {
+fn filesystem_sync_and_volume_state_integration_concurrent_sync_observation_and_shutdown_linearize_without_deadlock()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();

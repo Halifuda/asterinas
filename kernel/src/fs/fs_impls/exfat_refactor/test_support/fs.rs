@@ -7,12 +7,12 @@ use core::{
 };
 
 use aster_block::{
-    bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
     BlockDevice, BlockDeviceMeta, SECTOR_SIZE,
+    bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio},
 };
 use device_id::DeviceId;
 use ostd::{
-    mm::{io::util::HasVmReaderWriter, FrameAllocOptions, HasSize, Segment, VmIo, PAGE_SIZE},
+    mm::{FrameAllocOptions, HasSize, PAGE_SIZE, Segment, VmIo, io::util::HasVmReaderWriter},
     prelude::ktest,
 };
 
@@ -22,7 +22,7 @@ use crate::{
         file::InodeType,
         vfs::{file_system::FsFlags, inode::Inode},
     },
-    thread::{kernel_thread::ThreadOptions, Thread},
+    thread::{Thread, kernel_thread::ThreadOptions},
 };
 
 const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
@@ -660,6 +660,8 @@ fn allocation_bitmap_data_offset(disk: &Arc<ExfatRefactorMemoryDisk>) -> usize {
     cluster_offset(&directory_entry.boot_region, first_cluster)
 }
 
+mod volume_admin_identity;
+mod volume_admin_identity_integration;
 mod volume_sync_integration;
 
 #[ktest]
@@ -708,12 +710,16 @@ fn mount_volume_state_mount_publishes_root_inode_superblock_and_defaults() {
     assert_eq!(fs.current_options().unwrap(), default_mount_options());
     let state = fs.state.read();
     let publication = state.as_ref().unwrap();
-    assert!(publication
-        .upcase_table
-        .names_equal(&[u16::from(b'a')], &[u16::from(b'A')]));
-    assert!(!publication
-        .upcase_table
-        .names_equal(&[u16::from(b'a')], &[u16::from(b'B')]));
+    assert!(
+        publication
+            .upcase_table
+            .names_equal(&[u16::from(b'a')], &[u16::from(b'A')])
+    );
+    assert!(
+        !publication
+            .upcase_table
+            .names_equal(&[u16::from(b'a')], &[u16::from(b'B')])
+    );
 }
 
 #[ktest]
@@ -770,8 +776,8 @@ fn mount_volume_state_preserves_volume_anomaly_flags() {
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_posture_and_admission_boundary_observation_and_sync_preserve_anomaly_overlays_root_and_superblock_visibility(
-) {
+fn filesystem_sync_and_volume_state_posture_and_admission_boundary_observation_and_sync_preserve_anomaly_overlays_root_and_superblock_visibility()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -789,8 +795,8 @@ fn filesystem_sync_and_volume_state_posture_and_admission_boundary_observation_a
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_posture_and_admission_boundary_read_only_admission_and_sync_reject_without_state_drift(
-) {
+fn filesystem_sync_and_volume_state_posture_and_admission_boundary_read_only_admission_and_sync_reject_without_state_drift()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -818,8 +824,8 @@ fn filesystem_sync_and_volume_state_posture_and_admission_boundary_read_only_adm
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_dirty_admission_persists_dirty_boot_flag_and_preserves_existing_anomaly_overlays(
-) {
+fn filesystem_sync_and_volume_state_dirty_admission_persists_dirty_boot_flag_and_preserves_existing_anomaly_overlays()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -844,8 +850,8 @@ fn filesystem_sync_and_volume_state_dirty_admission_persists_dirty_boot_flag_and
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_sync_clears_only_volume_dirty_and_repeated_clean_syncs_stay_stable(
-) {
+fn filesystem_sync_and_volume_state_sync_clears_only_volume_dirty_and_repeated_clean_syncs_stay_stable()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -873,8 +879,8 @@ fn filesystem_sync_and_volume_state_sync_clears_only_volume_dirty_and_repeated_c
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_sync_boot_flag_write_failure_keeps_dirty_posture_and_anomaly_overlays(
-) {
+fn filesystem_sync_and_volume_state_sync_boot_flag_write_failure_keeps_dirty_posture_and_anomaly_overlays()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -900,8 +906,8 @@ fn filesystem_sync_and_volume_state_sync_boot_flag_write_failure_keeps_dirty_pos
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_sync_final_flush_failure_withholds_clean_publication_until_barrier_completion(
-) {
+fn filesystem_sync_and_volume_state_sync_final_flush_failure_withholds_clean_publication_until_barrier_completion()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -925,8 +931,8 @@ fn filesystem_sync_and_volume_state_sync_final_flush_failure_withholds_clean_pub
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_suppresses_mutation_and_trim(
-) {
+fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_suppresses_mutation_and_trim()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -970,8 +976,8 @@ fn filesystem_sync_and_volume_state_forced_shutdown_admission_is_monotonic_and_s
 }
 
 #[ktest]
-fn filesystem_sync_and_volume_state_forced_shutdown_sync_and_observation_preserve_existing_anomaly_posture(
-) {
+fn filesystem_sync_and_volume_state_forced_shutdown_sync_and_observation_preserve_existing_anomaly_posture()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -1151,8 +1157,8 @@ fn administrative_trim_free_space_rejects_read_only_before_unsupported_trim() {
 }
 
 #[ktest]
-fn free_space_accounting_and_discard_integration_allocate_free_updates_superblock_and_discard_policy(
-) {
+fn free_space_accounting_and_discard_integration_allocate_free_updates_superblock_and_discard_policy()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();
@@ -1227,8 +1233,8 @@ fn free_space_accounting_and_discard_integration_failures_preserve_snapshot_and_
 }
 
 #[ktest]
-fn free_space_accounting_and_discard_integration_repeated_snapshots_and_trim_rejections_stay_stable(
-) {
+fn free_space_accounting_and_discard_integration_repeated_snapshots_and_trim_rejections_stay_stable()
+ {
     init_mount_volume_state_test_runtime();
 
     let disk = ExfatRefactorMemoryDisk::new();

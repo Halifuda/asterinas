@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use aster_block::{BlockDevice, bio::BioStatus};
 use ostd::sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard};
@@ -8,6 +8,7 @@ use ostd::sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard};
 use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
     boot::{BootRegion, VolumeAnomalyState},
+    direntry,
     fat::FatReader,
     inode::ExfatInode,
     upcase::UpcaseTable,
@@ -19,6 +20,7 @@ use crate::{
         registry::{FsProperties, FsType},
     },
     prelude::*,
+    process::credentials::capabilities::CapSet,
 };
 
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
@@ -137,6 +139,64 @@ pub(crate) struct ExfatFs {
     state: RwMutex<Option<MountedVolumeState>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VolumeIdentityEntries {
+    pub(crate) guid: Option<[u8; 16]>,
+    pub(crate) label: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VolumeIdentityQuery {
+    Guid,
+    Label,
+    LabelAndGuid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VolumeIdentityUpdate {
+    Guid(Option<[u8; 16]>),
+    Label(Option<String>),
+    LabelAndGuid {
+        guid: Option<[u8; 16]>,
+        label: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VolumeAdminRequest {
+    ForceShutdown,
+    QueryIdentity(VolumeIdentityQuery),
+    TrimFreeSpace,
+    UpdateIdentity(VolumeIdentityUpdate),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VolumeAdminResponse {
+    Identity(VolumeIdentityEntries),
+    MutationAcknowledged,
+    ShutdownAcknowledged,
+    TrimAcknowledged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VolumeAdminAuthority {
+    Privileged,
+    Unprivileged,
+}
+
+impl VolumeAdminAuthority {
+    fn ensure_privileged(self) -> Result<()> {
+        if matches!(self, Self::Privileged) {
+            return Ok(());
+        }
+
+        return_errno_with_message!(
+            Errno::EPERM,
+            "exFAT volume administration requires SYS_ADMIN"
+        )
+    }
+}
+
 impl ExfatFs {
     fn new(block_device: Arc<dyn BlockDevice>, source: Option<String>) -> Arc<Self> {
         Arc::new(Self {
@@ -160,14 +220,8 @@ impl ExfatFs {
         (Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags),
         MountVolumeStateError,
     > {
-        let (
-            boot_region,
-            anomaly,
-            bitmap,
-            upcase_table,
-            used_clusters,
-            used_clusters_from_recount,
-        ) = BootRegion::load_mount_state(block_device.as_ref())?;
+        let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
+            BootRegion::load_mount_state(block_device.as_ref())?;
         let fs = Self::new(block_device.clone(), source.map(ToString::to_string));
         let root_inode =
             ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
@@ -430,9 +484,133 @@ impl ExfatFs {
         ))
     }
 
-    pub(super) fn admit_forced_shutdown(
+    pub(crate) fn handle_volume_admin_request(
         &self,
-    ) -> core::result::Result<(), MountVolumeStateError> {
+        request: VolumeAdminRequest,
+        ctx: &Context,
+    ) -> Result<VolumeAdminResponse> {
+        let authority = if ctx
+            .posix_thread
+            .credentials()
+            .effective_capset()
+            .contains(CapSet::SYS_ADMIN)
+        {
+            VolumeAdminAuthority::Privileged
+        } else {
+            VolumeAdminAuthority::Unprivileged
+        };
+        self.handle_volume_admin_request_with_authority(request, authority)
+    }
+
+    pub(crate) fn handle_volume_admin_request_with_authority(
+        &self,
+        request: VolumeAdminRequest,
+        authority: VolumeAdminAuthority,
+    ) -> Result<VolumeAdminResponse> {
+        match request {
+            VolumeAdminRequest::ForceShutdown => {
+                authority.ensure_privileged()?;
+                self.admit_forced_shutdown()?;
+                Ok(VolumeAdminResponse::ShutdownAcknowledged)
+            }
+            VolumeAdminRequest::QueryIdentity(query) => self
+                .query_volume_identity(query)
+                .map(VolumeAdminResponse::Identity),
+            VolumeAdminRequest::TrimFreeSpace => {
+                authority.ensure_privileged()?;
+                self.administrative_trim_free_space()?;
+                Ok(VolumeAdminResponse::TrimAcknowledged)
+            }
+            VolumeAdminRequest::UpdateIdentity(update) => {
+                authority.ensure_privileged()?;
+                self.update_volume_identity(update)?;
+                Ok(VolumeAdminResponse::MutationAcknowledged)
+            }
+        }
+    }
+
+    fn query_volume_identity(&self, query: VolumeIdentityQuery) -> Result<VolumeIdentityEntries> {
+        match query {
+            VolumeIdentityQuery::Label => Ok(VolumeIdentityEntries {
+                guid: None,
+                label: self.query_volume_label()?,
+            }),
+            VolumeIdentityQuery::Guid | VolumeIdentityQuery::LabelAndGuid => {
+                return_errno_with_message!(
+                    Errno::EOPNOTSUPP,
+                    "exFAT volume GUID administration is not supported"
+                );
+            }
+        }
+    }
+
+    fn query_volume_label(&self) -> Result<Option<String>> {
+        let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
+            self.admitted_lookup_state()?;
+        let root_inode = state
+            .as_ref()
+            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .root_inode
+            .clone();
+
+        let label = root_inode.read_root_directory(
+            &block_device,
+            &boot_region,
+            direntry::read_volume_label,
+        )?;
+        match label {
+            Some(label) => String::from_utf16(&label)
+                .map(Some)
+                .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout.into()),
+            None => Ok(None),
+        }
+    }
+
+    fn update_volume_identity(&self, update: VolumeIdentityUpdate) -> Result<()> {
+        match update {
+            VolumeIdentityUpdate::Label(label) => self.update_volume_label(label),
+            VolumeIdentityUpdate::Guid(_) | VolumeIdentityUpdate::LabelAndGuid { .. } => {
+                return_errno_with_message!(
+                    Errno::EOPNOTSUPP,
+                    "exFAT volume GUID administration is not supported"
+                );
+            }
+        }
+    }
+
+    fn update_volume_label(&self, label: Option<String>) -> Result<()> {
+        let admitted_label = Self::admitted_volume_label(label)?;
+        let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
+            self.admitted_mutation_state()?;
+        let root_inode = state
+            .as_ref()
+            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .root_inode
+            .clone();
+
+        root_inode
+            .rewrite_root_directory(&block_device, &boot_region, |directory_bytes| {
+                direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
+            })
+            .map_err(Error::from)
+    }
+
+    fn admitted_volume_label(label: Option<String>) -> Result<Option<Vec<u16>>> {
+        let Some(label) = label else {
+            return Ok(None);
+        };
+        if label.is_empty() {
+            return Ok(None);
+        }
+
+        let admitted_label: Vec<u16> = label.encode_utf16().collect();
+        if admitted_label.len() > 11 {
+            return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
+        }
+        Ok(Some(admitted_label))
+    }
+
+    pub(super) fn admit_forced_shutdown(&self) -> core::result::Result<(), MountVolumeStateError> {
         let mut state = self.state.write();
         let publication = state
             .as_mut()
@@ -467,10 +645,8 @@ impl ExfatFs {
     pub(super) fn allocate_free_space(
         &self,
         requested_clusters: usize,
-    ) -> core::result::Result<
-        (Vec<ClusterRange>, FreeSpaceSnapshot),
-        FreeSpaceAccountingError,
-    > {
+    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), FreeSpaceAccountingError>
+    {
         let state = self.state.write();
         let publication = state
             .as_ref()
@@ -493,10 +669,8 @@ impl ExfatFs {
         &self,
         publication: &MountedVolumeState,
         requested_clusters: usize,
-    ) -> core::result::Result<
-        (Vec<ClusterRange>, FreeSpaceSnapshot),
-        FreeSpaceAccountingError,
-    > {
+    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), FreeSpaceAccountingError>
+    {
         if publication.flags.contains(FsFlags::RDONLY) {
             return Err(FreeSpaceAccountingError::ReadOnlyConflict);
         }

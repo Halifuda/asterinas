@@ -192,9 +192,7 @@ impl BootRegion {
         usize::try_from(byte_offset).map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)
     }
 
-    pub(super) fn cluster_count_usize(
-        &self,
-    ) -> core::result::Result<usize, MountVolumeStateError> {
+    pub(super) fn cluster_count_usize(&self) -> core::result::Result<usize, MountVolumeStateError> {
         usize::try_from(self.cluster_count).map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)
     }
 
@@ -224,9 +222,7 @@ impl BootRegion {
             .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)
     }
 
-    pub(super) fn data_capacity_bytes(
-        &self,
-    ) -> core::result::Result<u64, MountVolumeStateError> {
+    pub(super) fn data_capacity_bytes(&self) -> core::result::Result<u64, MountVolumeStateError> {
         let cluster_size = u64::try_from(self.cluster_size)
             .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
         u64::from(self.cluster_count)
@@ -357,9 +353,7 @@ impl BootRegion {
             for entry in cluster_bytes.chunks_exact(32) {
                 match entry[0] {
                     END_OF_DIRECTORY_ENTRY_TYPE => return Ok(ChainVisitControl::Stop),
-                    ALLOCATION_BITMAP_ENTRY_TYPE => {
-                        bitmap = Some(AllocationBitmap::parse(entry)?)
-                    }
+                    ALLOCATION_BITMAP_ENTRY_TYPE => bitmap = Some(AllocationBitmap::parse(entry)?),
                     UPCASE_TABLE_ENTRY_TYPE => upcase = Some(UpcaseRecord::parse(entry)?),
                     _ => (),
                 }

@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{
-    collections::BTreeSet,
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::mem;
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::{
-    boot::BootRegion,
-    fs::MountVolumeStateError,
-};
+use super::{boot::BootRegion, fs::MountVolumeStateError};
 
 const FAT_END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 
@@ -184,8 +177,7 @@ impl<'a> FatReader<'a> {
                     .checked_add(1)
                     .ok_or(MountVolumeStateError::InvalidOperationInput)?
             };
-            if next_cluster != appended_cluster
-                && !self.boot_region.is_valid_cluster(next_cluster)
+            if next_cluster != appended_cluster && !self.boot_region.is_valid_cluster(next_cluster)
             {
                 return Err(MountVolumeStateError::InvalidOperationInput);
             }

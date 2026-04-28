@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{
-    collections::BTreeSet,
-    vec,
-};
+use alloc::{collections::BTreeSet, vec};
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
