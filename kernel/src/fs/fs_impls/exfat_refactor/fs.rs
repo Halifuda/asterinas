@@ -48,9 +48,9 @@ impl FreeSpaceAllocatorState {
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
         requested_clusters: usize,
-    ) -> core::result::Result<Vec<ClusterRange>, FreeSpaceAccountingError> {
+    ) -> core::result::Result<Vec<ClusterRange>, MountVolumeStateError> {
         if requested_clusters == 0 {
-            return Err(FreeSpaceAccountingError::InvalidOperationInput);
+            return Err(MountVolumeStateError::InvalidOperationInput);
         }
 
         let mut fat_reader = FatReader::new(block_device, boot_region);
@@ -64,12 +64,12 @@ impl FreeSpaceAllocatorState {
             AllocationBitmapUpdate::Allocate,
         )?;
         if allocated_clusters != requested_clusters {
-            return Err(FreeSpaceAccountingError::InconsistentAccounting);
+            return Err(MountVolumeStateError::InconsistentAccounting);
         }
         self.used_clusters = self
             .used_clusters
             .checked_add(allocated_clusters)
-            .ok_or(FreeSpaceAccountingError::InconsistentAccounting)?;
+            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
         Ok(allocated_ranges)
     }
 
@@ -78,7 +78,7 @@ impl FreeSpaceAllocatorState {
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
         ranges: &[ClusterRange],
-    ) -> core::result::Result<(), FreeSpaceAccountingError> {
+    ) -> core::result::Result<(), MountVolumeStateError> {
         let released_clusters = self.bitmap.apply_update(
             block_device,
             boot_region,
@@ -88,7 +88,7 @@ impl FreeSpaceAllocatorState {
         self.used_clusters = self
             .used_clusters
             .checked_sub(released_clusters)
-            .ok_or(FreeSpaceAccountingError::InconsistentAccounting)?;
+            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
         Ok(())
     }
 
@@ -96,7 +96,7 @@ impl FreeSpaceAllocatorState {
         &mut self,
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
-    ) -> core::result::Result<(), FreeSpaceAccountingError> {
+    ) -> core::result::Result<(), MountVolumeStateError> {
         let mut fat_reader = FatReader::new(block_device, boot_region);
         let used_clusters = self
             .bitmap
@@ -109,11 +109,11 @@ impl FreeSpaceAllocatorState {
     fn snapshot(
         &self,
         boot_region: &BootRegion,
-    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
         let total_clusters = boot_region.cluster_count_usize()?;
         let free_clusters = total_clusters
             .checked_sub(self.used_clusters)
-            .ok_or(FreeSpaceAccountingError::InconsistentAccounting)?;
+            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
         Ok(FreeSpaceSnapshot {
             total_clusters,
             free_clusters,
@@ -124,14 +124,14 @@ impl FreeSpaceAllocatorState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FreeSpaceSnapshot {
+pub(super) struct FreeSpaceSnapshot {
     total_clusters: usize,
     free_clusters: usize,
     used_clusters: usize,
     used_clusters_from_recount: bool,
 }
 
-pub(crate) struct ExfatFs {
+pub(super) struct ExfatFs {
     allocator: RwLock<Option<FreeSpaceAllocatorState>>,
     block_device: Arc<dyn BlockDevice>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
@@ -140,20 +140,20 @@ pub(crate) struct ExfatFs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VolumeIdentityEntries {
-    pub(crate) guid: Option<[u8; 16]>,
-    pub(crate) label: Option<String>,
+pub(super) struct VolumeIdentityEntries {
+    pub(super) guid: Option<[u8; 16]>,
+    pub(super) label: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeIdentityQuery {
+pub(super) enum VolumeIdentityQuery {
     Guid,
     Label,
     LabelAndGuid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeIdentityUpdate {
+pub(super) enum VolumeIdentityUpdate {
     Guid(Option<[u8; 16]>),
     Label(Option<String>),
     LabelAndGuid {
@@ -163,38 +163,10 @@ pub(crate) enum VolumeIdentityUpdate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeAdminRequest {
+pub(super) enum VolumeAdminRequest {
     ForceShutdown,
-    QueryIdentity(VolumeIdentityQuery),
     TrimFreeSpace,
     UpdateIdentity(VolumeIdentityUpdate),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeAdminResponse {
-    Identity(VolumeIdentityEntries),
-    MutationAcknowledged,
-    ShutdownAcknowledged,
-    TrimAcknowledged,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum VolumeAdminAuthority {
-    Privileged,
-    Unprivileged,
-}
-
-impl VolumeAdminAuthority {
-    fn ensure_privileged(self) -> Result<()> {
-        if matches!(self, Self::Privileged) {
-            return Ok(());
-        }
-
-        return_errno_with_message!(
-            Errno::EPERM,
-            "exFAT volume administration requires SYS_ADMIN"
-        )
-    }
 }
 
 impl ExfatFs {
@@ -240,9 +212,7 @@ impl ExfatFs {
             used_clusters_from_recount,
         };
         fs.publish_mount_state(allocator_state, publication);
-        let super_block = fs
-            .super_block_snapshot()
-            .map_err(MountVolumeStateError::from)?;
+        let super_block = fs.super_block_snapshot()?;
         let root_inode: Arc<dyn Inode> = root_inode;
         Ok((fs, root_inode, super_block, options.fs_flags))
     }
@@ -481,48 +451,41 @@ impl ExfatFs {
         &self,
         request: VolumeAdminRequest,
         ctx: &Context,
-    ) -> Result<VolumeAdminResponse> {
-        let authority = if ctx
+    ) -> Result<()> {
+        let is_privileged = ctx
             .posix_thread
             .credentials()
             .effective_capset()
-            .contains(CapSet::SYS_ADMIN)
-        {
-            VolumeAdminAuthority::Privileged
-        } else {
-            VolumeAdminAuthority::Unprivileged
+            .contains(CapSet::SYS_ADMIN);
+        let ensure_privileged_fn = || {
+            if is_privileged {
+                return Ok(());
+            }
+            return_errno_with_message!(
+                Errno::EPERM,
+                "exFAT volume administration requires SYS_ADMIN"
+            )
         };
-        self.handle_volume_admin_request_with_authority(request, authority)
-    }
-
-    pub(crate) fn handle_volume_admin_request_with_authority(
-        &self,
-        request: VolumeAdminRequest,
-        authority: VolumeAdminAuthority,
-    ) -> Result<VolumeAdminResponse> {
         match request {
             VolumeAdminRequest::ForceShutdown => {
-                authority.ensure_privileged()?;
-                self.admit_forced_shutdown()?;
-                Ok(VolumeAdminResponse::ShutdownAcknowledged)
+                ensure_privileged_fn()?;
+                self.admit_forced_shutdown().map_err(Error::from)
             }
-            VolumeAdminRequest::QueryIdentity(query) => self
-                .query_volume_identity(query)
-                .map(VolumeAdminResponse::Identity),
             VolumeAdminRequest::TrimFreeSpace => {
-                authority.ensure_privileged()?;
-                self.administrative_trim_free_space()?;
-                Ok(VolumeAdminResponse::TrimAcknowledged)
+                ensure_privileged_fn()?;
+                self.administrative_trim_free_space()
             }
             VolumeAdminRequest::UpdateIdentity(update) => {
-                authority.ensure_privileged()?;
-                self.update_volume_identity(update)?;
-                Ok(VolumeAdminResponse::MutationAcknowledged)
+                ensure_privileged_fn()?;
+                self.update_volume_identity(update)
             }
         }
     }
 
-    fn query_volume_identity(&self, query: VolumeIdentityQuery) -> Result<VolumeIdentityEntries> {
+    pub(super) fn query_volume_identity(
+        &self,
+        query: VolumeIdentityQuery,
+    ) -> Result<VolumeIdentityEntries> {
         match query {
             VolumeIdentityQuery::Label => {
                 let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
@@ -554,7 +517,7 @@ impl ExfatFs {
         }
     }
 
-    fn update_volume_identity(&self, update: VolumeIdentityUpdate) -> Result<()> {
+    pub(super) fn update_volume_identity(&self, update: VolumeIdentityUpdate) -> Result<()> {
         match update {
             VolumeIdentityUpdate::Label(label) => {
                 let admitted_label = match label {
@@ -600,15 +563,15 @@ impl ExfatFs {
         Ok(())
     }
 
-    fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, FreeSpaceAccountingError> {
+    fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, MountVolumeStateError> {
         let state = self.state.read();
         let publication = state
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         let allocator = self.allocator.read();
         let allocator_state = allocator
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         let snapshot = allocator_state.snapshot(&publication.boot_region)?;
         Ok(self.build_super_block(publication, &snapshot))
     }
@@ -616,38 +579,38 @@ impl ExfatFs {
     #[cfg(ktest)]
     fn cached_free_space_snapshot(
         &self,
-    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
         let state = self.state.read();
         let publication = state
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         let allocator = self.allocator.read();
         let allocator_state = allocator
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         allocator_state.snapshot(&publication.boot_region)
     }
 
     pub(super) fn allocate_free_space(
         &self,
         requested_clusters: usize,
-    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), FreeSpaceAccountingError>
+    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), MountVolumeStateError>
     {
         let state = self.state.write();
         let publication = state
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         self.allocate_free_space_with_publication(publication, requested_clusters)
     }
 
     pub(super) fn free_allocated_space(
         &self,
         ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
         let mut state = self.state.write();
         let publication = state
             .as_mut()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         self.free_allocated_space_with_publication(publication, ranges)
     }
 
@@ -655,16 +618,16 @@ impl ExfatFs {
         &self,
         publication: &MountedVolumeState,
         requested_clusters: usize,
-    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), FreeSpaceAccountingError>
+    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), MountVolumeStateError>
     {
         if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(FreeSpaceAccountingError::ReadOnlyConflict);
+            return Err(MountVolumeStateError::ReadOnlyConflict);
         }
 
         let mut allocator = self.allocator.write();
         let allocator_state = allocator
             .as_mut()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         let allocated_ranges = allocator_state.allocate_clusters(
             self.block_device.as_ref(),
             &publication.boot_region,
@@ -678,15 +641,15 @@ impl ExfatFs {
         &self,
         publication: &mut MountedVolumeState,
         ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
         if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(FreeSpaceAccountingError::ReadOnlyConflict);
+            return Err(MountVolumeStateError::ReadOnlyConflict);
         }
 
         let mut allocator = self.allocator.write();
         let allocator_state = allocator
             .as_mut()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         allocator_state.free_clusters(
             self.block_device.as_ref(),
             &publication.boot_region,
@@ -703,29 +666,29 @@ impl ExfatFs {
     #[cfg(ktest)]
     fn recount_free_space(
         &self,
-    ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
+    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
         let state = self.state.write();
         let publication = state
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         let mut allocator = self.allocator.write();
         let allocator_state = allocator
             .as_mut()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         allocator_state.recount(self.block_device.as_ref(), &publication.boot_region)?;
         allocator_state.snapshot(&publication.boot_region)
     }
 
-    fn administrative_trim_free_space(&self) -> Result<()> {
+    pub(super) fn administrative_trim_free_space(&self) -> Result<()> {
         let state = self.state.write();
         let publication = state
             .as_ref()
-            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+            .ok_or(MountVolumeStateError::UnpublishedState)?;
         if publication.forced_shutdown {
             return Err(Error::new(Errno::EIO));
         }
         if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(FreeSpaceAccountingError::ReadOnlyConflict.into());
+            return Err(MountVolumeStateError::ReadOnlyConflict.into());
         }
 
         Err(Error::new(Errno::EOPNOTSUPP))
@@ -891,7 +854,7 @@ impl FileSystem for ExfatFs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExfatMountOptions {
+pub(super) struct ExfatMountOptions {
     discard: bool,
     pub(super) fs_flags: FsFlags,
     pub(super) iocharset: String,
@@ -949,14 +912,8 @@ impl ExfatMountOptions {
     }
 }
 
-// TODO: `MountVolumeStateError` remains the mount-owned error seam while
-// `test_support/` diagnostics still classify mount bootstrap failures here and
-// `meso_02` free-space accounting still converts through it. Once `meso_02`
-// accepts its final owner-local error boundary and test-only diagnostics
-// localize their failure strings, narrow this enum back to mount bootstrap and
-// remount failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MountVolumeStateError {
+pub(super) enum MountVolumeStateError {
     InvalidOperationInput,
     InvalidMountInput,
     InvalidOnDiskLayout,
@@ -988,87 +945,6 @@ impl From<MountVolumeStateError> for Error {
                 Error::with_message(Errno::EINVAL, "filesystem state is not published")
             }
             MountVolumeStateError::InconsistentAccounting => {
-                Error::with_message(Errno::EUCLEAN, "exFAT allocator accounting is inconsistent")
-            }
-        }
-    }
-}
-
-// TODO: This bridge remains temporary while `mount_candidate()` still converts
-// cached free-space snapshot failures through `MountVolumeStateError`.
-// Administrative trim keeps its explicit `EOPNOTSUPP` on the owner-local
-// `ExfatFs::administrative_trim_free_space()` boundary until mount bootstrap no
-// longer depends on this conversion; then collapse on the final free-space
-// error owner and remove this bridge.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FreeSpaceAccountingError {
-    InvalidOperationInput,
-    InvalidOnDiskLayout,
-    DeviceIo,
-    NoSpace,
-    ReadOnlyConflict,
-    UnpublishedState,
-    InconsistentAccounting,
-}
-
-impl From<MountVolumeStateError> for FreeSpaceAccountingError {
-    fn from(error: MountVolumeStateError) -> Self {
-        match error {
-            MountVolumeStateError::InvalidOperationInput
-            | MountVolumeStateError::InvalidMountInput
-            | MountVolumeStateError::UnsupportedRemountDelta => {
-                FreeSpaceAccountingError::InvalidOperationInput
-            }
-            MountVolumeStateError::InvalidOnDiskLayout => {
-                FreeSpaceAccountingError::InvalidOnDiskLayout
-            }
-            MountVolumeStateError::DeviceIo => FreeSpaceAccountingError::DeviceIo,
-            MountVolumeStateError::NoSpace => FreeSpaceAccountingError::NoSpace,
-            MountVolumeStateError::ReadOnlyConflict => FreeSpaceAccountingError::ReadOnlyConflict,
-            MountVolumeStateError::UnpublishedState => FreeSpaceAccountingError::UnpublishedState,
-            MountVolumeStateError::InconsistentAccounting => {
-                FreeSpaceAccountingError::InconsistentAccounting
-            }
-        }
-    }
-}
-
-impl From<FreeSpaceAccountingError> for MountVolumeStateError {
-    fn from(error: FreeSpaceAccountingError) -> Self {
-        match error {
-            FreeSpaceAccountingError::InvalidOperationInput => {
-                MountVolumeStateError::InvalidOperationInput
-            }
-            FreeSpaceAccountingError::InvalidOnDiskLayout => {
-                MountVolumeStateError::InvalidOnDiskLayout
-            }
-            FreeSpaceAccountingError::DeviceIo => MountVolumeStateError::DeviceIo,
-            FreeSpaceAccountingError::NoSpace => MountVolumeStateError::NoSpace,
-            FreeSpaceAccountingError::ReadOnlyConflict => MountVolumeStateError::ReadOnlyConflict,
-            FreeSpaceAccountingError::UnpublishedState => MountVolumeStateError::UnpublishedState,
-            FreeSpaceAccountingError::InconsistentAccounting => {
-                MountVolumeStateError::InconsistentAccounting
-            }
-        }
-    }
-}
-
-impl From<FreeSpaceAccountingError> for Error {
-    fn from(error: FreeSpaceAccountingError) -> Self {
-        match error {
-            FreeSpaceAccountingError::InvalidOperationInput => {
-                Error::with_message(Errno::EINVAL, "invalid exFAT operation input")
-            }
-            FreeSpaceAccountingError::InvalidOnDiskLayout => {
-                Error::with_message(Errno::EUCLEAN, "invalid exFAT on-disk layout")
-            }
-            FreeSpaceAccountingError::DeviceIo => Error::new(Errno::EIO),
-            FreeSpaceAccountingError::NoSpace => Error::new(Errno::ENOSPC),
-            FreeSpaceAccountingError::ReadOnlyConflict => Error::new(Errno::EROFS),
-            FreeSpaceAccountingError::UnpublishedState => {
-                Error::with_message(Errno::EINVAL, "filesystem state is not published")
-            }
-            FreeSpaceAccountingError::InconsistentAccounting => {
                 Error::with_message(Errno::EUCLEAN, "exFAT allocator accounting is inconsistent")
             }
         }

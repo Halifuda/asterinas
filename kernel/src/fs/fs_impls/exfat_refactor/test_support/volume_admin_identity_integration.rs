@@ -5,7 +5,7 @@ use ostd::prelude::ktest;
 use super::volume_admin_identity::{
     assert_request_errno_and_state_stable, assert_volume_admin_state_matches,
     capture_volume_admin_state, expect_identity_label, handle_admin_request, next_volume_label,
-    ordinary_root_namespace_entries, read_root_directory_bytes,
+    ordinary_root_namespace_entries, query_identity, read_root_directory_bytes,
 };
 use super::*;
 use crate::process::credentials::capabilities::CapSet;
@@ -16,26 +16,19 @@ const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum AdminCallOutcome {
     Errno(Errno),
-    Response(VolumeAdminResponse),
+    Success,
 }
 
-fn classify_admin_call(result: Result<VolumeAdminResponse>) -> AdminCallOutcome {
+fn classify_admin_call(result: Result<()>) -> AdminCallOutcome {
     match result {
-        Ok(response) => AdminCallOutcome::Response(response),
+        Ok(()) => AdminCallOutcome::Success,
         Err(error) => AdminCallOutcome::Errno(error.error()),
     }
 }
 
 fn repeated_label_query(fs: &Arc<ExfatFs>, expected_label: Option<&str>) {
     for _ in 0..4 {
-        let label = expect_identity_label(
-            handle_admin_request(
-                fs,
-                CapSet::empty(),
-                VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Label),
-            )
-            .unwrap(),
-        );
+        let label = expect_identity_label(query_identity(fs, VolumeIdentityQuery::Label).unwrap());
         assert_eq!(label.as_deref(), expected_label);
     }
 }
@@ -51,34 +44,21 @@ fn volume_admin_identity_integration_query_update_requery_then_trim_preserves_ad
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
 
     let initial_label = expect_identity_label(
-        handle_admin_request(
-            &fs,
-            CapSet::empty(),
-            VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Label),
-        )
-        .unwrap(),
+        query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
     );
     let updated_label = next_volume_label(initial_label.as_deref());
 
-    assert_eq!(
-        handle_admin_request(
-            &fs,
-            CapSet::SYS_ADMIN,
-            VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(
-                updated_label.into(),
-            ))),
-        )
-        .unwrap(),
-        VolumeAdminResponse::MutationAcknowledged
-    );
+    handle_admin_request(
+        &fs,
+        CapSet::SYS_ADMIN,
+        VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(
+            updated_label.into(),
+        ))),
+    )
+    .unwrap();
     assert_eq!(
         expect_identity_label(
-            handle_admin_request(
-                &fs,
-                CapSet::empty(),
-                VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Label),
-            )
-            .unwrap(),
+            query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
         ),
         Some(updated_label.into())
     );
@@ -102,11 +82,11 @@ fn volume_admin_identity_integration_failure_classes_preserve_identity_and_alloc
     let disk = ExfatRefactorMemoryDisk::new();
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
 
-    assert_request_errno_and_state_stable(
-        &fs,
-        CapSet::SYS_ADMIN,
-        VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Guid),
-        Errno::EOPNOTSUPP,
+    assert_eq!(
+        query_identity(&fs, VolumeIdentityQuery::Guid)
+            .unwrap_err()
+            .error(),
+        Errno::EOPNOTSUPP
     );
     assert_request_errno_and_state_stable(
         &fs,
@@ -151,7 +131,10 @@ fn volume_admin_identity_integration_failure_classes_preserve_identity_and_alloc
     let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
     let (failing_fs, _, _, _) = mount_block_device(&block_device, default_mount_options()).unwrap();
     let before_failure = capture_volume_admin_state(&failing_fs);
-    let next_label = next_volume_label(failing_fs.query_volume_label().unwrap().as_deref());
+    let next_label = next_volume_label(
+        expect_identity_label(query_identity(&failing_fs, VolumeIdentityQuery::Label).unwrap())
+            .as_deref(),
+    );
 
     failing_disk.enable_failures();
     let error = handle_admin_request(
@@ -173,30 +156,26 @@ fn volume_admin_identity_integration_repeated_queries_stay_stable_for_present_an
     let ordinary_entries_before =
         ordinary_root_namespace_entries(&read_root_directory_bytes(&disk));
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
-    let updated_label = next_volume_label(fs.query_volume_label().unwrap().as_deref());
-
-    assert_eq!(
-        handle_admin_request(
-            &fs,
-            CapSet::SYS_ADMIN,
-            VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(
-                updated_label.into(),
-            ))),
-        )
-        .unwrap(),
-        VolumeAdminResponse::MutationAcknowledged
+    let updated_label = next_volume_label(
+        expect_identity_label(query_identity(&fs, VolumeIdentityQuery::Label).unwrap()).as_deref(),
     );
+
+    handle_admin_request(
+        &fs,
+        CapSet::SYS_ADMIN,
+        VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(Some(
+            updated_label.into(),
+        ))),
+    )
+    .unwrap();
     repeated_label_query(&fs, Some(updated_label));
 
-    assert_eq!(
-        handle_admin_request(
-            &fs,
-            CapSet::SYS_ADMIN,
-            VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(None)),
-        )
-        .unwrap(),
-        VolumeAdminResponse::MutationAcknowledged
-    );
+    handle_admin_request(
+        &fs,
+        CapSet::SYS_ADMIN,
+        VolumeAdminRequest::UpdateIdentity(VolumeIdentityUpdate::Label(None)),
+    )
+    .unwrap();
     repeated_label_query(&fs, None);
 
     assert_eq!(
@@ -213,12 +192,7 @@ fn volume_admin_identity_integration_concurrent_update_shutdown_and_trim_lineari
     let disk = ExfatRefactorMemoryDisk::new();
     let (fs, _, _, _) = mounted_fs(&disk, default_mount_options());
     let initial_label = expect_identity_label(
-        handle_admin_request(
-            &fs,
-            CapSet::empty(),
-            VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Label),
-        )
-        .unwrap(),
+        query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
     );
     let updated_label = String::from(next_volume_label(initial_label.as_deref()));
     let start = Arc::new(AtomicBool::new(false));
@@ -294,12 +268,11 @@ fn volume_admin_identity_integration_concurrent_update_shutdown_and_trim_lineari
 
     assert_eq!(
         shutdown_outcome,
-        AdminCallOutcome::Response(VolumeAdminResponse::ShutdownAcknowledged)
+        AdminCallOutcome::Success
     );
     assert!(matches!(
         mutation_outcome,
-        AdminCallOutcome::Response(VolumeAdminResponse::MutationAcknowledged)
-            | AdminCallOutcome::Errno(Errno::EIO)
+        AdminCallOutcome::Success | AdminCallOutcome::Errno(Errno::EIO)
     ));
     assert!(matches!(
         trim_outcome,
@@ -308,15 +281,10 @@ fn volume_admin_identity_integration_concurrent_update_shutdown_and_trim_lineari
     assert!(fs.state.read().as_ref().unwrap().forced_shutdown);
 
     let queried_label = expect_identity_label(
-        handle_admin_request(
-            &fs,
-            CapSet::empty(),
-            VolumeAdminRequest::QueryIdentity(VolumeIdentityQuery::Label),
-        )
-        .unwrap(),
+        query_identity(&fs, VolumeIdentityQuery::Label).unwrap(),
     );
     match mutation_outcome {
-        AdminCallOutcome::Response(VolumeAdminResponse::MutationAcknowledged) => {
+        AdminCallOutcome::Success => {
             assert_eq!(queried_label.as_deref(), Some(updated_label.as_str()));
         }
         AdminCallOutcome::Errno(Errno::EIO) => {
