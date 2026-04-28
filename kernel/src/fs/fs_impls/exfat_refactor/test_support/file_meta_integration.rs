@@ -7,14 +7,14 @@ use aster_block::BlockDevice;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    assert_bytes_unchanged_except, assert_flush_only, assert_metadata_unchanged,
-    assert_valid_entry_set_checksum, decode_entry_name, encode_exfat_date, encode_exfat_date_only,
-    encode_exfat_date_time, encode_valid_utc_offset_byte, expected_timestamp,
-    init_lookup_test_runtime, mount_root, root_entry_set, set_regular_file_entry_metadata,
-    stream_lengths, wait_for_blocked_flush, write_bytes_append, ExfatLookupFlushControlDisk,
-    ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk, FILE_ATTRIBUTES_OFFSET,
-    FILE_ATTRIBUTE_REGULAR, ROOT_FILE_ENTRY_INDEX, TEST_CONTIGUOUS_SECOND_CLUSTER,
-    TEST_REGULAR_FILE_CLUSTER,
+    ExfatLookupFlushControlDisk, ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk,
+    FILE_ATTRIBUTE_REGULAR, FILE_ATTRIBUTES_OFFSET, ROOT_FILE_ENTRY_INDEX,
+    TEST_CONTIGUOUS_SECOND_CLUSTER, TEST_REGULAR_FILE_CLUSTER, assert_bytes_unchanged_except,
+    assert_flush_only, assert_metadata_unchanged, assert_valid_entry_set_checksum,
+    decode_entry_name, encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    encode_valid_utc_offset_byte, expected_timestamp, init_lookup_test_runtime, mount_root,
+    root_entry_set, set_regular_file_entry_metadata, stream_lengths, wait_for_blocked_flush,
+    write_bytes_append,
 };
 use crate::process::Uid;
 
@@ -35,8 +35,8 @@ fn assert_projected_identity(metadata: Metadata, size: usize, allocated_sectors:
     assert_eq!(metadata.type_, InodeType::File);
 }
 
-pub(super) fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync(
-) {
+pub(super) fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -142,8 +142,8 @@ pub(super) fn file_metadata_projection_update_integration_success_path_live_and_
     );
 }
 
-pub(super) fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry(
-) {
+pub(super) fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry()
+ {
     init_lookup_test_runtime();
 
     let denied_disk = ExfatLookupTestDisk::new();
@@ -300,8 +300,8 @@ pub(super) fn file_metadata_projection_update_integration_repeated_calls_keep_me
     assert_eq!(file_inode.group().unwrap(), Gid::new_root());
 }
 
-pub(super) fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates(
-) {
+pub(super) fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

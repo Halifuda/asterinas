@@ -3,8 +3,8 @@
 use ostd::prelude::ktest;
 
 use super::{
-    init_lookup_test_runtime, lookup_error, mount_root, Errno, ExfatLookupTestDisk,
-    ROOT_FILE_ENTRY_INDEX,
+    Errno, ExfatLookupTestDisk, ROOT_FILE_ENTRY_INDEX, init_lookup_test_runtime, lookup_error,
+    mount_root,
 };
 
 #[ktest]

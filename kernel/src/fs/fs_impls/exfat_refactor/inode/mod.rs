@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod cached_io;
-mod content_mutation;
 mod dir_metadata;
+mod dir_mutation;
 mod file_metadata;
+mod file_mutation;
 mod lookup;
-mod mutation;
 mod page_backend;
-mod shared;
+mod state;
 mod sync;
 
 use alloc::{string::String, vec, vec::Vec};
@@ -25,6 +25,10 @@ use ostd::{
 use spin::Once;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
+use self::{
+    state::{ExfatInodeDirtyState, ExfatInodeStream, InodeRewriteTarget, InodeTimestampField},
+    sync::InodeSyncScope,
+};
 use super::{
     bitmap::ClusterRange,
     boot::BootRegion,
@@ -33,7 +37,7 @@ use super::{
         FileEntrySetView, ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
     },
     fat::{ChainVisitControl, FatChainStep, FatReader},
-    fs::{ExfatFs, ExfatMountOptions, MountVolumeStateError, MountedVolumeState},
+    fs::{ExfatFs, ExfatFsError, ExfatMountOptions, MountedVolumeState},
     upcase::UpcaseTable,
 };
 use crate::{
@@ -52,20 +56,6 @@ use crate::{
     vm::vmo::Vmo,
 };
 
-use self::shared::{ExfatInodeDirtyState, ExfatInodeStream, FileSyncScope};
-
-#[derive(Clone, Copy)]
-enum RewriteTarget {
-    Directory,
-    RegularFile,
-}
-
-#[derive(Clone, Copy)]
-enum TimestampFieldKind {
-    Accessed,
-    Modified,
-}
-
 pub(super) struct ExfatInode {
     admission: RwMutex<()>,
     dirty_state: RwLock<ExfatInodeDirtyState>,
@@ -83,12 +73,12 @@ impl ExfatInode {
         &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        read_root_directory_fn: impl FnOnce(&[u8]) -> core::result::Result<T, MountVolumeStateError>,
-    ) -> core::result::Result<T, MountVolumeStateError> {
+        read_root_directory_fn: impl FnOnce(&[u8]) -> core::result::Result<T, ExfatFsError>,
+    ) -> core::result::Result<T, ExfatFsError> {
         let _directory_guard = self.admission.read();
         let stream = *self.stream.read();
         if stream.data_length.is_some() {
-            return Err(MountVolumeStateError::InvalidOperationInput);
+            return Err(ExfatFsError::InvalidOperationInput);
         }
 
         let directory_bytes =
@@ -100,15 +90,12 @@ impl ExfatInode {
         &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        rewrite_root_directory_fn: impl FnOnce(
-            &mut Vec<u8>,
-        )
-            -> core::result::Result<T, MountVolumeStateError>,
-    ) -> core::result::Result<T, MountVolumeStateError> {
+        rewrite_root_directory_fn: impl FnOnce(&mut Vec<u8>) -> core::result::Result<T, ExfatFsError>,
+    ) -> core::result::Result<T, ExfatFsError> {
         let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
         let stream = *self.stream.read();
         if stream.data_length.is_some() {
-            return Err(MountVolumeStateError::InvalidOperationInput);
+            return Err(ExfatFsError::InvalidOperationInput);
         }
 
         let mut directory_bytes =
@@ -352,7 +339,7 @@ impl Inode for ExfatInode {
             return Ok(());
         }
 
-        self.sync_regular_file(FileSyncScope::All)
+        self.sync_regular_file(InodeSyncScope::All)
     }
 
     fn sync_data(&self) -> Result<()> {
@@ -360,7 +347,7 @@ impl Inode for ExfatInode {
             return Ok(());
         }
 
-        self.sync_regular_file(FileSyncScope::Data)
+        self.sync_regular_file(InodeSyncScope::Data)
     }
 
     fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {

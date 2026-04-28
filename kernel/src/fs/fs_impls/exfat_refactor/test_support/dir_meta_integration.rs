@@ -11,19 +11,19 @@ use spin::Mutex;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    assert_metadata_unchanged, assert_valid_entry_set_checksum, collect_dirents, decode_entry_name,
-    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
-    encode_valid_utc_offset_byte, entry_set_checksum, expected_timestamp, init_lookup_test_runtime,
-    lookup_error, mount_root, root_entry_set, set_directory_entry_metadata, ExfatLookupTestDisk,
-    ExfatLookupToggleFailingWriteDisk, ExfatLookupWriteControlDisk, DIRECTORY_ENTRY_SIZE,
-    FILE_ATTRIBUTES_OFFSET, FILE_ATTRIBUTE_DIRECTORY, FILE_DIRECTORY_ENTRY_TYPE,
-    FILE_NAME_ENTRY_TYPE, RENAME_SOURCE_PARENT_CLUSTER, RENAME_TARGET_PARENT_CLUSTER,
-    ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX, STREAM_EXTENSION_ENTRY_TYPE,
-    TEST_PARENT_CLUSTER,
+    DIRECTORY_ENTRY_SIZE, ExfatLookupTestDisk, ExfatLookupToggleFailingWriteDisk,
+    ExfatLookupWriteControlDisk, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTES_OFFSET,
+    FILE_DIRECTORY_ENTRY_TYPE, FILE_NAME_ENTRY_TYPE, RENAME_SOURCE_PARENT_CLUSTER,
+    RENAME_TARGET_PARENT_CLUSTER, ROOT_FILE_ENTRY_INDEX, ROOT_SECOND_FILE_ENTRY_INDEX,
+    STREAM_EXTENSION_ENTRY_TYPE, TEST_PARENT_CLUSTER, assert_metadata_unchanged,
+    assert_valid_entry_set_checksum, collect_dirents, decode_entry_name, encode_exfat_date,
+    encode_exfat_date_only, encode_exfat_date_time, encode_valid_utc_offset_byte,
+    entry_set_checksum, expected_timestamp, init_lookup_test_runtime, lookup_error, mount_root,
+    root_entry_set, set_directory_entry_metadata,
 };
 use crate::{
     process::{Gid, Uid},
-    thread::{kernel_thread::ThreadOptions, Thread},
+    thread::{Thread, kernel_thread::ThreadOptions},
 };
 
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
@@ -39,7 +39,7 @@ const SOURCE_DIRECTORY_NAME: &str = "SrcDir";
 const TARGET_DIRECTORY_NAME: &str = "DstDir";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProjectionSnapshot {
+struct DirMetadataSnapshot {
     atime: Duration,
     ctime: Duration,
     gid: Gid,
@@ -86,9 +86,9 @@ fn install_timestamped_root_directory(
     expected_timestamp(modified_date, modified_time, modified_offset)
 }
 
-fn projection_snapshot(inode: &Arc<dyn Inode>) -> ProjectionSnapshot {
+fn projection_snapshot(inode: &Arc<dyn Inode>) -> DirMetadataSnapshot {
     let metadata = inode.metadata();
-    ProjectionSnapshot {
+    DirMetadataSnapshot {
         atime: metadata.last_access_at,
         ctime: metadata.last_meta_change_at,
         gid: metadata.gid,
@@ -126,8 +126,8 @@ fn assert_directory_self_entry_set(
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets(
-) {
+pub(super) fn directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -220,8 +220,8 @@ pub(super) fn directory_metadata_projection_and_update_integration_namespace_mut
     );
 }
 
-pub(super) fn directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication(
-) {
+pub(super) fn directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication()
+ {
     init_lookup_test_runtime();
 
     let integrity_disk = ExfatLookupTestDisk::new();
@@ -311,8 +311,8 @@ pub(super) fn directory_metadata_projection_and_update_integration_failure_maint
     assert!(parent_inode.lookup("RefreshFail").is_ok());
 }
 
-pub(super) fn directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views(
-) {
+pub(super) fn directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -337,7 +337,7 @@ pub(super) fn directory_metadata_projection_and_update_integration_concurrency_o
         Time::from_hms_milli(6, 8, 10, 240).unwrap(),
         UtcOffset::from_whole_seconds(-2 * 60 * 60).unwrap(),
     );
-    let snapshot_after = ProjectionSnapshot {
+    let snapshot_after = DirMetadataSnapshot {
         atime: snapshot_before.atime,
         ctime: requested_mtime,
         gid: snapshot_before.gid,

@@ -5,11 +5,11 @@ use core::time::Duration;
 use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
-    assert_metadata_unchanged, encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
+    ExfatLookupTestDisk, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTES_OFFSET, ROOT_FILE_ENTRY_INDEX,
+    ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CHILD_DIRECTORY_CLUSTER, assert_metadata_unchanged,
+    encode_exfat_date, encode_exfat_date_only, encode_exfat_date_time,
     encode_valid_utc_offset_byte, entry_set_checksum, expected_timestamp, init_lookup_test_runtime,
-    lookup_error, mount_root, root_entry_set, set_directory_entry_metadata, ExfatLookupTestDisk,
-    FILE_ATTRIBUTES_OFFSET, FILE_ATTRIBUTE_DIRECTORY, ROOT_FILE_ENTRY_INDEX,
-    ROOT_SECOND_FILE_ENTRY_INDEX, TEST_CHILD_DIRECTORY_CLUSTER,
+    lookup_error, mount_root, root_entry_set, set_directory_entry_metadata,
 };
 
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
@@ -22,8 +22,8 @@ const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 
-pub(super) fn directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set(
-) {
+pub(super) fn directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -77,8 +77,8 @@ pub(super) fn directory_metadata_projection_and_update_projection_substrate_proj
     assert_eq!(directory_inode.ctime(), expected_mtime);
 }
 
-pub(super) fn directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication(
-) {
+pub(super) fn directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -102,8 +102,8 @@ pub(super) fn directory_metadata_projection_and_update_projection_substrate_keep
     assert_metadata_unchanged(root_inode.metadata(), metadata);
 }
 
-pub(super) fn directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters(
-) {
+pub(super) fn directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

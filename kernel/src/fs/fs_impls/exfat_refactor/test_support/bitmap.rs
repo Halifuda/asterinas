@@ -9,7 +9,7 @@ use super::super::{
     bitmap::AllocationBitmap,
     boot::BootRegion,
     fat::{FatChainStep, FatReader},
-    fs::MountVolumeStateError,
+    fs::ExfatFsError,
 };
 
 pub(super) fn diagnose_count_used_clusters(
@@ -103,7 +103,7 @@ pub(super) fn diagnose_count_used_clusters(
             Ok(FatChainStep::End) => {
                 return Err("count_used_clusters:stream_shorter_than_bitmap");
             }
-            Err(MountVolumeStateError::DeviceIo) => {
+            Err(ExfatFsError::DeviceIo) => {
                 return Err("count_used_clusters:fat_device_io");
             }
             Err(_) => return Err("count_used_clusters:fat_chain_invalid"),

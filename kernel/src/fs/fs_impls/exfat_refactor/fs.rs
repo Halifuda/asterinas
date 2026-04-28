@@ -3,11 +3,14 @@
 use alloc::{string::String, vec::Vec};
 
 use aster_block::{BlockDevice, bio::BioStatus};
-use ostd::sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard};
+use ostd::{
+    mm::VmIo,
+    sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard},
+};
 
 use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
-    boot::{BootRegion, VolumeAnomalyState},
+    boot::BootRegion,
     direntry,
     fat::FatReader,
     inode::ExfatInode,
@@ -22,119 +25,45 @@ use crate::{
     prelude::*,
 };
 
-#[path = "admin.rs"]
-mod admin;
-
-pub(super) use admin::{
-    VolumeAdminRequest, VolumeIdentityEntries, VolumeIdentityQuery, VolumeIdentityUpdate,
-};
-
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
-#[derive(Clone)]
-pub(super) struct MountedVolumeState {
-    anomaly: VolumeAnomalyState,
-    boot_region: BootRegion,
-    flags: FsFlags,
-    options: ExfatMountOptions,
-    root_inode: Arc<ExfatInode>,
-    upcase_table: Arc<UpcaseTable>,
-    forced_shutdown: bool,
-}
-
-struct FreeSpaceAllocatorState {
-    pub(super) bitmap: AllocationBitmap,
-    used_clusters: usize,
-    pub(super) used_clusters_from_recount: bool,
-}
-
-impl FreeSpaceAllocatorState {
-    fn allocate_clusters(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-        requested_clusters: usize,
-    ) -> core::result::Result<Vec<ClusterRange>, MountVolumeStateError> {
-        if requested_clusters == 0 {
-            return Err(MountVolumeStateError::InvalidOperationInput);
-        }
-
-        let mut fat_reader = FatReader::new(block_device, boot_region);
-        let allocated_ranges =
-            self.bitmap
-                .find_free_ranges(boot_region, &mut fat_reader, requested_clusters)?;
-        let allocated_clusters = self.bitmap.apply_update(
-            block_device,
-            boot_region,
-            &allocated_ranges,
-            AllocationBitmapUpdate::Allocate,
-        )?;
-        if allocated_clusters != requested_clusters {
-            return Err(MountVolumeStateError::InconsistentAccounting);
-        }
-        self.used_clusters = self
-            .used_clusters
-            .checked_add(allocated_clusters)
-            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
-        Ok(allocated_ranges)
-    }
-
-    fn free_clusters(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-        ranges: &[ClusterRange],
-    ) -> core::result::Result<(), MountVolumeStateError> {
-        let released_clusters = self.bitmap.apply_update(
-            block_device,
-            boot_region,
-            ranges,
-            AllocationBitmapUpdate::Free,
-        )?;
-        self.used_clusters = self
-            .used_clusters
-            .checked_sub(released_clusters)
-            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
-        Ok(())
-    }
-
-    fn recount(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<(), MountVolumeStateError> {
-        let mut fat_reader = FatReader::new(block_device, boot_region);
-        let used_clusters = self
-            .bitmap
-            .recount_used_clusters(boot_region, &mut fat_reader)?;
-        self.used_clusters = used_clusters;
-        self.used_clusters_from_recount = true;
-        Ok(())
-    }
-
-    fn snapshot(
-        &self,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
-        let total_clusters = boot_region.cluster_count_usize()?;
-        let free_clusters = total_clusters
-            .checked_sub(self.used_clusters)
-            .ok_or(MountVolumeStateError::InconsistentAccounting)?;
-        Ok(FreeSpaceSnapshot {
-            total_clusters,
-            free_clusters,
-            used_clusters: self.used_clusters,
-            used_clusters_from_recount: self.used_clusters_from_recount,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct FreeSpaceSnapshot {
-    total_clusters: usize,
-    free_clusters: usize,
-    used_clusters: usize,
-    used_clusters_from_recount: bool,
+pub(super) enum ExfatFsError {
+    InvalidOperationInput,
+    InvalidMountInput,
+    InvalidOnDiskLayout,
+    DeviceIo,
+    NoSpace,
+    UnsupportedRemountDelta,
+    ReadOnlyConflict,
+    UnpublishedState,
+    InconsistentAccounting,
+}
+
+impl From<ExfatFsError> for Error {
+    fn from(error: ExfatFsError) -> Self {
+        match error {
+            ExfatFsError::InvalidOperationInput => {
+                Error::with_message(Errno::EINVAL, "invalid exFAT operation input")
+            }
+            ExfatFsError::InvalidMountInput => Error::new(Errno::EINVAL),
+            ExfatFsError::InvalidOnDiskLayout => {
+                Error::with_message(Errno::EUCLEAN, "invalid exFAT on-disk layout")
+            }
+            ExfatFsError::DeviceIo => Error::new(Errno::EIO),
+            ExfatFsError::NoSpace => Error::new(Errno::ENOSPC),
+            ExfatFsError::UnsupportedRemountDelta => {
+                Error::with_message(Errno::EINVAL, "unsupported exFAT remount delta")
+            }
+            ExfatFsError::ReadOnlyConflict => Error::new(Errno::EROFS),
+            ExfatFsError::UnpublishedState => {
+                Error::with_message(Errno::EINVAL, "filesystem state is not published")
+            }
+            ExfatFsError::InconsistentAccounting => {
+                Error::with_message(Errno::EUCLEAN, "exFAT allocator accounting is inconsistent")
+            }
+        }
+    }
 }
 
 pub(super) struct ExfatFs {
@@ -142,429 +71,7 @@ pub(super) struct ExfatFs {
     block_device: Arc<dyn BlockDevice>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     source: Option<String>,
-    state: RwMutex<Option<MountedVolumeState>>,
-}
-
-impl ExfatFs {
-    fn new(block_device: Arc<dyn BlockDevice>, source: Option<String>) -> Arc<Self> {
-        Arc::new(Self {
-            allocator: RwLock::new(None),
-            block_device,
-            fs_event_subscriber_stats: FsEventSubscriberStats::new(),
-            source,
-            state: RwMutex::new(None),
-        })
-    }
-
-    pub(super) fn container_device_id(&self) -> device_id::DeviceId {
-        self.block_device.id()
-    }
-
-    fn mount_candidate(
-        block_device: &Arc<dyn BlockDevice>,
-        source: Option<&str>,
-        options: &ExfatMountOptions,
-    ) -> core::result::Result<
-        (Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags),
-        MountVolumeStateError,
-    > {
-        let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
-            BootRegion::load_mount_state(block_device.as_ref())?;
-        let fs = Self::new(block_device.clone(), source.map(ToString::to_string));
-        let root_inode =
-            ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
-        let publication = MountedVolumeState {
-            anomaly,
-            boot_region,
-            flags: options.fs_flags,
-            options: options.clone(),
-            root_inode: root_inode.clone(),
-            upcase_table,
-            forced_shutdown: false,
-        };
-        let allocator_state = FreeSpaceAllocatorState {
-            bitmap,
-            used_clusters,
-            used_clusters_from_recount,
-        };
-        fs.publish_mount_state(allocator_state, publication);
-        let super_block = fs.super_block_snapshot()?;
-        let root_inode: Arc<dyn Inode> = root_inode;
-        Ok((fs, root_inode, super_block, options.fs_flags))
-    }
-
-    fn remount_published(
-        &self,
-        next_flags: FsFlags,
-        next_options: &ExfatMountOptions,
-    ) -> core::result::Result<FsFlags, MountVolumeStateError> {
-        let mut state = self.state.write();
-        let publication = state
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let changed_flags = publication.flags ^ next_flags;
-        if changed_flags.intersects(
-            FsFlags::SYNCHRONOUS
-                | FsFlags::MANDLOCK
-                | FsFlags::DIRSYNC
-                | FsFlags::SILENT
-                | FsFlags::LAZYTIME,
-        ) {
-            return Err(MountVolumeStateError::UnsupportedRemountDelta);
-        }
-        if publication.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
-            return Err(MountVolumeStateError::ReadOnlyConflict);
-        }
-        if publication.options.iocharset != next_options.iocharset
-            || publication.options.keep_last_dots != next_options.keep_last_dots
-            || publication.options.zero_size_dir != next_options.zero_size_dir
-        {
-            return Err(MountVolumeStateError::UnsupportedRemountDelta);
-        }
-        publication.flags = next_flags;
-        publication.options = next_options.with_flags(next_flags);
-        Ok(next_flags)
-    }
-
-    fn build_super_block(
-        &self,
-        publication: &MountedVolumeState,
-        snapshot: &FreeSpaceSnapshot,
-    ) -> SuperBlock {
-        SuperBlock {
-            magic: EXFAT_SUPER_MAGIC,
-            bsize: publication.boot_region.cluster_size,
-            blocks: snapshot.total_clusters,
-            bfree: snapshot.free_clusters,
-            bavail: snapshot.free_clusters,
-            files: 0,
-            ffree: 0,
-            fsid: u64::from(publication.boot_region.volume_serial_number),
-            namelen: UpcaseTable::NAME_MAX,
-            frsize: publication.boot_region.cluster_size,
-            flags: u64::from(publication.flags.bits()),
-            container_dev_id: self.block_device.id(),
-        }
-    }
-
-    #[cfg(ktest)]
-    fn current_options(&self) -> core::result::Result<ExfatMountOptions, MountVolumeStateError> {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        Ok(publication.options.clone())
-    }
-
-    fn publish_mount_state(
-        &self,
-        allocator_state: FreeSpaceAllocatorState,
-        publication: MountedVolumeState,
-    ) {
-        *self.allocator.write() = Some(allocator_state);
-        *self.state.write() = Some(publication);
-    }
-
-    #[cfg(ktest)]
-    fn published_flags(&self) -> core::result::Result<FsFlags, MountVolumeStateError> {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        Ok(publication.flags)
-    }
-
-    pub(super) fn published_lookup_state(
-        &self,
-    ) -> core::result::Result<
-        (
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        MountVolumeStateError,
-    > {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        Ok((
-            self.block_device.clone(),
-            publication.boot_region,
-            publication.anomaly,
-            publication.upcase_table.clone(),
-            publication.options.clone(),
-        ))
-    }
-
-    pub(super) fn admitted_lookup_state(
-        &self,
-    ) -> core::result::Result<
-        (
-            RwMutexReadGuard<'_, Option<MountedVolumeState>>,
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        MountVolumeStateError,
-    > {
-        let state = self.state.read();
-        let (boot_region, anomaly, upcase_table, options) = {
-            let publication = state
-                .as_ref()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
-            (
-                publication.boot_region,
-                publication.anomaly,
-                publication.upcase_table.clone(),
-                publication.options.clone(),
-            )
-        };
-        Ok((
-            state,
-            self.block_device.clone(),
-            boot_region,
-            anomaly,
-            upcase_table,
-            options,
-        ))
-    }
-
-    pub(super) fn admitted_mutation_state(
-        &self,
-    ) -> core::result::Result<
-        (
-            RwMutexWriteGuard<'_, Option<MountedVolumeState>>,
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        MountVolumeStateError,
-    > {
-        let mut state = self.state.write();
-        let dirty_anomaly = {
-            let publication = state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
-            if publication.forced_shutdown {
-                return Err(MountVolumeStateError::DeviceIo);
-            }
-            if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(MountVolumeStateError::ReadOnlyConflict);
-            }
-            (!publication.anomaly.volume_dirty).then_some(VolumeAnomalyState {
-                volume_dirty: true,
-                ..publication.anomaly
-            })
-        };
-        if let Some(dirty_anomaly) = dirty_anomaly {
-            let boot_region = state
-                .as_ref()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
-                .boot_region;
-            if let Err(error) =
-                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), dirty_anomaly)
-            {
-                state
-                    .as_mut()
-                    .ok_or(MountVolumeStateError::UnpublishedState)?
-                    .anomaly
-                    .volume_dirty = true;
-                return Err(error);
-            }
-            let flush_status = match self.block_device.sync() {
-                Ok(status) => status,
-                Err(_) => {
-                    state
-                        .as_mut()
-                        .ok_or(MountVolumeStateError::UnpublishedState)?
-                        .anomaly
-                        .volume_dirty = true;
-                    return Err(MountVolumeStateError::DeviceIo);
-                }
-            };
-            if flush_status != BioStatus::Complete {
-                state
-                    .as_mut()
-                    .ok_or(MountVolumeStateError::UnpublishedState)?
-                    .anomaly
-                    .volume_dirty = true;
-                return Err(MountVolumeStateError::DeviceIo);
-            }
-            state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
-                .anomaly = dirty_anomaly;
-        }
-        let (boot_region, anomaly, upcase_table, options) = {
-            let publication = state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
-            (
-                publication.boot_region,
-                publication.anomaly,
-                publication.upcase_table.clone(),
-                publication.options.clone(),
-            )
-        };
-        Ok((
-            state,
-            self.block_device.clone(),
-            boot_region,
-            anomaly,
-            upcase_table,
-            options,
-        ))
-    }
-
-    pub(crate) fn handle_volume_admin_request(
-        &self,
-        request: VolumeAdminRequest,
-        ctx: &Context,
-    ) -> Result<()> {
-        admin::handle_volume_admin_request(self, request, ctx)
-    }
-
-    pub(super) fn query_volume_identity(
-        &self,
-        query: VolumeIdentityQuery,
-    ) -> Result<VolumeIdentityEntries> {
-        admin::query_volume_identity(self, query)
-    }
-
-    pub(super) fn update_volume_identity(&self, update: VolumeIdentityUpdate) -> Result<()> {
-        admin::update_volume_identity(self, update)
-    }
-
-    pub(super) fn admit_forced_shutdown(&self) -> core::result::Result<(), MountVolumeStateError> {
-        admin::admit_forced_shutdown(self)
-    }
-
-    fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, MountVolumeStateError> {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let allocator = self.allocator.read();
-        let allocator_state = allocator
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
-        Ok(self.build_super_block(publication, &snapshot))
-    }
-
-    #[cfg(ktest)]
-    fn cached_free_space_snapshot(
-        &self,
-    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let allocator = self.allocator.read();
-        let allocator_state = allocator
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        allocator_state.snapshot(&publication.boot_region)
-    }
-
-    pub(super) fn allocate_free_space(
-        &self,
-        requested_clusters: usize,
-    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), MountVolumeStateError>
-    {
-        let state = self.state.write();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        self.allocate_free_space_with_publication(publication, requested_clusters)
-    }
-
-    pub(super) fn free_allocated_space(
-        &self,
-        ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
-        let mut state = self.state.write();
-        let publication = state
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        self.free_allocated_space_with_publication(publication, ranges)
-    }
-
-    pub(super) fn allocate_free_space_with_publication(
-        &self,
-        publication: &MountedVolumeState,
-        requested_clusters: usize,
-    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), MountVolumeStateError>
-    {
-        if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(MountVolumeStateError::ReadOnlyConflict);
-        }
-
-        let mut allocator = self.allocator.write();
-        let allocator_state = allocator
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let allocated_ranges = allocator_state.allocate_clusters(
-            self.block_device.as_ref(),
-            &publication.boot_region,
-            requested_clusters,
-        )?;
-        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
-        Ok((allocated_ranges, snapshot))
-    }
-
-    pub(super) fn free_allocated_space_with_publication(
-        &self,
-        publication: &mut MountedVolumeState,
-        ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
-        if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(MountVolumeStateError::ReadOnlyConflict);
-        }
-
-        let mut allocator = self.allocator.write();
-        let allocator_state = allocator
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        allocator_state.free_clusters(
-            self.block_device.as_ref(),
-            &publication.boot_region,
-            ranges,
-        )?;
-        if publication.options.discard {
-            // Current Asterinas block devices expose no trim BIO, so downgrade
-            // only the advisory policy.
-            publication.options.discard = false;
-        }
-        allocator_state.snapshot(&publication.boot_region)
-    }
-
-    #[cfg(ktest)]
-    fn recount_free_space(
-        &self,
-    ) -> core::result::Result<FreeSpaceSnapshot, MountVolumeStateError> {
-        let state = self.state.write();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let mut allocator = self.allocator.write();
-        let allocator_state = allocator
-            .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        allocator_state.recount(self.block_device.as_ref(), &publication.boot_region)?;
-        allocator_state.snapshot(&publication.boot_region)
-    }
-
-    pub(super) fn administrative_trim_free_space(&self) -> Result<()> {
-        admin::administrative_trim_free_space(self)
-    }
+    pub(super) state: RwMutex<Option<MountedVolumeState>>,
 }
 
 impl FileSystem for ExfatFs {
@@ -579,14 +86,12 @@ impl FileSystem for ExfatFs {
     fn sync(&self) -> Result<()> {
         let mut state = self.state.write();
         {
-            let publication = state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             if publication.forced_shutdown {
                 return Err(Error::new(Errno::EIO));
             }
             if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+                return Err(ExfatFsError::ReadOnlyConflict.into());
             }
         }
 
@@ -595,7 +100,7 @@ impl FileSystem for ExfatFs {
             Err(_) => {
                 state
                     .as_mut()
-                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .ok_or(ExfatFsError::UnpublishedState)?
                     .anomaly
                     .volume_dirty = true;
                 return Err(Error::new(Errno::EIO));
@@ -604,21 +109,19 @@ impl FileSystem for ExfatFs {
         if flush_status != BioStatus::Complete {
             state
                 .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .anomaly
                 .volume_dirty = true;
             return_errno!(Errno::EIO);
         }
 
         let clean_anomaly = {
-            let publication = state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             if publication.forced_shutdown {
                 return Err(Error::new(Errno::EIO));
             }
             if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+                return Err(ExfatFsError::ReadOnlyConflict.into());
             }
             if !publication.anomaly.volume_dirty {
                 return Ok(());
@@ -630,26 +133,24 @@ impl FileSystem for ExfatFs {
         };
         let boot_region = state
             .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .ok_or(ExfatFsError::UnpublishedState)?
             .boot_region;
         if let Err(error) =
             boot_region.write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
         {
             state
                 .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .anomaly
                 .volume_dirty = true;
             return Err(error.into());
         }
 
         {
-            let publication = state
-                .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?;
+            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             if publication.flags.contains(FsFlags::RDONLY) {
                 publication.anomaly.volume_dirty = true;
-                return Err(MountVolumeStateError::ReadOnlyConflict.into());
+                return Err(ExfatFsError::ReadOnlyConflict.into());
             }
         }
 
@@ -658,7 +159,7 @@ impl FileSystem for ExfatFs {
             Err(_) => {
                 state
                     .as_mut()
-                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .ok_or(ExfatFsError::UnpublishedState)?
                     .anomaly
                     .volume_dirty = true;
                 return Err(Error::new(Errno::EIO));
@@ -667,14 +168,14 @@ impl FileSystem for ExfatFs {
         if flush_status != BioStatus::Complete {
             state
                 .as_mut()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .anomaly
                 .volume_dirty = true;
             return_errno!(Errno::EIO);
         }
         state
             .as_mut()
-            .ok_or(MountVolumeStateError::UnpublishedState)?
+            .ok_or(ExfatFsError::UnpublishedState)?
             .anomaly = clean_anomaly;
         Ok(())
     }
@@ -708,7 +209,7 @@ impl FileSystem for ExfatFs {
             let state = self.state.read();
             state
                 .as_ref()
-                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .ok_or(ExfatFsError::UnpublishedState)?
                 .options
                 .clone()
         };
@@ -725,6 +226,473 @@ impl FileSystem for ExfatFs {
     }
 }
 
+impl ExfatFs {
+    // Construction and mount publication
+
+    fn new(block_device: Arc<dyn BlockDevice>, source: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            allocator: RwLock::new(None),
+            block_device,
+            fs_event_subscriber_stats: FsEventSubscriberStats::new(),
+            source,
+            state: RwMutex::new(None),
+        })
+    }
+
+    fn mount_candidate(
+        block_device: &Arc<dyn BlockDevice>,
+        source: Option<&str>,
+        options: &ExfatMountOptions,
+    ) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), ExfatFsError>
+    {
+        let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
+            BootRegion::load_mount_state(block_device.as_ref())?;
+        let fs = Self::new(block_device.clone(), source.map(ToString::to_string));
+        let root_inode =
+            ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
+        let publication = MountedVolumeState {
+            anomaly,
+            boot_region,
+            flags: options.fs_flags,
+            options: options.clone(),
+            root_inode: root_inode.clone(),
+            upcase_table,
+            forced_shutdown: false,
+        };
+        let allocator_state = FreeSpaceAllocatorState {
+            bitmap,
+            used_clusters,
+            used_clusters_from_recount,
+        };
+        fs.publish_mount_state(allocator_state, publication);
+        let super_block = fs.super_block_snapshot()?;
+        let root_inode: Arc<dyn Inode> = root_inode;
+        Ok((fs, root_inode, super_block, options.fs_flags))
+    }
+
+    fn publish_mount_state(
+        &self,
+        allocator_state: FreeSpaceAllocatorState,
+        publication: MountedVolumeState,
+    ) {
+        *self.allocator.write() = Some(allocator_state);
+        *self.state.write() = Some(publication);
+    }
+
+    fn remount_published(
+        &self,
+        next_flags: FsFlags,
+        next_options: &ExfatMountOptions,
+    ) -> core::result::Result<FsFlags, ExfatFsError> {
+        let mut state = self.state.write();
+        let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        let changed_flags = publication.flags ^ next_flags;
+        if changed_flags.intersects(
+            FsFlags::SYNCHRONOUS
+                | FsFlags::MANDLOCK
+                | FsFlags::DIRSYNC
+                | FsFlags::SILENT
+                | FsFlags::LAZYTIME,
+        ) {
+            return Err(ExfatFsError::UnsupportedRemountDelta);
+        }
+        if publication.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
+            return Err(ExfatFsError::ReadOnlyConflict);
+        }
+        if publication.options.iocharset != next_options.iocharset
+            || publication.options.keep_last_dots != next_options.keep_last_dots
+            || publication.options.zero_size_dir != next_options.zero_size_dir
+        {
+            return Err(ExfatFsError::UnsupportedRemountDelta);
+        }
+        publication.flags = next_flags;
+        publication.options = next_options.with_flags(next_flags);
+        Ok(next_flags)
+    }
+
+    // Admission
+
+    pub(super) fn published_lookup_state(
+        &self,
+    ) -> core::result::Result<
+        (
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            VolumeAnomalyState,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
+        ExfatFsError,
+    > {
+        let state = self.state.read();
+        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        Ok((
+            self.block_device.clone(),
+            publication.boot_region,
+            publication.anomaly,
+            publication.upcase_table.clone(),
+            publication.options.clone(),
+        ))
+    }
+
+    pub(super) fn admitted_lookup_state(
+        &self,
+    ) -> core::result::Result<
+        (
+            RwMutexReadGuard<'_, Option<MountedVolumeState>>,
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            VolumeAnomalyState,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
+        ExfatFsError,
+    > {
+        let state = self.state.read();
+        let (boot_region, anomaly, upcase_table, options) = {
+            let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+            (
+                publication.boot_region,
+                publication.anomaly,
+                publication.upcase_table.clone(),
+                publication.options.clone(),
+            )
+        };
+        Ok((
+            state,
+            self.block_device.clone(),
+            boot_region,
+            anomaly,
+            upcase_table,
+            options,
+        ))
+    }
+
+    pub(super) fn admitted_mutation_state(
+        &self,
+    ) -> core::result::Result<
+        (
+            RwMutexWriteGuard<'_, Option<MountedVolumeState>>,
+            Arc<dyn BlockDevice>,
+            BootRegion,
+            VolumeAnomalyState,
+            Arc<UpcaseTable>,
+            ExfatMountOptions,
+        ),
+        ExfatFsError,
+    > {
+        let mut state = self.state.write();
+        let dirty_anomaly = {
+            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+            if publication.forced_shutdown {
+                return Err(ExfatFsError::DeviceIo);
+            }
+            if publication.flags.contains(FsFlags::RDONLY) {
+                return Err(ExfatFsError::ReadOnlyConflict);
+            }
+            (!publication.anomaly.volume_dirty).then_some(VolumeAnomalyState {
+                volume_dirty: true,
+                ..publication.anomaly
+            })
+        };
+        if let Some(dirty_anomaly) = dirty_anomaly {
+            let boot_region = state
+                .as_ref()
+                .ok_or(ExfatFsError::UnpublishedState)?
+                .boot_region;
+            if let Err(error) =
+                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), dirty_anomaly)
+            {
+                state
+                    .as_mut()
+                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(error);
+            }
+            let flush_status = match self.block_device.sync() {
+                Ok(status) => status,
+                Err(_) => {
+                    state
+                        .as_mut()
+                        .ok_or(ExfatFsError::UnpublishedState)?
+                        .anomaly
+                        .volume_dirty = true;
+                    return Err(ExfatFsError::DeviceIo);
+                }
+            };
+            if flush_status != BioStatus::Complete {
+                state
+                    .as_mut()
+                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return Err(ExfatFsError::DeviceIo);
+            }
+            state
+                .as_mut()
+                .ok_or(ExfatFsError::UnpublishedState)?
+                .anomaly = dirty_anomaly;
+        }
+        let (boot_region, anomaly, upcase_table, options) = {
+            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+            (
+                publication.boot_region,
+                publication.anomaly,
+                publication.upcase_table.clone(),
+                publication.options.clone(),
+            )
+        };
+        Ok((
+            state,
+            self.block_device.clone(),
+            boot_region,
+            anomaly,
+            upcase_table,
+            options,
+        ))
+    }
+
+    // Superblock
+
+    fn build_super_block(
+        &self,
+        publication: &MountedVolumeState,
+        snapshot: &FreeSpaceSnapshot,
+    ) -> SuperBlock {
+        SuperBlock {
+            magic: EXFAT_SUPER_MAGIC,
+            bsize: publication.boot_region.cluster_size,
+            blocks: snapshot.total_clusters,
+            bfree: snapshot.free_clusters,
+            bavail: snapshot.free_clusters,
+            files: 0,
+            ffree: 0,
+            fsid: u64::from(publication.boot_region.volume_serial_number),
+            namelen: UpcaseTable::NAME_MAX,
+            frsize: publication.boot_region.cluster_size,
+            flags: u64::from(publication.flags.bits()),
+            container_dev_id: self.block_device.id(),
+        }
+    }
+
+    fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, ExfatFsError> {
+        let state = self.state.read();
+        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let allocator = self.allocator.read();
+        let allocator_state = allocator.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
+        Ok(self.build_super_block(publication, &snapshot))
+    }
+
+    pub(super) fn free_allocated_space(
+        &self,
+        ranges: &[ClusterRange],
+    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+        let mut state = self.state.write();
+        let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        self.free_allocated_space_with_publication(publication, ranges)
+    }
+
+    pub(super) fn allocate_free_space_with_publication(
+        &self,
+        publication: &MountedVolumeState,
+        requested_clusters: usize,
+    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), ExfatFsError> {
+        if publication.flags.contains(FsFlags::RDONLY) {
+            return Err(ExfatFsError::ReadOnlyConflict);
+        }
+
+        let mut allocator = self.allocator.write();
+        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        let allocated_ranges = allocator_state.allocate_clusters(
+            self.block_device.as_ref(),
+            &publication.boot_region,
+            requested_clusters,
+        )?;
+        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
+        Ok((allocated_ranges, snapshot))
+    }
+
+    pub(super) fn free_allocated_space_with_publication(
+        &self,
+        publication: &mut MountedVolumeState,
+        ranges: &[ClusterRange],
+    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+        if publication.flags.contains(FsFlags::RDONLY) {
+            return Err(ExfatFsError::ReadOnlyConflict);
+        }
+
+        let mut allocator = self.allocator.write();
+        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        allocator_state.free_clusters(
+            self.block_device.as_ref(),
+            &publication.boot_region,
+            ranges,
+        )?;
+        if publication.options.discard {
+            // Current Asterinas block devices expose no trim BIO, so downgrade
+            // only the advisory policy.
+            publication.options.discard = false;
+        }
+        allocator_state.snapshot(&publication.boot_region)
+    }
+
+    fn cached_free_space_snapshot(&self) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+        let state = self.state.read();
+        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let allocator = self.allocator.read();
+        let allocator_state = allocator.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        allocator_state.snapshot(&publication.boot_region)
+    }
+
+    fn recount_free_space(&self) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+        let state = self.state.write();
+        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let mut allocator = self.allocator.write();
+        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        allocator_state.recount(self.block_device.as_ref(), &publication.boot_region)?;
+        allocator_state.snapshot(&publication.boot_region)
+    }
+
+    // Helpers
+
+    pub(super) fn container_device_id(&self) -> device_id::DeviceId {
+        self.block_device.id()
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct MountedVolumeState {
+    pub(super) anomaly: VolumeAnomalyState,
+    pub(super) boot_region: BootRegion,
+    pub(super) flags: FsFlags,
+    pub(super) options: ExfatMountOptions,
+    pub(super) root_inode: Arc<ExfatInode>,
+    pub(super) upcase_table: Arc<UpcaseTable>,
+    pub(super) forced_shutdown: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct VolumeAnomalyState {
+    pub(super) clear_to_zero: bool,
+    pub(super) media_failure: bool,
+    pub(super) volume_dirty: bool,
+}
+
+impl VolumeAnomalyState {
+    pub(super) fn read(
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+    ) -> core::result::Result<Self, ExfatFsError> {
+        let mut boot_sector = vec![0; boot_region.sector_size];
+        block_device
+            .read_bytes(0, &mut boot_sector)
+            .map_err(|_| ExfatFsError::DeviceIo)?;
+        let volume_flags = u16::from_le_bytes([boot_sector[106], boot_sector[107]]);
+        Ok(Self {
+            clear_to_zero: volume_flags & 0x0008 != 0,
+            media_failure: volume_flags & 0x0004 != 0,
+            volume_dirty: volume_flags & 0x0002 != 0,
+        })
+    }
+}
+
+struct FreeSpaceAllocatorState {
+    pub(super) bitmap: AllocationBitmap,
+    used_clusters: usize,
+    pub(super) used_clusters_from_recount: bool,
+}
+
+impl FreeSpaceAllocatorState {
+    fn allocate_clusters(
+        &mut self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+        requested_clusters: usize,
+    ) -> core::result::Result<Vec<ClusterRange>, ExfatFsError> {
+        if requested_clusters == 0 {
+            return Err(ExfatFsError::InvalidOperationInput);
+        }
+
+        let mut fat_reader = FatReader::new(block_device, boot_region);
+        let allocated_ranges =
+            self.bitmap
+                .find_free_ranges(boot_region, &mut fat_reader, requested_clusters)?;
+        let allocated_clusters = self.bitmap.apply_update(
+            block_device,
+            boot_region,
+            &allocated_ranges,
+            AllocationBitmapUpdate::Allocate,
+        )?;
+        if allocated_clusters != requested_clusters {
+            return Err(ExfatFsError::InconsistentAccounting);
+        }
+        self.used_clusters = self
+            .used_clusters
+            .checked_add(allocated_clusters)
+            .ok_or(ExfatFsError::InconsistentAccounting)?;
+        Ok(allocated_ranges)
+    }
+
+    fn free_clusters(
+        &mut self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+        ranges: &[ClusterRange],
+    ) -> core::result::Result<(), ExfatFsError> {
+        let released_clusters = self.bitmap.apply_update(
+            block_device,
+            boot_region,
+            ranges,
+            AllocationBitmapUpdate::Free,
+        )?;
+        self.used_clusters = self
+            .used_clusters
+            .checked_sub(released_clusters)
+            .ok_or(ExfatFsError::InconsistentAccounting)?;
+        Ok(())
+    }
+
+    fn recount(
+        &mut self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+    ) -> core::result::Result<(), ExfatFsError> {
+        let mut fat_reader = FatReader::new(block_device, boot_region);
+        let used_clusters = self
+            .bitmap
+            .recount_used_clusters(boot_region, &mut fat_reader)?;
+        self.used_clusters = used_clusters;
+        self.used_clusters_from_recount = true;
+        Ok(())
+    }
+
+    fn snapshot(
+        &self,
+        boot_region: &BootRegion,
+    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+        let total_clusters = boot_region.cluster_count_usize()?;
+        let free_clusters = total_clusters
+            .checked_sub(self.used_clusters)
+            .ok_or(ExfatFsError::InconsistentAccounting)?;
+        Ok(FreeSpaceSnapshot {
+            total_clusters,
+            free_clusters,
+            used_clusters: self.used_clusters,
+            used_clusters_from_recount: self.used_clusters_from_recount,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FreeSpaceSnapshot {
+    total_clusters: usize,
+    free_clusters: usize,
+    used_clusters: usize,
+    used_clusters_from_recount: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ExfatMountOptions {
     discard: bool,
@@ -735,10 +703,7 @@ pub(super) struct ExfatMountOptions {
 }
 
 impl ExfatMountOptions {
-    fn parse(
-        fs_flags: FsFlags,
-        args: Option<&CStr>,
-    ) -> core::result::Result<Self, MountVolumeStateError> {
+    fn parse(fs_flags: FsFlags, args: Option<&CStr>) -> core::result::Result<Self, ExfatFsError> {
         let mut options = Self {
             discard: false,
             fs_flags,
@@ -764,13 +729,13 @@ impl ExfatMountOptions {
                     let iocharset = entry
                         .split_once('=')
                         .map(|(_, value)| value)
-                        .ok_or(MountVolumeStateError::InvalidMountInput)?;
+                        .ok_or(ExfatFsError::InvalidMountInput)?;
                     if !iocharset.eq_ignore_ascii_case("utf8") {
-                        return Err(MountVolumeStateError::InvalidMountInput);
+                        return Err(ExfatFsError::InvalidMountInput);
                     }
                     options.iocharset = "utf8".to_string();
                 }
-                _ => return Err(MountVolumeStateError::InvalidMountInput),
+                _ => return Err(ExfatFsError::InvalidMountInput),
             }
         }
         Ok(options)
@@ -780,45 +745,6 @@ impl ExfatMountOptions {
         Self {
             fs_flags,
             ..self.clone()
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MountVolumeStateError {
-    InvalidOperationInput,
-    InvalidMountInput,
-    InvalidOnDiskLayout,
-    DeviceIo,
-    NoSpace,
-    UnsupportedRemountDelta,
-    ReadOnlyConflict,
-    UnpublishedState,
-    InconsistentAccounting,
-}
-
-impl From<MountVolumeStateError> for Error {
-    fn from(error: MountVolumeStateError) -> Self {
-        match error {
-            MountVolumeStateError::InvalidOperationInput => {
-                Error::with_message(Errno::EINVAL, "invalid exFAT operation input")
-            }
-            MountVolumeStateError::InvalidMountInput => Error::new(Errno::EINVAL),
-            MountVolumeStateError::InvalidOnDiskLayout => {
-                Error::with_message(Errno::EUCLEAN, "invalid exFAT on-disk layout")
-            }
-            MountVolumeStateError::DeviceIo => Error::new(Errno::EIO),
-            MountVolumeStateError::NoSpace => Error::new(Errno::ENOSPC),
-            MountVolumeStateError::UnsupportedRemountDelta => {
-                Error::with_message(Errno::EINVAL, "unsupported exFAT remount delta")
-            }
-            MountVolumeStateError::ReadOnlyConflict => Error::new(Errno::EROFS),
-            MountVolumeStateError::UnpublishedState => {
-                Error::with_message(Errno::EINVAL, "filesystem state is not published")
-            }
-            MountVolumeStateError::InconsistentAccounting => {
-                Error::with_message(Errno::EUCLEAN, "exFAT allocator accounting is inconsistent")
-            }
         }
     }
 }
@@ -857,7 +783,3 @@ impl FsType for ExfatFsType {
         None
     }
 }
-
-#[cfg(ktest)]
-#[path = "test_support/fs.rs"]
-mod tests;

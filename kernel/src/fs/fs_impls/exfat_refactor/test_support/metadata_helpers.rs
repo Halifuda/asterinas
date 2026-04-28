@@ -8,7 +8,7 @@ use time::{Date, Time, UtcOffset};
 use super::{
     super::direntry::entry_set_checksum,
     disk::ExfatLookupTestDisk,
-    helpers::root_entry_set,
+    inode_fixtures::root_entry_set,
     timestamp::{encode_exfat_date_only, encode_exfat_date_time, encode_valid_utc_offset_byte},
 };
 

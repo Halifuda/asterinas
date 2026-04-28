@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
 
-mod bitmap;
-mod boot_region;
+pub(super) mod bitmap;
+pub(super) mod boot_region;
 pub(super) mod checksum;
-pub(super) mod concurrency_helpers;
 pub(super) mod disk;
-pub(super) mod helpers;
+pub(super) mod inode_fixtures;
+pub(super) mod integration_fixtures;
 pub(super) mod metadata_helpers;
-mod mount_diagnostics;
-mod root_directory;
+pub(super) mod mount_diagnostics;
+pub(super) mod root_directory;
 pub(super) mod timestamp;
-mod upcase;
+pub(super) mod upcase;
 
 use aster_block::BlockDevice;
 
 use super::{
     bitmap::AllocationBitmap,
-    boot::{BootRegion, VolumeAnomalyState},
-    fs::MountVolumeStateError,
+    boot::BootRegion,
+    fs::{ExfatFsError, VolumeAnomalyState},
     upcase::UpcaseTable,
 };
 use crate::prelude::*;
@@ -33,7 +33,7 @@ pub(super) struct LoadedMountState {
 
 pub(super) fn load_validated_mount(
     block_device: &dyn BlockDevice,
-) -> core::result::Result<LoadedMountState, MountVolumeStateError> {
+) -> core::result::Result<LoadedMountState, ExfatFsError> {
     let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
         BootRegion::load_mount_state(block_device)?;
     Ok(LoadedMountState {

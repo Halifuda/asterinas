@@ -1,10 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use core::time::Duration;
+
+use aster_block::BlockDevice;
+
+use super::{
+    super::{
+        boot::BootRegion,
+        direntry::{self, FileEntrySetFieldUpdates, FileEntrySetView, ScannedDirectoryEntry},
+        fs::ExfatFsError,
+    },
+    ExfatFs, ExfatInode, InodeRewriteTarget,
+};
+use crate::{
+    fs::{
+        file::{InodeType, chmod, mkmod},
+        vfs::inode::Metadata,
+    },
+    prelude::*,
+    time::clocks::RealTimeCoarseClock,
+};
 
 impl ExfatInode {
+    // Read projection
+
     pub(super) fn directory_metadata_projection(&self) -> Result<Metadata> {
-        let mut metadata = *self.metadata.read();
+        let metadata = *self.metadata.read();
         if metadata.type_ != InodeType::Dir {
             return Ok(metadata);
         }
@@ -30,6 +51,7 @@ impl ExfatInode {
         };
         let _parent_guard = parent.admission.read();
         let parent_stream = *parent.stream.read();
+        let mut metadata = *self.metadata.read();
         let directory_bytes =
             Self::read_directory_bytes_for_stream(&block_device, &boot_region, parent_stream)
                 .map_err(Error::from)?;
@@ -43,36 +65,36 @@ impl ExfatInode {
         .map_err(Error::from)?
         {
             ScannedDirectoryEntry::File(entry_view) => entry_view,
-            _ => return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout)),
+            _ => return Err(Error::from(ExfatFsError::InvalidOnDiskLayout)),
         };
         if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY == 0 {
-            return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
         }
 
         let (inode_type, _first_cluster, data_length, _no_fat_chain) = entry_view
             .child_metadata(&boot_region)
             .map_err(Error::from)?;
         if inode_type != InodeType::Dir {
-            return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
+            return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
         }
 
         let entry_set = directory_bytes
             .get(direntry::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let create_timestamp = entry_set
             .get(direntry::CREATE_TIMESTAMP_OFFSET..direntry::CREATE_TIMESTAMP_OFFSET + 4)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?
             .try_into()
-            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?;
         let create_ten_ms_increment = *entry_set
             .get(direntry::CREATE_10MS_INCREMENT_OFFSET)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let create_utc_offset = *entry_set
             .get(direntry::CREATE_UTC_OFFSET_OFFSET)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let _create_at = Self::decoded_exfat_timestamp(
             create_timestamp,
@@ -85,13 +107,13 @@ impl ExfatInode {
                 direntry::LAST_ACCESSED_TIMESTAMP_OFFSET
                     ..direntry::LAST_ACCESSED_TIMESTAMP_OFFSET + 4,
             )
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?
             .try_into()
-            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?;
         let last_accessed_utc_offset = *entry_set
             .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let last_access_at =
             Self::decoded_exfat_timestamp(last_accessed_timestamp, None, last_accessed_utc_offset)
@@ -101,17 +123,17 @@ impl ExfatInode {
                 direntry::LAST_MODIFIED_TIMESTAMP_OFFSET
                     ..direntry::LAST_MODIFIED_TIMESTAMP_OFFSET + 4,
             )
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?
             .try_into()
-            .map_err(|_| Error::from(MountVolumeStateError::InvalidOnDiskLayout))?;
+            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?;
         let last_modified_ten_ms_increment = *entry_set
             .get(direntry::LAST_MODIFIED_10MS_INCREMENT_OFFSET)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let last_modified_utc_offset = *entry_set
             .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
             .map_err(Error::from)?;
         let last_modify_at = Self::decoded_exfat_timestamp(
             last_modified_timestamp,
@@ -133,91 +155,7 @@ impl ExfatInode {
         Ok(metadata)
     }
 
-    pub(super) fn rewrite_inode_entry_set(
-        &self,
-        target: RewriteTarget,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>, &[u8]) -> Result<Option<Vec<u8>>>,
-        update_metadata_fn: impl FnOnce(&mut Metadata),
-    ) -> Result<bool> {
-        let parent = self.parent.upgrade().ok_or_else(|| {
-            Error::with_message(
-                Errno::EIO,
-                "ordinary exFAT directory parent is not published",
-            )
-        })?;
-        let _directory_guards = match target {
-            RewriteTarget::Directory => {
-                Some(Self::ordered_directory_write_guards(vec![self, parent.as_ref()]))
-            }
-            RewriteTarget::RegularFile => None,
-        };
-        let _parent_guard = match target {
-            RewriteTarget::Directory => None,
-            RewriteTarget::RegularFile => Some(parent.admission.write()),
-        };
-        let parent_stream = *parent.stream.read();
-        let mut directory_bytes =
-            Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
-                .map_err(Error::from)?;
-        let entry_index =
-            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
-        let entry_view = match direntry::scan_directory_entry(
-            parent_stream.data_length.is_none(),
-            &directory_bytes,
-            entry_index,
-        )
-        .map_err(Error::from)?
-        {
-            ScannedDirectoryEntry::File(entry_view) => entry_view,
-            _ => return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout)),
-        };
-        let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
-            .child_metadata(boot_region)
-            .map_err(Error::from)?;
-        match target {
-            RewriteTarget::Directory => {
-                if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY == 0
-                    || inode_type != InodeType::Dir
-                {
-                    return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
-                }
-            }
-            RewriteTarget::RegularFile => {
-                if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY != 0
-                    || inode_type != InodeType::File
-                {
-                    return Err(Error::from(MountVolumeStateError::InvalidOnDiskLayout));
-                }
-            }
-        }
-
-        let slot_range_bytes = direntry::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?;
-        let source_entry_set = directory_bytes
-            .get(slot_range_bytes.clone())
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-            .map_err(Error::from)?;
-        let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view, source_entry_set)?
-        else {
-            return Ok(false);
-        };
-        let destination_entry_set = directory_bytes
-            .get_mut(slot_range_bytes)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
-            .map_err(Error::from)?;
-        destination_entry_set.copy_from_slice(&republished_entry_set);
-        Self::write_directory_bytes_for_stream(
-            block_device,
-            boot_region,
-            &directory_bytes,
-            parent_stream,
-        )
-        .map_err(Error::from)?;
-        let mut metadata = self.metadata.write();
-        update_metadata_fn(&mut metadata);
-        Ok(true)
-    }
+    // Directory metadata refresh
 
     pub(super) fn refresh_directory_metadata_after_namespace_mutation(
         &self,
@@ -239,13 +177,13 @@ impl ExfatInode {
         }
 
         let durable_updated = self.rewrite_inode_entry_set(
-            RewriteTarget::Directory,
+            InodeRewriteTarget::Directory,
             block_device,
             boot_region,
             |entry_view, source_entry_set| {
                 let utc_offset_byte = *source_entry_set
                     .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                    .ok_or(MountVolumeStateError::InvalidOnDiskLayout)
+                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
                     .map_err(Error::from)?;
                 let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
                     Self::encoded_exfat_timestamp_fields(timestamp, utc_offset_byte)?;
@@ -272,5 +210,95 @@ impl ExfatInode {
             self.mark_metadata_publication_dirty();
         }
         Ok(())
+    }
+
+    // Write helpers
+
+    pub(super) fn rewrite_inode_entry_set(
+        &self,
+        target: InodeRewriteTarget,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>, &[u8]) -> Result<Option<Vec<u8>>>,
+        update_metadata_fn: impl FnOnce(&mut Metadata),
+    ) -> Result<bool> {
+        let parent = self.parent.upgrade().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "ordinary exFAT directory parent is not published",
+            )
+        })?;
+        let _directory_guards = match target {
+            InodeRewriteTarget::Directory => Some(Self::ordered_directory_write_guards(vec![
+                self,
+                parent.as_ref(),
+            ])),
+            InodeRewriteTarget::RegularFile => None,
+        };
+        let _parent_guard = match target {
+            InodeRewriteTarget::Directory => None,
+            InodeRewriteTarget::RegularFile => Some(parent.admission.write()),
+        };
+        let parent_stream = *parent.stream.read();
+        let mut directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
+                .map_err(Error::from)?;
+        let entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let entry_view = match direntry::scan_directory_entry(
+            parent_stream.data_length.is_none(),
+            &directory_bytes,
+            entry_index,
+        )
+        .map_err(Error::from)?
+        {
+            ScannedDirectoryEntry::File(entry_view) => entry_view,
+            _ => return Err(Error::from(ExfatFsError::InvalidOnDiskLayout)),
+        };
+        let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
+            .child_metadata(boot_region)
+            .map_err(Error::from)?;
+        match target {
+            InodeRewriteTarget::Directory => {
+                if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY == 0
+                    || inode_type != InodeType::Dir
+                {
+                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                }
+            }
+            InodeRewriteTarget::RegularFile => {
+                if entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_DIRECTORY != 0
+                    || inode_type != InodeType::File
+                {
+                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                }
+            }
+        }
+
+        let slot_range_bytes =
+            direntry::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?;
+        let source_entry_set = directory_bytes
+            .get(slot_range_bytes.clone())
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view, source_entry_set)?
+        else {
+            return Ok(false);
+        };
+        let destination_entry_set = directory_bytes
+            .get_mut(slot_range_bytes)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        destination_entry_set.copy_from_slice(&republished_entry_set);
+        Self::write_directory_bytes_for_stream(
+            block_device,
+            boot_region,
+            &directory_bytes,
+            parent_stream,
+        )
+        .map_err(Error::from)?;
+        let mut metadata = self.metadata.write();
+        update_metadata_fn(&mut metadata);
+        Ok(true)
     }
 }

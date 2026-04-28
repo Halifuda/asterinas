@@ -3,8 +3,8 @@
 use alloc::{ffi::CString, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use aster_block::{bio::BioType, BlockDevice};
-use ostd::mm::{VmIo, VmReader, PAGE_SIZE};
+use aster_block::{BlockDevice, bio::BioType};
+use ostd::mm::{PAGE_SIZE, VmIo, VmReader};
 
 use super::{
     super::{
@@ -203,12 +203,16 @@ pub(in super::super) fn assert_sync_writeback_before_device_sync(observed_bios: 
         });
 
     assert!(write_index < flush_index);
-    assert!(observed_bios[..flush_index]
-        .iter()
-        .all(|bio| bio.type_ == BioType::Write));
-    assert!(observed_bios[flush_index..]
-        .iter()
-        .all(|bio| bio.type_ == BioType::Flush));
+    assert!(
+        observed_bios[..flush_index]
+            .iter()
+            .all(|bio| bio.type_ == BioType::Write)
+    );
+    assert!(
+        observed_bios[flush_index..]
+            .iter()
+            .all(|bio| bio.type_ == BioType::Flush)
+    );
 }
 
 pub(in super::super) fn assert_flush_only(observed_bios: &[ObservedBio]) {

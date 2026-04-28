@@ -9,7 +9,7 @@ use super::{
     super::{
         boot::BootRegion,
         fat::{FatChainStep, FatReader},
-        fs::MountVolumeStateError,
+        fs::ExfatFsError,
         upcase::UpcaseRecord,
     },
     checksum::stream_checksum,
@@ -68,7 +68,7 @@ pub(super) fn diagnose_load_upcase_table(
             Ok(FatChainStep::End) => {
                 return Err("load_upcase_table:stream_shorter_than_data_length");
             }
-            Err(MountVolumeStateError::DeviceIo) => return Err("load_upcase_table:fat_device_io"),
+            Err(ExfatFsError::DeviceIo) => return Err("load_upcase_table:fat_device_io"),
             Err(_) => return Err("load_upcase_table:fat_chain_invalid"),
         };
     }

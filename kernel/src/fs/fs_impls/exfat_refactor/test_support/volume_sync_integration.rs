@@ -14,7 +14,20 @@ use device_id::DeviceId;
 use ostd::mm::io::util::HasVmReaderWriter;
 use spin::Mutex;
 
-use super::*;
+use super::{
+    super::super::{
+        fs::{ExfatFs, ExfatFsError, ExfatMountOptions},
+        volume,
+    },
+    CLEAN_TEST_VOLUME_FLAGS, ExfatRefactorCountedFailingFlushDisk, ExfatRefactorMemoryDisk,
+    TEST_VOLUME_FLAGS, assert_same_super_block, boot_volume_flags, default_mount_options,
+    init_mount_volume_state_test_runtime, mount_block_device, mounted_fs,
+};
+use crate::{
+    fs::vfs::file_system::{FsFlags, SuperBlock},
+    prelude::*,
+    thread::Thread,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ObservedMountState {
@@ -226,15 +239,14 @@ fn filesystem_sync_and_volume_state_integration_failure_maintenance_preserves_co
         mounted_fs(&shutdown_disk, shutdown_options);
 
     assert_eq!(shutdown_flags, FsFlags::empty());
-    shutdown_fs.admit_forced_shutdown().unwrap();
+    volume::admit_forced_shutdown(&shutdown_fs).unwrap();
 
     assert_eq!(
         shutdown_fs.admitted_mutation_state().err(),
-        Some(MountVolumeStateError::DeviceIo)
+        Some(ExfatFsError::DeviceIo)
     );
     assert_eq!(
-        shutdown_fs
-            .administrative_trim_free_space()
+        volume::administrative_trim_free_space(&shutdown_fs)
             .unwrap_err()
             .error(),
         Errno::EIO
@@ -364,7 +376,7 @@ fn filesystem_sync_and_volume_state_integration_concurrent_sync_observation_and_
         let shutdown_started = shutdown_started.clone();
         ThreadOptions::new(move || {
             shutdown_started.store(true, Ordering::Relaxed);
-            fs.admit_forced_shutdown().unwrap();
+            volume::admit_forced_shutdown(&fs).unwrap();
             shutdown_done.store(true, Ordering::Relaxed);
         })
         .spawn()

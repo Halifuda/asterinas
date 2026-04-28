@@ -4,11 +4,11 @@ use alloc::{ffi::CString, format, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use aster_block::{
-    bio::{BioStatus, BioType},
     BlockDevice, SECTOR_SIZE,
+    bio::{BioStatus, BioType},
 };
 use ostd::{
-    mm::{VmIo, VmReader, PAGE_SIZE},
+    mm::{PAGE_SIZE, VmIo, VmReader},
     prelude::ktest,
 };
 
@@ -17,15 +17,13 @@ use super::{
         direntry::entry_set_checksum,
         fs::{ExfatFs, ExfatFsType},
         test_support::{
-            concurrency_helpers::{
-                install_root_file_with_cluster_contents, wait_for_blocked_flush, wait_for_flag,
-            },
             disk::{
                 ExfatLookupFlushControlDisk, ExfatLookupTestDisk, ExfatLookupToggleFailingReadDisk,
                 ExfatLookupToggleFailingWriteDisk, ExfatLookupWriteControlDisk, ObservedBio,
             },
-            helpers::{
-                assert_flush_only, assert_metadata_unchanged, assert_observed_bios,
+            inode_fixtures::{
+                CapturedDirent, RejectingDirentVisitor, assert_flush_only,
+                assert_metadata_unchanged, assert_observed_bios,
                 assert_sync_writeback_before_device_sync, collect_dirents, decode_entry_name,
                 dirty_regular_file_first_page, entry_index_from_ino, entry_names, entry_offsets,
                 init_lookup_test_runtime, lookup_error, lookup_exfat_inode, mount_root,
@@ -33,8 +31,10 @@ use super::{
                 patterned_bytes, published_lookup_state, published_page_count,
                 read_cache_page_bytes, root_entry_set, stream_first_cluster,
                 stream_has_no_fat_chain, stream_lengths, visible_name_count,
-                wait_for_concurrent_start, write_bytes_append, CapturedDirent,
-                RejectingDirentVisitor,
+                wait_for_concurrent_start, write_bytes_append,
+            },
+            integration_fixtures::{
+                install_root_file_with_cluster_contents, wait_for_blocked_flush, wait_for_flag,
             },
             metadata_helpers::{
                 assert_bytes_unchanged_except, assert_valid_entry_set_checksum,
@@ -58,7 +58,7 @@ use crate::{
             registry::FsType,
         },
     },
-    thread::{kernel_thread::ThreadOptions, Thread},
+    thread::{Thread, kernel_thread::ThreadOptions},
     vm::vmo::CommitFlags,
 };
 
@@ -186,274 +186,274 @@ mod lookup_resolution;
 #[path = "readdir_visibility.rs"]
 mod readdir_visibility;
 
-#[path = "directory_lookup_and_identity_integration.rs"]
-mod directory_lookup_and_identity_integration;
+#[path = "lookup_integration.rs"]
+mod lookup_integration;
 
-#[path = "file_metadata_projection_and_update_projection_substrate.rs"]
-mod file_metadata_projection_and_update_projection_substrate;
+#[path = "file_meta_projection.rs"]
+mod file_meta_projection;
 
-#[path = "directory_metadata_projection_and_update_projection_substrate.rs"]
-mod directory_metadata_projection_and_update_projection_substrate;
+#[path = "dir_meta_projection.rs"]
+mod dir_meta_projection;
 
-#[path = "file_metadata_projection_and_update_policy_and_timestamp_mutation.rs"]
-mod file_metadata_projection_and_update_policy_and_timestamp_mutation;
+#[path = "file_meta_timestamp.rs"]
+mod file_meta_timestamp;
 
-#[path = "directory_metadata_projection_and_update_policy_and_timestamp_mutation.rs"]
-mod directory_metadata_projection_and_update_policy_and_timestamp_mutation;
+#[path = "dir_meta_timestamp.rs"]
+mod dir_meta_timestamp;
 
-#[path = "directory_metadata_projection_and_update_namespace_refresh.rs"]
-mod directory_metadata_projection_and_update_namespace_refresh;
+#[path = "dir_meta_refresh.rs"]
+mod dir_meta_refresh;
 
-#[path = "directory_metadata_projection_and_update_integration.rs"]
-mod directory_metadata_projection_and_update_integration;
+#[path = "dir_meta_integration.rs"]
+mod dir_meta_integration;
 
-#[path = "file_metadata_projection_and_update_integration.rs"]
-mod file_metadata_projection_and_update_integration;
+#[path = "file_meta_integration.rs"]
+mod file_meta_integration;
 
-#[path = "file_content_mapping_and_cached_io_integration.rs"]
-mod file_content_mapping_and_cached_io_integration;
+#[path = "cached_io_integration.rs"]
+mod cached_io_integration;
 
-#[path = "file_content_mutation_integration.rs"]
-mod file_content_mutation_integration;
+#[path = "file_mutation_integration.rs"]
+mod file_mutation_integration;
 
-#[path = "file_sync_and_persistence_integration.rs"]
-mod file_sync_and_persistence_integration;
+#[path = "file_sync_integration.rs"]
+mod file_sync_integration;
 
-#[path = "directory_entry_field_update_substrate.rs"]
-mod directory_entry_field_update_substrate;
+#[path = "entry_field_update.rs"]
+mod entry_field_update;
 
 #[ktest]
 fn directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir() {
-    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir();
+    lookup_integration::directory_lookup_and_identity_integration_success_path_coheres_lookup_and_readdir();
 }
 
 #[ktest]
 fn directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries() {
-    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries();
+    lookup_integration::directory_lookup_and_identity_integration_failure_path_preserves_typed_boundaries();
 }
 
 #[ktest]
 fn directory_lookup_and_identity_integration_repeated_calls_stay_stable() {
-    directory_lookup_and_identity_integration::directory_lookup_and_identity_integration_repeated_calls_stay_stable();
+    lookup_integration::directory_lookup_and_identity_integration_repeated_calls_stay_stable();
 }
 
 #[ktest]
 fn file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache() {
-    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache();
+    cached_io_integration::file_content_mapping_cached_io_integration_success_path_coheres_read_mapping_and_page_cache();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state(
-) {
-    file_metadata_projection_and_update_projection_substrate::file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state();
+fn file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state()
+ {
+    file_meta_projection::file_metadata_projection_and_update_projection_substrate_projects_regular_file_snapshot_from_entry_set_and_stream_state();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups(
-) {
-    file_metadata_projection_and_update_projection_substrate::file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups();
+fn file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups()
+ {
+    file_meta_projection::file_metadata_projection_and_update_projection_substrate_rejects_invalid_timestamp_layout_without_disturbing_neighbor_lookups();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set(
-) {
-    directory_metadata_projection_and_update_projection_substrate::directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set();
+fn directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set()
+ {
+    dir_meta_projection::directory_metadata_projection_and_update_projection_substrate_projects_ordinary_directory_from_validated_self_entry_set();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication(
-) {
-    directory_metadata_projection_and_update_projection_substrate::directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication();
+fn directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication()
+ {
+    dir_meta_projection::directory_metadata_projection_and_update_projection_substrate_keeps_root_projection_synthetic_without_self_entry_fabrication();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters(
-) {
-    directory_metadata_projection_and_update_projection_substrate::directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters();
+fn directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters()
+ {
+    dir_meta_projection::directory_metadata_projection_and_update_projection_substrate_rejects_broken_ordinary_self_entry_sets_through_result_getters();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state(
-) {
-    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state();
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state()
+ {
+    file_meta_timestamp::file_metadata_projection_and_update_policy_and_timestamp_mutation_updates_durable_read_only_projection_and_metadata_only_dirty_state();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape(
-) {
-    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape();
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape()
+ {
+    file_meta_timestamp::file_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_confirm_projection_and_refuse_escape();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families(
-) {
-    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families();
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families()
+ {
+    file_meta_timestamp::file_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_owned_timestamp_families();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only(
-) {
-    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only();
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only()
+ {
+    file_meta_timestamp::file_metadata_projection_and_update_policy_and_timestamp_mutation_treats_ctime_as_synthetic_only();
 }
 
 #[ktest]
-fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state(
-) {
-    file_metadata_projection_and_update_policy_and_timestamp_mutation::file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state();
+fn file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state()
+ {
+    file_meta_timestamp::file_metadata_projection_and_update_policy_and_timestamp_mutation_policy_denial_and_io_failure_preserve_last_good_state();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_updates_only_dos_read_only_for_ordinary_directories(
-) {
-    directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_updates_only_dos_read_only_for_ordinary_directories();
+fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_updates_only_dos_read_only_for_ordinary_directories()
+ {
+    dir_meta_timestamp::directory_metadata_projection_and_update_policy_and_timestamp_mutation_updates_only_dos_read_only_for_ordinary_directories();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_follow_mount_envelope(
-) {
-    directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_follow_mount_envelope();
+fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_follow_mount_envelope()
+ {
+    dir_meta_timestamp::directory_metadata_projection_and_update_policy_and_timestamp_mutation_owner_group_follow_mount_envelope();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_directory_timestamp_families(
-) {
-    directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_directory_timestamp_families();
+fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_directory_timestamp_families()
+ {
+    dir_meta_timestamp::directory_metadata_projection_and_update_policy_and_timestamp_mutation_rewrites_only_directory_timestamp_families();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_and_ctime_requests_stay_bounded(
-) {
-    directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_and_ctime_requests_stay_bounded();
+fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_and_ctime_requests_stay_bounded()
+ {
+    dir_meta_timestamp::directory_metadata_projection_and_update_policy_and_timestamp_mutation_root_and_ctime_requests_stay_bounded();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state(
-) {
-    directory_metadata_projection_and_update_policy_and_timestamp_mutation::directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state();
+fn directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state()
+ {
+    dir_meta_timestamp::directory_metadata_projection_and_update_policy_and_timestamp_mutation_denials_and_failures_preserve_last_good_state();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp(
-) {
-    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp();
+fn directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp()
+ {
+    dir_meta_refresh::directory_metadata_projection_and_update_namespace_refresh_create_and_mkdir_refresh_parent_timestamp();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp(
-) {
-    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp();
+fn directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp()
+ {
+    dir_meta_refresh::directory_metadata_projection_and_update_namespace_refresh_unlink_and_rmdir_refresh_parent_timestamp();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories(
-) {
-    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories();
+fn directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories()
+ {
+    dir_meta_refresh::directory_metadata_projection_and_update_namespace_refresh_rename_refreshes_affected_directories();
 }
 
 #[ktest]
 fn directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state() {
-    directory_metadata_projection_and_update_namespace_refresh::directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state();
+    dir_meta_refresh::directory_metadata_projection_and_update_namespace_refresh_failure_preserves_last_good_state();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets(
-) {
-    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets();
+fn directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets()
+ {
+    dir_meta_integration::directory_metadata_projection_and_update_integration_namespace_mutation_sequence_preserves_projection_and_durable_self_entry_sets();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication(
-) {
-    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication();
+fn directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication()
+ {
+    dir_meta_integration::directory_metadata_projection_and_update_integration_failure_maintenance_preserves_last_good_directory_metadata_publication();
 }
 
 #[ktest]
-fn directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views(
-) {
-    directory_metadata_projection_and_update_integration::directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views();
+fn directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views()
+ {
+    dir_meta_integration::directory_metadata_projection_and_update_integration_concurrency_observes_only_pre_or_post_projection_views();
 }
 
 #[ktest]
-fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync(
-) {
-    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync();
+fn file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync()
+ {
+    file_meta_integration::file_metadata_projection_update_integration_success_path_live_and_reread_projection_agree_after_sync();
 }
 
 #[ktest]
 fn file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry() {
-    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry();
+    file_meta_integration::file_metadata_projection_update_integration_failure_maintenance_preserves_state_and_retry();
 }
 
 #[ktest]
 fn file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable() {
-    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable();
+    file_meta_integration::file_metadata_projection_update_integration_repeated_calls_keep_metadata_stable();
 }
 
 #[ktest]
 fn file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates()
 {
-    file_metadata_projection_and_update_integration::file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates();
+    file_meta_integration::file_metadata_projection_update_integration_concurrency_serializes_metadata_and_content_updates();
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility(
-) {
-    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility();
+fn file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility()
+ {
+    cached_io_integration::file_content_mapping_cached_io_integration_failure_maintenance_preserves_stream_state_and_page_visibility();
 }
 
 #[ktest]
 fn file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping()
 {
-    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping();
+    cached_io_integration::file_content_mapping_cached_io_integration_repeated_calls_stay_stable_across_cache_and_mapping();
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary(
-) {
-    file_content_mapping_and_cached_io_integration::file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary();
+fn file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary()
+ {
+    cached_io_integration::file_content_mapping_cached_io_integration_concurrency_serializes_mapping_against_truncate_boundary();
 }
 
 #[ktest]
 fn file_content_mutation_integration_success_path_write_append_grow_shrink_readback() {
-    file_content_mutation_integration::file_content_mutation_integration_success_path_write_append_grow_shrink_readback();
+    file_mutation_integration::file_content_mutation_integration_success_path_write_append_grow_shrink_readback();
 }
 
 #[ktest]
 fn file_content_mutation_integration_failure_maintenance_preserves_safe_visibility() {
-    file_content_mutation_integration::file_content_mutation_integration_failure_maintenance_preserves_safe_visibility();
+    file_mutation_integration::file_content_mutation_integration_failure_maintenance_preserves_safe_visibility();
 }
 
 #[ktest]
 fn file_content_mutation_integration_repeated_calls_keep_state_stable() {
-    file_content_mutation_integration::file_content_mutation_integration_repeated_calls_keep_state_stable();
+    file_mutation_integration::file_content_mutation_integration_repeated_calls_keep_state_stable();
 }
 
 #[ktest]
 fn file_content_mutation_integration_concurrency_serializes_mutation_and_observation() {
-    file_content_mutation_integration::file_content_mutation_integration_concurrency_serializes_mutation_and_observation();
+    file_mutation_integration::file_content_mutation_integration_concurrency_serializes_mutation_and_observation();
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary(
-) {
-    file_sync_and_persistence_integration::file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary();
+fn file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary()
+ {
+    file_sync_integration::file_sync_and_persistence_integration_success_path_sync_data_then_sync_all_preserve_ordering_and_scope_boundary();
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window(
-) {
-    file_sync_and_persistence_integration::file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window();
+fn file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window()
+ {
+    file_sync_integration::file_sync_and_persistence_integration_failure_maintenance_device_stage_retry_preserves_dirty_window();
 }
 
 #[ktest]
-fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary(
-) {
-    file_sync_and_persistence_integration::file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary();
+fn file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary()
+ {
+    file_sync_integration::file_sync_and_persistence_integration_repeated_calls_preserve_clean_stability_and_metadata_boundary();
 }
 
 #[ktest]
 fn file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work() {
-    file_sync_and_persistence_integration::file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work();
+    file_sync_integration::file_sync_and_persistence_integration_concurrency_blocked_sync_revalidates_later_dirty_work();
 }
 
 #[ktest]
@@ -577,119 +577,16 @@ fn directory_entry_mutation_mkdir_publishes_checksum_valid_entry_set() {
         decode_entry_name(&entry_set),
         "CreateDir".encode_utf16().collect::<Vec<_>>()
     );
-    assert!(disk
-        .read_cluster(first_cluster)
-        .iter()
-        .all(|byte| *byte == 0));
+    assert!(
+        disk.read_cluster(first_cluster)
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 }
 
 #[ktest]
 fn directory_entry_mutation_zero_size_dir_changes_only_newborn_shape() {
-    init_lookup_test_runtime();
-
-    let default_disk = ExfatLookupTestDisk::new();
-    let (_default_fs, _default_root_inode, default_parent_inode) =
-        mount_create_parent(&default_disk, FsFlags::empty(), None);
-    let default_child = default_parent_inode
-        .create("ShapeDir", InodeType::Dir, InodeMode::all())
-        .unwrap();
-    let (_default_visited_count, default_entries) = collect_dirents(&default_parent_inode, 2);
-    let default_parent_cluster = default_disk.read_cluster(TEST_PARENT_CLUSTER);
-    let default_entry_set = default_parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
-
-    let zero_size_disk = ExfatLookupTestDisk::new();
-    let (_zero_size_fs, _zero_size_root_inode, zero_size_parent_inode) =
-        mount_create_parent(&zero_size_disk, FsFlags::empty(), Some("zero_size_dir"));
-    let zero_size_child = zero_size_parent_inode
-        .create("ShapeDir", InodeType::Dir, InodeMode::all())
-        .unwrap();
-    let (_zero_size_visited_count, zero_size_entries) = collect_dirents(&zero_size_parent_inode, 2);
-    let zero_size_parent_cluster = zero_size_disk.read_cluster(TEST_PARENT_CLUSTER);
-    let zero_size_entry_set = zero_size_parent_cluster[..DIRECTORY_ENTRY_SIZE * 3].to_vec();
-
-    assert_eq!(default_child.type_(), InodeType::Dir);
-    assert_eq!(zero_size_child.type_(), InodeType::Dir);
-    assert_eq!(default_child.size(), default_disk.root_cluster_size());
-    assert_eq!(zero_size_child.size(), 0);
-    assert_eq!(entry_names(&default_entries), vec!["ShapeDir"]);
-    assert_eq!(entry_names(&zero_size_entries), vec!["ShapeDir"]);
-    assert_eq!(entry_index_from_ino(default_child.ino()), 0);
-    assert_eq!(entry_index_from_ino(zero_size_child.ino()), 0);
-    assert_eq!(
-        usize::from(default_entry_set[1]),
-        usize::from(zero_size_entry_set[1])
-    );
-    assert_eq!(
-        decode_entry_name(&default_entry_set),
-        decode_entry_name(&zero_size_entry_set)
-    );
-    assert_eq!(
-        u16::from_le_bytes([default_entry_set[4], default_entry_set[5]]),
-        u16::from_le_bytes([zero_size_entry_set[4], zero_size_entry_set[5]])
-    );
-    assert_eq!(
-        default_entry_set[DIRECTORY_ENTRY_SIZE],
-        STREAM_EXTENSION_ENTRY_TYPE
-    );
-    assert_eq!(
-        zero_size_entry_set[DIRECTORY_ENTRY_SIZE],
-        STREAM_EXTENSION_ENTRY_TYPE
-    );
-    assert_eq!(default_entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x03);
-    assert_eq!(zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 1], 0x01);
-    assert_ne!(
-        u32::from_le_bytes([
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 20],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 21],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 22],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 23],
-        ]),
-        0
-    );
-    assert_eq!(
-        u32::from_le_bytes([
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 20],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 21],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 22],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 23],
-        ]),
-        0
-    );
-    assert_eq!(
-        usize::try_from(u64::from_le_bytes([
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 24],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 25],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 26],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 27],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 28],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 29],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 30],
-            default_entry_set[DIRECTORY_ENTRY_SIZE + 31],
-        ]))
-        .unwrap(),
-        default_disk.root_cluster_size()
-    );
-    assert_eq!(
-        u64::from_le_bytes([
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 24],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 25],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 26],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 27],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 28],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 29],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 30],
-            zero_size_entry_set[DIRECTORY_ENTRY_SIZE + 31],
-        ]),
-        0
-    );
-    assert_eq!(
-        u16::from_le_bytes([default_entry_set[2], default_entry_set[3]]),
-        entry_set_checksum(&default_entry_set, 2)
-    );
-    assert_eq!(
-        u16::from_le_bytes([zero_size_entry_set[2], zero_size_entry_set[3]]),
-        entry_set_checksum(&zero_size_entry_set, 2)
-    );
+    entry_field_update::directory_entry_mutation_zero_size_dir_changes_only_newborn_shape();
 }
 
 #[ktest]
@@ -940,8 +837,8 @@ fn directory_entry_mutation_delete_failure_maintenance_preserves_namespace_first
 }
 
 #[ktest]
-fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_duplicate_namespace(
-) {
+fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_duplicate_namespace()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1000,8 +897,8 @@ fn directory_entry_mutation_rename_within_directory_rewrites_visibility_without_
 }
 
 #[ktest]
-fn directory_entry_mutation_rename_across_directories_publishes_destination_before_source_invalidation(
-) {
+fn directory_entry_mutation_rename_across_directories_publishes_destination_before_source_invalidation()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1259,288 +1156,15 @@ fn directory_entry_mutation_integration_success_path_create_rename_unlink_rmdir(
 }
 
 #[ktest]
-fn directory_entry_mutation_integration_failure_maintenance_preserves_namespace_and_typed_boundaries(
-) {
-    init_lookup_test_runtime();
-
-    let rename_failure_disk = ExfatLookupTestDisk::new();
-    rename_failure_disk.install_root_directory(
-        ROOT_FILE_ENTRY_INDEX,
-        RENAME_TARGET_PARENT_NAME,
-        RENAME_TARGET_PARENT_CLUSTER,
-    );
-    rename_failure_disk.install_root_file(ROOT_SECOND_FILE_ENTRY_INDEX, "MoveMe");
-    let rename_failure_wrapper = ExfatLookupToggleFailingWriteDisk::new(
-        rename_failure_disk.clone(),
-        rename_failure_disk.root_directory_offset(),
-        rename_failure_disk.root_cluster_size(),
-    );
-    let rename_failure_device: Arc<dyn BlockDevice> = rename_failure_wrapper.clone();
-    let (_rename_failure_fs, rename_failure_root) =
-        mount_root_from_block_device(rename_failure_device, FsFlags::empty(), None);
-    let rename_failure_target = rename_failure_root
-        .lookup(RENAME_TARGET_PARENT_NAME)
-        .unwrap();
-
-    rename_failure_wrapper.enable_failures();
-    let rename_failure_error = rename_failure_root
-        .rename("MoveMe", &rename_failure_target, "Moved")
-        .unwrap_err();
-    let (_rename_failure_root_visited_count, rename_failure_root_entries) =
-        collect_dirents(&rename_failure_root, 2);
-    let (_rename_failure_target_visited_count, rename_failure_target_entries) =
-        collect_dirents(&rename_failure_target, 2);
-
-    assert_eq!(rename_failure_error.error(), Errno::EIO);
-    assert!(rename_failure_root.lookup("MoveMe").is_ok());
-    assert!(rename_failure_target.lookup("Moved").is_ok());
-    assert_eq!(
-        visible_name_count(&rename_failure_root_entries, "MoveMe"),
-        1
-    );
-    assert_eq!(
-        visible_name_count(&rename_failure_target_entries, "Moved"),
-        1
-    );
-
-    let unlink_failure_disk = ExfatLookupTestDisk::new();
-    unlink_failure_disk.install_root_directory(
-        ROOT_FILE_ENTRY_INDEX,
-        TEST_PARENT_NAME,
-        TEST_PARENT_CLUSTER,
-    );
-    unlink_failure_disk.install_directory_file(
-        TEST_PARENT_CLUSTER,
-        0,
-        "Victim",
-        TEST_REGULAR_FILE_CLUSTER,
-        unlink_failure_disk.root_cluster_size(),
-    );
-    let unlink_failure_wrapper = ExfatLookupToggleFailingWriteDisk::new(
-        unlink_failure_disk.clone(),
-        unlink_failure_disk.allocation_bitmap_byte_offset_for_cluster(TEST_REGULAR_FILE_CLUSTER),
-        1,
-    );
-    let unlink_failure_device: Arc<dyn BlockDevice> = unlink_failure_wrapper.clone();
-    let (_unlink_failure_fs, unlink_failure_root) =
-        mount_root_from_block_device(unlink_failure_device, FsFlags::empty(), None);
-    let unlink_failure_parent = unlink_failure_root.lookup(TEST_PARENT_NAME).unwrap();
-
-    unlink_failure_wrapper.enable_failures();
-    unlink_failure_parent.unlink("Victim").unwrap();
-
-    let removed_entry_set = unlink_failure_disk.read_directory_entries(TEST_PARENT_CLUSTER, 0, 3);
-    assert_eq!(
-        lookup_error(&unlink_failure_parent, "Victim"),
-        Errno::ENOENT
-    );
-    assert_entry_set_invalidated(&removed_entry_set);
-    assert!(unlink_failure_disk.is_cluster_allocated(TEST_REGULAR_FILE_CLUSTER));
-
-    let non_empty_directory_disk = ExfatLookupTestDisk::new();
-    let (_non_empty_directory_fs, _non_empty_directory_root, source_parent, target_parent) =
-        mount_rename_parent_pair(&non_empty_directory_disk);
-    non_empty_directory_disk.install_directory_subdirectory(
-        RENAME_SOURCE_PARENT_CLUSTER,
-        0,
-        "MoveDir",
-        RENAME_SOURCE_DIRECTORY_CLUSTER,
-    );
-    non_empty_directory_disk.install_directory_subdirectory(
-        RENAME_TARGET_PARENT_CLUSTER,
-        0,
-        "Occupied",
-        RENAME_TARGET_DIRECTORY_CLUSTER,
-    );
-    non_empty_directory_disk.install_directory_file(
-        RENAME_TARGET_DIRECTORY_CLUSTER,
-        0,
-        "Leaf",
-        RENAME_TARGET_DIRECTORY_CHILD_CLUSTER,
-        non_empty_directory_disk.root_cluster_size(),
-    );
-    let source_bytes_before = non_empty_directory_disk.read_cluster(RENAME_SOURCE_PARENT_CLUSTER);
-    let target_bytes_before = non_empty_directory_disk.read_cluster(RENAME_TARGET_PARENT_CLUSTER);
-
-    let non_empty_directory_error = source_parent
-        .rename("MoveDir", &target_parent, "Occupied")
-        .unwrap_err();
-
-    assert_eq!(non_empty_directory_error.error(), Errno::ENOTEMPTY);
-    assert!(source_parent.lookup("MoveDir").is_ok());
-    assert!(target_parent.lookup("Occupied").is_ok());
-    assert_directory_unchanged(
-        &non_empty_directory_disk,
-        &source_parent,
-        RENAME_SOURCE_PARENT_CLUSTER,
-        &source_bytes_before,
-        &["MoveDir"],
-    );
-    assert_directory_unchanged(
-        &non_empty_directory_disk,
-        &target_parent,
-        RENAME_TARGET_PARENT_CLUSTER,
-        &target_bytes_before,
-        &["Occupied"],
-    );
-
-    let typed_invalid_source_disk = ExfatLookupTestDisk::new();
-    typed_invalid_source_disk.install_root_fractured_entry_set(ROOT_FILE_ENTRY_INDEX, "Broken");
-    let (_typed_invalid_source_fs, typed_invalid_source_root) =
-        mount_root(&typed_invalid_source_disk, None);
-    let typed_invalid_source_bytes =
-        typed_invalid_source_disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 3);
-
-    let typed_invalid_source_error = typed_invalid_source_root
-        .rename("Broken", &typed_invalid_source_root, "Renamed")
-        .unwrap_err();
-
-    assert_eq!(typed_invalid_source_error.error(), Errno::EUCLEAN);
-    assert_eq!(
-        typed_invalid_source_disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 3),
-        typed_invalid_source_bytes
-    );
-    assert_eq!(
-        lookup_error(&typed_invalid_source_root, "Broken"),
-        Errno::EUCLEAN
-    );
-
-    let typed_invalid_target_disk = ExfatLookupTestDisk::new();
-    typed_invalid_target_disk.install_root_unrecognized_critical_entry(ROOT_FILE_ENTRY_INDEX);
-    let (_typed_invalid_target_fs, typed_invalid_target_root) =
-        mount_root(&typed_invalid_target_disk, None);
-    let typed_invalid_target_bytes =
-        typed_invalid_target_disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 2);
-
-    let typed_invalid_target_error = typed_invalid_target_root.rmdir("Broken").unwrap_err();
-
-    assert_eq!(typed_invalid_target_error.error(), Errno::EUCLEAN);
-    assert_eq!(
-        typed_invalid_target_disk.read_root_entries(ROOT_FILE_ENTRY_INDEX, 2),
-        typed_invalid_target_bytes
-    );
-    assert_eq!(
-        lookup_error(&typed_invalid_target_root, "Broken"),
-        Errno::EUCLEAN
-    );
+fn directory_entry_mutation_integration_failure_maintenance_preserves_namespace_and_typed_boundaries()
+ {
+    entry_field_update::directory_entry_mutation_integration_failure_maintenance_preserves_namespace_and_typed_boundaries();
 }
 
 #[ktest]
-fn directory_entry_mutation_integration_concurrency_linearizes_cross_directory_rename_and_competing_mutations(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let (_fs, _root_inode, source_parent, target_parent) = mount_rename_parent_pair(&disk);
-    let busy_directory = target_parent
-        .create("BusyDir", InodeType::Dir, InodeMode::all())
-        .unwrap();
-    busy_directory
-        .create("Leaf", InodeType::File, InodeMode::all())
-        .unwrap();
-    target_parent
-        .create("MovedAcross", InodeType::File, InodeMode::all())
-        .unwrap();
-    source_parent
-        .create("MoveMe", InodeType::File, InodeMode::all())
-        .unwrap();
-
-    let fill_count = disk
-        .root_directory_entry_capacity()
-        .checked_div(3)
-        .and_then(|entry_sets| entry_sets.checked_sub(2))
-        .unwrap();
-    for fill_index in 0..fill_count {
-        let fill_name = format!("Fill{:02}", fill_index);
-        target_parent
-            .create(&fill_name, InodeType::File, InodeMode::all())
-            .unwrap();
-    }
-
-    let target_size_before_growth = target_parent.size();
-    let ready_count = Arc::new(AtomicUsize::new(0));
-    let rename_result = Arc::new(Mutex::new(None));
-    let create_result = Arc::new(Mutex::new(None));
-    let rmdir_result = Arc::new(Mutex::new(None));
-
-    let rename_thread = {
-        let ready_count = ready_count.clone();
-        let rename_result = rename_result.clone();
-        let source_parent = source_parent.clone();
-        let target_parent = target_parent.clone();
-
-        ThreadOptions::new(move || {
-            wait_for_concurrent_start(&ready_count, 3);
-            *rename_result.lock() = Some(
-                source_parent
-                    .rename("MoveMe", &target_parent, "MovedAcross")
-                    .map_err(|error| error.error()),
-            );
-        })
-        .spawn()
-    };
-
-    let create_thread = {
-        let ready_count = ready_count.clone();
-        let create_result = create_result.clone();
-        let target_parent = target_parent.clone();
-
-        ThreadOptions::new(move || {
-            wait_for_concurrent_start(&ready_count, 3);
-            *create_result.lock() = Some(
-                target_parent
-                    .create("GrowthFile", InodeType::File, InodeMode::all())
-                    .map(|created| created.ino())
-                    .map_err(|error| error.error()),
-            );
-        })
-        .spawn()
-    };
-
-    let rmdir_thread = {
-        let ready_count = ready_count.clone();
-        let rmdir_result = rmdir_result.clone();
-        let target_parent = target_parent.clone();
-
-        ThreadOptions::new(move || {
-            wait_for_concurrent_start(&ready_count, 3);
-            *rmdir_result.lock() = Some(
-                target_parent
-                    .rmdir("BusyDir")
-                    .map_err(|error| error.error()),
-            );
-        })
-        .spawn()
-    };
-
-    rename_thread.join();
-    create_thread.join();
-    rmdir_thread.join();
-
-    assert_eq!(*rename_result.lock(), Some(Ok(())));
-    assert!(matches!(*create_result.lock(), Some(Ok(_))));
-    assert_eq!(*rmdir_result.lock(), Some(Err(Errno::ENOTEMPTY)));
-
-    let moved_lookup = target_parent.lookup("MovedAcross").unwrap();
-    let growth_lookup = target_parent.lookup("GrowthFile").unwrap();
-    let busy_lookup = target_parent.lookup("BusyDir").unwrap();
-    let (_source_visited_count, source_entries) = collect_dirents(&source_parent, 2);
-    let (_target_visited_count, target_entries) = collect_dirents(&target_parent, 2);
-    let (_busy_visited_count, busy_entries) = collect_dirents(&busy_lookup, 2);
-
-    assert_eq!(lookup_error(&source_parent, "MoveMe"), Errno::ENOENT);
-    assert_eq!(moved_lookup.type_(), InodeType::File);
-    assert_eq!(growth_lookup.type_(), InodeType::File);
-    assert_eq!(busy_lookup.type_(), InodeType::Dir);
-    assert_eq!(
-        target_parent.size(),
-        target_size_before_growth + disk.root_cluster_size()
-    );
-    assert_eq!(visible_name_count(&source_entries, "MoveMe"), 0);
-    assert_eq!(visible_name_count(&target_entries, "MovedAcross"), 1);
-    assert_eq!(visible_name_count(&target_entries, "GrowthFile"), 1);
-    assert_eq!(visible_name_count(&target_entries, "BusyDir"), 1);
-    assert_eq!(entry_names(&busy_entries), vec!["Leaf"]);
+fn directory_entry_mutation_integration_concurrency_linearizes_cross_directory_rename_and_competing_mutations()
+ {
+    entry_field_update::directory_entry_mutation_integration_concurrency_linearizes_cross_directory_rename_and_competing_mutations();
 }
 
 #[ktest]
@@ -1642,8 +1266,8 @@ fn file_content_mutation_write_boundary_gap_write_zero_fills_exposed_range() {
 }
 
 #[ktest]
-fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct_without_side_effects(
-) {
+fn file_content_mutation_write_boundary_direct_write_rejects_misaligned_o_direct_without_side_effects()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -1767,322 +1391,33 @@ fn file_content_mutation_write_boundary_write_at_fast_fails_on_imported_mount_an
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let initial_bytes = vec![b'A'; cluster_size];
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "AppendGrowth",
-        TEST_REGULAR_FILE_CLUSTER,
-        cluster_size,
-        cluster_size,
-        true,
-        &[TEST_REGULAR_FILE_CLUSTER],
-    );
-    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("AppendGrowth").unwrap();
-    let payload = b"TAIL!";
-
-    let written_len = write_bytes_append(&file_inode, payload).unwrap();
-
-    assert_eq!(written_len, payload.len());
-
-    let mut visible_bytes = vec![0xCC; cluster_size + payload.len()];
-    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
-    assert_eq!(read_len, cluster_size + payload.len());
-    assert_eq!(&visible_bytes[..cluster_size], &initial_bytes);
-    assert_eq!(&visible_bytes[cluster_size..read_len], payload);
-
-    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    assert_eq!(
-        stream_lengths(&entry_set_after),
-        (
-            u64::try_from(cluster_size + payload.len()).unwrap(),
-            u64::try_from(cluster_size + payload.len()).unwrap(),
-        )
-    );
-    assert_eq!(
-        stream_first_cluster(&entry_set_after),
-        TEST_REGULAR_FILE_CLUSTER
-    );
-    assert_eq!(file_inode.size(), cluster_size + payload.len());
-    assert_eq!(
-        file_inode.metadata().nr_sectors_allocated,
-        2 * cluster_size / SECTOR_SIZE
-    );
+fn file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof()
+ {
+    file_mutation_integration::file_content_mutation_growth_shrink_and_allocation_topology_append_growth_allocates_and_publishes_new_eof();
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let mut first_cluster_bytes = vec![0xA5; cluster_size];
-    first_cluster_bytes[..4].copy_from_slice(b"DATA");
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "GapGrowth",
-        TEST_REGULAR_FILE_CLUSTER,
-        cluster_size,
-        4,
-        true,
-        &[TEST_REGULAR_FILE_CLUSTER],
-    );
-    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &first_cluster_bytes);
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("GapGrowth").unwrap();
-
-    let written_len = file_inode.write_bytes_at(cluster_size + 4, b"END").unwrap();
-
-    assert_eq!(written_len, 3);
-
-    let mut visible_bytes = vec![0xCC; cluster_size + 7];
-    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
-    assert_eq!(read_len, cluster_size + 7);
-    assert_eq!(&visible_bytes[..4], b"DATA");
-    assert_eq!(
-        &visible_bytes[4..cluster_size + 4],
-        &vec![0; cluster_size][..]
-    );
-    assert_eq!(&visible_bytes[cluster_size + 4..read_len], b"END");
-
-    let first_cluster_after = disk.read_cluster(TEST_REGULAR_FILE_CLUSTER);
-    assert_eq!(&first_cluster_after[..4], b"DATA");
-    assert_eq!(
-        &first_cluster_after[4..cluster_size],
-        &vec![0; cluster_size - 4][..]
-    );
-
-    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    let second_cluster = next_stream_cluster(&disk, &entry_set_after);
-    let second_cluster_after = disk.read_cluster(second_cluster);
-    assert_eq!(&second_cluster_after[..4], &[0; 4]);
-    assert_eq!(&second_cluster_after[4..7], b"END");
-    assert_eq!(
-        stream_lengths(&entry_set_after),
-        (
-            u64::try_from(cluster_size + 7).unwrap(),
-            u64::try_from(cluster_size + 7).unwrap(),
-        )
-    );
-    assert!(disk.is_cluster_allocated(second_cluster));
-    assert_ne!(second_cluster, TEST_REGULAR_FILE_CLUSTER);
+fn file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range()
+ {
+    file_mutation_integration::file_content_mutation_growth_shrink_and_allocation_topology_gap_growth_zero_fills_newly_allocated_range();
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let initial_bytes = vec![b'Q'; cluster_size];
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "FragmentGrow",
-        TEST_REGULAR_FILE_CLUSTER,
-        cluster_size,
-        cluster_size,
-        true,
-        &[TEST_REGULAR_FILE_CLUSTER],
-    );
-    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
-    disk.install_root_file_with_contents(
-        ROOT_SECOND_FILE_ENTRY_INDEX,
-        "Blocker",
-        TEST_CONTIGUOUS_SECOND_CLUSTER,
-        b"busy",
-    );
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("FragmentGrow").unwrap();
-    let payload = b"tail";
-
-    let written_len = file_inode.write_bytes_at(cluster_size, payload).unwrap();
-
-    assert_eq!(written_len, payload.len());
-
-    let mut visible_bytes = vec![0xCC; cluster_size + payload.len()];
-    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
-    assert_eq!(read_len, cluster_size + payload.len());
-    assert_eq!(&visible_bytes[..cluster_size], &initial_bytes);
-    assert_eq!(&visible_bytes[cluster_size..read_len], payload);
-
-    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    let appended_cluster = disk.fat_chain_step(TEST_REGULAR_FILE_CLUSTER);
-    assert_eq!(
-        stream_first_cluster(&entry_set_after),
-        TEST_REGULAR_FILE_CLUSTER
-    );
-    assert!(!stream_has_no_fat_chain(&entry_set_after));
-    assert_eq!(
-        stream_lengths(&entry_set_after),
-        (
-            u64::try_from(cluster_size + payload.len()).unwrap(),
-            u64::try_from(cluster_size + payload.len()).unwrap(),
-        )
-    );
-    assert_ne!(appended_cluster, TEST_REGULAR_FILE_CLUSTER + 1);
-    assert_eq!(disk.fat_chain_step(appended_cluster), FAT_END_OF_CHAIN);
-    assert!(disk.is_cluster_allocated(appended_cluster));
+fn file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links()
+ {
+    file_mutation_integration::file_content_mutation_growth_shrink_and_allocation_topology_non_contiguous_growth_backfills_fat_links();
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let first_cluster_bytes = vec![b'A'; cluster_size];
-    let second_cluster_bytes = vec![b'B'; cluster_size];
-    let third_cluster_bytes = vec![b'C'; cluster_size];
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "ShrinkFile",
-        TEST_FRAGMENTED_FIRST_CLUSTER,
-        cluster_size * 3,
-        cluster_size * 3,
-        false,
-        &[
-            TEST_FRAGMENTED_FIRST_CLUSTER,
-            TEST_FRAGMENTED_SECOND_CLUSTER,
-            TEST_FRAGMENTED_THIRD_CLUSTER,
-        ],
-    );
-    disk.set_fat_chain_step(
-        TEST_FRAGMENTED_FIRST_CLUSTER,
-        TEST_FRAGMENTED_SECOND_CLUSTER,
-    );
-    disk.set_fat_chain_step(
-        TEST_FRAGMENTED_SECOND_CLUSTER,
-        TEST_FRAGMENTED_THIRD_CLUSTER,
-    );
-    disk.terminate_fat_chain(TEST_FRAGMENTED_THIRD_CLUSTER);
-    disk.write_cluster_prefix(TEST_FRAGMENTED_FIRST_CLUSTER, &first_cluster_bytes);
-    disk.write_cluster_prefix(TEST_FRAGMENTED_SECOND_CLUSTER, &second_cluster_bytes);
-    disk.write_cluster_prefix(TEST_FRAGMENTED_THIRD_CLUSTER, &third_cluster_bytes);
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("ShrinkFile").unwrap();
-    let new_size = cluster_size + 2;
-
-    file_inode.resize(new_size).unwrap();
-
-    assert_eq!(file_inode.size(), new_size);
-
-    let mut visible_bytes = vec![0xCC; new_size];
-    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
-    assert_eq!(read_len, new_size);
-    assert_eq!(&visible_bytes[..cluster_size], &first_cluster_bytes);
-    assert_eq!(
-        &visible_bytes[cluster_size..read_len],
-        &second_cluster_bytes[..2]
-    );
-
-    let mut eof_bytes = [0xDD; 4];
-    assert_eq!(
-        file_inode.read_bytes_at(new_size, &mut eof_bytes).unwrap(),
-        0
-    );
-    assert_eq!(eof_bytes, [0xDD; 4]);
-
-    let entry_set_after = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    assert_eq!(
-        stream_lengths(&entry_set_after),
-        (
-            u64::try_from(new_size).unwrap(),
-            u64::try_from(new_size).unwrap(),
-        )
-    );
-    assert_eq!(
-        stream_first_cluster(&entry_set_after),
-        TEST_FRAGMENTED_FIRST_CLUSTER
-    );
-    assert!(!stream_has_no_fat_chain(&entry_set_after));
-    assert_eq!(
-        disk.fat_chain_step(TEST_FRAGMENTED_FIRST_CLUSTER),
-        TEST_FRAGMENTED_SECOND_CLUSTER
-    );
-    assert_eq!(
-        disk.fat_chain_step(TEST_FRAGMENTED_SECOND_CLUSTER),
-        FAT_END_OF_CHAIN
-    );
-    assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_FIRST_CLUSTER));
-    assert!(disk.is_cluster_allocated(TEST_FRAGMENTED_SECOND_CLUSTER));
-    assert!(!disk.is_cluster_allocated(TEST_FRAGMENTED_THIRD_CLUSTER));
-    assert_eq!(
-        file_inode.metadata().nr_sectors_allocated,
-        2 * cluster_size / SECTOR_SIZE
-    );
+fn file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain()
+ {
+    file_mutation_integration::file_content_mutation_growth_shrink_and_allocation_topology_resize_shrink_releases_clusters_and_truncates_chain();
 }
 
 #[ktest]
-fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let initial_bytes = vec![b'P'; cluster_size];
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "PublishFail",
-        TEST_REGULAR_FILE_CLUSTER,
-        cluster_size,
-        cluster_size,
-        true,
-        &[TEST_REGULAR_FILE_CLUSTER],
-    );
-    disk.write_cluster_prefix(TEST_REGULAR_FILE_CLUSTER, &initial_bytes);
-
-    let stream_extension_offset = disk.root_directory_offset()
-        + ROOT_FILE_ENTRY_INDEX * DIRECTORY_ENTRY_SIZE
-        + DIRECTORY_ENTRY_SIZE;
-    let failing_disk = ExfatLookupToggleFailingWriteDisk::new(
-        disk.clone(),
-        stream_extension_offset,
-        DIRECTORY_ENTRY_SIZE,
-    );
-    let block_device: Arc<dyn BlockDevice> = failing_disk.clone();
-    let (_fs, root_inode) = mount_root_from_block_device(block_device, FsFlags::empty(), None);
-    let file_inode = root_inode.lookup("PublishFail").unwrap();
-    let entry_set_before = root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX);
-    let metadata_before = file_inode.metadata();
-
-    failing_disk.enable_failures();
-    let error = write_bytes_append(&file_inode, b"boom").unwrap_err();
-
-    assert_eq!(error.error(), Errno::EIO);
-    assert_eq!(
-        root_entry_set(&disk, ROOT_FILE_ENTRY_INDEX),
-        entry_set_before
-    );
-    assert_metadata_unchanged(file_inode.metadata(), metadata_before);
-    assert_eq!(file_inode.size(), cluster_size);
-
-    let mut visible_bytes = vec![0xCC; cluster_size];
-    let read_len = file_inode.read_bytes_at(0, &mut visible_bytes).unwrap();
-    assert_eq!(read_len, cluster_size);
-    assert_eq!(&visible_bytes[..read_len], &initial_bytes);
-
-    let mut eof_bytes = [0xDD; 4];
-    assert_eq!(
-        file_inode
-            .read_bytes_at(cluster_size, &mut eof_bytes)
-            .unwrap(),
-        0
-    );
-    assert_eq!(eof_bytes, [0xDD; 4]);
+fn file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof()
+ {
+    file_mutation_integration::file_content_mutation_growth_shrink_and_allocation_topology_publication_failure_preserves_visible_eof();
 }
 
 #[ktest]
@@ -2205,8 +1540,8 @@ fn file_content_mapping_cached_io_read_at_fast_fails_on_imported_mount_anomaly()
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_map_regular_file_logical_offset_maps_contiguous_nofatchain_offsets(
-) {
+fn file_content_mapping_cached_io_map_regular_file_logical_offset_maps_contiguous_nofatchain_offsets()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2334,8 +1669,8 @@ fn file_content_mapping_cached_io_page_count_and_cache_holder_follow_published_f
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_map_regular_file_logical_offset_returns_none_for_eof_and_uninitialized_offsets(
-) {
+fn file_content_mapping_cached_io_map_regular_file_logical_offset_returns_none_for_eof_and_uninitialized_offsets()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2449,178 +1784,14 @@ fn file_content_mapping_cached_io_page_cache_backend_contiguous_read_returns_wai
 }
 
 #[ktest]
-fn file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping(
-) {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let page_idx = cluster_size.div_ceil(PAGE_SIZE);
-    let file_offset = page_idx * PAGE_SIZE;
-    let data_length = file_offset + PAGE_SIZE;
-    let cluster_count = data_length.div_ceil(cluster_size);
-    let clusters: Vec<u32> = (0..cluster_count)
-        .map(|index| TEST_FRAGMENTED_FIRST_CLUSTER + u32::try_from(index * 3).unwrap())
-        .collect();
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "FragmentedWriteback",
-        clusters[0],
-        data_length,
-        data_length,
-        false,
-        &clusters,
-    );
-    for cluster_pair in clusters.windows(2) {
-        disk.set_fat_chain_step(cluster_pair[0], cluster_pair[1]);
-    }
-    disk.terminate_fat_chain(*clusters.last().unwrap());
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("FragmentedWriteback").unwrap();
-    let exfat_inode = lookup_exfat_inode(&file_inode);
-    let (_block_device, boot_region) = published_lookup_state(&file_inode);
-    let page_pattern = patterned_bytes(PAGE_SIZE);
-    let page = CachePage::alloc_zero(PageState::UpToDate).unwrap();
-    page.write_bytes(0, &page_pattern).unwrap();
-    let start_cluster_index = file_offset / cluster_size;
-    let start_cluster_offset = file_offset % cluster_size;
-    let mut remaining = PAGE_SIZE;
-    let mut expected_ranges = Vec::new();
-    let mut expected_cluster_prefixes = Vec::new();
-    let mut cluster_offset = start_cluster_offset;
-
-    for cluster in clusters.iter().skip(start_cluster_index) {
-        if remaining == 0 {
-            break;
-        }
-
-        let chunk_len = remaining.min(cluster_size - cluster_offset);
-        expected_ranges.push((
-            boot_region.cluster_offset(*cluster).unwrap() + cluster_offset,
-            chunk_len,
-        ));
-        expected_cluster_prefixes.push((*cluster, cluster_offset, chunk_len));
-        remaining -= chunk_len;
-        cluster_offset = 0;
-    }
-
-    let _ = disk.take_observed_bios();
-    let waiter = exfat_inode.write_page_async(page_idx, &page).unwrap();
-
-    assert!(waiter.nreqs() > 0);
-    assert_eq!(waiter.wait(), Some(BioStatus::Complete));
-    let mut page_offset = 0usize;
-    for (cluster, cluster_offset, chunk_len) in expected_cluster_prefixes {
-        let cluster_bytes = disk.read_cluster(cluster);
-        assert_eq!(
-            &cluster_bytes[cluster_offset..cluster_offset + chunk_len],
-            &page_pattern[page_offset..page_offset + chunk_len],
-        );
-        page_offset += chunk_len;
-    }
-    let observed_bios = disk.take_observed_bios();
-    let write_bios: Vec<_> = observed_bios
-        .into_iter()
-        .filter(|bio| bio.type_ == BioType::Write)
-        .collect();
-    assert!(!write_bios.is_empty());
-    assert_eq!(
-        write_bios
-            .iter()
-            .map(|bio| bio.byte_range.end - bio.byte_range.start)
-            .sum::<usize>(),
-        PAGE_SIZE,
-    );
-    let mut touched_expected_ranges = vec![false; expected_ranges.len()];
-    for observed_bio in &write_bios {
-        let mut matched = false;
-        for (index, (expected_start, expected_len)) in expected_ranges.iter().enumerate() {
-            let expected_end = expected_start + expected_len;
-            if *expected_start <= observed_bio.byte_range.start
-                && observed_bio.byte_range.end <= expected_end
-            {
-                touched_expected_ranges[index] = true;
-                matched = true;
-                break;
-            }
-        }
-        assert!(matched);
-    }
-    if expected_ranges.len() > 1 {
-        assert!(
-            touched_expected_ranges
-                .iter()
-                .filter(|touched| **touched)
-                .count()
-                > 1
-        );
-    }
+fn file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping()
+ {
+    cached_io_integration::file_content_mapping_cached_io_page_cache_backend_fragmented_writeback_preserves_segmented_mapping();
 }
 
 #[ktest]
 fn file_content_mapping_cached_io_page_cache_backend_zero_fills_mid_page_uninitialized_suffix() {
-    init_lookup_test_runtime();
-
-    let disk = ExfatLookupTestDisk::new();
-    let cluster_size = disk.root_cluster_size();
-    let data_length = PAGE_SIZE.min(cluster_size * 2);
-    let valid_data_length = SECTOR_SIZE;
-    assert!(valid_data_length < data_length);
-    let cluster_count = data_length.div_ceil(cluster_size);
-    let clusters: Vec<u32> = (0..cluster_count)
-        .map(|index| TEST_REGULAR_FILE_CLUSTER + u32::try_from(index).unwrap())
-        .collect();
-    let initialized_prefix = patterned_bytes(valid_data_length);
-    let mut on_disk_bytes = vec![0xD7; data_length];
-    on_disk_bytes[..valid_data_length].copy_from_slice(&initialized_prefix);
-
-    disk.install_root_file_with_cluster_chain(
-        ROOT_FILE_ENTRY_INDEX,
-        "ZeroPageTail",
-        clusters[0],
-        data_length,
-        valid_data_length,
-        true,
-        &clusters,
-    );
-    for (cluster_index, cluster) in clusters.iter().enumerate() {
-        let start = cluster_index * cluster_size;
-        if start >= on_disk_bytes.len() {
-            break;
-        }
-        let end = (start + cluster_size).min(on_disk_bytes.len());
-        disk.write_cluster_prefix(*cluster, &on_disk_bytes[start..end]);
-    }
-
-    let (_fs, root_inode) = mount_root(&disk, None);
-    let file_inode = root_inode.lookup("ZeroPageTail").unwrap();
-    let exfat_inode = lookup_exfat_inode(&file_inode);
-    let (_block_device, boot_region) = published_lookup_state(&file_inode);
-
-    let _ = disk.take_observed_bios();
-    let page = CachePage::alloc_uninit().unwrap();
-    let waiter = exfat_inode.read_page_async(0, &page).unwrap();
-
-    assert_eq!(waiter.nreqs(), 1);
-    assert_eq!(waiter.wait(), Some(BioStatus::Complete));
-
-    let page_bytes = read_cache_page_bytes(&page);
-    assert_eq!(
-        &page_bytes[..valid_data_length],
-        initialized_prefix.as_slice()
-    );
-    assert!(page_bytes[valid_data_length..]
-        .iter()
-        .all(|byte| *byte == 0));
-    assert_observed_bios(
-        &disk.take_observed_bios(),
-        BioType::Read,
-        &[(
-            boot_region.cluster_offset(clusters[0]).unwrap(),
-            valid_data_length,
-        )],
-    );
+    cached_io_integration::file_content_mapping_cached_io_page_cache_backend_zero_fills_mid_page_uninitialized_suffix();
 }
 
 #[ktest]
@@ -2678,8 +1849,8 @@ fn file_content_mapping_cached_io_page_cache_backend_fast_fails_imported_anomaly
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data_orders_file_writeback_before_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data_orders_file_writeback_before_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2707,8 +1878,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_data
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_orders_file_writeback_before_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_orders_file_writeback_before_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2736,8 +1907,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_all_
 }
 
 #[ktest]
-fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast_fail_rejects_imported_mount_anomaly_before_writeback_or_device_sync(
-) {
+fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast_fail_rejects_imported_mount_anomaly_before_writeback_or_device_sync()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2769,8 +1940,8 @@ fn file_sync_and_persistence_writeback_ordering_and_admission_boundary_sync_fast
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_sync_data_leaves_metadata_only_interval_for_sync_all(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_sync_data_leaves_metadata_only_interval_for_sync_all()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2801,8 +1972,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_repeated_clean_sync_calls_do_not_manufacture_dirty_state()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2827,8 +1998,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_device_stage_failure_leaves_dirty_window_retryable(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_device_stage_failure_leaves_dirty_window_retryable()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();
@@ -2861,8 +2032,8 @@ fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance
 }
 
 #[ktest]
-fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success(
-) {
+fn file_sync_and_persistence_revalidation_metadata_scope_and_failure_maintenance_later_dirty_work_remains_outstanding_after_blocked_sync_success()
+ {
     init_lookup_test_runtime();
 
     let disk = ExfatLookupTestDisk::new();

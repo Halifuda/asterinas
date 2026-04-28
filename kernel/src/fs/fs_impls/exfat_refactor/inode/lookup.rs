@@ -1,6 +1,28 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use super::*;
+use alloc::string::String;
+
+use aster_block::BlockDevice;
+
+use super::{
+    super::{
+        boot::BootRegion,
+        direntry::{
+            self, DIRECTORY_ENTRY_SIZE, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange,
+            FileEntrySetView, ScannedDirectoryEntry,
+        },
+        fs::ExfatFsError,
+    },
+    ExfatFs, ExfatInode, UpcaseTable,
+};
+use crate::{
+    fs::{
+        file::{InodeType, chmod},
+        utils::DirentVisitor,
+        vfs::inode::Inode,
+    },
+    prelude::*,
+};
 
 impl ExfatInode {
     pub(super) fn lookup_child_by_name(
@@ -11,7 +33,7 @@ impl ExfatInode {
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
-    ) -> core::result::Result<Option<Arc<dyn Inode>>, MountVolumeStateError> {
+    ) -> core::result::Result<Option<Arc<dyn Inode>>, ExfatFsError> {
         let (_owner_guard, stream, directory_bytes) =
             self.admitted_directory_snapshot(block_device, boot_region)?;
         let Some(entry_view) = Self::locate_named_child_view(
@@ -30,14 +52,14 @@ impl ExfatInode {
         let ino = (u64::from(stream.first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
-                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
             );
         let entry_set = directory_bytes
             .get(direntry::slot_range_bytes(slot_range)?)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
         let stream_entry = entry_set
             .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
         let valid_data_length = usize::try_from(u64::from_le_bytes([
             stream_entry[8],
             stream_entry[9],
@@ -48,9 +70,9 @@ impl ExfatInode {
             stream_entry[14],
             stream_entry[15],
         ]))
-        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+        .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
         if valid_data_length > data_length {
-            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+            return Err(ExfatFsError::InvalidOnDiskLayout);
         }
 
         let child_inode = Self::new_child(
@@ -71,12 +93,12 @@ impl ExfatInode {
                     direntry::LAST_ACCESSED_TIMESTAMP_OFFSET
                         ..direntry::LAST_ACCESSED_TIMESTAMP_OFFSET + 4,
                 )
-                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?
                 .try_into()
-                .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
             let last_accessed_utc_offset = *entry_set
                 .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
             let last_access_at = Self::decoded_exfat_timestamp(
                 last_accessed_timestamp,
                 None,
@@ -87,15 +109,15 @@ impl ExfatInode {
                     direntry::LAST_MODIFIED_TIMESTAMP_OFFSET
                         ..direntry::LAST_MODIFIED_TIMESTAMP_OFFSET + 4,
                 )
-                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?
                 .try_into()
-                .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
             let last_modified_ten_ms_increment = *entry_set
                 .get(direntry::LAST_MODIFIED_10MS_INCREMENT_OFFSET)
-                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
             let last_modified_utc_offset = *entry_set
                 .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
             let last_modify_at = Self::decoded_exfat_timestamp(
                 last_modified_timestamp,
                 Some(last_modified_ten_ms_increment),
@@ -125,7 +147,7 @@ impl ExfatInode {
         lookup_name_hash: u16,
     ) -> core::result::Result<
         Option<(DirectoryEntrySlotRange, InodeType, u32, usize, usize, bool)>,
-        MountVolumeStateError,
+        ExfatFsError,
     > {
         let Some(entry_view) = Self::locate_named_child_view(
             directory_bytes,
@@ -142,10 +164,10 @@ impl ExfatInode {
             entry_view.child_metadata(boot_region)?;
         let entry_set = directory_bytes
             .get(direntry::slot_range_bytes(slot_range)?)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
         let stream_entry = entry_set
             .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
-            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
         let valid_data_length = usize::try_from(u64::from_le_bytes([
             stream_entry[8],
             stream_entry[9],
@@ -156,9 +178,9 @@ impl ExfatInode {
             stream_entry[14],
             stream_entry[15],
         ]))
-        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+        .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
         if valid_data_length > data_length {
-            return Err(MountVolumeStateError::InvalidOnDiskLayout);
+            return Err(ExfatFsError::InvalidOnDiskLayout);
         }
         Ok(Some((
             slot_range,
@@ -176,7 +198,7 @@ impl ExfatInode {
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
-    ) -> core::result::Result<Option<FileEntrySetView<'a>>, MountVolumeStateError> {
+    ) -> core::result::Result<Option<FileEntrySetView<'a>>, ExfatFsError> {
         let mut entry_index = 0usize;
         loop {
             match direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)? {
@@ -198,7 +220,7 @@ impl ExfatInode {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
-                    return Err(MountVolumeStateError::InvalidOnDiskLayout);
+                    return Err(ExfatFsError::InvalidOnDiskLayout);
                 }
             }
         }
@@ -253,20 +275,20 @@ impl ExfatInode {
 
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
-                            .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?;
+                            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
                         let entry_ino = (u64::from(stream.first_cluster) << 32)
                             | u64::from(
                                 u32::try_from(entry_view.slot_range().first_entry_index())
-                                    .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout)?,
+                                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
                             );
                         visitor.visit(&entry_name, entry_ino, inode_type, visible_offset)?;
                         next_offset = visible_offset
                             .checked_add(1)
-                            .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
                     }
                     visible_offset = visible_offset
                         .checked_add(1)
-                        .ok_or(MountVolumeStateError::InvalidOnDiskLayout)?;
+                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
                 ScannedDirectoryEntry::Anomaly { kind, slot_range } => {
@@ -274,7 +296,7 @@ impl ExfatInode {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
-                    return Err(MountVolumeStateError::InvalidOnDiskLayout.into());
+                    return Err(ExfatFsError::InvalidOnDiskLayout.into());
                 }
             }
         }
