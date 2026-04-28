@@ -363,13 +363,6 @@ impl BootRegion {
             }
             Ok(ChainVisitControl::Continue)
         })?;
-        Self::finalize_root_records(bitmap, upcase)
-    }
-
-    fn finalize_root_records(
-        bitmap: Option<AllocationBitmap>,
-        upcase: Option<UpcaseRecord>,
-    ) -> core::result::Result<(AllocationBitmap, UpcaseRecord), MountVolumeStateError> {
         Ok((
             bitmap.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,
             upcase.ok_or(MountVolumeStateError::InvalidOnDiskLayout)?,

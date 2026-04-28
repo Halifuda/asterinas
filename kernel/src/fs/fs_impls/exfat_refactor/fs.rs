@@ -301,6 +301,7 @@ impl ExfatFs {
         }
     }
 
+    #[cfg(ktest)]
     fn current_options(&self) -> core::result::Result<ExfatMountOptions, MountVolumeStateError> {
         let state = self.state.read();
         let publication = state
@@ -318,21 +319,13 @@ impl ExfatFs {
         *self.state.write() = Some(publication);
     }
 
+    #[cfg(ktest)]
     fn published_flags(&self) -> core::result::Result<FsFlags, MountVolumeStateError> {
         let state = self.state.read();
         let publication = state
             .as_ref()
             .ok_or(MountVolumeStateError::UnpublishedState)?;
         Ok(publication.flags)
-    }
-
-    fn published_root_inode(&self) -> core::result::Result<Arc<dyn Inode>, MountVolumeStateError> {
-        let state = self.state.read();
-        let publication = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?;
-        let root_inode: Arc<dyn Inode> = publication.root_inode.clone();
-        Ok(root_inode)
     }
 
     pub(super) fn published_lookup_state(
@@ -531,10 +524,27 @@ impl ExfatFs {
 
     fn query_volume_identity(&self, query: VolumeIdentityQuery) -> Result<VolumeIdentityEntries> {
         match query {
-            VolumeIdentityQuery::Label => Ok(VolumeIdentityEntries {
-                guid: None,
-                label: self.query_volume_label()?,
-            }),
+            VolumeIdentityQuery::Label => {
+                let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
+                    self.admitted_lookup_state()?;
+                let root_inode = state
+                    .as_ref()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .root_inode
+                    .clone();
+                let label = root_inode.read_root_directory(
+                    &block_device,
+                    &boot_region,
+                    direntry::read_volume_label,
+                )?;
+                let label = match label {
+                    Some(label) => String::from_utf16(&label)
+                        .map(Some)
+                        .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout.into())?,
+                    None => None,
+                };
+                Ok(VolumeIdentityEntries { guid: None, label })
+            }
             VolumeIdentityQuery::Guid | VolumeIdentityQuery::LabelAndGuid => {
                 return_errno_with_message!(
                     Errno::EOPNOTSUPP,
@@ -544,31 +554,34 @@ impl ExfatFs {
         }
     }
 
-    fn query_volume_label(&self) -> Result<Option<String>> {
-        let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
-            self.admitted_lookup_state()?;
-        let root_inode = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?
-            .root_inode
-            .clone();
-
-        let label = root_inode.read_root_directory(
-            &block_device,
-            &boot_region,
-            direntry::read_volume_label,
-        )?;
-        match label {
-            Some(label) => String::from_utf16(&label)
-                .map(Some)
-                .map_err(|_| MountVolumeStateError::InvalidOnDiskLayout.into()),
-            None => Ok(None),
-        }
-    }
-
     fn update_volume_identity(&self, update: VolumeIdentityUpdate) -> Result<()> {
         match update {
-            VolumeIdentityUpdate::Label(label) => self.update_volume_label(label),
+            VolumeIdentityUpdate::Label(label) => {
+                let admitted_label = match label {
+                    None => None,
+                    Some(label) if label.is_empty() => None,
+                    Some(label) => {
+                        let admitted_label: Vec<u16> = label.encode_utf16().collect();
+                        if admitted_label.len() > 11 {
+                            return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
+                        }
+                        Some(admitted_label)
+                    }
+                };
+                let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
+                    self.admitted_mutation_state()?;
+                let root_inode = state
+                    .as_ref()
+                    .ok_or(MountVolumeStateError::UnpublishedState)?
+                    .root_inode
+                    .clone();
+
+                root_inode
+                    .rewrite_root_directory(&block_device, &boot_region, |directory_bytes| {
+                        direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
+                    })
+                    .map_err(Error::from)
+            }
             VolumeIdentityUpdate::Guid(_) | VolumeIdentityUpdate::LabelAndGuid { .. } => {
                 return_errno_with_message!(
                     Errno::EOPNOTSUPP,
@@ -576,38 +589,6 @@ impl ExfatFs {
                 );
             }
         }
-    }
-
-    fn update_volume_label(&self, label: Option<String>) -> Result<()> {
-        let admitted_label = Self::admitted_volume_label(label)?;
-        let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
-            self.admitted_mutation_state()?;
-        let root_inode = state
-            .as_ref()
-            .ok_or(MountVolumeStateError::UnpublishedState)?
-            .root_inode
-            .clone();
-
-        root_inode
-            .rewrite_root_directory(&block_device, &boot_region, |directory_bytes| {
-                direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
-            })
-            .map_err(Error::from)
-    }
-
-    fn admitted_volume_label(label: Option<String>) -> Result<Option<Vec<u16>>> {
-        let Some(label) = label else {
-            return Ok(None);
-        };
-        if label.is_empty() {
-            return Ok(None);
-        }
-
-        let admitted_label: Vec<u16> = label.encode_utf16().collect();
-        if admitted_label.len() > 11 {
-            return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
-        }
-        Ok(Some(admitted_label))
     }
 
     pub(super) fn admit_forced_shutdown(&self) -> core::result::Result<(), MountVolumeStateError> {
@@ -620,14 +601,19 @@ impl ExfatFs {
     }
 
     fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, FreeSpaceAccountingError> {
-        let snapshot = self.cached_free_space_snapshot()?;
         let state = self.state.read();
         let publication = state
             .as_ref()
             .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+        let allocator = self.allocator.read();
+        let allocator_state = allocator
+            .as_ref()
+            .ok_or(FreeSpaceAccountingError::UnpublishedState)?;
+        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
         Ok(self.build_super_block(publication, &snapshot))
     }
 
+    #[cfg(ktest)]
     fn cached_free_space_snapshot(
         &self,
     ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
@@ -714,6 +700,7 @@ impl ExfatFs {
         allocator_state.snapshot(&publication.boot_region)
     }
 
+    #[cfg(ktest)]
     fn recount_free_space(
         &self,
     ) -> core::result::Result<FreeSpaceSnapshot, FreeSpaceAccountingError> {
@@ -858,10 +845,12 @@ impl FileSystem for ExfatFs {
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
-        match self.published_root_inode() {
-            Ok(root_inode) => root_inode,
-            Err(_) => unreachable!("mounted exFAT instances must publish a root inode"),
-        }
+        let state = self.state.read();
+        let publication = state
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("mounted exFAT instances must publish a root inode"));
+        let root_inode: Arc<dyn Inode> = publication.root_inode.clone();
+        root_inode
     }
 
     fn sb(&self) -> SuperBlock {
@@ -872,14 +861,22 @@ impl FileSystem for ExfatFs {
     }
 
     fn flags(&self) -> FsFlags {
-        match self.published_flags() {
-            Ok(flags) => flags,
-            Err(_) => unreachable!("mounted exFAT instances must publish filesystem flags"),
-        }
+        let state = self.state.read();
+        let publication = state.as_ref().unwrap_or_else(|| {
+            unreachable!("mounted exFAT instances must publish filesystem flags")
+        });
+        publication.flags
     }
 
     fn set_fs_flags(&self, flags: FsFlags, data: Option<CString>, _ctx: &Context) -> Result<()> {
-        let current_options = self.current_options()?;
+        let current_options = {
+            let state = self.state.read();
+            state
+                .as_ref()
+                .ok_or(MountVolumeStateError::UnpublishedState)?
+                .options
+                .clone()
+        };
         let next_options = match data.as_deref() {
             Some(args) => ExfatMountOptions::parse(flags, Some(args))?,
             None => current_options.with_flags(flags),
