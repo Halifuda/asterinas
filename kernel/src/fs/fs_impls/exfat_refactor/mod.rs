@@ -8,8 +8,6 @@ mod direntry;
 mod fat;
 mod fs;
 mod inode;
-#[cfg(ktest)]
-mod test_support;
 mod upcase;
 mod volume;
 
