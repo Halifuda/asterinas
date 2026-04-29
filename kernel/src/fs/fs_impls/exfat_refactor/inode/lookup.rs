@@ -8,7 +8,7 @@ use super::{
     super::{
         boot::BootRegion,
         direntry::{self, DirectoryEntryAnomalyKind, FileEntrySetView, ScannedDirectoryEntry},
-        fs::ExfatFsError,
+        invalid_on_disk_layout,
     },
     DirectoryContextMode, ExfatFs, ExfatInode, UpcaseTable,
 };
@@ -26,7 +26,7 @@ impl ExfatInode {
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
-    ) -> core::result::Result<Option<Arc<dyn Inode>>, ExfatFsError> {
+    ) -> Result<Option<Arc<dyn Inode>>> {
         let (_owner_guard, stream) = self.admitted_directory_snapshot()?;
         let directory_bytes =
             Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
@@ -46,12 +46,12 @@ impl ExfatInode {
         let ino = (u64::from(stream.first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
-                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+                    .map_err(|_| invalid_on_disk_layout())?,
             );
         let valid_data_length = usize::try_from(entry_view.cluster_map()?.valid_data_length())
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .map_err(|_| invalid_on_disk_layout())?;
         if valid_data_length > data_length {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let child_inode = Self::new_child(
@@ -77,7 +77,7 @@ impl ExfatInode {
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
-    ) -> core::result::Result<Option<FileEntrySetView<'a>>, ExfatFsError> {
+    ) -> Result<Option<FileEntrySetView<'a>>> {
         let mut entry_index = 0usize;
         loop {
             match direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)? {
@@ -99,7 +99,7 @@ impl ExfatInode {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
-                    return Err(ExfatFsError::InvalidOnDiskLayout);
+                    return Err(invalid_on_disk_layout());
                 }
             }
         }
@@ -150,20 +150,20 @@ impl ExfatInode {
 
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
-                            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+                            .map_err(|_| invalid_on_disk_layout())?;
                         let entry_ino = (u64::from(stream.first_cluster) << 32)
                             | u64::from(
                                 u32::try_from(entry_view.slot_range().first_entry_index())
-                                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+                                    .map_err(|_| invalid_on_disk_layout())?,
                             );
                         visitor.visit(&entry_name, entry_ino, inode_type, visible_offset)?;
                         next_offset = visible_offset
                             .checked_add(1)
-                            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                            .ok_or(invalid_on_disk_layout())?;
                     }
                     visible_offset = visible_offset
                         .checked_add(1)
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
                 ScannedDirectoryEntry::Anomaly { kind, slot_range } => {
@@ -171,7 +171,7 @@ impl ExfatInode {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
-                    return Err(ExfatFsError::InvalidOnDiskLayout.into());
+                    return Err(invalid_on_disk_layout().into());
                 }
             }
         }

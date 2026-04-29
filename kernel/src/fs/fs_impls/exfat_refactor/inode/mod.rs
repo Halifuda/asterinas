@@ -25,7 +25,8 @@ use self::{
 };
 use super::{
     boot::BootRegion,
-    fs::{ExfatFs, ExfatFsError, MountedVolumeState},
+    invalid_operation_input,
+    fs::{ExfatFs, MountedVolumeState},
     upcase::UpcaseTable,
 };
 use crate::{
@@ -60,11 +61,11 @@ impl ExfatInode {
         &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> core::result::Result<Vec<u8>, ExfatFsError> {
+    ) -> Result<Vec<u8>> {
         let _directory_guard = self.admission.read();
         let stream = *self.stream.read();
         if stream.data_length.is_some() {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
 
         Self::read_directory_bytes_for_stream(block_device, boot_region, stream)
@@ -75,11 +76,11 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         directory_bytes: &[u8],
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
         let stream = *self.stream.read();
         if stream.data_length.is_some() {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
 
         Self::write_directory_bytes_for_stream(block_device, boot_region, directory_bytes, stream)

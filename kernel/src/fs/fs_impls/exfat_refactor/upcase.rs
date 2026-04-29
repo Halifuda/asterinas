@@ -3,7 +3,7 @@
 use super::{
     boot::BootRegion,
     fat::{ChainVisitControl, FatReader},
-    fs::ExfatFsError,
+    invalid_on_disk_layout,
 };
 use crate::prelude::*;
 
@@ -24,10 +24,9 @@ impl UpcaseTable {
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
         upcase: UpcaseRecord,
-    ) -> core::result::Result<Self, ExfatFsError> {
+    ) -> Result<Self> {
         boot_region.validate_stream_data(upcase.first_cluster, upcase.data_length)?;
-        let data_length =
-            usize::try_from(upcase.data_length).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+        let data_length = usize::try_from(upcase.data_length).map_err(|_| invalid_on_disk_layout())?;
         let mut remaining = data_length;
         let mut table_bytes = Vec::with_capacity(data_length);
         fat_reader.walk_cluster_chain(upcase.first_cluster, |_, cluster_bytes| {
@@ -40,10 +39,10 @@ impl UpcaseTable {
             Ok(ChainVisitControl::Continue)
         })?;
         if remaining != 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         if Self::stream_checksum(&table_bytes) != upcase.checksum {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(Self {
             mapping: Self::decode_mapping(&table_bytes)?,
@@ -58,7 +57,7 @@ impl UpcaseTable {
         checksum
     }
 
-    fn decode_mapping(table_bytes: &[u8]) -> core::result::Result<Vec<u16>, ExfatFsError> {
+    fn decode_mapping(table_bytes: &[u8]) -> Result<Vec<u16>> {
         let mapping = if table_bytes.len() == Self::UNCOMPRESSED_TABLE_BYTE_LEN {
             let mut mapping = Vec::with_capacity(Self::TABLE_CODE_UNIT_COUNT);
             for word in table_bytes.chunks_exact(2) {
@@ -68,7 +67,7 @@ impl UpcaseTable {
         } else {
             let mut words = table_bytes.chunks_exact(2);
             if !words.remainder().is_empty() {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
 
             let mut mapping = Vec::with_capacity(Self::TABLE_CODE_UNIT_COUNT);
@@ -76,7 +75,7 @@ impl UpcaseTable {
                 let value = u16::from_le_bytes([word[0], word[1]]);
                 if value != u16::MAX {
                     if mapping.len() == Self::TABLE_CODE_UNIT_COUNT {
-                        return Err(ExfatFsError::InvalidOnDiskLayout);
+                        return Err(invalid_on_disk_layout());
                     }
                     mapping.push(value);
                     continue;
@@ -87,25 +86,25 @@ impl UpcaseTable {
                         mapping.push(u16::MAX);
                         break;
                     }
-                    return Err(ExfatFsError::InvalidOnDiskLayout);
+                    return Err(invalid_on_disk_layout());
                 };
                 let identity_count =
                     u16::from_le_bytes([identity_count_word[0], identity_count_word[1]]);
                 if identity_count == 0 {
-                    return Err(ExfatFsError::InvalidOnDiskLayout);
+                    return Err(invalid_on_disk_layout());
                 }
 
                 let run_end = mapping
                     .len()
                     .checked_add(usize::from(identity_count))
-                    .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                    .ok_or_else(invalid_on_disk_layout)?;
                 if run_end > Self::TABLE_CODE_UNIT_COUNT {
-                    return Err(ExfatFsError::InvalidOnDiskLayout);
+                    return Err(invalid_on_disk_layout());
                 }
 
                 for code_unit in mapping.len()..run_end {
                     mapping.push(
-                        u16::try_from(code_unit).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+                        u16::try_from(code_unit).map_err(|_| invalid_on_disk_layout())?,
                     );
                 }
             }
@@ -114,7 +113,7 @@ impl UpcaseTable {
         };
 
         if mapping.len() != Self::TABLE_CODE_UNIT_COUNT {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         for code_unit in 0..Self::MANDATORY_PREFIX_CODE_UNIT_COUNT {
@@ -123,7 +122,7 @@ impl UpcaseTable {
                 _ => u16::from(code_unit),
             };
             if mapping[usize::from(code_unit)] != expected_mapping {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
         }
 
@@ -160,9 +159,9 @@ pub(super) struct UpcaseRecord {
 }
 
 impl UpcaseRecord {
-    pub(super) fn parse(entry: &[u8]) -> core::result::Result<Self, ExfatFsError> {
+    pub(super) fn parse(entry: &[u8]) -> Result<Self> {
         if entry.len() != 32 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(Self {
             checksum: u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]),

@@ -11,7 +11,7 @@ use super::{
             ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
         },
         fat::{ChainVisitControl, FatReader},
-        fs::ExfatFsError,
+        inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
     },
     DirectoryContextMode, ExfatFs, ExfatInode, ExfatInodeStream, MountedVolumeState, UpcaseTable,
 };
@@ -92,7 +92,7 @@ impl ExfatInode {
             let (first_cluster, data_length, no_fat_chain) = if type_ == InodeType::Dir
                 && !options.zero_size_dir
             {
-                let (allocated_ranges, _) = fs
+                let allocated_ranges = fs
                     .allocate_free_space_with_publication(publication, 1)
                     .map_err(Error::from)?;
                 let allocated_cluster = match allocated_ranges.as_slice() {
@@ -102,7 +102,7 @@ impl ExfatInode {
                     _ => {
                         let _ = fs
                             .free_allocated_space_with_publication(publication, &allocated_ranges);
-                        return Err(Error::from(ExfatFsError::InconsistentAccounting));
+                        return Err(inconsistent_bitmap_accounting());
                     }
                 };
                 if let Err(error) = Self::initialize_directory_cluster(
@@ -243,7 +243,7 @@ impl ExfatInode {
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
             let removed_entry_set = invalidated_directory_bytes
                 .get_mut(slot_range_bytes)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
                 WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
@@ -345,7 +345,7 @@ impl ExfatInode {
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
             let removed_entry_set = invalidated_directory_bytes
                 .get_mut(slot_range_bytes)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
                 WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
@@ -632,7 +632,7 @@ impl ExfatInode {
             }
             if target_inode_type == InodeType::Dir {
                 let Some(child_inode) = target_child_inode else {
-                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                    return Err(Error::from(invalid_on_disk_layout()));
                 };
                 Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
             }
@@ -707,7 +707,7 @@ impl ExfatInode {
                 direntry::slot_range_bytes(target_slot_range).map_err(Error::from)?;
             let overwritten_entry_set = renamed_directory_bytes
                 .get_mut(slot_range_bytes)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut overwritten_entry_set =
                 WritableDirectoryEntrySlotSpan::new(target_slot_range, overwritten_entry_set)
@@ -719,7 +719,7 @@ impl ExfatInode {
                 direntry::slot_range_bytes(source_slot_range).map_err(Error::from)?;
             let removed_entry_set = renamed_directory_bytes
                 .get_mut(slot_range_bytes)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)
+                .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
                 WritableDirectoryEntrySlotSpan::new(source_slot_range, removed_entry_set)
@@ -730,7 +730,7 @@ impl ExfatInode {
         let final_slot_bytes = direntry::slot_range_bytes(final_slot_range).map_err(Error::from)?;
         let destination_entry_set = renamed_directory_bytes
             .get_mut(final_slot_bytes)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?;
         let mut destination_entry_set =
             WritableDirectoryEntrySlotSpan::new(final_slot_range, destination_entry_set)
@@ -739,7 +739,7 @@ impl ExfatInode {
         destination_entry_set
             .bytes_mut()
             .get_mut(..renamed_entry_set.len())
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?
             .copy_from_slice(&renamed_entry_set);
         Self::write_directory_bytes_for_stream(
@@ -819,7 +819,7 @@ impl ExfatInode {
                 }
                 if target_inode_type == InodeType::Dir {
                     let Some(child_inode) = target_child_inode else {
-                        return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                        return Err(Error::from(invalid_on_disk_layout()));
                     };
                     Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
                 }
@@ -856,7 +856,7 @@ impl ExfatInode {
             direntry::slot_range_bytes(target_slot_range).map_err(Error::from)?;
         let destination_entry_set = published_target_directory_bytes
             .get_mut(target_slot_bytes)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?;
         let mut destination_entry_set =
             WritableDirectoryEntrySlotSpan::new(target_slot_range, destination_entry_set)
@@ -865,7 +865,7 @@ impl ExfatInode {
         destination_entry_set
             .bytes_mut()
             .get_mut(..renamed_entry_set.len())
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?
             .copy_from_slice(&renamed_entry_set);
         Self::write_directory_bytes_for_stream(
@@ -881,7 +881,7 @@ impl ExfatInode {
             direntry::slot_range_bytes(source_slot_range).map_err(Error::from)?;
         let removed_entry_set = invalidated_source_directory_bytes
             .get_mut(source_slot_bytes)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?;
         let mut removed_entry_set =
             WritableDirectoryEntrySlotSpan::new(source_slot_range, removed_entry_set)
@@ -907,12 +907,12 @@ impl ExfatInode {
         is_root_directory: bool,
         directory_bytes: &[u8],
         required_entry_count: usize,
-    ) -> core::result::Result<Option<DirectoryEntrySlotRange>, ExfatFsError> {
+    ) -> Result<Option<DirectoryEntrySlotRange>> {
         if required_entry_count == 0 {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
         if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let total_entries = directory_bytes.len() / DIRECTORY_ENTRY_SIZE;
@@ -924,13 +924,13 @@ impl ExfatInode {
                 ScannedDirectoryEntry::EndOfDirectory { entry_index } => {
                     let available_entries = total_entries
                         .checked_sub(entry_index)
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                     if run_length == 0 {
                         run_start_index = entry_index;
                     }
                     run_length = run_length
                         .checked_add(available_entries)
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                     if run_length >= required_entry_count {
                         return Ok(Some(DirectoryEntrySlotRange::new(
                             run_start_index,
@@ -945,7 +945,7 @@ impl ExfatInode {
                     }
                     run_length = run_length
                         .checked_add(slot_range.entry_count())
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                     if run_length >= required_entry_count {
                         return Ok(Some(DirectoryEntrySlotRange::new(
                             run_start_index,
@@ -959,7 +959,7 @@ impl ExfatInode {
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
                 ScannedDirectoryEntry::Anomaly { .. } => {
-                    return Err(ExfatFsError::InvalidOnDiskLayout);
+                    return Err(invalid_on_disk_layout());
                 }
             }
         }
@@ -973,7 +973,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         required_entry_count: usize,
-    ) -> core::result::Result<(ExfatInodeStream, Vec<u8>, DirectoryEntrySlotRange), ExfatFsError>
+    ) -> Result<(ExfatInodeStream, Vec<u8>, DirectoryEntrySlotRange)>
     {
         loop {
             let directory_bytes =
@@ -999,15 +999,15 @@ impl ExfatInode {
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> core::result::Result<ExfatInodeStream, ExfatFsError> {
-        let (allocated_ranges, _) = fs.allocate_free_space_with_publication(publication, 1)?;
+    ) -> Result<ExfatInodeStream> {
+        let allocated_ranges = fs.allocate_free_space_with_publication(publication, 1)?;
         let allocated_cluster = match allocated_ranges.as_slice() {
             [allocated_range] if allocated_range.cluster_count == 1 => {
                 allocated_range.start_cluster
             }
             _ => {
                 let _ = fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-                return Err(ExfatFsError::InconsistentAccounting);
+                return Err(inconsistent_bitmap_accounting());
             }
         };
 
@@ -1039,11 +1039,11 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         allocated_cluster: u32,
-    ) -> core::result::Result<ExfatInodeStream, ExfatFsError> {
+    ) -> Result<ExfatInodeStream> {
         let next_data_length = match stream.data_length {
             Some(data_length) => data_length
                 .checked_add(boot_region.cluster_size)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+                .ok_or(invalid_on_disk_layout())?,
             None => boot_region.cluster_size,
         };
 
@@ -1092,7 +1092,7 @@ impl ExfatInode {
         {
             let mut published_stream = self.stream.write();
             if *published_stream != stream {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
             *published_stream = updated_stream;
         }
@@ -1100,7 +1100,7 @@ impl ExfatInode {
         metadata.size = metadata
             .size
             .checked_add(boot_region.cluster_size)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         Ok(updated_stream)
     }
 
@@ -1123,7 +1123,7 @@ impl ExfatInode {
         {
             match first_child_scan {
                 ScannedDirectoryEntry::Anomaly { .. } => {
-                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                    return Err(Error::from(invalid_on_disk_layout()));
                 }
                 ScannedDirectoryEntry::File(_) => return_errno!(Errno::ENOTEMPTY),
                 ScannedDirectoryEntry::EndOfDirectory { .. } | ScannedDirectoryEntry::Vacant(_) => {
@@ -1140,17 +1140,17 @@ impl ExfatInode {
         first_cluster: u32,
         data_length: usize,
         no_fat_chain: bool,
-    ) -> core::result::Result<Vec<ClusterRange>, ExfatFsError> {
+    ) -> Result<Vec<ClusterRange>> {
         if data_length == 0 {
             if first_cluster != 0 {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
             return Ok(Vec::new());
         }
 
         boot_region.validate_stream_data(
             first_cluster,
-            u64::try_from(data_length).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+            u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
         )?;
         let expected_cluster_count = data_length.div_ceil(boot_region.cluster_size);
         if no_fat_chain {
@@ -1169,12 +1169,12 @@ impl ExfatInode {
         fat_reader.walk_cluster_chain(first_cluster, |cluster, _| {
             total_cluster_count = total_cluster_count
                 .checked_add(1)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                .ok_or(invalid_on_disk_layout())?;
             match previous_cluster {
                 Some(previous_cluster) if previous_cluster.checked_add(1) == Some(cluster) => {
                     current_range_count = current_range_count
                         .checked_add(1)
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                 }
                 Some(_) => {
                     cluster_ranges.push(ClusterRange {
@@ -1193,7 +1193,7 @@ impl ExfatInode {
             Ok(ChainVisitControl::Continue)
         })?;
         if current_range_count == 0 || total_cluster_count != expected_cluster_count {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         cluster_ranges.push(ClusterRange {
             start_cluster: current_range_start,

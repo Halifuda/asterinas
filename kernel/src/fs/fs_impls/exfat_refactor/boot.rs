@@ -8,7 +8,8 @@ use ostd::mm::VmIo;
 use super::{
     bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmap},
     fat::{ChainVisitControl, FatReader},
-    fs::{ExfatFsError, VolumeAnomalyState},
+    device_io, invalid_on_disk_layout,
+    fs::VolumeAnomalyState,
     upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseRecord, UpcaseTable},
 };
 use crate::prelude::*;
@@ -35,62 +36,45 @@ pub(super) struct BootRegion {
 impl BootRegion {
     pub(super) fn load_mount_state(
         block_device: &dyn BlockDevice,
-    ) -> core::result::Result<
-        (
-            Self,
-            VolumeAnomalyState,
-            AllocationBitmap,
-            Arc<UpcaseTable>,
-            usize,
-            bool,
-        ),
-        ExfatFsError,
-    > {
+    ) -> Result<(Self, VolumeAnomalyState, AllocationBitmap, Arc<UpcaseTable>)> {
         let boot_region = Self::read(block_device)?;
         let anomaly = VolumeAnomalyState::read(block_device, &boot_region)?;
         let mut fat_reader = FatReader::new(block_device, &boot_region);
-        let (bitmap, upcase) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
+        let (mut bitmap, upcase) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
         let upcase_table = Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase)?);
-        let (used_clusters, used_clusters_from_recount) =
-            bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
-        Ok((
-            boot_region,
-            anomaly,
-            bitmap,
-            upcase_table,
-            used_clusters,
-            used_clusters_from_recount,
-        ))
+        let used_clusters = bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
+        bitmap.set_used_clusters(used_clusters);
+        Ok((boot_region, anomaly, bitmap, upcase_table))
     }
 
-    pub(super) fn read(block_device: &dyn BlockDevice) -> core::result::Result<Self, ExfatFsError> {
+    pub(super) fn read(block_device: &dyn BlockDevice) -> Result<Self> {
         let mut sector_header = [0u8; 512];
         block_device
             .read_bytes(0, &mut sector_header)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
         if &sector_header[3..11] != b"EXFAT   " {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         if u16::from_le_bytes([sector_header[510], sector_header[511]]) != 0xAA55 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let bytes_per_sector_shift = sector_header[108];
         let sectors_per_cluster_shift = sector_header[109];
         if !(9..=12).contains(&bytes_per_sector_shift) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         let sector_size = 1usize
             .checked_shl(u32::from(bytes_per_sector_shift))
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         let sectors_per_cluster = 1usize
             .checked_shl(u32::from(sectors_per_cluster_shift))
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         let cluster_size = sector_size
             .checked_mul(sectors_per_cluster)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         if cluster_size == 0 || cluster_size > MAX_CLUSTER_SIZE {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let volume_length_sectors = u64::from_le_bytes([
@@ -147,7 +131,7 @@ impl BootRegion {
             || fat_length_sectors == 0
             || cluster_count == 0
         {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let boot_region = Self {
@@ -168,57 +152,54 @@ impl BootRegion {
         Ok(boot_region)
     }
 
-    pub(super) fn cluster_offset(&self, cluster: u32) -> core::result::Result<usize, ExfatFsError> {
+    pub(super) fn cluster_offset(&self, cluster: u32) -> Result<usize> {
         if !self.is_valid_cluster(cluster) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         let cluster_index = u64::from(cluster - FIRST_DATA_CLUSTER);
         let sectors_per_cluster = u64::try_from(self.sectors_per_cluster)
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .map_err(|_| invalid_on_disk_layout())?;
         let sector_index = cluster_index
             .checked_mul(sectors_per_cluster)
             .and_then(|offset| offset.checked_add(u64::from(self.cluster_heap_offset_sectors)))
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-        let sector_size =
-            u64::try_from(self.sector_size).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
+        let sector_size = u64::try_from(self.sector_size).map_err(|_| invalid_on_disk_layout())?;
         let byte_offset = sector_index
             .checked_mul(sector_size)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-        usize::try_from(byte_offset).map_err(|_| ExfatFsError::InvalidOnDiskLayout)
+            .ok_or_else(invalid_on_disk_layout)?;
+        usize::try_from(byte_offset).map_err(|_| invalid_on_disk_layout())
     }
 
-    pub(super) fn cluster_count_usize(&self) -> core::result::Result<usize, ExfatFsError> {
-        usize::try_from(self.cluster_count).map_err(|_| ExfatFsError::InvalidOnDiskLayout)
+    pub(super) fn cluster_count_usize(&self) -> Result<usize> {
+        usize::try_from(self.cluster_count).map_err(|_| invalid_on_disk_layout())
     }
 
     pub(super) fn cluster_from_index(
         &self,
         cluster_index: usize,
-    ) -> core::result::Result<u32, ExfatFsError> {
-        let cluster_index =
-            u32::try_from(cluster_index).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+    ) -> Result<u32> {
+        let cluster_index = u32::try_from(cluster_index).map_err(|_| invalid_on_disk_layout())?;
         let cluster = FIRST_DATA_CLUSTER
             .checked_add(cluster_index)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         if !self.is_valid_cluster(cluster) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(cluster)
     }
 
-    pub(super) fn cluster_index(&self, cluster: u32) -> core::result::Result<usize, ExfatFsError> {
+    pub(super) fn cluster_index(&self, cluster: u32) -> Result<usize> {
         if !self.is_valid_cluster(cluster) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
-        usize::try_from(cluster - FIRST_DATA_CLUSTER).map_err(|_| ExfatFsError::InvalidOnDiskLayout)
+        usize::try_from(cluster - FIRST_DATA_CLUSTER).map_err(|_| invalid_on_disk_layout())
     }
 
-    pub(super) fn data_capacity_bytes(&self) -> core::result::Result<u64, ExfatFsError> {
-        let cluster_size =
-            u64::try_from(self.cluster_size).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+    pub(super) fn data_capacity_bytes(&self) -> Result<u64> {
+        let cluster_size = u64::try_from(self.cluster_size).map_err(|_| invalid_on_disk_layout())?;
         u64::from(self.cluster_count)
             .checked_mul(cluster_size)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or_else(invalid_on_disk_layout)
     }
 
     pub(super) fn is_valid_cluster(&self, cluster: u32) -> bool {
@@ -234,12 +215,12 @@ impl BootRegion {
         &self,
         first_cluster: u32,
         data_length: u64,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         if !self.is_valid_cluster(first_cluster) || data_length == 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         if data_length > self.data_capacity_bytes()? {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(())
     }
@@ -247,50 +228,50 @@ impl BootRegion {
     fn validate_checksum(
         &self,
         block_device: &dyn BlockDevice,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let checksum_region_len = self
             .sector_size
             .checked_mul(11)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         let mut checksum_region = vec![0; checksum_region_len];
         block_device
             .read_bytes(0, &mut checksum_region)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
         let expected_checksum = Self::checksum(&checksum_region);
 
         let mut checksum_sector = vec![0; self.sector_size];
         block_device
             .read_bytes(checksum_region_len, &mut checksum_sector)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
         for chunk in checksum_sector.chunks_exact(mem::size_of::<u32>()) {
             if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != expected_checksum {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
         }
         Ok(())
     }
 
-    fn validate_geometry(&self) -> core::result::Result<(), ExfatFsError> {
+    fn validate_geometry(&self) -> Result<()> {
         if !self.is_valid_cluster(self.root_dir_cluster) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         let data_sectors = u64::from(self.cluster_count)
             .checked_mul(
                 u64::try_from(self.sectors_per_cluster)
-                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+                    .map_err(|_| invalid_on_disk_layout())?,
             )
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         let heap_end = u64::from(self.cluster_heap_offset_sectors)
             .checked_add(data_sectors)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         if heap_end > self.volume_length_sectors {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         let fat_end = u64::from(self.fat_offset_sectors)
             .checked_add(u64::from(self.fat_length_sectors))
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or_else(invalid_on_disk_layout)?;
         if fat_end > u64::from(self.cluster_heap_offset_sectors) {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(())
     }
@@ -309,7 +290,7 @@ impl BootRegion {
     fn scan_root_directory(
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
-    ) -> core::result::Result<(AllocationBitmap, UpcaseRecord), ExfatFsError> {
+    ) -> Result<(AllocationBitmap, UpcaseRecord)> {
         let mut bitmap = None;
         let mut upcase = None;
         fat_reader.walk_cluster_chain(boot_region.root_dir_cluster, |_, cluster_bytes| {
@@ -327,8 +308,8 @@ impl BootRegion {
             Ok(ChainVisitControl::Continue)
         })?;
         Ok((
-            bitmap.ok_or(ExfatFsError::InvalidOnDiskLayout)?,
-            upcase.ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+            bitmap.ok_or_else(invalid_on_disk_layout)?,
+            upcase.ok_or_else(invalid_on_disk_layout)?,
         ))
     }
 }
@@ -338,11 +319,11 @@ impl BootRegion {
         &self,
         block_device: &dyn BlockDevice,
         anomaly: VolumeAnomalyState,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let mut boot_sector = vec![0; self.sector_size];
         block_device
             .read_bytes(0, &mut boot_sector)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
 
         let mut volume_flags = 0u16;
         if anomaly.volume_dirty {
@@ -358,7 +339,7 @@ impl BootRegion {
 
         block_device
             .write_bytes(0, &boot_sector)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
         Ok(())
     }
 }

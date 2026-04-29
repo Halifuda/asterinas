@@ -16,9 +16,10 @@ use super::{
         direntry::{self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, ScannedDirectoryEntry},
         fat::{ChainVisitControl, FatChainStep, FatReader},
         fs::{
-            AdmittedLookupState, AdmittedMutationState, ExfatFs, ExfatFsError, ExfatMountOptions,
+            AdmittedLookupState, AdmittedMutationState, ExfatFs, ExfatMountOptions,
             MountedVolumeState,
         },
+        device_io, invalid_on_disk_layout, invalid_operation_input, unpublished_state,
         upcase::UpcaseTable,
     },
     ExfatInode,
@@ -184,7 +185,7 @@ impl AdmittedDirectoryContext<'_> {
         admission
             .state_guard
             .as_mut()
-            .ok_or(ExfatFsError::UnpublishedState)
+            .ok_or(unpublished_state())
             .map_err(Error::from)
     }
 
@@ -220,7 +221,7 @@ impl ExfatInode {
 
     pub(super) fn admitted_directory_snapshot(
         &self,
-    ) -> core::result::Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream), ExfatFsError> {
+    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream)> {
         let owner = self.admission.read();
         let stream = *self.stream.read();
         Ok((owner, stream))
@@ -258,7 +259,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         stream: ExfatInodeStream,
-    ) -> core::result::Result<Vec<u8>, ExfatFsError> {
+    ) -> Result<Vec<u8>> {
         let Some(data_length) = stream.data_length else {
             let mut directory_bytes = Vec::new();
             let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
@@ -271,16 +272,16 @@ impl ExfatInode {
 
         if data_length == 0 {
             if stream.first_cluster != 0 {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
             return Ok(Vec::new());
         }
         if data_length % DIRECTORY_ENTRY_SIZE != 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
 
         let data_length_u64 =
-            u64::try_from(data_length).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
         boot_region.validate_stream_data(stream.first_cluster, data_length_u64)?;
 
         let mut remaining = data_length;
@@ -293,7 +294,7 @@ impl ExfatInode {
             let mut cluster_bytes = vec![0; boot_region.cluster_size];
             block_device
                 .read_bytes(cluster_start, &mut cluster_bytes)
-                .map_err(|_| ExfatFsError::DeviceIo)?;
+                .map_err(|_| device_io())?;
             let bytes_to_copy = remaining.min(cluster_bytes.len());
             directory_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
             remaining -= bytes_to_copy;
@@ -302,7 +303,7 @@ impl ExfatInode {
             }
             current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())? {
                 Some(next_cluster) => next_cluster,
-                None => return Err(ExfatFsError::InvalidOnDiskLayout),
+                None => return Err(invalid_on_disk_layout()),
             };
         }
         Ok(directory_bytes)
@@ -313,13 +314,13 @@ impl ExfatInode {
         boot_region: &BootRegion,
         directory_bytes: &[u8],
         stream: ExfatInodeStream,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let expected_length = match stream.data_length {
             Some(data_length) => data_length,
             None => directory_bytes.len(),
         };
         if directory_bytes.len() != expected_length {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
         if directory_bytes.is_empty() {
             return Ok(());
@@ -336,14 +337,14 @@ impl ExfatInode {
                     boot_region.cluster_offset(current_cluster)?,
                     &remaining[..bytes_to_write],
                 )
-                .map_err(|_| ExfatFsError::DeviceIo)?;
+                .map_err(|_| device_io())?;
             remaining = &remaining[bytes_to_write..];
             if remaining.is_empty() {
                 break;
             }
             current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())? {
                 Some(next_cluster) => next_cluster,
-                None => return Err(ExfatFsError::InvalidOnDiskLayout),
+                None => return Err(invalid_on_disk_layout()),
             };
         }
         Ok(())
@@ -353,18 +354,18 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         first_cluster: u32,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let cluster_offset = boot_region.cluster_offset(first_cluster)?;
         let cluster_bytes = vec![0; boot_region.cluster_size];
         block_device
             .write_bytes(cluster_offset, &cluster_bytes)
-            .map_err(|_| ExfatFsError::DeviceIo)
+            .map_err(|_| device_io())
     }
 
     pub(super) fn advance_cluster(
         current_cluster: u32,
         fat_reader: Option<&mut FatReader<'_>>,
-    ) -> core::result::Result<Option<u32>, ExfatFsError> {
+    ) -> Result<Option<u32>> {
         match fat_reader {
             Some(fat_reader) => match fat_reader.next_cluster(current_cluster) {
                 Ok(FatChainStep::Continue(next_cluster)) => Ok(Some(next_cluster)),
@@ -374,7 +375,7 @@ impl ExfatInode {
             None => current_cluster
                 .checked_add(1)
                 .map(Some)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout),
+                .ok_or(invalid_on_disk_layout()),
         }
     }
 
@@ -393,10 +394,10 @@ impl ExfatInode {
     pub(super) fn entry_location_ino(
         &self,
         entry_index: usize,
-    ) -> core::result::Result<u64, ExfatFsError> {
+    ) -> Result<u64> {
         let stream = self.stream.read();
         Ok((u64::from(stream.first_cluster) << 32)
-            | u64::from(u32::try_from(entry_index).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?))
+            | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
     }
 
     pub(super) fn child_inode_from_directory_entry(
@@ -410,11 +411,11 @@ impl ExfatInode {
         data_length: usize,
         valid_data_length: usize,
         no_fat_chain: bool,
-    ) -> core::result::Result<Arc<Self>, ExfatFsError> {
+    ) -> Result<Arc<Self>> {
         let child_ino = (u64::from(parent_first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
-                    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+                    .map_err(|_| invalid_on_disk_layout())?,
             );
         Ok(Self::new_child(
             fs,
@@ -470,7 +471,7 @@ impl ExfatInode {
         timestamp_bytes: [u8; 4],
         ten_ms_increment: Option<u8>,
         utc_offset_byte: u8,
-    ) -> core::result::Result<Duration, ExfatFsError> {
+    ) -> Result<Duration> {
         if timestamp_bytes == [0; 4] && ten_ms_increment.unwrap_or(0) == 0 {
             return Ok(Duration::ZERO);
         }
@@ -478,32 +479,32 @@ impl ExfatInode {
         let encoded_date = u16::from_le_bytes([timestamp_bytes[2], timestamp_bytes[3]]);
         let encoded_year = 1980i32 + i32::from(encoded_date >> 9);
         let encoded_month = u8::try_from((encoded_date >> 5) & 0x0f)
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .map_err(|_| invalid_on_disk_layout())?;
         let encoded_day =
-            u8::try_from(encoded_date & 0x1f).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            u8::try_from(encoded_date & 0x1f).map_err(|_| invalid_on_disk_layout())?;
         let month =
-            Month::try_from(encoded_month).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            Month::try_from(encoded_month).map_err(|_| invalid_on_disk_layout())?;
         let date = Date::from_calendar_date(encoded_year, month, encoded_day)
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .map_err(|_| invalid_on_disk_layout())?;
 
         let time = if let Some(ten_ms_increment) = ten_ms_increment {
             if ten_ms_increment >= 200 {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
+                return Err(invalid_on_disk_layout());
             }
 
             let encoded_time = u16::from_le_bytes([timestamp_bytes[0], timestamp_bytes[1]]);
             let seconds = u8::try_from(encoded_time & 0x1f)
-                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?
+                .map_err(|_| invalid_on_disk_layout())?
                 .checked_mul(2)
                 .and_then(|seconds| seconds.checked_add(ten_ms_increment / 100))
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                .ok_or(invalid_on_disk_layout())?;
             let milliseconds = u16::from(ten_ms_increment % 100) * 10;
             let hour = u8::try_from((encoded_time >> 11) & 0x1f)
-                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+                .map_err(|_| invalid_on_disk_layout())?;
             let minute = u8::try_from((encoded_time >> 5) & 0x3f)
-                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+                .map_err(|_| invalid_on_disk_layout())?;
             Time::from_hms_milli(hour, minute, seconds, milliseconds)
-                .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?
+                .map_err(|_| invalid_on_disk_layout())?
         } else {
             Time::MIDNIGHT
         };
@@ -511,20 +512,20 @@ impl ExfatInode {
         let utc_offset = Self::exfat_utc_offset(utc_offset_byte)?;
         let date_time = PrimitiveDateTime::new(date, time).assume_offset(utc_offset);
         let unix_timestamp_nanos = u64::try_from(date_time.unix_timestamp_nanos())
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+            .map_err(|_| invalid_on_disk_layout())?;
         Ok(Duration::from_nanos(unix_timestamp_nanos))
     }
 
     pub(super) fn exfat_utc_offset(
         utc_offset_byte: u8,
-    ) -> core::result::Result<UtcOffset, ExfatFsError> {
+    ) -> Result<UtcOffset> {
         if utc_offset_byte & 0x80 == 0 {
             return Ok(UtcOffset::UTC);
         }
 
         let quarter_hours = (((utc_offset_byte & 0x7f) as i8) << 1) >> 1;
         UtcOffset::from_whole_seconds(i32::from(quarter_hours) * 15 * 60)
-            .map_err(|_| ExfatFsError::InvalidOnDiskLayout)
+            .map_err(|_| invalid_on_disk_layout())
     }
 
     pub(super) fn encoded_exfat_timestamp_fields(
@@ -585,7 +586,7 @@ impl ExfatInode {
     pub(super) fn regular_file_allocated_sectors(
         boot_region: &BootRegion,
         data_length: usize,
-    ) -> core::result::Result<usize, ExfatFsError> {
+    ) -> Result<usize> {
         let allocated_clusters = if data_length == 0 {
             0
         } else {
@@ -593,7 +594,7 @@ impl ExfatInode {
         };
         allocated_clusters
             .checked_mul(boot_region.sectors_per_cluster)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
     }
 
     // Other helpers
@@ -613,7 +614,7 @@ impl ExfatInode {
         &self,
         stream: ExfatInodeStream,
         directory_bytes: &'a [u8],
-    ) -> core::result::Result<Option<ScannedDirectoryEntry<'a>>, ExfatFsError> {
+    ) -> Result<Option<ScannedDirectoryEntry<'a>>> {
         let is_root_directory = stream.data_length.is_none();
         let mut entry_index = 0usize;
         loop {
