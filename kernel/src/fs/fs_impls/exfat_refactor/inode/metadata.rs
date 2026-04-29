@@ -2,13 +2,15 @@
 
 use core::time::Duration;
 
+use aster_block::BlockDevice;
+
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, FileEntrySetFieldUpdates},
+        direntry::{self, FileEntrySetView, FileEntryTimestamp, ScannedDirectoryEntry},
         fs::ExfatFsError,
     },
-    ExfatFs, ExfatInode, InodeRewriteTarget, InodeTimestampField,
+    ExfatInode, InodeRewriteTarget, InodeTimestampField,
 };
 use crate::{
     fs::{
@@ -24,10 +26,7 @@ impl ExfatInode {
     // Read projection
 
     pub(super) fn metadata_projection(&self) -> Metadata {
-        let mut metadata = *self.metadata.read();
-        if metadata.type_ == InodeType::Dir {
-            return self.directory_metadata_projection().unwrap_or(metadata);
-        }
+        let metadata = *self.metadata.read();
         if metadata.type_ != InodeType::File {
             return metadata;
         }
@@ -53,6 +52,7 @@ impl ExfatInode {
             drop(owner_guard);
             return metadata;
         };
+        let mut metadata = metadata;
         metadata.size = data_length;
         metadata.nr_sectors_allocated = allocated_sectors;
         drop(owner_guard);
@@ -72,29 +72,14 @@ impl ExfatInode {
     }
 
     pub(super) fn mode_impl(&self) -> Result<InodeMode> {
-        if self.metadata.read().type_ == InodeType::Dir {
-            return self
-                .directory_metadata_projection()
-                .map(|metadata| metadata.mode);
-        }
         Ok(self.metadata_projection().mode)
     }
 
     pub(super) fn owner_impl(&self) -> Result<Uid> {
-        if self.metadata.read().type_ == InodeType::Dir {
-            return self
-                .directory_metadata_projection()
-                .map(|metadata| metadata.uid);
-        }
         Ok(self.metadata_projection().uid)
     }
 
     pub(super) fn group_impl(&self) -> Result<Gid> {
-        if self.metadata.read().type_ == InodeType::Dir {
-            return self
-                .directory_metadata_projection()
-                .map(|metadata| metadata.gid);
-        }
         Ok(self.metadata_projection().gid)
     }
 
@@ -108,6 +93,46 @@ impl ExfatInode {
 
     pub(super) fn ctime_impl(&self) -> Duration {
         self.metadata_projection().last_meta_change_at
+    }
+
+    pub(super) fn refresh_cached_metadata_from_entry_view(
+        &self,
+        entry_view: FileEntrySetView<'_>,
+        boot_region: &BootRegion,
+    ) -> core::result::Result<(), ExfatFsError> {
+        let (inode_type, _first_cluster, data_length, _no_fat_chain) =
+            entry_view.child_metadata(boot_region)?;
+        let _create_at = Self::decoded_exfat_timestamp(
+            entry_view.create_timestamp().timestamp_bytes(),
+            entry_view.create_timestamp().ten_ms_increment(),
+            entry_view.create_timestamp().utc_offset_byte(),
+        )?;
+        let last_access_at = Self::decoded_exfat_timestamp(
+            entry_view.last_accessed_timestamp().timestamp_bytes(),
+            entry_view.last_accessed_timestamp().ten_ms_increment(),
+            entry_view.last_accessed_timestamp().utc_offset_byte(),
+        )?;
+        let last_modify_at = Self::decoded_exfat_timestamp(
+            entry_view.last_modified_timestamp().timestamp_bytes(),
+            entry_view.last_modified_timestamp().ten_ms_increment(),
+            entry_view.last_modified_timestamp().utc_offset_byte(),
+        )?;
+        let allocated_sectors = Self::regular_file_allocated_sectors(boot_region, data_length)?;
+        let mut metadata = self.metadata.write();
+        if metadata.type_ != inode_type {
+            return Err(ExfatFsError::InvalidOnDiskLayout);
+        }
+        let writable_bits = metadata.mode & mkmod!(a+w);
+        metadata.mode = chmod!(metadata.mode, a-w);
+        if !entry_view.is_read_only() {
+            metadata.mode |= writable_bits;
+        }
+        metadata.last_access_at = last_access_at;
+        metadata.last_meta_change_at = last_modify_at;
+        metadata.last_modify_at = last_modify_at;
+        metadata.nr_sectors_allocated = allocated_sectors;
+        metadata.size = data_length;
+        Ok(())
     }
 
     // Write path
@@ -141,10 +166,9 @@ impl ExfatInode {
                 InodeRewriteTarget::Directory,
                 &admission.block_device,
                 &admission.boot_region,
-                |entry_view, _source_entry_set| {
+                |entry_view| {
                     let current_attributes = entry_view.file_attributes();
-                    let current_writable =
-                        current_attributes & direntry::FILE_ATTRIBUTE_READ_ONLY == 0;
+                    let current_writable = !entry_view.is_read_only();
                     if requested_writable == current_writable {
                         return Ok(None);
                     }
@@ -156,15 +180,9 @@ impl ExfatInode {
                     } else {
                         file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
                     }
-                    direntry::republished_entry_set(
-                        entry_view,
-                        &direntry::FileEntrySetFieldUpdates {
-                            file_attributes: Some(file_attributes),
-                            ..Default::default()
-                        },
-                    )
-                    .map(Some)
-                    .map_err(Error::from)
+                    let mut republished_entry_set = entry_view.republished();
+                    republished_entry_set.set_file_attributes(file_attributes);
+                    Ok(Some(republished_entry_set.into_bytes()))
                 },
                 |metadata| {
                     let writable_bits = metadata.mode & mkmod!(a+w);
@@ -205,25 +223,17 @@ impl ExfatInode {
             InodeRewriteTarget::RegularFile,
             &admission.block_device,
             &admission.boot_region,
-            |entry_view, _source_entry_set| {
-                if requested_writable
-                    == (entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_READ_ONLY != 0)
-                {
+            |entry_view| {
+                if requested_writable == entry_view.is_read_only() {
                     let mut file_attributes = entry_view.file_attributes();
                     if requested_writable {
                         file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
                     } else {
                         file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
                     }
-                    return direntry::republished_entry_set(
-                        entry_view,
-                        &direntry::FileEntrySetFieldUpdates {
-                            file_attributes: Some(file_attributes),
-                            ..Default::default()
-                        },
-                    )
-                    .map(Some)
-                    .map_err(Error::from);
+                    let mut republished_entry_set = entry_view.republished();
+                    republished_entry_set.set_file_attributes(file_attributes);
+                    return Ok(Some(republished_entry_set.into_bytes()));
                 }
                 Ok(None)
             },
@@ -349,7 +359,7 @@ impl ExfatInode {
         self.reject_published_identity_change(|metadata| metadata.gid == gid)
     }
 
-    // Write helpers
+    // Metadata mutation helpers
 
     pub(super) fn reject_published_identity_change(
         &self,
@@ -415,48 +425,45 @@ impl ExfatInode {
                         InodeRewriteTarget::Directory,
                         &admission.block_device,
                         &admission.boot_region,
-                        |entry_view, source_entry_set| match field_kind {
-                            InodeTimestampField::Accessed => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_accessed_fields: Some((
+                        |entry_view| {
+                            let mut republished_entry_set = entry_view.republished();
+                            match field_kind {
+                                InodeTimestampField::Accessed => {
+                                    let (
+                                        timestamp_bytes,
+                                        _ten_ms_increment,
+                                        encoded_utc_offset_byte,
+                                    ) = Self::encoded_exfat_timestamp_fields(
+                                        time,
+                                        entry_view.last_accessed_timestamp().utc_offset_byte(),
+                                    )?;
+                                    republished_entry_set.set_last_accessed_timestamp(
+                                        FileEntryTimestamp::new(
                                             [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                            None,
                                             encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                            InodeTimestampField::Modified => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_modified_fields: Some((
+                                        ),
+                                    );
+                                }
+                                InodeTimestampField::Modified => {
+                                    let (
+                                        timestamp_bytes,
+                                        ten_ms_increment,
+                                        encoded_utc_offset_byte,
+                                    ) = Self::encoded_exfat_timestamp_fields(
+                                        time,
+                                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                                    )?;
+                                    republished_entry_set.set_last_modified_timestamp(
+                                        FileEntryTimestamp::new(
                                             timestamp_bytes,
-                                            ten_ms_increment,
+                                            Some(ten_ms_increment),
                                             encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
+                                        ),
+                                    );
+                                }
                             }
+                            Ok(Some(republished_entry_set.into_bytes()))
                         },
                         |metadata| match field_kind {
                             InodeTimestampField::Accessed => metadata.last_access_at = time,
@@ -477,48 +484,45 @@ impl ExfatInode {
                         InodeRewriteTarget::RegularFile,
                         &admission.block_device,
                         &admission.boot_region,
-                        |entry_view, source_entry_set| match field_kind {
-                            InodeTimestampField::Accessed => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_ACCESSED_UTC_OFFSET_OFFSET)
-                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_accessed_fields: Some((
+                        |entry_view| {
+                            let mut republished_entry_set = entry_view.republished();
+                            match field_kind {
+                                InodeTimestampField::Accessed => {
+                                    let (
+                                        timestamp_bytes,
+                                        _ten_ms_increment,
+                                        encoded_utc_offset_byte,
+                                    ) = Self::encoded_exfat_timestamp_fields(
+                                        time,
+                                        entry_view.last_accessed_timestamp().utc_offset_byte(),
+                                    )?;
+                                    republished_entry_set.set_last_accessed_timestamp(
+                                        FileEntryTimestamp::new(
                                             [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                            None,
                                             encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
-                            }
-                            InodeTimestampField::Modified => {
-                                let utc_offset_byte = *source_entry_set
-                                    .get(direntry::LAST_MODIFIED_UTC_OFFSET_OFFSET)
-                                    .ok_or(ExfatFsError::InvalidOnDiskLayout)
-                                    .map_err(Error::from)?;
-                                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
-                                    Self::encoded_exfat_timestamp_fields(time, utc_offset_byte)?;
-                                direntry::republished_entry_set(
-                                    entry_view,
-                                    &direntry::FileEntrySetFieldUpdates {
-                                        last_modified_fields: Some((
+                                        ),
+                                    );
+                                }
+                                InodeTimestampField::Modified => {
+                                    let (
+                                        timestamp_bytes,
+                                        ten_ms_increment,
+                                        encoded_utc_offset_byte,
+                                    ) = Self::encoded_exfat_timestamp_fields(
+                                        time,
+                                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                                    )?;
+                                    republished_entry_set.set_last_modified_timestamp(
+                                        FileEntryTimestamp::new(
                                             timestamp_bytes,
-                                            ten_ms_increment,
+                                            Some(ten_ms_increment),
                                             encoded_utc_offset_byte,
-                                        )),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(Some)
-                                .map_err(Error::from)
+                                        ),
+                                    );
+                                }
                             }
+                            Ok(Some(republished_entry_set.into_bytes()))
                         },
                         |_| {},
                     )
@@ -535,5 +539,132 @@ impl ExfatInode {
                 }
             }
         }
+    }
+
+    pub(super) fn refresh_directory_metadata_after_namespace_mutation(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        timestamp: Duration,
+    ) -> Result<()> {
+        if self.metadata.read().type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+
+        if self.stream.read().data_length.is_none() {
+            let mut metadata = self.metadata.write();
+            metadata.last_meta_change_at = timestamp;
+            metadata.last_modify_at = timestamp;
+            drop(metadata);
+            self.mark_metadata_publication_dirty();
+            return Ok(());
+        }
+
+        let durable_updated = self.rewrite_inode_entry_set(
+            InodeRewriteTarget::Directory,
+            block_device,
+            boot_region,
+            |entry_view| {
+                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                    Self::encoded_exfat_timestamp_fields(
+                        timestamp,
+                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                    )?;
+                let mut republished_entry_set = entry_view.republished();
+                republished_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
+                    timestamp_bytes,
+                    Some(ten_ms_increment),
+                    encoded_utc_offset_byte,
+                ));
+                Ok(Some(republished_entry_set.into_bytes()))
+            },
+            |metadata| {
+                metadata.last_meta_change_at = timestamp;
+                metadata.last_modify_at = timestamp;
+            },
+        )?;
+        if durable_updated {
+            self.mark_metadata_publication_dirty();
+        }
+        Ok(())
+    }
+
+    pub(super) fn rewrite_inode_entry_set(
+        &self,
+        target: InodeRewriteTarget,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
+        update_metadata_fn: impl FnOnce(&mut Metadata),
+    ) -> Result<bool> {
+        let parent = self.parent.upgrade().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "ordinary exFAT directory parent is not published",
+            )
+        })?;
+        let _directory_guards = match target {
+            InodeRewriteTarget::Directory => Some(Self::ordered_directory_write_guards(vec![
+                self,
+                parent.as_ref(),
+            ])),
+            InodeRewriteTarget::RegularFile => None,
+        };
+        let _parent_guard = match target {
+            InodeRewriteTarget::Directory => None,
+            InodeRewriteTarget::RegularFile => Some(parent.admission.write()),
+        };
+        let parent_stream = *parent.stream.read();
+        let mut directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
+                .map_err(Error::from)?;
+        let entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let entry_view = match direntry::scan_directory_entry(
+            parent_stream.data_length.is_none(),
+            &directory_bytes,
+            entry_index,
+        )
+        .map_err(Error::from)?
+        {
+            ScannedDirectoryEntry::File(entry_view) => entry_view,
+            _ => return Err(Error::from(ExfatFsError::InvalidOnDiskLayout)),
+        };
+        let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
+            .child_metadata(boot_region)
+            .map_err(Error::from)?;
+        match target {
+            InodeRewriteTarget::Directory => {
+                if !entry_view.is_directory() || inode_type != InodeType::Dir {
+                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                }
+            }
+            InodeRewriteTarget::RegularFile => {
+                if entry_view.is_directory() || inode_type != InodeType::File {
+                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                }
+            }
+        }
+
+        let slot_range_bytes =
+            direntry::slot_range_bytes(entry_view.slot_range()).map_err(Error::from)?;
+        let Some(republished_entry_set) = rewrite_entry_set_fn(entry_view)? else {
+            return Ok(false);
+        };
+        let destination_entry_set = directory_bytes
+            .get_mut(slot_range_bytes)
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .map_err(Error::from)?;
+        destination_entry_set.copy_from_slice(&republished_entry_set);
+        Self::write_directory_bytes_for_stream(
+            block_device,
+            boot_region,
+            &directory_bytes,
+            parent_stream,
+        )
+        .map_err(Error::from)?;
+        let mut metadata = self.metadata.write();
+        update_metadata_fn(&mut metadata);
+        Ok(true)
     }
 }

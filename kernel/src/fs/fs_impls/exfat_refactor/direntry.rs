@@ -12,14 +12,14 @@ use crate::fs::file::InodeType;
 pub(super) const DIRECTORY_ENTRY_SIZE: usize = 32;
 pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 pub(super) const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
-pub(super) const CREATE_TIMESTAMP_OFFSET: usize = 8;
-pub(super) const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
-pub(super) const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
-pub(super) const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
-pub(super) const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
-pub(super) const CREATE_UTC_OFFSET_OFFSET: usize = 22;
-pub(super) const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
-pub(super) const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
+const CREATE_TIMESTAMP_OFFSET: usize = 8;
+const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
+const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
+const CREATE_10MS_INCREMENT_OFFSET: usize = 20;
+const LAST_MODIFIED_10MS_INCREMENT_OFFSET: usize = 21;
+const CREATE_UTC_OFFSET_OFFSET: usize = 22;
+const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
+const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct DirectoryEntrySlotRange {
@@ -67,6 +67,82 @@ pub(super) enum DirectoryEntryAnomalyKind {
     UnexpectedSecondaryEntry,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct FileEntryTimestamp {
+    ten_ms_increment: Option<u8>,
+    timestamp_bytes: [u8; 4],
+    utc_offset_byte: u8,
+}
+
+impl FileEntryTimestamp {
+    pub(super) fn new(
+        timestamp_bytes: [u8; 4],
+        ten_ms_increment: Option<u8>,
+        utc_offset_byte: u8,
+    ) -> Self {
+        Self {
+            ten_ms_increment,
+            timestamp_bytes,
+            utc_offset_byte,
+        }
+    }
+
+    pub(super) fn ten_ms_increment(self) -> Option<u8> {
+        self.ten_ms_increment
+    }
+
+    pub(super) fn timestamp_bytes(self) -> [u8; 4] {
+        self.timestamp_bytes
+    }
+
+    pub(super) fn utc_offset_byte(self) -> u8 {
+        self.utc_offset_byte
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FileEntryClusterMap {
+    data_length: u64,
+    first_cluster: u32,
+    no_fat_chain: bool,
+    valid_data_length: u64,
+}
+
+impl FileEntryClusterMap {
+    pub(super) fn new(
+        first_cluster: u32,
+        data_length: u64,
+        valid_data_length: u64,
+        no_fat_chain: bool,
+    ) -> core::result::Result<Self, ExfatFsError> {
+        if valid_data_length > data_length {
+            return Err(ExfatFsError::InvalidOnDiskLayout);
+        }
+        Ok(Self {
+            data_length,
+            first_cluster,
+            no_fat_chain,
+            valid_data_length,
+        })
+    }
+
+    pub(super) fn data_length(self) -> u64 {
+        self.data_length
+    }
+
+    pub(super) fn first_cluster(self) -> u32 {
+        self.first_cluster
+    }
+
+    pub(super) fn no_fat_chain(self) -> bool {
+        self.no_fat_chain
+    }
+
+    pub(super) fn valid_data_length(self) -> u64 {
+        self.valid_data_length
+    }
+}
+
 // Borrowed read-only view produced only from one validated file entry set. This
 // is not a general mutable entry buffer.
 #[derive(Clone, Copy)]
@@ -101,8 +177,190 @@ impl FileEntrySetView<'_> {
         ])
     }
 
+    pub(super) fn is_directory(self) -> bool {
+        self.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+
+    pub(super) fn is_read_only(self) -> bool {
+        self.file_attributes() & FILE_ATTRIBUTE_READ_ONLY != 0
+    }
+
+    pub(super) fn create_timestamp(self) -> FileEntryTimestamp {
+        FileEntryTimestamp::new(
+            [
+                self.primary_entry[CREATE_TIMESTAMP_OFFSET],
+                self.primary_entry[CREATE_TIMESTAMP_OFFSET + 1],
+                self.primary_entry[CREATE_TIMESTAMP_OFFSET + 2],
+                self.primary_entry[CREATE_TIMESTAMP_OFFSET + 3],
+            ],
+            Some(self.primary_entry[CREATE_10MS_INCREMENT_OFFSET]),
+            self.primary_entry[CREATE_UTC_OFFSET_OFFSET],
+        )
+    }
+
+    pub(super) fn last_modified_timestamp(self) -> FileEntryTimestamp {
+        FileEntryTimestamp::new(
+            [
+                self.primary_entry[LAST_MODIFIED_TIMESTAMP_OFFSET],
+                self.primary_entry[LAST_MODIFIED_TIMESTAMP_OFFSET + 1],
+                self.primary_entry[LAST_MODIFIED_TIMESTAMP_OFFSET + 2],
+                self.primary_entry[LAST_MODIFIED_TIMESTAMP_OFFSET + 3],
+            ],
+            Some(self.primary_entry[LAST_MODIFIED_10MS_INCREMENT_OFFSET]),
+            self.primary_entry[LAST_MODIFIED_UTC_OFFSET_OFFSET],
+        )
+    }
+
+    pub(super) fn last_accessed_timestamp(self) -> FileEntryTimestamp {
+        FileEntryTimestamp::new(
+            [
+                self.primary_entry[LAST_ACCESSED_TIMESTAMP_OFFSET],
+                self.primary_entry[LAST_ACCESSED_TIMESTAMP_OFFSET + 1],
+                self.primary_entry[LAST_ACCESSED_TIMESTAMP_OFFSET + 2],
+                self.primary_entry[LAST_ACCESSED_TIMESTAMP_OFFSET + 3],
+            ],
+            None,
+            self.primary_entry[LAST_ACCESSED_UTC_OFFSET_OFFSET],
+        )
+    }
+
+    pub(super) fn cluster_map(self) -> core::result::Result<FileEntryClusterMap, ExfatFsError> {
+        FileEntryClusterMap::new(
+            u32::from_le_bytes([
+                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET],
+                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 1],
+                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 2],
+                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 3],
+            ]),
+            u64::from_le_bytes([
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 1],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 2],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 3],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 4],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 5],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 6],
+                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 7],
+            ]),
+            u64::from_le_bytes([
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 1],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 2],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 3],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 4],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 5],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 6],
+                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 7],
+            ]),
+            self.stream_entry[STREAM_FLAGS_OFFSET] & 0x02 != 0,
+        )
+    }
+
+    pub(super) fn republished(self) -> RepublishedFileEntrySet {
+        RepublishedFileEntrySet {
+            entry_set: self.entry_set.to_vec(),
+            secondary_count: self.secondary_count,
+        }
+    }
+
     pub(super) fn stored_name_hash(self) -> u16 {
-        u16::from_le_bytes([self.stream_entry[4], self.stream_entry[5]])
+        u16::from_le_bytes([
+            self.stream_entry[STREAM_NAME_HASH_OFFSET],
+            self.stream_entry[STREAM_NAME_HASH_OFFSET + 1],
+        ])
+    }
+}
+
+pub(super) struct RepublishedFileEntrySet {
+    entry_set: Vec<u8>,
+    secondary_count: usize,
+}
+
+impl RepublishedFileEntrySet {
+    pub(super) fn set_file_attributes(&mut self, file_attributes: u16) {
+        self.entry_set[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2]
+            .copy_from_slice(&file_attributes.to_le_bytes());
+    }
+
+    pub(super) fn set_last_accessed_timestamp(&mut self, timestamp: FileEntryTimestamp) {
+        self.entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
+            .copy_from_slice(&timestamp.timestamp_bytes());
+        self.entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = timestamp.utc_offset_byte();
+    }
+
+    pub(super) fn set_last_modified_timestamp(&mut self, timestamp: FileEntryTimestamp) {
+        self.entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
+            .copy_from_slice(&timestamp.timestamp_bytes());
+        self.entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] =
+            timestamp.ten_ms_increment().unwrap_or(0);
+        self.entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = timestamp.utc_offset_byte();
+    }
+
+    pub(super) fn set_cluster_map(&mut self, cluster_map: FileEntryClusterMap) {
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_FLAGS_OFFSET] = if cluster_map.no_fat_chain() {
+            0x03
+        } else {
+            0x01
+        };
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_VALID_DATA_LENGTH_OFFSET
+            ..DIRECTORY_ENTRY_SIZE + STREAM_VALID_DATA_LENGTH_OFFSET + 8]
+            .copy_from_slice(&cluster_map.valid_data_length().to_le_bytes());
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_FIRST_CLUSTER_OFFSET
+            ..DIRECTORY_ENTRY_SIZE + STREAM_FIRST_CLUSTER_OFFSET + 4]
+            .copy_from_slice(&cluster_map.first_cluster().to_le_bytes());
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_DATA_LENGTH_OFFSET
+            ..DIRECTORY_ENTRY_SIZE + STREAM_DATA_LENGTH_OFFSET + 8]
+            .copy_from_slice(&cluster_map.data_length().to_le_bytes());
+    }
+
+    fn set_name_fields(
+        &mut self,
+        name: &[u16],
+        name_hash: u16,
+    ) -> core::result::Result<(), ExfatFsError> {
+        let current_name_entry_count =
+            usize::from(self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET])
+                .div_ceil(15);
+        let requested_name_entry_count = file_entry_set_entry_count(name.len())?
+            .checked_sub(2)
+            .ok_or(ExfatFsError::InvalidOperationInput)?;
+        if requested_name_entry_count != current_name_entry_count {
+            return Err(ExfatFsError::InvalidOperationInput);
+        }
+
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET] =
+            u8::try_from(name.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET
+            ..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
+            .copy_from_slice(&name_hash.to_le_bytes());
+
+        for name_entry_index in 0..current_name_entry_count {
+            let name_entry_offset = (name_entry_index + 2)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            self.entry_set[name_entry_offset + 2..name_entry_offset + DIRECTORY_ENTRY_SIZE].fill(0);
+        }
+
+        for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
+            let name_entry_offset = (name_entry_index + 2)
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(ExfatFsError::InvalidOperationInput)?;
+            for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
+                let code_unit_offset = name_entry_offset
+                    .checked_add(2)
+                    .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
+                    .ok_or(ExfatFsError::InvalidOperationInput)?;
+                self.entry_set[code_unit_offset..code_unit_offset + 2]
+                    .copy_from_slice(&name_code_unit.to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn into_bytes(mut self) -> Vec<u8> {
+        let checksum = entry_set_checksum(&self.entry_set, self.secondary_count);
+        self.entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
+        self.entry_set
     }
 }
 
@@ -324,127 +582,6 @@ pub(super) fn write_volume_label(
     Ok(())
 }
 
-// Recognized field updates for one already-admitted published file entry set.
-// This preserves the existing entry-set topology and refuses layout-changing
-// name rewrites.
-#[derive(Default)]
-pub(super) struct FileEntrySetFieldUpdates<'a> {
-    pub(super) create_fields: Option<([u8; 4], u8, u8)>,
-    pub(super) data_length: Option<u64>,
-    pub(super) file_attributes: Option<u16>,
-    pub(super) first_cluster: Option<u32>,
-    pub(super) last_accessed_fields: Option<([u8; 4], u8)>,
-    pub(super) last_modified_fields: Option<([u8; 4], u8, u8)>,
-    pub(super) name: Option<&'a [u16]>,
-    pub(super) name_hash: Option<u16>,
-    pub(super) stream_flags: Option<u8>,
-    pub(super) valid_data_length: Option<u64>,
-}
-
-pub(super) fn republished_entry_set(
-    source_entry_set: FileEntrySetView<'_>,
-    updates: &FileEntrySetFieldUpdates<'_>,
-) -> core::result::Result<Vec<u8>, ExfatFsError> {
-    let mut republished_entry_set = source_entry_set.entry_set.to_vec();
-    let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
-
-    if let Some(file_attributes) = updates.file_attributes {
-        republished_entry_set[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2]
-            .copy_from_slice(&file_attributes.to_le_bytes());
-    }
-
-    if let Some((timestamp, ten_ms_increment, utc_offset)) = updates.create_fields {
-        republished_entry_set[CREATE_TIMESTAMP_OFFSET..CREATE_TIMESTAMP_OFFSET + 4]
-            .copy_from_slice(&timestamp);
-        republished_entry_set[CREATE_10MS_INCREMENT_OFFSET] = ten_ms_increment;
-        republished_entry_set[CREATE_UTC_OFFSET_OFFSET] = utc_offset;
-    }
-
-    if let Some((timestamp, ten_ms_increment, utc_offset)) = updates.last_modified_fields {
-        republished_entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
-            .copy_from_slice(&timestamp);
-        republished_entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] = ten_ms_increment;
-        republished_entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = utc_offset;
-    }
-
-    if let Some((timestamp, utc_offset)) = updates.last_accessed_fields {
-        republished_entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
-            .copy_from_slice(&timestamp);
-        republished_entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = utc_offset;
-    }
-
-    if let Some(name) = updates.name {
-        let current_name_entry_count =
-            usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
-        let requested_name_entry_count = file_entry_set_entry_count(name.len())?
-            .checked_sub(2)
-            .ok_or(ExfatFsError::InvalidOperationInput)?;
-        if requested_name_entry_count != current_name_entry_count {
-            return Err(ExfatFsError::InvalidOperationInput);
-        }
-
-        republished_entry_set[stream_entry_offset + STREAM_NAME_LENGTH_OFFSET] =
-            u8::try_from(name.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
-
-        for name_entry_index in 0..current_name_entry_count {
-            let name_entry_offset = (name_entry_index + 2)
-                .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-            republished_entry_set[name_entry_offset + 2..name_entry_offset + DIRECTORY_ENTRY_SIZE]
-                .fill(0);
-        }
-
-        for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
-            let name_entry_offset = (name_entry_index + 2)
-                .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
-            for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
-                let code_unit_offset = name_entry_offset
-                    .checked_add(2)
-                    .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
-                    .ok_or(ExfatFsError::InvalidOperationInput)?;
-                republished_entry_set[code_unit_offset..code_unit_offset + 2]
-                    .copy_from_slice(&name_code_unit.to_le_bytes());
-            }
-        }
-    }
-
-    if let Some(name_hash) = updates.name_hash {
-        republished_entry_set[stream_entry_offset + STREAM_NAME_HASH_OFFSET
-            ..stream_entry_offset + STREAM_NAME_HASH_OFFSET + 2]
-            .copy_from_slice(&name_hash.to_le_bytes());
-    }
-
-    if let Some(stream_flags) = updates.stream_flags {
-        republished_entry_set[stream_entry_offset + STREAM_FLAGS_OFFSET] = stream_flags;
-    }
-
-    if let Some(valid_data_length) = updates.valid_data_length {
-        republished_entry_set[stream_entry_offset + STREAM_VALID_DATA_LENGTH_OFFSET
-            ..stream_entry_offset + STREAM_VALID_DATA_LENGTH_OFFSET + 8]
-            .copy_from_slice(&valid_data_length.to_le_bytes());
-    }
-
-    if let Some(first_cluster) = updates.first_cluster {
-        republished_entry_set[stream_entry_offset + STREAM_FIRST_CLUSTER_OFFSET
-            ..stream_entry_offset + STREAM_FIRST_CLUSTER_OFFSET + 4]
-            .copy_from_slice(&first_cluster.to_le_bytes());
-    }
-
-    if let Some(data_length) = updates.data_length {
-        republished_entry_set[stream_entry_offset + STREAM_DATA_LENGTH_OFFSET
-            ..stream_entry_offset + STREAM_DATA_LENGTH_OFFSET + 8]
-            .copy_from_slice(&data_length.to_le_bytes());
-    }
-
-    let checksum = entry_set_checksum(
-        &republished_entry_set,
-        usize::from(source_entry_set.secondary_count),
-    );
-    republished_entry_set[2..4].copy_from_slice(&checksum.to_le_bytes());
-    Ok(republished_entry_set)
-}
-
 pub(super) fn renamed_entry_set(
     source_entry_set: FileEntrySetView<'_>,
     name: &[u16],
@@ -457,14 +594,9 @@ pub(super) fn renamed_entry_set(
     let current_name_entry_count =
         usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
     if new_name_entry_count == current_name_entry_count {
-        return republished_entry_set(
-            source_entry_set,
-            &FileEntrySetFieldUpdates {
-                name: Some(name),
-                name_hash: Some(name_hash),
-                ..Default::default()
-            },
-        );
+        let mut renamed_entry_set = source_entry_set.republished();
+        renamed_entry_set.set_name_fields(name, name_hash)?;
+        return Ok(renamed_entry_set.into_bytes());
     }
     let required_secondary_count = current_name_entry_count
         .checked_add(1)

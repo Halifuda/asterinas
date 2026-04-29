@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::string::String;
-
 use aster_block::BlockDevice;
 
 use super::{
@@ -9,17 +7,17 @@ use super::{
         bitmap::ClusterRange,
         boot::BootRegion,
         direntry::{
-            self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, FileEntrySetFieldUpdates,
-            FileEntrySetView, ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
+            self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, FileEntrySetView,
+            ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
         },
         fat::{ChainVisitControl, FatReader},
-        fs::{ExfatFsError, ExfatMountOptions},
+        fs::ExfatFsError,
     },
-    ExfatFs, ExfatInode, ExfatInodeStream, MountedVolumeState, UpcaseTable,
+    DirectoryContextMode, ExfatFs, ExfatInode, ExfatInodeStream, MountedVolumeState, UpcaseTable,
 };
 use crate::{
     fs::{
-        file::{InodeMode, InodeType, chmod},
+        file::{InodeMode, InodeType},
         vfs::{file_system::FsFlags, inode::Inode},
     },
     prelude::*,
@@ -35,9 +33,6 @@ impl ExfatInode {
         type_: InodeType,
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
         if !matches!(type_, InodeType::File | InodeType::Dir) {
             return_errno!(Errno::EOPNOTSUPP);
         }
@@ -46,14 +41,14 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
-        if admission.forced_shutdown {
+        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
+        if context.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = &admission.block_device;
-        let boot_region = &admission.boot_region;
-        let upcase_table = &admission.upcase_table;
-        let options = &admission.options;
+        let block_device = context.block_device();
+        let boot_region = context.boot_region();
+        let upcase_table = context.upcase_table();
+        let options = context.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -81,11 +76,7 @@ impl ExfatInode {
                 return_errno!(Errno::EEXIST);
             }
 
-            let publication = admission
-                .state_guard
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+            let publication = context.publication()?;
             let (stream, mut published_directory_bytes, slot_range) = self
                 .reserve_directory_entry_slots(
                     stream,
@@ -194,22 +185,18 @@ impl ExfatInode {
     }
 
     pub(super) fn unlink_impl(&self, name: &str) -> Result<()> {
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
-        if admission.forced_shutdown {
+        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
+        if context.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = &admission.block_device;
-        let boot_region = &admission.boot_region;
-        let upcase_table = &admission.upcase_table;
-        let options = &admission.options;
+        let block_device = context.block_device();
+        let boot_region = context.boot_region();
+        let upcase_table = context.upcase_table();
+        let options = context.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -224,19 +211,21 @@ impl ExfatInode {
             let directory_bytes =
                 Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
                     .map_err(Error::from)?;
-            let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
-                Self::locate_named_child(
-                    &directory_bytes,
-                    is_root_directory,
-                    &boot_region,
-                    &upcase_table,
-                    &admitted_name,
-                    lookup_name_hash,
-                )
-                .map_err(Error::from)?
+            let Some(entry_view) = Self::locate_named_child_view(
+                &directory_bytes,
+                is_root_directory,
+                &upcase_table,
+                &admitted_name,
+                lookup_name_hash,
+            )
+            .map_err(Error::from)?
             else {
                 return_errno!(Errno::ENOENT);
             };
+            let slot_range = entry_view.slot_range();
+            let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
+                .child_metadata(&boot_region)
+                .map_err(Error::from)?;
             if inode_type == InodeType::Dir {
                 return_errno!(Errno::EISDIR);
             }
@@ -271,11 +260,7 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = admission
-                .state_guard
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+            let publication = context.publication()?;
             let _ =
                 fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
         }
@@ -288,22 +273,18 @@ impl ExfatInode {
     }
 
     pub(super) fn rmdir_impl(&self, name: &str) -> Result<()> {
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
-        if admission.forced_shutdown {
+        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
+        if context.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = &admission.block_device;
-        let boot_region = &admission.boot_region;
-        let upcase_table = &admission.upcase_table;
-        let options = &admission.options;
+        let block_device = context.block_device();
+        let boot_region = context.boot_region();
+        let upcase_table = context.upcase_table();
+        let options = context.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -317,19 +298,21 @@ impl ExfatInode {
             let directory_bytes =
                 Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
                     .map_err(Error::from)?;
-            let Some((slot_range, inode_type, first_cluster, data_length, _, no_fat_chain)) =
-                Self::locate_named_child(
-                    &directory_bytes,
-                    stream.data_length.is_none(),
-                    &boot_region,
-                    &upcase_table,
-                    &admitted_name,
-                    lookup_name_hash,
-                )
-                .map_err(Error::from)?
+            let Some(entry_view) = Self::locate_named_child_view(
+                &directory_bytes,
+                stream.data_length.is_none(),
+                &upcase_table,
+                &admitted_name,
+                lookup_name_hash,
+            )
+            .map_err(Error::from)?
             else {
                 return_errno!(Errno::ENOENT);
             };
+            let slot_range = entry_view.slot_range();
+            let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
+                .child_metadata(&boot_region)
+                .map_err(Error::from)?;
             if inode_type != InodeType::Dir {
                 return_errno!(Errno::ENOTDIR);
             }
@@ -379,11 +362,7 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = admission
-                .state_guard
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+            let publication = context.publication()?;
             let _ =
                 fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
         }
@@ -401,14 +380,10 @@ impl ExfatInode {
         target: &Arc<dyn Inode>,
         new_name: &str,
     ) -> Result<()> {
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-
         let Some(target_directory) = target.downcast_ref::<Self>() else {
             return_errno!(Errno::EXDEV);
         };
-        if target_directory.type_() != InodeType::Dir {
+        if self.type_() != InodeType::Dir || target_directory.type_() != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
 
@@ -416,6 +391,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
         let target_fs = target_directory
             .fs
             .upgrade()
@@ -423,15 +399,13 @@ impl ExfatInode {
         if !Arc::ptr_eq(&fs, &target_fs) {
             return_errno!(Errno::EXDEV);
         }
-
-        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
-        if admission.forced_shutdown {
+        if context.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = &admission.block_device;
-        let boot_region = &admission.boot_region;
-        let upcase_table = &admission.upcase_table;
-        let options = &admission.options;
+        let block_device = context.block_device();
+        let boot_region = context.boot_region();
+        let upcase_table = context.upcase_table();
+        let options = context.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -491,11 +465,7 @@ impl ExfatInode {
                 .transpose()
                 .map_err(Error::from)?
                 .flatten();
-                let publication = admission
-                    .state_guard
-                    .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)
-                    .map_err(Error::from)?;
+                let publication = context.publication()?;
                 let stream = *self.stream.read();
                 self.rename_within_directory(
                     stream,
@@ -559,11 +529,7 @@ impl ExfatInode {
             .transpose()
             .map_err(Error::from)?
             .flatten();
-            let publication = admission
-                .state_guard
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+            let publication = context.publication()?;
             let source_stream = *self.stream.read();
             let target_stream = *target_directory.stream.read();
             self.rename_across_directories(

@@ -1,58 +1,45 @@
 // SPDX-License-Identifier: MPL-2.0
 
 mod cached_io;
-mod dir_metadata;
 mod dir_mutation;
-mod file_metadata;
 mod file_mutation;
 mod lookup;
+mod metadata;
 mod page_backend;
 mod state;
 mod sync;
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::time::Duration;
 
-use aster_block::{
-    BlockDevice,
-    bio::{Bio, BioDirection, BioSegment, BioStatus, BioType, BioWaiter},
-    id::Sid,
-};
-use ostd::{
-    mm::{FallibleVmWrite, Segment, VmReader, io::util::HasVmReaderWriter},
-    sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard},
-};
+use aster_block::BlockDevice;
+use ostd::{mm::VmReader, sync::RwMutex};
 use spin::Once;
-use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use self::{
-    state::{ExfatInodeDirtyState, ExfatInodeStream, InodeRewriteTarget, InodeTimestampField},
+    state::{
+        DirectoryContextMode, ExfatInodeDirtyState, ExfatInodeStream, InodeRewriteTarget,
+        InodeTimestampField,
+    },
     sync::InodeSyncScope,
 };
 use super::{
-    bitmap::ClusterRange,
     boot::BootRegion,
-    direntry::{
-        self, DIRECTORY_ENTRY_SIZE, DirectoryEntryAnomalyKind, DirectoryEntrySlotRange,
-        FileEntrySetView, ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
-    },
-    fat::{ChainVisitControl, FatChainStep, FatReader},
-    fs::{ExfatFs, ExfatFsError, ExfatMountOptions, MountedVolumeState},
+    fs::{ExfatFs, ExfatFsError, MountedVolumeState},
     upcase::UpcaseTable,
 };
 use crate::{
     fs::{
-        file::{AccessMode, FileIo, InodeMode, InodeType, StatusFlags, chmod, mkmod},
+        file::{AccessMode, FileIo, InodeMode, InodeType, StatusFlags, mkmod},
         utils::DirentVisitor,
         vfs::{
-            file_system::{FileSystem, FsFlags},
+            file_system::FileSystem,
             inode::{Extension, FallocMode, Inode, Metadata, MknodType, SymbolicLink},
-            page_cache::{CachePage, PageCache, PageCacheBackend},
+            page_cache::PageCache,
         },
     },
     prelude::*,
     process::{Gid, Uid},
-    time::clocks::RealTimeCoarseClock,
     vm::vmo::Vmo,
 };
 
@@ -340,19 +327,23 @@ impl Inode for ExfatInode {
     }
 
     fn sync_all(&self) -> Result<()> {
-        if self.type_() != InodeType::File {
-            return Ok(());
+        match self.type_() {
+            InodeType::File => self.sync_regular_file(InodeSyncScope::All),
+            // exFAT publishes directory metadata through the parent entry during mutation, so
+            // directories do not retain a separate deferred writeback path for `sync_all()`.
+            InodeType::Dir => Ok(()),
+            _ => Ok(()),
         }
-
-        self.sync_regular_file(InodeSyncScope::All)
     }
 
     fn sync_data(&self) -> Result<()> {
-        if self.type_() != InodeType::File {
-            return Ok(());
+        match self.type_() {
+            InodeType::File => self.sync_regular_file(InodeSyncScope::Data),
+            // `sync_data()` matches `sync_all()` for directories because namespace mutations
+            // already rewrite the owning parent entry eagerly.
+            InodeType::Dir => Ok(()),
+            _ => Ok(()),
         }
-
-        self.sync_regular_file(InodeSyncScope::Data)
     }
 
     fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {

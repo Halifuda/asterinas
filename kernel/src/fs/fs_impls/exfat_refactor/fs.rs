@@ -11,7 +11,6 @@ use ostd::{
 use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
     boot::BootRegion,
-    direntry,
     fat::FatReader,
     inode::ExfatInode,
     upcase::UpcaseTable,
