@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Projects and mutates inode metadata backed by exFAT file-entry sets.
+//!
+//! Method groups: cached projection, VFS metadata getters, metadata setters, timestamp rewrite,
+//! entry-set rewrite, and directory metadata refresh.
+
 use core::time::Duration;
 
 use aster_block::BlockDevice;

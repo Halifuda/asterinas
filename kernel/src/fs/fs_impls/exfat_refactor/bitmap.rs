@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Owns allocation-bitmap scanning, range normalization, and cached used-cluster accounting.
+
 use core::ops::Range;
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};

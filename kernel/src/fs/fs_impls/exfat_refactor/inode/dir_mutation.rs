@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Implements directory namespace mutations and directory cluster-map growth.
+//!
+//! Method groups: create/unlink/rmdir/rename entry points, slot management, directory growth,
+//! emptiness validation, cluster-range collection, and rename-stage helpers.
+
 use aster_block::BlockDevice;
 
 use super::{
@@ -24,6 +29,54 @@ use crate::{
     prelude::*,
     time::clocks::RealTimeCoarseClock,
 };
+
+struct AllocatedDirectoryClusterGuard<'a> {
+    fs: &'a Arc<ExfatFs>,
+    publication: &'a mut MountedVolumeState,
+    allocated_ranges: Option<Vec<ClusterRange>>,
+}
+
+impl<'a> AllocatedDirectoryClusterGuard<'a> {
+    fn allocate(
+        fs: &'a Arc<ExfatFs>,
+        publication: &'a mut MountedVolumeState,
+    ) -> Result<Self> {
+        let allocated_ranges = fs.allocate_free_space_with_publication(publication, 1)?;
+        let guard = Self {
+            fs,
+            publication,
+            allocated_ranges: Some(allocated_ranges),
+        };
+        if !matches!(
+            guard.allocated_ranges.as_deref(),
+            Some([allocated_range]) if allocated_range.cluster_count == 1
+        ) {
+            return Err(inconsistent_bitmap_accounting());
+        }
+        Ok(guard)
+    }
+
+    fn allocated_cluster(&self) -> u32 {
+        match self.allocated_ranges.as_deref() {
+            Some([allocated_range]) => allocated_range.start_cluster,
+            _ => unreachable!("validated single-cluster allocation"),
+        }
+    }
+
+    fn commit(mut self) {
+        self.allocated_ranges = None;
+    }
+}
+
+impl Drop for AllocatedDirectoryClusterGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(allocated_ranges) = self.allocated_ranges.take() {
+            let _ = self
+                .fs
+                .free_allocated_space_with_publication(self.publication, &allocated_ranges);
+        }
+    }
+}
 
 impl ExfatInode {
     // VFS entry points
@@ -89,71 +142,63 @@ impl ExfatInode {
                 )
                 .map_err(Error::from)?;
 
-            let mut allocated_directory_ranges = None;
             let (first_cluster, data_length, no_fat_chain) = if type_ == InodeType::Dir
                 && !options.zero_size_dir
             {
-                let allocated_ranges = fs
-                    .allocate_free_space_with_publication(publication, 1)
-                    .map_err(Error::from)?;
-                let allocated_cluster = match allocated_ranges.as_slice() {
-                    [allocated_range] if allocated_range.cluster_count == 1 => {
-                        allocated_range.start_cluster
-                    }
-                    _ => {
-                        let _ = fs
-                            .free_allocated_space_with_publication(publication, &allocated_ranges);
-                        return Err(inconsistent_bitmap_accounting());
-                    }
-                };
+                let allocated_directory_cluster =
+                    AllocatedDirectoryClusterGuard::allocate(&fs, publication)
+                        .map_err(Error::from)?;
+                let allocated_cluster = allocated_directory_cluster.allocated_cluster();
                 if let Err(error) = Self::initialize_directory_cluster(
                     &block_device,
                     &boot_region,
                     allocated_cluster,
                 ) {
-                    let _ =
-                        fs.free_allocated_space_with_publication(publication, &allocated_ranges);
                     return Err(Error::from(error));
                 }
-                allocated_directory_ranges = Some(allocated_ranges);
+                let entry_set = direntry::encode_file_entry_set(
+                    &admitted_name,
+                    name_hash,
+                    type_,
+                    allocated_cluster,
+                    boot_region.cluster_size,
+                    true,
+                )
+                .map_err(Error::from)?;
+                let slot_range_bytes =
+                    direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
+                published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
+                Self::write_directory_bytes_for_cluster_map(
+                    &block_device,
+                    &boot_region,
+                    &published_directory_bytes,
+                    cluster_map,
+                )
+                .map_err(Error::from)?;
+                allocated_directory_cluster.commit();
                 (allocated_cluster, boot_region.cluster_size, true)
             } else {
+                let entry_set = direntry::encode_file_entry_set(
+                    &admitted_name,
+                    name_hash,
+                    type_,
+                    0,
+                    0,
+                    false,
+                )
+                .map_err(Error::from)?;
+                let slot_range_bytes =
+                    direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
+                published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
+                Self::write_directory_bytes_for_cluster_map(
+                    &block_device,
+                    &boot_region,
+                    &published_directory_bytes,
+                    cluster_map,
+                )
+                .map_err(Error::from)?;
                 (0, 0, false)
             };
-
-            let entry_set = direntry::encode_file_entry_set(
-                &admitted_name,
-                name_hash,
-                type_,
-                first_cluster,
-                data_length,
-                no_fat_chain,
-            )
-            .map_err(|error| {
-                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-                }
-                Error::from(error)
-            })?;
-            let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(|error| {
-                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-                }
-                Error::from(error)
-            })?;
-            published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
-            Self::write_directory_bytes_for_cluster_map(
-                &block_device,
-                &boot_region,
-                &published_directory_bytes,
-                cluster_map,
-            )
-            .map_err(|error| {
-                if let Some(allocated_ranges) = allocated_directory_ranges.as_ref() {
-                    let _ = fs.free_allocated_space_with_publication(publication, allocated_ranges);
-                }
-                Error::from(error)
-            })?;
 
             let child_size = if type_ == InodeType::Dir {
                 data_length
@@ -581,32 +626,24 @@ impl ExfatInode {
         let current_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
                 .map_err(Error::from)?;
-        let Some(current_source_view) = Self::locate_named_child_view(
+        let current_source_view = Self::lookup_rename_source_view(
             &current_directory_bytes,
-            cluster_map.data_length.is_none(),
+            cluster_map,
             upcase_table,
             old_name,
             old_name_hash,
-        )
-        .map_err(Error::from)?
-        else {
-            return_errno!(Errno::ENOENT);
-        };
+        )?;
         let source_name = current_source_view.name().map_err(Error::from)?;
         let current_source_slot_range = current_source_view.slot_range();
-        let current_target_view = Self::locate_named_child_view(
+        let current_target_view = Self::lookup_rename_target_view(
             &current_directory_bytes,
-            cluster_map.data_length.is_none(),
+            cluster_map,
             upcase_table,
             new_name,
             new_name_hash,
-        )
-        .map_err(Error::from)?;
-        if current_target_view
-            .map(FileEntrySetView::slot_range)
-            .is_some_and(|slot_range| slot_range == current_source_slot_range)
-            && source_name == new_name
-        {
+            Some(current_source_slot_range),
+        )?;
+        if current_target_view.is_none() && source_name == new_name {
             return Ok(false);
         }
         let current_renamed_entry_set =
@@ -617,143 +654,76 @@ impl ExfatInode {
         let (source_inode_type, _, _, _) = current_source_view
             .child_metadata(boot_region)
             .map_err(Error::from)?;
-        let mut replaced_target_ranges = Vec::new();
-        let mut final_slot_range = current_source_slot_range;
-        if let Some(target_view) = current_target_view
-            .filter(|entry_view| entry_view.slot_range() != current_source_slot_range)
-        {
-            let (target_inode_type, first_cluster, data_length, no_fat_chain) = target_view
-                .child_metadata(boot_region)
-                .map_err(Error::from)?;
-            if source_inode_type == InodeType::Dir && target_inode_type != InodeType::Dir {
-                return_errno!(Errno::ENOTDIR);
-            }
-            if source_inode_type != InodeType::Dir && target_inode_type == InodeType::Dir {
-                return_errno!(Errno::EISDIR);
-            }
-            if target_inode_type == InodeType::Dir {
-                let Some(child_inode) = target_child_inode else {
-                    return Err(Error::from(invalid_on_disk_layout()));
-                };
-                Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
-            }
-            replaced_target_ranges = Self::allocated_cluster_ranges(
+        let (replaced_target_slot_range, replaced_target_ranges) =
+            match Self::collect_replaced_target_ranges(
+                current_target_view,
+                target_child_inode,
+                source_inode_type,
                 block_device,
                 boot_region,
-                first_cluster,
-                data_length,
-                no_fat_chain,
-            )
-            .map_err(Error::from)?;
-            if current_source_slot_range.entry_count() < required_entry_count {
-                final_slot_range = target_view.slot_range();
-            }
-        }
-
-        let (mut renamed_directory_bytes, source_slot_range, renamed_entry_set) =
-            if final_slot_range == current_source_slot_range
-                && current_source_slot_range.entry_count() < required_entry_count
-            {
-                let (updated_cluster_map, latest_directory_bytes, reserved_slot_range) = self
-                    .reserve_directory_entry_slots(
-                        cluster_map,
-                        publication,
-                        fs,
-                        block_device,
-                        boot_region,
-                        required_entry_count,
-                    )
-                    .map_err(Error::from)?;
-                cluster_map = updated_cluster_map;
-                final_slot_range = reserved_slot_range;
-                let Some(latest_source_view) = Self::locate_named_child_view(
-                    &latest_directory_bytes,
-                    cluster_map.data_length.is_none(),
-                    upcase_table,
-                    old_name,
-                    old_name_hash,
-                )
-                .map_err(Error::from)?
-                else {
-                    return_errno!(Errno::ENOENT);
-                };
-                let source_slot_range = latest_source_view.slot_range();
-                let renamed_entry_set =
-                    direntry::renamed_entry_set(latest_source_view, new_name, new_name_hash)
-                        .map_err(Error::from)?;
-                (latest_directory_bytes, source_slot_range, renamed_entry_set)
-            } else {
-                (
-                    current_directory_bytes,
-                    current_source_slot_range,
-                    current_renamed_entry_set,
-                )
+            )? {
+                Some((slot_range, ranges)) => (Some(slot_range), ranges),
+                None => (None, Vec::new()),
             };
+        let reusable_slot_range = if current_source_slot_range.entry_count() >= required_entry_count
+        {
+            Some(current_source_slot_range)
+        } else {
+            replaced_target_slot_range
+        };
 
-        let target_slot_range = Self::locate_named_child_view(
+        let (
+            updated_cluster_map,
+            renamed_directory_bytes,
+            final_slot_range,
+            reserved_new_slot,
+        ) = self.reserve_rename_destination_slot(
+            cluster_map,
+            current_directory_bytes,
+            reusable_slot_range,
+            publication,
+            fs,
+            block_device,
+            boot_region,
+            required_entry_count,
+        )?;
+        cluster_map = updated_cluster_map;
+        let (source_slot_range, renamed_entry_set) = if reserved_new_slot {
+            let latest_source_view = Self::lookup_rename_source_view(
+                &renamed_directory_bytes,
+                cluster_map,
+                upcase_table,
+                old_name,
+                old_name_hash,
+            )?;
+            let source_slot_range = latest_source_view.slot_range();
+            let renamed_entry_set =
+                direntry::renamed_entry_set(latest_source_view, new_name, new_name_hash)
+                    .map_err(Error::from)?;
+            (source_slot_range, renamed_entry_set)
+        } else {
+            (current_source_slot_range, current_renamed_entry_set)
+        };
+        let replaced_target_slot_range = Self::lookup_rename_target_view(
             &renamed_directory_bytes,
-            cluster_map.data_length.is_none(),
+            cluster_map,
             upcase_table,
             new_name,
             new_name_hash,
-        )
-        .map_err(Error::from)?
-        .filter(|entry_view| {
-            entry_view.slot_range() != source_slot_range
-                && entry_view.slot_range() != final_slot_range
-        })
-        .map(FileEntrySetView::slot_range);
-        if let Some(target_slot_range) = target_slot_range {
-            let slot_range_bytes =
-                direntry::slot_range_bytes(target_slot_range).map_err(Error::from)?;
-            let overwritten_entry_set = renamed_directory_bytes
-                .get_mut(slot_range_bytes)
-                .ok_or(invalid_on_disk_layout())
-                .map_err(Error::from)?;
-            let mut overwritten_entry_set =
-                WritableDirectoryEntrySlotSpan::new(target_slot_range, overwritten_entry_set)
-                    .map_err(Error::from)?;
-            direntry::invalidate_entry_set(&mut overwritten_entry_set).map_err(Error::from)?;
-        }
-        if final_slot_range != source_slot_range {
-            let slot_range_bytes =
-                direntry::slot_range_bytes(source_slot_range).map_err(Error::from)?;
-            let removed_entry_set = renamed_directory_bytes
-                .get_mut(slot_range_bytes)
-                .ok_or(invalid_on_disk_layout())
-                .map_err(Error::from)?;
-            let mut removed_entry_set =
-                WritableDirectoryEntrySlotSpan::new(source_slot_range, removed_entry_set)
-                    .map_err(Error::from)?;
-            direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
-        }
-
-        let final_slot_bytes = direntry::slot_range_bytes(final_slot_range).map_err(Error::from)?;
-        let destination_entry_set = renamed_directory_bytes
-            .get_mut(final_slot_bytes)
-            .ok_or(invalid_on_disk_layout())
-            .map_err(Error::from)?;
-        let mut destination_entry_set =
-            WritableDirectoryEntrySlotSpan::new(final_slot_range, destination_entry_set)
-                .map_err(Error::from)?;
-        direntry::invalidate_entry_set(&mut destination_entry_set).map_err(Error::from)?;
-        destination_entry_set
-            .bytes_mut()
-            .get_mut(..renamed_entry_set.len())
-            .ok_or(invalid_on_disk_layout())
-            .map_err(Error::from)?
-            .copy_from_slice(&renamed_entry_set);
-        Self::write_directory_bytes_for_cluster_map(
+            Some(source_slot_range),
+        )?
+        .map(FileEntrySetView::slot_range)
+        .filter(|slot_range| *slot_range != final_slot_range);
+        Self::persist_rename_directory_update(
             block_device,
             boot_region,
-            &renamed_directory_bytes,
             cluster_map,
-        )
-        .map_err(Error::from)?;
-
-        if !replaced_target_ranges.is_empty() {
-            let _ = fs.free_allocated_space_with_publication(publication, &replaced_target_ranges);
-        }
+            renamed_directory_bytes,
+            Some((final_slot_range, &renamed_entry_set)),
+            replaced_target_slot_range,
+            (final_slot_range != source_slot_range).then_some(source_slot_range),
+        )?;
+        Self::cleanup_replaced_target_ranges(fs, publication, &replaced_target_ranges);
         Ok(true)
     }
 
@@ -776,17 +746,13 @@ impl ExfatInode {
         let source_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, source_cluster_map)
                 .map_err(Error::from)?;
-        let Some(source_view) = Self::locate_named_child_view(
+        let source_view = Self::lookup_rename_source_view(
             &source_directory_bytes,
-            source_cluster_map.data_length.is_none(),
+            source_cluster_map,
             upcase_table,
             old_name,
             old_name_hash,
-        )
-        .map_err(Error::from)?
-        else {
-            return_errno!(Errno::ENOENT);
-        };
+        )?;
         let source_slot_range = source_view.slot_range();
         let (source_inode_type, _, _, _) = source_view
             .child_metadata(boot_region)
@@ -798,107 +764,60 @@ impl ExfatInode {
         let target_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, target_cluster_map)
                 .map_err(Error::from)?;
-        let target_view = Self::locate_named_child_view(
+        let target_view = Self::lookup_rename_target_view(
             &target_directory_bytes,
-            target_cluster_map.data_length.is_none(),
+            target_cluster_map,
             upcase_table,
             new_name,
             new_name_hash,
-        )
-        .map_err(Error::from)?;
-        let (mut published_target_directory_bytes, target_slot_range, replaced_target_ranges) =
-            if let Some(target_view) = target_view {
-                let target_slot_range = target_view.slot_range();
-                let (target_inode_type, first_cluster, data_length, no_fat_chain) = target_view
-                    .child_metadata(boot_region)
-                    .map_err(Error::from)?;
-                if source_inode_type == InodeType::Dir && target_inode_type != InodeType::Dir {
-                    return_errno!(Errno::ENOTDIR);
-                }
-                if source_inode_type != InodeType::Dir && target_inode_type == InodeType::Dir {
-                    return_errno!(Errno::EISDIR);
-                }
-                if target_inode_type == InodeType::Dir {
-                    let Some(child_inode) = target_child_inode else {
-                        return Err(Error::from(invalid_on_disk_layout()));
-                    };
-                    Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
-                }
-                let target_ranges = Self::allocated_cluster_ranges(
-                    block_device,
-                    boot_region,
-                    first_cluster,
-                    data_length,
-                    no_fat_chain,
-                )
-                .map_err(Error::from)?;
-                (target_directory_bytes, target_slot_range, target_ranges)
-            } else {
-                let (updated_target_cluster_map, latest_target_directory_bytes, reserved_slot_range) =
-                    target_directory
-                        .reserve_directory_entry_slots(
-                            target_cluster_map,
-                            publication,
-                            fs,
-                            block_device,
-                            boot_region,
-                            required_entry_count,
-                        )
-                        .map_err(Error::from)?;
-                target_cluster_map = updated_target_cluster_map;
-                (
-                    latest_target_directory_bytes,
-                    reserved_slot_range,
-                    Vec::new(),
-                )
+            None,
+        )?;
+        let (replaced_target_slot_range, replaced_target_ranges) =
+            match Self::collect_replaced_target_ranges(
+                target_view,
+                target_child_inode,
+                source_inode_type,
+                block_device,
+                boot_region,
+            )? {
+                Some((slot_range, ranges)) => (Some(slot_range), ranges),
+                None => (None, Vec::new()),
             };
-
-        let target_slot_bytes =
-            direntry::slot_range_bytes(target_slot_range).map_err(Error::from)?;
-        let destination_entry_set = published_target_directory_bytes
-            .get_mut(target_slot_bytes)
-            .ok_or(invalid_on_disk_layout())
-            .map_err(Error::from)?;
-        let mut destination_entry_set =
-            WritableDirectoryEntrySlotSpan::new(target_slot_range, destination_entry_set)
-                .map_err(Error::from)?;
-        direntry::invalidate_entry_set(&mut destination_entry_set).map_err(Error::from)?;
-        destination_entry_set
-            .bytes_mut()
-            .get_mut(..renamed_entry_set.len())
-            .ok_or(invalid_on_disk_layout())
-            .map_err(Error::from)?
-            .copy_from_slice(&renamed_entry_set);
-        Self::write_directory_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            &published_target_directory_bytes,
+        let (
+            updated_target_cluster_map,
+            published_target_directory_bytes,
+            target_slot_range,
+            _reserved_target_slot,
+        ) = target_directory.reserve_rename_destination_slot(
             target_cluster_map,
-        )
-        .map_err(Error::from)?;
-
-        let mut invalidated_source_directory_bytes = source_directory_bytes;
-        let source_slot_bytes =
-            direntry::slot_range_bytes(source_slot_range).map_err(Error::from)?;
-        let removed_entry_set = invalidated_source_directory_bytes
-            .get_mut(source_slot_bytes)
-            .ok_or(invalid_on_disk_layout())
-            .map_err(Error::from)?;
-        let mut removed_entry_set =
-            WritableDirectoryEntrySlotSpan::new(source_slot_range, removed_entry_set)
-                .map_err(Error::from)?;
-        direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
-        Self::write_directory_bytes_for_cluster_map(
+            target_directory_bytes,
+            replaced_target_slot_range,
+            publication,
+            fs,
             block_device,
             boot_region,
-            &invalidated_source_directory_bytes,
+            required_entry_count,
+        )?;
+        target_cluster_map = updated_target_cluster_map;
+        Self::persist_rename_directory_update(
+            block_device,
+            boot_region,
+            target_cluster_map,
+            published_target_directory_bytes,
+            Some((target_slot_range, &renamed_entry_set)),
+            None,
+            None,
+        )?;
+        Self::persist_rename_directory_update(
+            block_device,
+            boot_region,
             source_cluster_map,
-        )
-        .map_err(Error::from)?;
-
-        if !replaced_target_ranges.is_empty() {
-            let _ = fs.free_allocated_space_with_publication(publication, &replaced_target_ranges);
-        }
+            source_directory_bytes,
+            None,
+            Some(source_slot_range),
+            None,
+        )?;
+        Self::cleanup_replaced_target_ranges(fs, publication, &replaced_target_ranges);
         Ok(())
     }
 
@@ -974,8 +893,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         required_entry_count: usize,
-    ) -> Result<(ExfatInodeClusterMap, Vec<u8>, DirectoryEntrySlotRange)>
-    {
+    ) -> Result<(ExfatInodeClusterMap, Vec<u8>, DirectoryEntrySlotRange)> {
         loop {
             let directory_bytes =
                 Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)?;
@@ -986,8 +904,13 @@ impl ExfatInode {
             )? {
                 return Ok((cluster_map, directory_bytes, slot_range));
             }
-            cluster_map =
-                self.grow_directory_cluster_map(cluster_map, publication, fs, block_device, boot_region)?;
+            cluster_map = self.grow_directory_cluster_map(
+                cluster_map,
+                publication,
+                fs,
+                block_device,
+                boot_region,
+            )?;
         }
     }
 
@@ -1001,36 +924,17 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<ExfatInodeClusterMap> {
-        let allocated_ranges = fs.allocate_free_space_with_publication(publication, 1)?;
-        let allocated_cluster = match allocated_ranges.as_slice() {
-            [allocated_range] if allocated_range.cluster_count == 1 => {
-                allocated_range.start_cluster
-            }
-            _ => {
-                let _ = fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-                return Err(inconsistent_bitmap_accounting());
-            }
-        };
-
-        if let Err(error) =
-            Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)
-        {
-            let _ = fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-            return Err(error);
-        }
-
-        let updated_cluster_map = match self.attach_directory_cluster(
+        let allocated_directory_cluster =
+            AllocatedDirectoryClusterGuard::allocate(fs, publication)?;
+        let allocated_cluster = allocated_directory_cluster.allocated_cluster();
+        Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)?;
+        let updated_cluster_map = self.attach_directory_cluster(
             cluster_map,
             block_device,
             boot_region,
             allocated_cluster,
-        ) {
-            Ok(updated_cluster_map) => updated_cluster_map,
-            Err(error) => {
-                let _ = fs.free_allocated_space_with_publication(publication, &allocated_ranges);
-                return Err(error);
-            }
-        };
+        )?;
+        allocated_directory_cluster.commit();
         Ok(updated_cluster_map)
     }
 
@@ -1222,5 +1126,178 @@ impl ExfatInode {
             cluster_count: current_range_count,
         });
         Ok(cluster_ranges)
+    }
+
+    fn lookup_rename_source_view<'a>(
+        directory_bytes: &'a [u8],
+        cluster_map: ExfatInodeClusterMap,
+        upcase_table: &UpcaseTable,
+        old_name: &[u16],
+        old_name_hash: u16,
+    ) -> Result<FileEntrySetView<'a>> {
+        Self::locate_named_child_view(
+            directory_bytes,
+            cluster_map.data_length.is_none(),
+            upcase_table,
+            old_name,
+            old_name_hash,
+        )
+        .map_err(Error::from)?
+        .ok_or_else(|| Error::new(Errno::ENOENT))
+    }
+
+    fn lookup_rename_target_view<'a>(
+        directory_bytes: &'a [u8],
+        cluster_map: ExfatInodeClusterMap,
+        upcase_table: &UpcaseTable,
+        new_name: &[u16],
+        new_name_hash: u16,
+        excluded_slot_range: Option<DirectoryEntrySlotRange>,
+    ) -> Result<Option<FileEntrySetView<'a>>> {
+        Ok(Self::locate_named_child_view(
+            directory_bytes,
+            cluster_map.data_length.is_none(),
+            upcase_table,
+            new_name,
+            new_name_hash,
+        )
+        .map_err(Error::from)?
+        .filter(|entry_view| Some(entry_view.slot_range()) != excluded_slot_range))
+    }
+
+    fn collect_replaced_target_ranges(
+        target_view: Option<FileEntrySetView<'_>>,
+        target_child_inode: Option<&Arc<Self>>,
+        source_inode_type: InodeType,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<Option<(DirectoryEntrySlotRange, Vec<ClusterRange>)>> {
+        let Some(target_view) = target_view else {
+            return Ok(None);
+        };
+        let target_slot_range = target_view.slot_range();
+        let (target_inode_type, first_cluster, data_length, no_fat_chain) = target_view
+            .child_metadata(boot_region)
+            .map_err(Error::from)?;
+        if source_inode_type == InodeType::Dir && target_inode_type != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+        if source_inode_type != InodeType::Dir && target_inode_type == InodeType::Dir {
+            return_errno!(Errno::EISDIR);
+        }
+        if target_inode_type == InodeType::Dir {
+            let Some(child_inode) = target_child_inode else {
+                return Err(Error::from(invalid_on_disk_layout()));
+            };
+            Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
+        }
+        let replaced_target_ranges = Self::allocated_cluster_ranges(
+            block_device,
+            boot_region,
+            first_cluster,
+            data_length,
+            no_fat_chain,
+        )
+        .map_err(Error::from)?;
+        Ok(Some((target_slot_range, replaced_target_ranges)))
+    }
+
+    fn reserve_rename_destination_slot(
+        &self,
+        cluster_map: ExfatInodeClusterMap,
+        current_directory_bytes: Vec<u8>,
+        reusable_slot_range: Option<DirectoryEntrySlotRange>,
+        publication: &mut MountedVolumeState,
+        fs: &Arc<ExfatFs>,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        required_entry_count: usize,
+    ) -> Result<(ExfatInodeClusterMap, Vec<u8>, DirectoryEntrySlotRange, bool)> {
+        if let Some(slot_range) = reusable_slot_range
+            .filter(|slot_range| slot_range.entry_count() >= required_entry_count)
+        {
+            return Ok((cluster_map, current_directory_bytes, slot_range, false));
+        }
+        let (updated_cluster_map, directory_bytes, slot_range) = self
+            .reserve_directory_entry_slots(
+                cluster_map,
+                publication,
+                fs,
+                block_device,
+                boot_region,
+                required_entry_count,
+            )
+            .map_err(Error::from)?;
+        Ok((updated_cluster_map, directory_bytes, slot_range, true))
+    }
+
+    fn persist_rename_directory_update(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: ExfatInodeClusterMap,
+        mut directory_bytes: Vec<u8>,
+        published_entry: Option<(DirectoryEntrySlotRange, &[u8])>,
+        first_invalidated_slot: Option<DirectoryEntrySlotRange>,
+        second_invalidated_slot: Option<DirectoryEntrySlotRange>,
+    ) -> Result<()> {
+        let mut invalidate_slot_range = |slot_range: DirectoryEntrySlotRange| -> Result<()> {
+            let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
+            let removed_entry_set = directory_bytes
+                .get_mut(slot_range_bytes)
+                .ok_or(invalid_on_disk_layout())
+                .map_err(Error::from)?;
+            let mut removed_entry_set =
+                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
+                    .map_err(Error::from)?;
+            direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)
+        };
+        if let Some(slot_range) = first_invalidated_slot {
+            invalidate_slot_range(slot_range)?;
+        }
+        if let Some(slot_range) = second_invalidated_slot.filter(|slot_range| {
+            first_invalidated_slot != Some(*slot_range)
+        }) {
+            invalidate_slot_range(slot_range)?;
+        }
+        if let Some((destination_slot_range, renamed_entry_set)) = published_entry {
+            if first_invalidated_slot != Some(destination_slot_range)
+                && second_invalidated_slot != Some(destination_slot_range)
+            {
+                invalidate_slot_range(destination_slot_range)?;
+            }
+            let destination_slot_bytes =
+                direntry::slot_range_bytes(destination_slot_range).map_err(Error::from)?;
+            let destination_entry_set = directory_bytes
+                .get_mut(destination_slot_bytes)
+                .ok_or(invalid_on_disk_layout())
+                .map_err(Error::from)?;
+            let mut destination_entry_set =
+                WritableDirectoryEntrySlotSpan::new(destination_slot_range, destination_entry_set)
+                    .map_err(Error::from)?;
+            destination_entry_set
+                .bytes_mut()
+                .get_mut(..renamed_entry_set.len())
+                .ok_or(invalid_on_disk_layout())
+                .map_err(Error::from)?
+                .copy_from_slice(renamed_entry_set);
+        }
+        Self::write_directory_bytes_for_cluster_map(
+            block_device,
+            boot_region,
+            &directory_bytes,
+            cluster_map,
+        )
+        .map_err(Error::from)
+    }
+
+    fn cleanup_replaced_target_ranges(
+        fs: &Arc<ExfatFs>,
+        publication: &mut MountedVolumeState,
+        replaced_target_ranges: &[ClusterRange],
+    ) {
+        if replaced_target_ranges.is_empty() {
+            return;
+        }
+        let _ = fs.free_allocated_space_with_publication(publication, replaced_target_ranges);
     }
 }

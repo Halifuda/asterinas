@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Stores inode cluster-map, dirty-state, admission, timestamp, and guard-order helpers.
+//!
+//! Method groups: dirty-state transitions, directory admission, regular-file snapshots,
+//! directory byte I/O, timestamp conversion, child construction, and ordered write guards.
+
 use alloc::vec::Vec;
 use core::time::Duration;
 

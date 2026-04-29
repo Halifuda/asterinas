@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::time::Duration;
+//! Implements regular-file writes, resizes, entry-set republish, and cluster-map growth.
+//!
+//! Method groups: write/resize entry points, shared growth publication, entry-set publication,
+//! growth topology helpers, and cluster-level mutation.
+
+use core::{ops::Range, time::Duration};
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -127,44 +132,13 @@ impl ExfatInode {
             }
             let block_device = admission.block_device.clone();
             let boot_region = admission.boot_region;
-            let publication = admission
-                .state_guard
-                .as_ref()
-                .ok_or_else(unpublished_state)?;
             let published_data_length = data_length.max(write_end);
-            let mut published_cluster_map = if write_end > data_length {
-                Self::grow_regular_file_cluster_map(
-                    &fs,
-                    publication,
-                    &admission.block_device,
-                    &admission.boot_region,
-                    *cluster_map,
-                    published_data_length,
-                )?
-            } else {
-                *cluster_map
-            };
             let published_valid_data_length = valid_data_length.max(write_end);
             let timestamp = RealTimeCoarseClock::get().read_time();
-            let allocated_clusters = if published_data_length == 0 {
-                0
-            } else {
-                published_data_length.div_ceil(boot_region.cluster_size)
-            };
-            let allocated_sectors = allocated_clusters
-                .checked_mul(boot_region.sectors_per_cluster)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
             drop(cluster_map);
             drop(_owner_guard);
             drop(admission);
 
-            let zero_fill_len = if effective_offset > valid_data_length {
-                effective_offset
-                    .checked_sub(valid_data_length)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?
-            } else {
-                0
-            };
             let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
             if published_data_length > data_length {
                 page_cache.resize(published_data_length)?;
@@ -175,6 +149,16 @@ impl ExfatInode {
                     .commit_on(page_idx, CommitFlags::empty())?;
             }
 
+            let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+            if admission.forced_shutdown
+                || admission.anomaly.clear_to_zero
+                || admission.anomaly.media_failure
+            {
+                return_errno!(Errno::EIO);
+            }
+            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+                return_errno!(Errno::EROFS);
+            }
             let _owner_guard = self.admission.write();
             let mut cluster_map = self.cluster_map.write();
             let Some(current_data_length) = cluster_map.data_length else {
@@ -208,37 +192,37 @@ impl ExfatInode {
                 drop(_owner_guard);
                 continue;
             }
-            if zero_fill_len != 0 {
-                page_cache.fill_zeros(valid_data_length..effective_offset)?;
-            }
-            page_cache.pages().write(effective_offset, reader)?;
-
-            published_cluster_map.data_length = Some(published_data_length);
-            published_cluster_map.valid_data_length = Some(published_valid_data_length);
-            if let Err(error) = self.republish_regular_file_entry_set(
+            let publication = admission
+                .state_guard
+                .as_ref()
+                .ok_or_else(unpublished_state)?;
+            let rollback_cache_invalidate_range = current_cache_invalidate_range.clone();
+            self.grow_and_republish_regular_file(
+                &fs,
+                publication,
                 &block_device,
                 &boot_region,
-                published_cluster_map,
+                &mut cluster_map,
+                effective_offset,
+                published_data_length,
+                published_valid_data_length,
                 timestamp,
-            ) {
-                if !current_cache_invalidate_range.is_empty() {
-                    page_cache.discard_range(current_cache_invalidate_range);
-                }
-                if published_data_length > data_length {
-                    let _ = page_cache.resize(data_length);
-                }
-                return Err(error);
-            }
-
-            {
-                let mut metadata = self.metadata.write();
-                metadata.nr_sectors_allocated = allocated_sectors;
-                metadata.last_meta_change_at = timestamp;
-                metadata.last_modify_at = timestamp;
-                metadata.size = published_data_length;
-            }
-            *cluster_map = published_cluster_map;
-            self.mark_content_publication_dirty();
+                |published_cluster_map, zero_fill_range| {
+                    if !zero_fill_range.is_empty() {
+                        page_cache.fill_zeros(zero_fill_range)?;
+                    }
+                    page_cache.pages().write(effective_offset, reader)?;
+                    Ok(())
+                },
+                || {
+                    if !rollback_cache_invalidate_range.is_empty() {
+                        page_cache.discard_range(rollback_cache_invalidate_range);
+                    }
+                    if published_data_length > data_length {
+                        let _ = page_cache.resize(data_length);
+                    }
+                },
+            )?;
             break;
         }
         if status_flags.contains(StatusFlags::O_SYNC) {
@@ -286,10 +270,7 @@ impl ExfatInode {
         if new_size == data_length {
             return Ok(());
         }
-        let page_cache = self
-            .page_cache
-            .get()
-            .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
+        let page_cache = self.page_cache_handle();
         let timestamp = RealTimeCoarseClock::get().read_time();
 
         if new_size > data_length {
@@ -297,60 +278,59 @@ impl ExfatInode {
                 .state_guard
                 .as_ref()
                 .ok_or_else(unpublished_state)?;
-            let mut published_cluster_map = Self::grow_regular_file_cluster_map(
+            self.grow_and_republish_regular_file(
                 &fs,
                 publication,
                 &admission.block_device,
                 &admission.boot_region,
-                *cluster_map,
+                &mut cluster_map,
                 new_size,
-            )?;
-            if valid_data_length < new_size {
-                Self::mutate_regular_file_range(
-                    &admission.block_device,
-                    &admission.boot_region,
-                    &published_cluster_map,
-                    new_size,
-                    valid_data_length,
-                    new_size
-                        .checked_sub(valid_data_length)
-                        .ok_or_else(|| Error::new(Errno::EINVAL))?,
-                    |chunk| {
-                        chunk.fill(0);
-                        Ok(())
-                    },
-                )?;
-            }
-            published_cluster_map.valid_data_length = Some(new_size);
-            if let Some(page_cache) = page_cache {
-                page_cache.resize(new_size)?;
-                page_cache.discard_range(valid_data_length..new_size);
-            }
-            if let Err(error) = self.republish_regular_file_entry_set(
-                &admission.block_device,
-                &admission.boot_region,
-                published_cluster_map,
+                new_size,
+                new_size,
                 timestamp,
-            ) {
-                if let Some(page_cache) = page_cache {
-                    let _ = page_cache.resize(data_length);
-                }
-                return Err(error);
-            }
+                |published_cluster_map, zero_fill_range| {
+                    if zero_fill_range.is_empty() {
+                        if let Some(page_cache) = page_cache
+                            && new_size > data_length
+                        {
+                            page_cache.resize(new_size)?;
+                        }
+                        return Ok(());
+                    }
 
-            let allocated_clusters = new_size.div_ceil(admission.boot_region.cluster_size);
-            let allocated_sectors = allocated_clusters
-                .checked_mul(admission.boot_region.sectors_per_cluster)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            {
-                let mut metadata = self.metadata.write();
-                metadata.last_meta_change_at = timestamp;
-                metadata.last_modify_at = timestamp;
-                metadata.nr_sectors_allocated = allocated_sectors;
-                metadata.size = new_size;
-            }
-            *cluster_map = published_cluster_map;
-            self.mark_content_publication_dirty();
+                    if let Some(page_cache) = page_cache {
+                        if new_size > data_length {
+                            page_cache.resize(new_size)?;
+                        }
+                        page_cache.fill_zeros(zero_fill_range)?;
+                        return Ok(());
+                    }
+
+                    Self::mutate_regular_file_range(
+                        &admission.block_device,
+                        &admission.boot_region,
+                        published_cluster_map,
+                        new_size,
+                        zero_fill_range.start,
+                        zero_fill_range
+                            .end
+                            .checked_sub(zero_fill_range.start)
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?,
+                        |chunk| {
+                            chunk.fill(0);
+                            Ok(())
+                        },
+                    )
+                },
+                || {
+                    if let Some(page_cache) = page_cache {
+                        if valid_data_length < new_size {
+                            page_cache.discard_range(valid_data_length..new_size);
+                        }
+                        let _ = page_cache.resize(data_length);
+                    }
+                },
+            )?;
             return Ok(());
         }
 
@@ -468,6 +448,81 @@ impl ExfatInode {
             fs.free_allocated_space_with_publication(publication, &released_ranges)?;
         }
         Ok(())
+    }
+
+    fn grow_and_republish_regular_file(
+        &self,
+        fs: &Arc<ExfatFs>,
+        publication: &MountedVolumeState,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: &mut ExfatInodeClusterMap,
+        zero_fill_end: usize,
+        new_data_length: usize,
+        new_valid_data_length: usize,
+        timestamp: Duration,
+        apply_growth_fn: impl FnOnce(&ExfatInodeClusterMap, Range<usize>) -> Result<()>,
+        rollback_growth_fn: impl FnOnce(),
+    ) -> Result<()> {
+        let result = (|| {
+            let Some(current_data_length) = cluster_map.data_length else {
+                return_errno!(Errno::EINVAL);
+            };
+            let Some(current_valid_data_length) = cluster_map.valid_data_length else {
+                return_errno!(Errno::EINVAL);
+            };
+            if current_valid_data_length > current_data_length
+                || zero_fill_end > new_valid_data_length
+                || new_valid_data_length > new_data_length
+                || new_data_length < current_data_length
+            {
+                return_errno!(Errno::EINVAL);
+            }
+            let zero_fill_range =
+                current_valid_data_length..current_valid_data_length.max(zero_fill_end);
+
+            let mut published_cluster_map = Self::grow_regular_file_cluster_map(
+                fs,
+                publication,
+                block_device,
+                boot_region,
+                *cluster_map,
+                new_data_length,
+            )?;
+            apply_growth_fn(&published_cluster_map, zero_fill_range)?;
+
+            published_cluster_map.data_length = Some(new_data_length);
+            published_cluster_map.valid_data_length = Some(new_valid_data_length);
+            self.republish_regular_file_entry_set(
+                block_device,
+                boot_region,
+                published_cluster_map,
+                timestamp,
+            )?;
+
+            let allocated_clusters = if new_data_length == 0 {
+                0
+            } else {
+                new_data_length.div_ceil(boot_region.cluster_size)
+            };
+            let allocated_sectors = allocated_clusters
+                .checked_mul(boot_region.sectors_per_cluster)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            {
+                let mut metadata = self.metadata.write();
+                metadata.nr_sectors_allocated = allocated_sectors;
+                metadata.last_meta_change_at = timestamp;
+                metadata.last_modify_at = timestamp;
+                metadata.size = new_data_length;
+            }
+            *cluster_map = published_cluster_map;
+            self.mark_content_publication_dirty();
+            Ok(())
+        })();
+        if result.is_err() {
+            rollback_growth_fn();
+        }
+        result
     }
 
     // Entry-set publication
@@ -590,86 +645,148 @@ impl ExfatInode {
         if allocated_cluster_count != additional_clusters {
             return Err(inconsistent_bitmap_accounting());
         }
+        if current_allocated_clusters == 0 {
+            return Self::allocate_initial_regular_file_clusters(
+                block_device,
+                boot_region,
+                cluster_map,
+                new_data_length,
+                &allocated_ranges,
+            );
+        }
+
         let first_new_cluster = allocated_ranges
             .first()
             .ok_or_else(inconsistent_bitmap_accounting)?
             .start_cluster;
-        let stays_contiguous = if current_allocated_clusters == 0 {
-            allocated_ranges.len() == 1
-        } else if cluster_map.no_fat_chain {
-            cluster_map.first_cluster.checked_add(
+        if cluster_map.no_fat_chain
+            && allocated_ranges.len() == 1
+            && cluster_map.first_cluster.checked_add(
                 u32::try_from(current_allocated_clusters)
                     .map_err(|_| invalid_on_disk_layout())?,
             ) == Some(first_new_cluster)
-                && allocated_ranges.len() == 1
-        } else {
-            false
-        };
-        if !stays_contiguous {
-            let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-            let link_allocated_ranges_fn = |fat_reader: &mut FatReader<'_>| -> Result<()> {
-                    for (range_index, range) in allocated_ranges.iter().enumerate() {
-                        let next_range_start = allocated_ranges
-                            .get(range_index + 1)
-                            .map(|next_range| next_range.start_cluster);
-                        match (range.cluster_count, next_range_start) {
-                            (0, _) => return Err(invalid_operation_input()),
-                            (1, None) => fat_reader.terminate_cluster_chain(range.start_cluster)?,
-                            (cluster_count, None) => {
-                                let last_cluster = range
-                                    .start_cluster
-                                    .checked_add(
-                                        u32::try_from(cluster_count - 1)
-                                            .map_err(|_| invalid_operation_input())?,
-                                    )
-                                    .ok_or_else(invalid_operation_input)?;
-                                fat_reader.link_contiguous_chain_to_cluster(
-                                    range.start_cluster,
-                                    cluster_count - 1,
-                                    last_cluster,
-                                )?;
-                            }
-                            (cluster_count, Some(next_cluster)) => {
-                                fat_reader.link_contiguous_chain_to_cluster(
-                                    range.start_cluster,
-                                    cluster_count,
-                                    next_cluster,
-                                )?;
-                            }
-                        }
-                    }
-                    Ok(())
-                };
-            if current_allocated_clusters == 0 {
-                link_allocated_ranges_fn(&mut fat_reader).map_err(Error::from)?;
-            } else {
-                if cluster_map.no_fat_chain {
-                    fat_reader
-                        .link_contiguous_chain_to_cluster(
-                            cluster_map.first_cluster,
-                            current_allocated_clusters,
-                            first_new_cluster,
-                        )
-                        .map_err(Error::from)?;
-                } else {
-                    fat_reader
-                        .append_cluster_to_chain(cluster_map.first_cluster, first_new_cluster)
-                        .map_err(Error::from)?;
-                }
-                link_allocated_ranges_fn(&mut fat_reader).map_err(Error::from)?;
-            }
+        {
+            return Ok(Self::extend_contiguous_regular_file_clusters(
+                cluster_map,
+                new_data_length,
+            ));
         }
 
+        Self::extend_fragmented_regular_file_clusters(
+            block_device,
+            boot_region,
+            cluster_map,
+            current_allocated_clusters,
+            new_data_length,
+            &allocated_ranges,
+        )
+    }
+
+    fn allocate_initial_regular_file_clusters(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: ExfatInodeClusterMap,
+        new_data_length: usize,
+        allocated_ranges: &[ClusterRange],
+    ) -> Result<ExfatInodeClusterMap> {
+        let first_new_cluster = allocated_ranges
+            .first()
+            .ok_or_else(inconsistent_bitmap_accounting)?
+            .start_cluster;
+        let is_single_contiguous_allocation = allocated_ranges.len() == 1;
+        if !is_single_contiguous_allocation {
+            let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+            Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
+                .map_err(Error::from)?;
+        }
         Ok(ExfatInodeClusterMap {
             data_length: Some(new_data_length),
-            first_cluster: if current_allocated_clusters == 0 {
-                first_new_cluster
-            } else {
-                cluster_map.first_cluster
-            },
-            no_fat_chain: stays_contiguous,
+            first_cluster: first_new_cluster,
+            no_fat_chain: is_single_contiguous_allocation,
             ..cluster_map
         })
+    }
+
+    fn extend_contiguous_regular_file_clusters(
+        cluster_map: ExfatInodeClusterMap,
+        new_data_length: usize,
+    ) -> ExfatInodeClusterMap {
+        ExfatInodeClusterMap {
+            data_length: Some(new_data_length),
+            ..cluster_map
+        }
+    }
+
+    fn extend_fragmented_regular_file_clusters(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: ExfatInodeClusterMap,
+        current_allocated_clusters: usize,
+        new_data_length: usize,
+        allocated_ranges: &[ClusterRange],
+    ) -> Result<ExfatInodeClusterMap> {
+        let first_new_cluster = allocated_ranges
+            .first()
+            .ok_or_else(inconsistent_bitmap_accounting)?
+            .start_cluster;
+        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+        if cluster_map.no_fat_chain {
+            fat_reader
+                .link_contiguous_chain_to_cluster(
+                    cluster_map.first_cluster,
+                    current_allocated_clusters,
+                    first_new_cluster,
+                )
+                .map_err(Error::from)?;
+        } else {
+            fat_reader
+                .append_cluster_to_chain(cluster_map.first_cluster, first_new_cluster)
+                .map_err(Error::from)?;
+        }
+        Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
+            .map_err(Error::from)?;
+        Ok(ExfatInodeClusterMap {
+            data_length: Some(new_data_length),
+            no_fat_chain: false,
+            ..cluster_map
+        })
+    }
+
+    fn link_allocated_cluster_ranges(
+        fat_reader: &mut FatReader<'_>,
+        allocated_ranges: &[ClusterRange],
+    ) -> Result<()> {
+        for (range_index, range) in allocated_ranges.iter().enumerate() {
+            let next_range_start = allocated_ranges
+                .get(range_index + 1)
+                .map(|next_range| next_range.start_cluster);
+            match (range.cluster_count, next_range_start) {
+                (0, _) => return Err(invalid_operation_input()),
+                (1, None) => fat_reader.terminate_cluster_chain(range.start_cluster)?,
+                (cluster_count, None) => {
+                    let last_cluster = range
+                        .start_cluster
+                        .checked_add(
+                            u32::try_from(cluster_count - 1)
+                                .map_err(|_| invalid_operation_input())?,
+                        )
+                        .ok_or_else(invalid_operation_input)?;
+                    fat_reader.link_contiguous_chain_to_cluster(
+                        range.start_cluster,
+                        cluster_count - 1,
+                        last_cluster,
+                    )?;
+                }
+                (cluster_count, Some(next_cluster)) => {
+                    fat_reader.link_contiguous_chain_to_cluster(
+                        range.start_cluster,
+                        cluster_count,
+                        next_cluster,
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     // Cluster-level I/O helper

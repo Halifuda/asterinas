@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Loads the exFAT up-case table and provides case-folded name comparison helpers.
+
 use super::{
     boot::BootRegion,
     fat::{ChainVisitControl, FatReader},

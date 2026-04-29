@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Bridges the exFAT inode owner to the generic page-cache backend.
+//!
+//! Method groups: weak-inode backend ownership, page read/write BIO callbacks, page count,
+//! and inode page-cache accessors.
+
 use aster_block::bio::{BioType, BioWaiter};
 use ostd::mm::io::util::HasVmReaderWriter;
 
