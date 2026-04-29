@@ -3,7 +3,7 @@
 use alloc::{string::String, vec::Vec};
 
 use super::{
-    direntry,
+    direntry::DIRECTORY_ENTRY_SIZE,
     fs::{ExfatFs, ExfatFsError},
 };
 use crate::{
@@ -11,33 +11,9 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct VolumeIdentityEntries {
-    pub(super) guid: Option<[u8; 16]>,
-    pub(super) label: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum VolumeIdentityQuery {
-    Guid,
-    Label,
-    LabelAndGuid,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum VolumeIdentityUpdate {
-    Guid(Option<[u8; 16]>),
-    Label(Option<String>),
-    LabelAndGuid {
-        guid: Option<[u8; 16]>,
-        label: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum VolumeAdminRequest {
     ForceShutdown,
-    TrimFreeSpace,
-    UpdateIdentity(VolumeIdentityUpdate),
+    WriteVolumeLabel(Option<String>),
 }
 
 pub(super) fn handle_volume_admin_request(
@@ -64,97 +40,67 @@ pub(super) fn handle_volume_admin_request(
             ensure_privileged_fn()?;
             admit_forced_shutdown(fs).map_err(Error::from)
         }
-        VolumeAdminRequest::TrimFreeSpace => {
+        VolumeAdminRequest::WriteVolumeLabel(label) => {
             ensure_privileged_fn()?;
-            administrative_trim_free_space(fs)
-        }
-        VolumeAdminRequest::UpdateIdentity(update) => {
-            ensure_privileged_fn()?;
-            update_volume_identity(fs, update)
+            write_volume_label(fs, label)
         }
     }
 }
 
-pub(super) fn query_volume_identity(
-    fs: &ExfatFs,
-    query: VolumeIdentityQuery,
-) -> Result<VolumeIdentityEntries> {
-    match query {
-        VolumeIdentityQuery::Label => {
-            let admission = fs.admitted_lookup_state()?;
-            let root_inode = admission
-                .state_guard
-                .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .root_inode
-                .clone();
-            let label = root_inode.read_root_directory(
-                &admission.block_device,
-                &admission.boot_region,
-                direntry::read_volume_label,
-            )?;
-            let label = match label {
-                Some(label) => String::from_utf16(&label)
-                    .map(Some)
-                    .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?,
-                None => None,
-            };
-            Ok(VolumeIdentityEntries { guid: None, label })
-        }
-        VolumeIdentityQuery::Guid | VolumeIdentityQuery::LabelAndGuid => {
-            return_errno_with_message!(
-                Errno::EOPNOTSUPP,
-                "exFAT volume GUID administration is not supported"
-            );
-        }
+pub(super) fn read_volume_label(fs: &ExfatFs) -> Result<Option<String>> {
+    let admission = fs.admitted_lookup_state()?;
+    let root_inode = admission
+        .state_guard
+        .as_ref()
+        .ok_or(ExfatFsError::UnpublishedState)?
+        .root_inode
+        .clone();
+    let directory_bytes =
+        root_inode.read_root_directory_bytes(&admission.block_device, &admission.boot_region)?;
+    let label = decode_volume_label_entry(&directory_bytes)?;
+    match label {
+        Some(label) => String::from_utf16(&label)
+            .map(Some)
+            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout)),
+        None => Ok(None),
     }
 }
 
-pub(super) fn update_volume_identity(fs: &ExfatFs, update: VolumeIdentityUpdate) -> Result<()> {
-    match update {
-        VolumeIdentityUpdate::Label(label) => {
-            let admitted_label = match label {
-                None => None,
-                Some(label) if label.is_empty() => None,
-                Some(label) => {
-                    let admitted_label: Vec<u16> = label.encode_utf16().collect();
-                    if admitted_label.len() > 11 {
-                        return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
-                    }
-                    Some(admitted_label)
-                }
-            };
-            let admission = fs.admitted_mutation_state()?;
-            if admission.forced_shutdown {
-                return_errno!(Errno::EIO);
+pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<()> {
+    let admitted_label = match label {
+        None => None,
+        Some(label) if label.is_empty() => None,
+        Some(label) => {
+            let admitted_label: Vec<u16> = label.encode_utf16().collect();
+            if admitted_label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
+                return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
             }
-            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
-                return Err(ExfatFsError::ReadOnlyConflict.into());
-            }
-            let root_inode = admission
-                .state_guard
-                .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .root_inode
-                .clone();
-
-            root_inode
-                .rewrite_root_directory(
-                    &admission.block_device,
-                    &admission.boot_region,
-                    |directory_bytes| {
-                        direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
-                    },
-                )
-                .map_err(Error::from)
+            Some(admitted_label)
         }
-        VolumeIdentityUpdate::Guid(_) | VolumeIdentityUpdate::LabelAndGuid { .. } => {
-            return_errno_with_message!(
-                Errno::EOPNOTSUPP,
-                "exFAT volume GUID administration is not supported"
-            );
-        }
+    };
+    let admission = fs.admitted_mutation_state()?;
+    if admission.forced_shutdown {
+        return_errno!(Errno::EIO);
     }
+    if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+        return Err(ExfatFsError::ReadOnlyConflict.into());
+    }
+    let root_inode = admission
+        .state_guard
+        .as_ref()
+        .ok_or(ExfatFsError::UnpublishedState)?
+        .root_inode
+        .clone();
+    let mut directory_bytes =
+        root_inode.read_root_directory_bytes(&admission.block_device, &admission.boot_region)?;
+    encode_volume_label_entry(&mut directory_bytes, admitted_label.as_deref())?;
+    root_inode
+        .rewrite_root_directory_bytes(
+            &admission.block_device,
+            &admission.boot_region,
+            &directory_bytes,
+        )
+        .map_err(Error::from)
 }
 
 pub(super) fn admit_forced_shutdown(fs: &ExfatFs) -> core::result::Result<(), ExfatFsError> {
@@ -164,15 +110,141 @@ pub(super) fn admit_forced_shutdown(fs: &ExfatFs) -> core::result::Result<(), Ex
     Ok(())
 }
 
-pub(super) fn administrative_trim_free_space(fs: &ExfatFs) -> Result<()> {
-    let state = fs.state.write();
-    let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-    if publication.forced_shutdown {
-        return Err(Error::new(Errno::EIO));
+fn decode_volume_label_entry(
+    directory_bytes: &[u8],
+) -> core::result::Result<Option<Vec<u16>>, ExfatFsError> {
+    let Some(entry_index) = locate_volume_label_entry(directory_bytes)? else {
+        return Ok(None);
+    };
+    let entry_offset = entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let entry = directory_bytes
+        .get(entry_offset..entry_end)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let label_length = usize::from(entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET]);
+    if label_length > VOLUME_LABEL_MAX_CODE_UNITS {
+        return Err(ExfatFsError::InvalidOnDiskLayout);
     }
-    if publication.flags.contains(FsFlags::RDONLY) {
-        return Err(ExfatFsError::ReadOnlyConflict.into());
+    if label_length == 0 {
+        return Ok(None);
     }
 
-    Err(Error::new(Errno::EOPNOTSUPP))
+    let label_end = VOLUME_LABEL_UTF16_OFFSET
+        .checked_add(
+            label_length
+                .checked_mul(2)
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+        )
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let mut label = Vec::with_capacity(label_length);
+    for code_unit_bytes in entry[VOLUME_LABEL_UTF16_OFFSET..label_end].chunks_exact(2) {
+        label.push(u16::from_le_bytes([code_unit_bytes[0], code_unit_bytes[1]]));
+    }
+    Ok(Some(label))
 }
+
+fn encode_volume_label_entry(
+    directory_bytes: &mut [u8],
+    label: Option<&[u16]>,
+) -> core::result::Result<(), ExfatFsError> {
+    let existing_entry_index = locate_volume_label_entry(directory_bytes)?;
+    let Some(label) = label.filter(|label| !label.is_empty()) else {
+        if let Some(existing_entry_index) = existing_entry_index {
+            let entry_offset = existing_entry_index
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            let entry_end = entry_offset
+                .checked_add(DIRECTORY_ENTRY_SIZE)
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            let entry = directory_bytes
+                .get_mut(entry_offset..entry_end)
+                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
+        }
+        return Ok(());
+    };
+    if label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
+        return Err(ExfatFsError::InvalidOperationInput);
+    }
+
+    let destination_entry_index = match existing_entry_index {
+        Some(existing_entry_index) => existing_entry_index,
+        None => {
+            let mut destination_entry_index = None;
+            for (entry_index, entry) in directory_bytes
+                .chunks_exact(DIRECTORY_ENTRY_SIZE)
+                .enumerate()
+            {
+                if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE || entry[0] & ENTRY_TYPE_IN_USE_BIT == 0
+                {
+                    destination_entry_index = Some(entry_index);
+                    break;
+                }
+            }
+            destination_entry_index.ok_or(ExfatFsError::InvalidOnDiskLayout)?
+        }
+    };
+
+    let mut encoded_entry = [0u8; DIRECTORY_ENTRY_SIZE];
+    encoded_entry[0] = VOLUME_LABEL_ENTRY_TYPE;
+    encoded_entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET] =
+        u8::try_from(label.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+    for (index, code_unit) in label.iter().enumerate() {
+        let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
+            .checked_add(
+                index
+                    .checked_mul(2)
+                    .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+            )
+            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        encoded_entry[code_unit_offset..code_unit_offset + 2]
+            .copy_from_slice(&code_unit.to_le_bytes());
+    }
+
+    let entry_offset = destination_entry_index
+        .checked_mul(DIRECTORY_ENTRY_SIZE)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let entry_end = entry_offset
+        .checked_add(DIRECTORY_ENTRY_SIZE)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    let entry = directory_bytes
+        .get_mut(entry_offset..entry_end)
+        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+    entry.copy_from_slice(&encoded_entry);
+    Ok(())
+}
+
+fn locate_volume_label_entry(
+    directory_bytes: &[u8],
+) -> core::result::Result<Option<usize>, ExfatFsError> {
+    if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
+        return Err(ExfatFsError::InvalidOnDiskLayout);
+    }
+
+    let mut label_entry_index = None;
+    for (entry_index, entry) in directory_bytes
+        .chunks_exact(DIRECTORY_ENTRY_SIZE)
+        .enumerate()
+    {
+        if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE {
+            break;
+        }
+        if entry[0] == VOLUME_LABEL_ENTRY_TYPE {
+            if label_entry_index.replace(entry_index).is_some() {
+                return Err(ExfatFsError::InvalidOnDiskLayout);
+            }
+        }
+    }
+    Ok(label_entry_index)
+}
+
+const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
+const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
+const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
+const VOLUME_LABEL_ENTRY_LENGTH_OFFSET: usize = 1;
+const VOLUME_LABEL_UTF16_OFFSET: usize = 2;
+const VOLUME_LABEL_MAX_CODE_UNITS: usize = 11;
