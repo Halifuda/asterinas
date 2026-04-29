@@ -13,7 +13,7 @@ use super::{
         fat::{FatChainStep, FatReader},
         invalid_on_disk_layout,
     },
-    ExfatInode, ExfatInodeStream,
+    ExfatInode, ExfatInodeClusterMap,
 };
 use crate::{
     fs::{
@@ -26,11 +26,11 @@ use crate::{
 impl ExfatInode {
     pub(super) fn validate_regular_file_mapping_shape(
         boot_region: &BootRegion,
-        stream: &ExfatInodeStream,
+        cluster_map: &ExfatInodeClusterMap,
         data_length: usize,
     ) -> Result<()> {
         let data_length_u64 = u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
-        match boot_region.validate_stream_data(stream.first_cluster, data_length_u64) {
+        match boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64) {
             Ok(()) => Ok(()),
             Err(_) => return_errno!(Errno::EINVAL),
         }
@@ -39,16 +39,16 @@ impl ExfatInode {
     pub(super) fn mapped_regular_file_cluster(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        stream: &ExfatInodeStream,
+        cluster_map: &ExfatInodeClusterMap,
         data_length: usize,
         cluster_index: usize,
     ) -> Result<u32> {
-        if stream.no_fat_chain {
+        if cluster_map.no_fat_chain {
             let cluster_count = data_length.div_ceil(boot_region.cluster_size);
             if cluster_index >= cluster_count {
                 return_errno!(Errno::EINVAL);
             }
-            let last_cluster = stream
+            let last_cluster = cluster_map
                 .first_cluster
                 .checked_add(
                     u32::try_from(cluster_count.saturating_sub(1))
@@ -58,14 +58,14 @@ impl ExfatInode {
             if !boot_region.is_valid_cluster(last_cluster) {
                 return_errno!(Errno::EINVAL);
             }
-            return stream
+            return cluster_map
                 .first_cluster
                 .checked_add(u32::try_from(cluster_index).map_err(|_| Error::new(Errno::EINVAL))?)
                 .ok_or_else(|| Error::new(Errno::EINVAL));
         }
 
         let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-        let mut current_cluster = stream.first_cluster;
+        let mut current_cluster = cluster_map.first_cluster;
         for _ in 0..cluster_index {
             current_cluster = match fat_reader.next_cluster(current_cluster) {
                 Ok(FatChainStep::Continue(next_cluster)) => next_cluster,
@@ -90,19 +90,19 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, stream, data_length, valid_data_length) =
-            self.admitted_regular_file_stream_snapshot()?;
+        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+            self.admitted_regular_file_cluster_map_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, &stream, data_length)?;
+        Self::validate_regular_file_mapping_shape(boot_region, &cluster_map, data_length)?;
         let cluster_size = boot_region.cluster_size;
         let cluster_index = offset / cluster_size;
         let cluster = Self::mapped_regular_file_cluster(
             block_device,
             boot_region,
-            &stream,
+            &cluster_map,
             data_length,
             cluster_index,
         )?;
@@ -118,7 +118,7 @@ impl ExfatInode {
     pub(super) fn regular_file_page_bio_ranges(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        stream: &ExfatInodeStream,
+        cluster_map: &ExfatInodeClusterMap,
         data_length: usize,
         file_offset: usize,
         len: usize,
@@ -127,7 +127,7 @@ impl ExfatInode {
             return Ok(Vec::new());
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, stream, data_length)?;
+        Self::validate_regular_file_mapping_shape(boot_region, cluster_map, data_length)?;
 
         let cluster_size = boot_region.cluster_size;
         let cluster_index = file_offset / cluster_size;
@@ -135,7 +135,7 @@ impl ExfatInode {
         let mut current_cluster = Self::mapped_regular_file_cluster(
             block_device,
             boot_region,
-            stream,
+            cluster_map,
             data_length,
             cluster_index,
         )?;
@@ -143,7 +143,7 @@ impl ExfatInode {
         let mut remaining = len;
         let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
         let mut fat_reader =
-            (!stream.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
+            (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
 
         while remaining != 0 {
             let chunk_len = remaining.min(cluster_size - cluster_offset);
@@ -212,7 +212,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         frame: &CachePage,
-        stream: &ExfatInodeStream,
+        cluster_map: &ExfatInodeClusterMap,
         data_length: usize,
         file_offset: usize,
         initialized_len: usize,
@@ -221,7 +221,7 @@ impl ExfatInode {
         let page_ranges = Self::regular_file_page_bio_ranges(
             block_device,
             boot_region,
-            stream,
+            cluster_map,
             data_length,
             file_offset,
             initialized_len,
@@ -257,7 +257,7 @@ impl ExfatInode {
     pub(super) fn read_regular_file_at(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        stream: ExfatInodeStream,
+        cluster_map: ExfatInodeClusterMap,
         data_length: usize,
         valid_data_length: usize,
         offset: usize,
@@ -270,7 +270,7 @@ impl ExfatInode {
             return Ok(0);
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, &stream, data_length)?;
+        Self::validate_regular_file_mapping_shape(boot_region, &cluster_map, data_length)?;
         if offset >= data_length {
             return Ok(0);
         }
@@ -293,19 +293,19 @@ impl ExfatInode {
             let cluster_index = offset / cluster_size;
             let mut cluster_offset = offset % cluster_size;
             let mut fat_reader =
-                (!stream.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
+                (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
             let mut cluster_buffer = vec![0; cluster_size];
             let mut current_cluster = Self::mapped_regular_file_cluster(
                 block_device,
                 boot_region,
-                &stream,
+                &cluster_map,
                 data_length,
                 cluster_index,
             )?;
             while initialized_remaining != 0 {
                 let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
                 let cluster_start = boot_region.cluster_offset(current_cluster).map_err(|_| {
-                    if stream.no_fat_chain {
+                    if cluster_map.no_fat_chain {
                         invalid_on_disk_layout()
                     } else {
                         Error::new(Errno::EIO)
@@ -370,8 +370,8 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, _stream, data_length, _valid_data_length) =
-            self.admitted_regular_file_stream_snapshot()?;
+        let (_owner_guard, _cluster_map, data_length, _valid_data_length) =
+            self.admitted_regular_file_cluster_map_snapshot()?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);
         }

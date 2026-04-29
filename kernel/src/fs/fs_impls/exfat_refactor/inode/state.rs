@@ -13,7 +13,7 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, ScannedDirectoryEntry},
+        direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
         fs::{
             AdmittedLookupState, AdmittedMutationState, ExfatFs, ExfatMountOptions,
@@ -27,9 +27,12 @@ use super::{
 use crate::{fs::file::InodeType, prelude::*};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) struct ExfatInodeStream {
+pub(super) struct ExfatInodeClusterMap {
+    // `None` is reserved for the unbounded root directory; ordinary files and
+    // directories always publish `Some(data_length)`.
     pub(super) data_length: Option<usize>,
     pub(super) first_cluster: u32,
+    // `None` is reserved for the unbounded root directory.
     pub(super) valid_data_length: Option<usize>,
     pub(super) no_fat_chain: bool,
 }
@@ -221,15 +224,15 @@ impl ExfatInode {
 
     pub(super) fn admitted_directory_snapshot(
         &self,
-    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream)> {
+    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeClusterMap)> {
         let owner = self.admission.read();
-        let stream = *self.stream.read();
-        Ok((owner, stream))
+        let cluster_map = *self.cluster_map.read();
+        Ok((owner, cluster_map))
     }
 
-    pub(super) fn admitted_regular_file_stream_snapshot(
+    pub(super) fn admitted_regular_file_cluster_map_snapshot(
         &self,
-    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream, usize, usize)> {
+    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeClusterMap, usize, usize)> {
         match self.metadata.read().type_ {
             InodeType::Dir => return_errno!(Errno::EISDIR),
             InodeType::File => {}
@@ -237,33 +240,33 @@ impl ExfatInode {
         }
 
         let owner = self.admission.read();
-        let stream = *self.stream.read();
-        let Some(data_length) = stream.data_length else {
+        let cluster_map = *self.cluster_map.read();
+        let Some(data_length) = cluster_map.data_length else {
             return_errno!(Errno::EINVAL);
         };
-        let Some(valid_data_length) = stream.valid_data_length else {
+        let Some(valid_data_length) = cluster_map.valid_data_length else {
             return_errno!(Errno::EINVAL);
         };
         if valid_data_length > data_length {
             return_errno!(Errno::EINVAL);
         }
-        if data_length == 0 && (stream.first_cluster != 0 || valid_data_length != 0) {
+        if data_length == 0 && (cluster_map.first_cluster != 0 || valid_data_length != 0) {
             return_errno!(Errno::EINVAL);
         }
-        Ok((owner, stream, data_length, valid_data_length))
+        Ok((owner, cluster_map, data_length, valid_data_length))
     }
 
     // Directory I/O
 
-    pub(super) fn read_directory_bytes_for_stream(
+    pub(super) fn read_directory_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        stream: ExfatInodeStream,
+        cluster_map: ExfatInodeClusterMap,
     ) -> Result<Vec<u8>> {
-        let Some(data_length) = stream.data_length else {
+        let Some(data_length) = cluster_map.data_length else {
             let mut directory_bytes = Vec::new();
             let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-            fat_reader.walk_cluster_chain(stream.first_cluster, |_, cluster_bytes| {
+            fat_reader.walk_cluster_chain(cluster_map.first_cluster, |_, cluster_bytes| {
                 directory_bytes.extend_from_slice(cluster_bytes);
                 Ok(ChainVisitControl::Continue)
             })?;
@@ -271,7 +274,7 @@ impl ExfatInode {
         };
 
         if data_length == 0 {
-            if stream.first_cluster != 0 {
+            if cluster_map.first_cluster != 0 {
                 return Err(invalid_on_disk_layout());
             }
             return Ok(Vec::new());
@@ -282,40 +285,55 @@ impl ExfatInode {
 
         let data_length_u64 =
             u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
-        boot_region.validate_stream_data(stream.first_cluster, data_length_u64)?;
+        boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64)?;
+        if cluster_map.no_fat_chain {
+            let mut remaining = data_length;
+            let mut directory_bytes = Vec::with_capacity(data_length);
+            let mut current_cluster = cluster_map.first_cluster;
+            while remaining != 0 {
+                let cluster_start = boot_region.cluster_offset(current_cluster)?;
+                let mut cluster_bytes = vec![0; boot_region.cluster_size];
+                block_device
+                    .read_bytes(cluster_start, &mut cluster_bytes)
+                    .map_err(|_| device_io())?;
+                let bytes_to_copy = remaining.min(cluster_bytes.len());
+                directory_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
+                remaining -= bytes_to_copy;
+                if remaining == 0 {
+                    return Ok(directory_bytes);
+                }
+                current_cluster = Self::advance_cluster(current_cluster, None)?
+                    .ok_or_else(invalid_on_disk_layout)?;
+            }
+            return Err(invalid_on_disk_layout());
+        }
 
         let mut remaining = data_length;
         let mut directory_bytes = Vec::with_capacity(data_length);
-        let mut current_cluster = stream.first_cluster;
-        let mut fat_reader =
-            (!stream.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
-        while remaining != 0 {
-            let cluster_start = boot_region.cluster_offset(current_cluster)?;
-            let mut cluster_bytes = vec![0; boot_region.cluster_size];
-            block_device
-                .read_bytes(cluster_start, &mut cluster_bytes)
-                .map_err(|_| device_io())?;
+        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+        fat_reader.walk_cluster_chain(cluster_map.first_cluster, |_, cluster_bytes| {
             let bytes_to_copy = remaining.min(cluster_bytes.len());
             directory_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
             remaining -= bytes_to_copy;
-            if remaining == 0 {
-                break;
-            }
-            current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())? {
-                Some(next_cluster) => next_cluster,
-                None => return Err(invalid_on_disk_layout()),
-            };
+            Ok(if remaining == 0 {
+                ChainVisitControl::Stop
+            } else {
+                ChainVisitControl::Continue
+            })
+        })?;
+        if remaining != 0 {
+            return Err(invalid_on_disk_layout());
         }
         Ok(directory_bytes)
     }
 
-    pub(super) fn write_directory_bytes_for_stream(
+    pub(super) fn write_directory_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         directory_bytes: &[u8],
-        stream: ExfatInodeStream,
+        cluster_map: ExfatInodeClusterMap,
     ) -> Result<()> {
-        let expected_length = match stream.data_length {
+        let expected_length = match cluster_map.data_length {
             Some(data_length) => data_length,
             None => directory_bytes.len(),
         };
@@ -325,11 +343,31 @@ impl ExfatInode {
         if directory_bytes.is_empty() {
             return Ok(());
         }
+        if cluster_map.data_length.is_some() && cluster_map.no_fat_chain {
+            let mut remaining = directory_bytes;
+            let mut current_cluster = cluster_map.first_cluster;
+            while !remaining.is_empty() {
+                let bytes_to_write = remaining.len().min(boot_region.cluster_size);
+                block_device
+                    .write_bytes(
+                        boot_region.cluster_offset(current_cluster)?,
+                        &remaining[..bytes_to_write],
+                    )
+                    .map_err(|_| device_io())?;
+                remaining = &remaining[bytes_to_write..];
+                if remaining.is_empty() {
+                    return Ok(());
+                }
+                current_cluster = Self::advance_cluster(current_cluster, None)?
+                    .ok_or_else(invalid_on_disk_layout)?;
+            }
+            return Err(invalid_on_disk_layout());
+        }
 
         let mut remaining = directory_bytes;
-        let mut current_cluster = stream.first_cluster;
+        let mut current_cluster = cluster_map.first_cluster;
         let mut fat_reader =
-            (!stream.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
+            (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
         while !remaining.is_empty() {
             let bytes_to_write = remaining.len().min(boot_region.cluster_size);
             block_device
@@ -395,8 +433,8 @@ impl ExfatInode {
         &self,
         entry_index: usize,
     ) -> Result<u64> {
-        let stream = self.stream.read();
-        Ok((u64::from(stream.first_cluster) << 32)
+        let cluster_map = self.cluster_map.read();
+        Ok((u64::from(cluster_map.first_cluster) << 32)
             | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
     }
 
@@ -599,7 +637,7 @@ impl ExfatInode {
 
     // Other helpers
 
-    pub(super) fn ordered_directory_write_guards<'a>(
+    pub(super) fn directory_write_guards_by_ino<'a>(
         mut directories: Vec<&'a ExfatInode>,
     ) -> Vec<RwMutexWriteGuard<'a, ()>> {
         directories.sort_by_key(|directory| directory.metadata.read().ino);
@@ -608,27 +646,5 @@ impl ExfatInode {
             .into_iter()
             .map(|directory| directory.admission.write())
             .collect()
-    }
-
-    pub(super) fn first_directory_child_scan<'a>(
-        &self,
-        stream: ExfatInodeStream,
-        directory_bytes: &'a [u8],
-    ) -> Result<Option<ScannedDirectoryEntry<'a>>> {
-        let is_root_directory = stream.data_length.is_none();
-        let mut entry_index = 0usize;
-        loop {
-            let entry_scan =
-                direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)?;
-            match entry_scan {
-                ScannedDirectoryEntry::EndOfDirectory { .. } => return Ok(None),
-                ScannedDirectoryEntry::Vacant(slot_range) => {
-                    entry_index = slot_range.next_entry_index()?;
-                }
-                ScannedDirectoryEntry::Anomaly { .. } | ScannedDirectoryEntry::File(_) => {
-                    return Ok(Some(entry_scan));
-                }
-            }
-        }
     }
 }
