@@ -479,109 +479,6 @@ pub(super) fn invalidate_entry_set(
     Ok(())
 }
 
-pub(super) fn read_volume_label(
-    directory_bytes: &[u8],
-) -> core::result::Result<Option<Vec<u16>>, ExfatFsError> {
-    let Some(entry_index) = locate_volume_label_entry(directory_bytes)? else {
-        return Ok(None);
-    };
-    let entry_offset = entry_index
-        .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    let entry_end = entry_offset
-        .checked_add(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    let entry = directory_bytes
-        .get(entry_offset..entry_end)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    let label_length = usize::from(entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET]);
-    if label_length > VOLUME_LABEL_MAX_CODE_UNITS {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
-    }
-    if label_length == 0 {
-        return Ok(None);
-    }
-
-    let mut label = Vec::with_capacity(label_length);
-    let label_end = VOLUME_LABEL_UTF16_OFFSET
-        .checked_add(
-            label_length
-                .checked_mul(2)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
-        )
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    for code_unit_bytes in entry[VOLUME_LABEL_UTF16_OFFSET..label_end].chunks_exact(2) {
-        label.push(u16::from_le_bytes([code_unit_bytes[0], code_unit_bytes[1]]));
-    }
-    Ok(Some(label))
-}
-
-pub(super) fn write_volume_label(
-    directory_bytes: &mut [u8],
-    label: Option<&[u16]>,
-) -> core::result::Result<(), ExfatFsError> {
-    let existing_entry_index = locate_volume_label_entry(directory_bytes)?;
-    let Some(label) = label.filter(|label| !label.is_empty()) else {
-        if let Some(existing_entry_index) = existing_entry_index {
-            let slot_range = DirectoryEntrySlotRange::new(existing_entry_index, 1)?;
-            let slot_range_bytes = slot_range_bytes(slot_range)?;
-            let slot_bytes = directory_bytes
-                .get_mut(slot_range_bytes)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-            let mut slot_span = WritableDirectoryEntrySlotSpan::new(slot_range, slot_bytes)?;
-            invalidate_entry_set(&mut slot_span)?;
-        }
-        return Ok(());
-    };
-    if label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
-        return Err(ExfatFsError::InvalidOperationInput);
-    }
-
-    let destination_entry_index = match existing_entry_index {
-        Some(existing_entry_index) => existing_entry_index,
-        None => {
-            let mut destination_entry_index = None;
-            for (entry_index, entry) in directory_bytes
-                .chunks_exact(DIRECTORY_ENTRY_SIZE)
-                .enumerate()
-            {
-                if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE || entry[0] & ENTRY_TYPE_IN_USE_BIT == 0
-                {
-                    destination_entry_index = Some(entry_index);
-                    break;
-                }
-            }
-            destination_entry_index.ok_or(ExfatFsError::InvalidOnDiskLayout)?
-        }
-    };
-    let mut encoded_entry = [0u8; DIRECTORY_ENTRY_SIZE];
-    encoded_entry[0] = VOLUME_LABEL_ENTRY_TYPE;
-    encoded_entry[VOLUME_LABEL_ENTRY_LENGTH_OFFSET] =
-        u8::try_from(label.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
-    for (index, code_unit) in label.iter().enumerate() {
-        let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
-            .checked_add(
-                index
-                    .checked_mul(2)
-                    .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
-            )
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-        encoded_entry[code_unit_offset..code_unit_offset + 2]
-            .copy_from_slice(&code_unit.to_le_bytes());
-    }
-    let entry_offset = destination_entry_index
-        .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    let entry_end = entry_offset
-        .checked_add(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    let entry = directory_bytes
-        .get_mut(entry_offset..entry_end)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
-    entry.copy_from_slice(&encoded_entry);
-    Ok(())
-}
-
 pub(super) fn renamed_entry_set(
     source_entry_set: FileEntrySetView<'_>,
     name: &[u16],
@@ -680,9 +577,6 @@ const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
 const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
 const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
 const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
-const VOLUME_LABEL_ENTRY_LENGTH_OFFSET: usize = 1;
-const VOLUME_LABEL_UTF16_OFFSET: usize = 2;
-const VOLUME_LABEL_MAX_CODE_UNITS: usize = 11;
 const FILE_ATTRIBUTES_OFFSET: usize = 4;
 const STREAM_FLAGS_OFFSET: usize = 1;
 const STREAM_NAME_LENGTH_OFFSET: usize = 3;
@@ -994,30 +888,6 @@ pub(super) fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u1
         checksum = checksum.rotate_right(1).wrapping_add(u16::from(*byte));
     }
     checksum
-}
-
-fn locate_volume_label_entry(
-    directory_bytes: &[u8],
-) -> core::result::Result<Option<usize>, ExfatFsError> {
-    if directory_bytes.len() % DIRECTORY_ENTRY_SIZE != 0 {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
-    }
-
-    let mut label_entry_index = None;
-    for (entry_index, entry) in directory_bytes
-        .chunks_exact(DIRECTORY_ENTRY_SIZE)
-        .enumerate()
-    {
-        if entry[0] == END_OF_DIRECTORY_ENTRY_TYPE {
-            break;
-        }
-        if entry[0] == VOLUME_LABEL_ENTRY_TYPE {
-            if label_entry_index.replace(entry_index).is_some() {
-                return Err(ExfatFsError::InvalidOnDiskLayout);
-            }
-        }
-    }
-    Ok(label_entry_index)
 }
 
 pub(super) fn slot_range_bytes(
