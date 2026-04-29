@@ -11,6 +11,9 @@ pub(super) const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
 
 #[derive(Clone)]
 pub(super) struct UpcaseTable {
+    checksum: u32,
+    data_length: u64,
+    first_cluster: u32,
     mapping: Vec<u16>,
 }
 
@@ -23,13 +26,39 @@ impl UpcaseTable {
     pub(super) fn load(
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
-        upcase: UpcaseRecord,
+        upcase_entry: [u8; 32],
     ) -> Result<Self> {
-        boot_region.validate_stream_data(upcase.first_cluster, upcase.data_length)?;
-        let data_length = usize::try_from(upcase.data_length).map_err(|_| invalid_on_disk_layout())?;
+        if upcase_entry[0] != UPCASE_TABLE_ENTRY_TYPE {
+            return Err(invalid_on_disk_layout());
+        }
+
+        let checksum = u32::from_le_bytes([
+            upcase_entry[4],
+            upcase_entry[5],
+            upcase_entry[6],
+            upcase_entry[7],
+        ]);
+        let first_cluster = u32::from_le_bytes([
+            upcase_entry[20],
+            upcase_entry[21],
+            upcase_entry[22],
+            upcase_entry[23],
+        ]);
+        let data_length = u64::from_le_bytes([
+            upcase_entry[24],
+            upcase_entry[25],
+            upcase_entry[26],
+            upcase_entry[27],
+            upcase_entry[28],
+            upcase_entry[29],
+            upcase_entry[30],
+            upcase_entry[31],
+        ]);
+        boot_region.validate_stream_data(first_cluster, data_length)?;
+        let data_length = usize::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
         let mut remaining = data_length;
         let mut table_bytes = Vec::with_capacity(data_length);
-        fat_reader.walk_cluster_chain(upcase.first_cluster, |_, cluster_bytes| {
+        fat_reader.walk_cluster_chain(first_cluster, |_, cluster_bytes| {
             let bytes_to_copy = remaining.min(cluster_bytes.len());
             table_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
             remaining -= bytes_to_copy;
@@ -41,10 +70,13 @@ impl UpcaseTable {
         if remaining != 0 {
             return Err(invalid_on_disk_layout());
         }
-        if Self::stream_checksum(&table_bytes) != upcase.checksum {
+        if Self::stream_checksum(&table_bytes) != checksum {
             return Err(invalid_on_disk_layout());
         }
         Ok(Self {
+            checksum,
+            data_length: u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
+            first_cluster,
             mapping: Self::decode_mapping(&table_bytes)?,
         })
     }
@@ -129,47 +161,34 @@ impl UpcaseTable {
         Ok(mapping)
     }
 
+    pub(super) fn upcase_code_unit(
+        &self,
+        code_unit: u16,
+    ) -> u16 {
+        self.mapping
+            .get(usize::from(code_unit))
+            .copied()
+            .unwrap_or(code_unit)
+    }
+
     pub(super) fn names_equal(&self, left: &[u16], right: &[u16]) -> bool {
         left.len() == right.len()
             && left
                 .iter()
                 .zip(right.iter())
                 .all(|(left_code_unit, right_code_unit)| {
-                    self.mapping[usize::from(*left_code_unit)]
-                        == self.mapping[usize::from(*right_code_unit)]
+                    self.upcase_code_unit(*left_code_unit)
+                        == self.upcase_code_unit(*right_code_unit)
                 })
     }
 
     pub(super) fn name_hash(&self, name: &[u16]) -> u16 {
         let mut hash = 0u16;
         for code_unit in name {
-            for byte in self.mapping[usize::from(*code_unit)].to_le_bytes() {
+            for byte in self.upcase_code_unit(*code_unit).to_le_bytes() {
                 hash = ((hash & 1) << 15) + (hash >> 1) + u16::from(byte);
             }
         }
         hash
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct UpcaseRecord {
-    pub(super) checksum: u32,
-    pub(super) data_length: u64,
-    pub(super) first_cluster: u32,
-}
-
-impl UpcaseRecord {
-    pub(super) fn parse(entry: &[u8]) -> Result<Self> {
-        if entry.len() != 32 {
-            return Err(invalid_on_disk_layout());
-        }
-        Ok(Self {
-            checksum: u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]),
-            first_cluster: u32::from_le_bytes([entry[20], entry[21], entry[22], entry[23]]),
-            data_length: u64::from_le_bytes([
-                entry[24], entry[25], entry[26], entry[27], entry[28], entry[29], entry[30],
-                entry[31],
-            ]),
-        })
     }
 }

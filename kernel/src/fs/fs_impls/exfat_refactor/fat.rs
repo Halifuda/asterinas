@@ -61,7 +61,9 @@ impl<'a> FatReader<'a> {
                 return Err(invalid_on_disk_layout());
             }
             let cluster_offset = self.boot_region.cluster_offset(current_cluster)?;
-            Self::read_device_bytes(self.block_device, cluster_offset, &mut cluster_buffer)?;
+            self.block_device
+                .read_bytes(cluster_offset, &mut cluster_buffer)
+                .map_err(|_| device_io())?;
             if matches!(
                 visit_cluster_fn(current_cluster, &cluster_buffer)?,
                 ChainVisitControl::Stop
@@ -93,11 +95,12 @@ impl<'a> FatReader<'a> {
             let sector_offset = sector_index
                 .checked_mul(sector_size)
                 .ok_or_else(invalid_on_disk_layout)?;
-            Self::read_device_bytes(
-                self.block_device,
-                usize::try_from(sector_offset).map_err(|_| invalid_on_disk_layout())?,
-                &mut self.cached_sector,
-            )?;
+            self.block_device
+                .read_bytes(
+                    usize::try_from(sector_offset).map_err(|_| invalid_on_disk_layout())?,
+                    &mut self.cached_sector,
+                )
+                .map_err(|_| device_io())?;
             self.cached_sector_index = Some(sector_index);
         }
         let entry_within_sector = usize::try_from(entry_offset % sector_size)
@@ -195,16 +198,6 @@ impl<'a> FatReader<'a> {
         self.write_cluster_entry(cluster, FAT_END_OF_CHAIN)
     }
 
-    fn read_device_bytes(
-        block_device: &dyn BlockDevice,
-        offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<()> {
-        block_device
-            .read_bytes(offset, buffer)
-            .map_err(|_| device_io())
-    }
-
     fn write_cluster_entry(
         &mut self,
         cluster: u32,
@@ -228,11 +221,12 @@ impl<'a> FatReader<'a> {
             let sector_offset = sector_index
                 .checked_mul(sector_size)
                 .ok_or_else(invalid_on_disk_layout)?;
-            Self::read_device_bytes(
-                self.block_device,
-                usize::try_from(sector_offset).map_err(|_| invalid_on_disk_layout())?,
-                &mut self.cached_sector,
-            )?;
+            self.block_device
+                .read_bytes(
+                    usize::try_from(sector_offset).map_err(|_| invalid_on_disk_layout())?,
+                    &mut self.cached_sector,
+                )
+                .map_err(|_| device_io())?;
             self.cached_sector_index = Some(sector_index);
         }
 

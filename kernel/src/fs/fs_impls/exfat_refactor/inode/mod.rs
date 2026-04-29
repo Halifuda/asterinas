@@ -18,7 +18,7 @@ use spin::Once;
 
 use self::{
     state::{
-        DirectoryContextMode, ExfatInodeDirtyState, ExfatInodeStream, InodeRewriteTarget,
+        DirectoryContextMode, ExfatInodeDirtyState, ExfatInodeClusterMap, InodeRewriteTarget,
         InodeTimestampField,
     },
     sync::InodeSyncScope,
@@ -53,7 +53,7 @@ pub(super) struct ExfatInode {
     parent: Weak<Self>,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
-    stream: RwLock<ExfatInodeStream>,
+    cluster_map: RwLock<ExfatInodeClusterMap>,
 }
 
 impl ExfatInode {
@@ -63,12 +63,12 @@ impl ExfatInode {
         boot_region: &BootRegion,
     ) -> Result<Vec<u8>> {
         let _directory_guard = self.admission.read();
-        let stream = *self.stream.read();
-        if stream.data_length.is_some() {
+        let cluster_map = *self.cluster_map.read();
+        if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
 
-        Self::read_directory_bytes_for_stream(block_device, boot_region, stream)
+        Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
     }
 
     pub(super) fn rewrite_root_directory_bytes(
@@ -77,13 +77,13 @@ impl ExfatInode {
         boot_region: &BootRegion,
         directory_bytes: &[u8],
     ) -> Result<()> {
-        let _directory_guards = Self::ordered_directory_write_guards(vec![self]);
-        let stream = *self.stream.read();
-        if stream.data_length.is_some() {
+        let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+        let cluster_map = *self.cluster_map.read();
+        if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
 
-        Self::write_directory_bytes_for_stream(block_device, boot_region, directory_bytes, stream)
+        Self::write_directory_bytes_for_cluster_map(block_device, boot_region, directory_bytes, cluster_map)
     }
 
     fn new(
@@ -104,7 +104,7 @@ impl ExfatInode {
             parent,
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
-            stream: RwLock::new(ExfatInodeStream {
+            cluster_map: RwLock::new(ExfatInodeClusterMap {
                 data_length,
                 first_cluster,
                 valid_data_length,

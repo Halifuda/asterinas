@@ -27,12 +27,12 @@ impl ExfatInode {
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> Result<Option<Arc<dyn Inode>>> {
-        let (_owner_guard, stream) = self.admitted_directory_snapshot()?;
+        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot()?;
         let directory_bytes =
-            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
+            Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)?;
         let Some(entry_view) = Self::locate_named_child_view(
             &directory_bytes,
-            stream.data_length.is_none(),
+            cluster_map.data_length.is_none(),
             upcase_table,
             lookup_name,
             lookup_name_hash,
@@ -43,7 +43,7 @@ impl ExfatInode {
         let slot_range = entry_view.slot_range();
         let (inode_type, first_cluster, data_length, no_fat_chain) =
             entry_view.child_metadata(boot_region)?;
-        let ino = (u64::from(stream.first_cluster) << 32)
+        let ino = (u64::from(cluster_map.first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
                     .map_err(|_| invalid_on_disk_layout())?,
@@ -117,9 +117,9 @@ impl ExfatInode {
         let context = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
         let block_device = context.block_device();
         let boot_region = context.boot_region();
-        let (_owner_guard, stream) = self.admitted_directory_snapshot().map_err(Error::from)?;
+        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot().map_err(Error::from)?;
         let directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, stream)
+            Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)
                 .map_err(Error::from)?;
 
         let mut next_offset = offset;
@@ -136,7 +136,7 @@ impl ExfatInode {
         let mut entry_index = 0usize;
         loop {
             match direntry::scan_directory_entry(
-                stream.data_length.is_none(),
+                cluster_map.data_length.is_none(),
                 &directory_bytes,
                 entry_index,
             )? {
@@ -151,7 +151,7 @@ impl ExfatInode {
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
                             .map_err(|_| invalid_on_disk_layout())?;
-                        let entry_ino = (u64::from(stream.first_cluster) << 32)
+                        let entry_ino = (u64::from(cluster_map.first_cluster) << 32)
                             | u64::from(
                                 u32::try_from(entry_view.slot_range().first_entry_index())
                                     .map_err(|_| invalid_on_disk_layout())?,

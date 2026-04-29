@@ -10,7 +10,7 @@ use super::{
     fat::{ChainVisitControl, FatReader},
     device_io, invalid_on_disk_layout,
     fs::VolumeAnomalyState,
-    upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseRecord, UpcaseTable},
+    upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseTable},
 };
 use crate::prelude::*;
 
@@ -37,17 +37,19 @@ impl BootRegion {
     pub(super) fn load_mount_state(
         block_device: &dyn BlockDevice,
     ) -> Result<(Self, VolumeAnomalyState, AllocationBitmap, Arc<UpcaseTable>)> {
-        let boot_region = Self::read(block_device)?;
+        let boot_region = Self::load(block_device)?;
         let anomaly = VolumeAnomalyState::read(block_device, &boot_region)?;
         let mut fat_reader = FatReader::new(block_device, &boot_region);
-        let (mut bitmap, upcase) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
-        let upcase_table = Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase)?);
+        let (mut bitmap, upcase_entry) =
+            Self::scan_root_directory(&boot_region, &mut fat_reader)?;
+        let upcase_table =
+            Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase_entry)?);
         let used_clusters = bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
         bitmap.set_used_clusters(used_clusters);
         Ok((boot_region, anomaly, bitmap, upcase_table))
     }
 
-    pub(super) fn read(block_device: &dyn BlockDevice) -> Result<Self> {
+    fn load(block_device: &dyn BlockDevice) -> Result<Self> {
         let mut sector_header = [0u8; 512];
         block_device
             .read_bytes(0, &mut sector_header)
@@ -290,18 +292,22 @@ impl BootRegion {
     fn scan_root_directory(
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
-    ) -> Result<(AllocationBitmap, UpcaseRecord)> {
+    ) -> Result<(AllocationBitmap, [u8; 32])> {
         let mut bitmap = None;
-        let mut upcase = None;
+        let mut upcase_entry = None;
         fat_reader.walk_cluster_chain(boot_region.root_dir_cluster, |_, cluster_bytes| {
             for entry in cluster_bytes.chunks_exact(32) {
                 match entry[0] {
                     END_OF_DIRECTORY_ENTRY_TYPE => return Ok(ChainVisitControl::Stop),
                     ALLOCATION_BITMAP_ENTRY_TYPE => bitmap = Some(AllocationBitmap::parse(entry)?),
-                    UPCASE_TABLE_ENTRY_TYPE => upcase = Some(UpcaseRecord::parse(entry)?),
+                    UPCASE_TABLE_ENTRY_TYPE => {
+                        upcase_entry = Some(
+                            <[u8; 32]>::try_from(entry).map_err(|_| invalid_on_disk_layout())?,
+                        );
+                    }
                     _ => (),
                 }
-                if bitmap.is_some() && upcase.is_some() {
+                if bitmap.is_some() && upcase_entry.is_some() {
                     return Ok(ChainVisitControl::Stop);
                 }
             }
@@ -309,12 +315,10 @@ impl BootRegion {
         })?;
         Ok((
             bitmap.ok_or_else(invalid_on_disk_layout)?,
-            upcase.ok_or_else(invalid_on_disk_layout)?,
+            upcase_entry.ok_or_else(invalid_on_disk_layout)?,
         ))
     }
-}
 
-impl BootRegion {
     pub(super) fn write_volume_anomaly_state(
         &self,
         block_device: &dyn BlockDevice,

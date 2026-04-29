@@ -41,8 +41,8 @@ impl ExfatInode {
             return metadata;
         }
 
-        let Ok((owner_guard, _stream, data_length, _valid_data_length)) =
-            self.admitted_regular_file_stream_snapshot()
+        let Ok((owner_guard, _cluster_map, data_length, _valid_data_length)) =
+            self.admitted_regular_file_cluster_map_snapshot()
         else {
             return metadata;
         };
@@ -154,7 +154,7 @@ impl ExfatInode {
             }
 
             let requested_writable = mode.intersects(mkmod!(a+w));
-            if self.stream.read().data_length.is_none() {
+            if self.cluster_map.read().data_length.is_none() {
                 let current_writable = self.metadata.read().mode.intersects(mkmod!(a+w));
                 if requested_writable == current_writable {
                     return Ok(());
@@ -417,7 +417,7 @@ impl ExfatInode {
 
         match target {
             InodeRewriteTarget::Directory => {
-                if self.stream.read().data_length.is_none() {
+                if self.cluster_map.read().data_length.is_none() {
                     return;
                 }
                 if self
@@ -551,7 +551,7 @@ impl ExfatInode {
             return_errno!(Errno::ENOTDIR);
         }
 
-        if self.stream.read().data_length.is_none() {
+        if self.cluster_map.read().data_length.is_none() {
             let mut metadata = self.metadata.write();
             metadata.last_meta_change_at = timestamp;
             metadata.last_modify_at = timestamp;
@@ -604,7 +604,7 @@ impl ExfatInode {
             )
         })?;
         let _directory_guards = match target {
-            InodeRewriteTarget::Directory => Some(Self::ordered_directory_write_guards(vec![
+            InodeRewriteTarget::Directory => Some(Self::directory_write_guards_by_ino(vec![
                 self,
                 parent.as_ref(),
             ])),
@@ -614,14 +614,14 @@ impl ExfatInode {
             InodeRewriteTarget::Directory => None,
             InodeRewriteTarget::RegularFile => Some(parent.admission.write()),
         };
-        let parent_stream = *parent.stream.read();
+        let parent_cluster_map = *parent.cluster_map.read();
         let mut directory_bytes =
-            Self::read_directory_bytes_for_stream(block_device, boot_region, parent_stream)
+            Self::read_directory_bytes_for_cluster_map(block_device, boot_region, parent_cluster_map)
                 .map_err(Error::from)?;
         let entry_index =
             usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
         let entry_view = match direntry::scan_directory_entry(
-            parent_stream.data_length.is_none(),
+            parent_cluster_map.data_length.is_none(),
             &directory_bytes,
             entry_index,
         )
@@ -656,11 +656,11 @@ impl ExfatInode {
             .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?;
         destination_entry_set.copy_from_slice(&republished_entry_set);
-        Self::write_directory_bytes_for_stream(
+        Self::write_directory_bytes_for_cluster_map(
             block_device,
             boot_region,
             &directory_bytes,
-            parent_stream,
+            parent_cluster_map,
         )
         .map_err(Error::from)?;
         let mut metadata = self.metadata.write();

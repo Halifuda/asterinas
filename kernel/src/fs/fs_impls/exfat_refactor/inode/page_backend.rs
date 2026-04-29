@@ -3,7 +3,7 @@
 use aster_block::bio::{BioType, BioWaiter};
 use ostd::mm::io::util::HasVmReaderWriter;
 
-use super::{super::boot::BootRegion, ExfatInode, ExfatInodeStream};
+use super::ExfatInode;
 use crate::{
     fs::{
         file::InodeType,
@@ -48,8 +48,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, stream, data_length, valid_data_length) =
-            inode.admitted_regular_file_stream_snapshot()?;
+        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+            inode.admitted_regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len =
@@ -68,7 +68,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             &admission.block_device,
             &admission.boot_region,
             frame,
-            &stream,
+            &cluster_map,
             data_length,
             file_offset,
             initialized_sector_len,
@@ -90,8 +90,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             return_errno!(Errno::EROFS);
         }
 
-        let (_owner_guard, stream, data_length, valid_data_length) =
-            inode.admitted_regular_file_stream_snapshot()?;
+        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+            inode.admitted_regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len = initialized_len
@@ -106,7 +106,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             &admission.block_device,
             &admission.boot_region,
             frame,
-            &stream,
+            &cluster_map,
             data_length,
             file_offset,
             initialized_sector_len,
