@@ -6,13 +6,7 @@ use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::{
-    super::{
-        bitmap::ClusterRange,
-        boot::BootRegion,
-        direntry,
-        fat::FatReader,
-        fs::{ExfatFsError, ExfatMountOptions},
-    },
+    super::{bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader, fs::ExfatFsError},
     ExfatFs, ExfatInode, ExfatInodeStream, InodeRewriteTarget, MountedVolumeState,
 };
 use crate::{
@@ -507,36 +501,37 @@ impl ExfatInode {
                 .map_err(Error::from)?;
         }
 
-        let (timestamp_bytes, hundredths_increment, utc_offset_byte) =
-            Self::encoded_exfat_timestamp_fields(timestamp, 0)?;
-        let last_modified_fields = (timestamp_bytes, hundredths_increment, utc_offset_byte);
         self.rewrite_inode_entry_set(
             InodeRewriteTarget::RegularFile,
             block_device,
             boot_region,
-            |entry_view, _source_entry_set| {
-                let stream_flags = if published_stream.no_fat_chain {
-                    0x03
-                } else {
-                    0x01
-                };
+            |entry_view| {
                 let valid_data_length =
                     u64::try_from(valid_data_length).map_err(|_| Error::new(Errno::EINVAL))?;
                 let data_length =
                     u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
-                direntry::republished_entry_set(
-                    entry_view,
-                    &direntry::FileEntrySetFieldUpdates {
-                        data_length: Some(data_length),
-                        first_cluster: Some(published_stream.first_cluster),
-                        last_modified_fields: Some(last_modified_fields),
-                        stream_flags: Some(stream_flags),
-                        valid_data_length: Some(valid_data_length),
-                        ..Default::default()
-                    },
+                let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
+                    Self::encoded_exfat_timestamp_fields(
+                        timestamp,
+                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                    )?;
+                let cluster_map = direntry::FileEntryClusterMap::new(
+                    published_stream.first_cluster,
+                    data_length,
+                    valid_data_length,
+                    published_stream.no_fat_chain,
                 )
-                .map(Some)
-                .map_err(Error::from)
+                .map_err(Error::from)?;
+                let mut republished_entry_set = entry_view.republished();
+                republished_entry_set.set_cluster_map(cluster_map);
+                republished_entry_set.set_last_modified_timestamp(
+                    direntry::FileEntryTimestamp::new(
+                        timestamp_bytes,
+                        Some(hundredths_increment),
+                        encoded_utc_offset_byte,
+                    ),
+                );
+                Ok(Some(republished_entry_set.into_bytes()))
             },
             |_| {},
         )?;

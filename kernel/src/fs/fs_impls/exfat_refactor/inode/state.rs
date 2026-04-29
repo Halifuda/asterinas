@@ -15,7 +15,10 @@ use super::{
         boot::BootRegion,
         direntry::{self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, ScannedDirectoryEntry},
         fat::{ChainVisitControl, FatChainStep, FatReader},
-        fs::{ExfatFs, ExfatFsError, ExfatMountOptions},
+        fs::{
+            AdmittedLookupState, AdmittedMutationState, ExfatFs, ExfatFsError, ExfatMountOptions,
+            MountedVolumeState,
+        },
         upcase::UpcaseTable,
     },
     ExfatInode,
@@ -127,8 +130,93 @@ pub(super) enum InodeTimestampField {
     Modified,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DirectoryContextMode {
+    Lookup,
+    Mutation,
+}
+
+pub(super) struct AdmittedDirectoryContext<'a> {
+    access: DirectoryContextAccess<'a>,
+}
+
+enum DirectoryContextAccess<'a> {
+    Lookup(AdmittedLookupState<'a>),
+    Mutation(AdmittedMutationState<'a>),
+}
+
+impl AdmittedDirectoryContext<'_> {
+    pub(super) fn block_device(&self) -> Arc<dyn BlockDevice> {
+        match &self.access {
+            DirectoryContextAccess::Lookup(admission) => admission.block_device.clone(),
+            DirectoryContextAccess::Mutation(admission) => admission.block_device.clone(),
+        }
+    }
+
+    pub(super) fn boot_region(&self) -> BootRegion {
+        match &self.access {
+            DirectoryContextAccess::Lookup(admission) => admission.boot_region,
+            DirectoryContextAccess::Mutation(admission) => admission.boot_region,
+        }
+    }
+
+    pub(super) fn forced_shutdown(&self) -> bool {
+        match &self.access {
+            DirectoryContextAccess::Lookup(admission) => admission.forced_shutdown,
+            DirectoryContextAccess::Mutation(admission) => admission.forced_shutdown,
+        }
+    }
+
+    pub(super) fn options(&self) -> ExfatMountOptions {
+        match &self.access {
+            DirectoryContextAccess::Lookup(admission) => admission.options.clone(),
+            DirectoryContextAccess::Mutation(admission) => admission.options.clone(),
+        }
+    }
+
+    pub(super) fn publication(&mut self) -> Result<&mut MountedVolumeState> {
+        let DirectoryContextAccess::Mutation(admission) = &mut self.access else {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "lookup admission has no mutation publication"
+            );
+        };
+        admission
+            .state_guard
+            .as_mut()
+            .ok_or(ExfatFsError::UnpublishedState)
+            .map_err(Error::from)
+    }
+
+    pub(super) fn upcase_table(&self) -> Arc<UpcaseTable> {
+        match &self.access {
+            DirectoryContextAccess::Lookup(admission) => admission.upcase_table.clone(),
+            DirectoryContextAccess::Mutation(admission) => admission.upcase_table.clone(),
+        }
+    }
+}
+
 impl ExfatInode {
     // Admission
+
+    pub(super) fn admitted_directory_context<'a>(
+        &self,
+        fs: &'a Arc<ExfatFs>,
+        mode: DirectoryContextMode,
+    ) -> Result<AdmittedDirectoryContext<'a>> {
+        if self.metadata.read().type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+        let access = match mode {
+            DirectoryContextMode::Lookup => {
+                DirectoryContextAccess::Lookup(fs.admitted_lookup_state().map_err(Error::from)?)
+            }
+            DirectoryContextMode::Mutation => {
+                DirectoryContextAccess::Mutation(fs.admitted_mutation_state().map_err(Error::from)?)
+            }
+        };
+        Ok(AdmittedDirectoryContext { access })
+    }
 
     pub(super) fn admitted_directory_snapshot(
         &self,
