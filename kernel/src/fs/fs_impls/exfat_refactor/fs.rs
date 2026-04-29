@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use aster_block::{BlockDevice, bio::BioStatus};
 use ostd::{
@@ -70,6 +70,7 @@ pub(super) struct ExfatFs {
     allocator: RwLock<Option<FreeSpaceAllocatorState>>,
     block_device: Arc<dyn BlockDevice>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
+    inode_cache: RwLock<BTreeMap<u64, Weak<ExfatInode>>>,
     source: Option<String>,
     pub(super) state: RwMutex<Option<MountedVolumeState>>,
 }
@@ -88,7 +89,7 @@ impl FileSystem for ExfatFs {
         {
             let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             if publication.forced_shutdown {
-                return Err(Error::new(Errno::EIO));
+                return_errno!(Errno::EIO);
             }
             if publication.flags.contains(FsFlags::RDONLY) {
                 return Err(ExfatFsError::ReadOnlyConflict.into());
@@ -103,7 +104,7 @@ impl FileSystem for ExfatFs {
                     .ok_or(ExfatFsError::UnpublishedState)?
                     .anomaly
                     .volume_dirty = true;
-                return Err(Error::new(Errno::EIO));
+                return_errno!(Errno::EIO);
             }
         };
         if flush_status != BioStatus::Complete {
@@ -118,7 +119,7 @@ impl FileSystem for ExfatFs {
         let clean_anomaly = {
             let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             if publication.forced_shutdown {
-                return Err(Error::new(Errno::EIO));
+                return_errno!(Errno::EIO);
             }
             if publication.flags.contains(FsFlags::RDONLY) {
                 return Err(ExfatFsError::ReadOnlyConflict.into());
@@ -234,6 +235,7 @@ impl ExfatFs {
             allocator: RwLock::new(None),
             block_device,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
+            inode_cache: RwLock::new(BTreeMap::new()),
             source,
             state: RwMutex::new(None),
         })
@@ -314,143 +316,67 @@ impl ExfatFs {
 
     pub(super) fn published_lookup_state(
         &self,
-    ) -> core::result::Result<
-        (
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        ExfatFsError,
-    > {
+    ) -> core::result::Result<PublishedLookupState, ExfatFsError> {
         let state = self.state.read();
         let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-        Ok((
-            self.block_device.clone(),
-            publication.boot_region,
-            publication.anomaly,
-            publication.upcase_table.clone(),
-            publication.options.clone(),
-        ))
+        Ok(PublishedLookupState {
+            block_device: self.block_device.clone(),
+            boot_region: publication.boot_region,
+            anomaly: publication.anomaly,
+            upcase_table: publication.upcase_table.clone(),
+            options: publication.options.clone(),
+            forced_shutdown: publication.forced_shutdown,
+        })
     }
 
     pub(super) fn admitted_lookup_state(
         &self,
-    ) -> core::result::Result<
-        (
-            RwMutexReadGuard<'_, Option<MountedVolumeState>>,
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        ExfatFsError,
-    > {
+    ) -> core::result::Result<AdmittedLookupState<'_>, ExfatFsError> {
         let state = self.state.read();
-        let (boot_region, anomaly, upcase_table, options) = {
+        let (boot_region, anomaly, upcase_table, options, forced_shutdown) = {
             let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
             (
                 publication.boot_region,
                 publication.anomaly,
                 publication.upcase_table.clone(),
                 publication.options.clone(),
+                publication.forced_shutdown,
             )
         };
-        Ok((
-            state,
-            self.block_device.clone(),
+        Ok(AdmittedLookupState {
+            state_guard: state,
+            block_device: self.block_device.clone(),
             boot_region,
             anomaly,
             upcase_table,
             options,
-        ))
+            forced_shutdown,
+        })
     }
 
     pub(super) fn admitted_mutation_state(
         &self,
-    ) -> core::result::Result<
-        (
-            RwMutexWriteGuard<'_, Option<MountedVolumeState>>,
-            Arc<dyn BlockDevice>,
-            BootRegion,
-            VolumeAnomalyState,
-            Arc<UpcaseTable>,
-            ExfatMountOptions,
-        ),
-        ExfatFsError,
-    > {
+    ) -> core::result::Result<AdmittedMutationState<'_>, ExfatFsError> {
         let mut state = self.state.write();
-        let dirty_anomaly = {
-            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-            if publication.forced_shutdown {
-                return Err(ExfatFsError::DeviceIo);
-            }
-            if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(ExfatFsError::ReadOnlyConflict);
-            }
-            (!publication.anomaly.volume_dirty).then_some(VolumeAnomalyState {
-                volume_dirty: true,
-                ..publication.anomaly
-            })
-        };
-        if let Some(dirty_anomaly) = dirty_anomaly {
-            let boot_region = state
-                .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .boot_region;
-            if let Err(error) =
-                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), dirty_anomaly)
-            {
-                state
-                    .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)?
-                    .anomaly
-                    .volume_dirty = true;
-                return Err(error);
-            }
-            let flush_status = match self.block_device.sync() {
-                Ok(status) => status,
-                Err(_) => {
-                    state
-                        .as_mut()
-                        .ok_or(ExfatFsError::UnpublishedState)?
-                        .anomaly
-                        .volume_dirty = true;
-                    return Err(ExfatFsError::DeviceIo);
-                }
-            };
-            if flush_status != BioStatus::Complete {
-                state
-                    .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)?
-                    .anomaly
-                    .volume_dirty = true;
-                return Err(ExfatFsError::DeviceIo);
-            }
-            state
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .anomaly = dirty_anomaly;
-        }
-        let (boot_region, anomaly, upcase_table, options) = {
+        let (boot_region, anomaly, upcase_table, options, forced_shutdown) = {
             let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
             (
                 publication.boot_region,
                 publication.anomaly,
                 publication.upcase_table.clone(),
                 publication.options.clone(),
+                publication.forced_shutdown,
             )
         };
-        Ok((
-            state,
-            self.block_device.clone(),
+        Ok(AdmittedMutationState {
+            state_guard: state,
+            block_device: self.block_device.clone(),
             boot_region,
             anomaly,
             upcase_table,
             options,
-        ))
+            forced_shutdown,
+        })
     }
 
     // Superblock
@@ -560,6 +486,59 @@ impl ExfatFs {
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
     }
+
+    pub(super) fn get_or_create_cached_inode(
+        &self,
+        ino: u64,
+        create_inode_fn: impl FnOnce() -> Arc<ExfatInode>,
+    ) -> Arc<ExfatInode> {
+        if let Some(cached_inode) = self
+            .inode_cache
+            .read()
+            .get(&ino)
+            .and_then(Weak::upgrade)
+        {
+            return cached_inode;
+        }
+
+        let mut inode_cache = self.inode_cache.write();
+        if let Some(cached_inode) = inode_cache.get(&ino).and_then(Weak::upgrade) {
+            return cached_inode;
+        }
+
+        let inode = create_inode_fn();
+        inode_cache.insert(ino, Arc::downgrade(&inode));
+        inode
+    }
+}
+
+pub(super) struct PublishedLookupState {
+    pub(super) block_device: Arc<dyn BlockDevice>,
+    pub(super) boot_region: BootRegion,
+    pub(super) anomaly: VolumeAnomalyState,
+    pub(super) upcase_table: Arc<UpcaseTable>,
+    pub(super) options: ExfatMountOptions,
+    pub(super) forced_shutdown: bool,
+}
+
+pub(super) struct AdmittedLookupState<'a> {
+    pub(super) state_guard: RwMutexReadGuard<'a, Option<MountedVolumeState>>,
+    pub(super) block_device: Arc<dyn BlockDevice>,
+    pub(super) boot_region: BootRegion,
+    pub(super) anomaly: VolumeAnomalyState,
+    pub(super) upcase_table: Arc<UpcaseTable>,
+    pub(super) options: ExfatMountOptions,
+    pub(super) forced_shutdown: bool,
+}
+
+pub(super) struct AdmittedMutationState<'a> {
+    pub(super) state_guard: RwMutexWriteGuard<'a, Option<MountedVolumeState>>,
+    pub(super) block_device: Arc<dyn BlockDevice>,
+    pub(super) boot_region: BootRegion,
+    pub(super) anomaly: VolumeAnomalyState,
+    pub(super) upcase_table: Arc<UpcaseTable>,
+    pub(super) options: ExfatMountOptions,
+    pub(super) forced_shutdown: bool,
 }
 
 #[derive(Clone)]

@@ -93,15 +93,10 @@ impl ExfatInode {
 
     pub(super) fn admitted_directory_snapshot(
         &self,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream, Vec<u8>), ExfatFsError>
-    {
+    ) -> core::result::Result<(RwMutexReadGuard<'_, ()>, ExfatInodeStream), ExfatFsError> {
         let owner = self.admission.read();
         let stream = *self.stream.read();
-        let directory_bytes =
-            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
-        Ok((owner, stream, directory_bytes))
+        Ok((owner, stream))
     }
 
     pub(super) fn admitted_regular_file_stream_snapshot(

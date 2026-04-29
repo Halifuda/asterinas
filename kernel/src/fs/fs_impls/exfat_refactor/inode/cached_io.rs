@@ -85,8 +85,8 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (_, _, anomaly, _, _) = fs.published_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.published_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
@@ -362,25 +362,21 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, boot_region, anomaly, _, _) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
-        {
-            let _state_guard = state_guard;
-            let (_owner_guard, stream, data_length, valid_data_length) =
-                self.admitted_regular_file_stream_snapshot()?;
-            Self::read_regular_file_at(
-                &block_device,
-                &boot_region,
-                stream,
-                data_length,
-                valid_data_length,
-                offset,
-                writer,
-            )
-        }
+        let (_owner_guard, stream, data_length, valid_data_length) =
+            self.admitted_regular_file_stream_snapshot()?;
+        Self::read_regular_file_at(
+            &admission.block_device,
+            &admission.boot_region,
+            stream,
+            data_length,
+            valid_data_length,
+            offset,
+            writer,
+        )
     }
 }

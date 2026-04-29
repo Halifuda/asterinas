@@ -34,8 +34,9 @@ impl ExfatInode {
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> core::result::Result<Option<Arc<dyn Inode>>, ExfatFsError> {
-        let (_owner_guard, stream, directory_bytes) =
-            self.admitted_directory_snapshot(block_device, boot_region)?;
+        let (_owner_guard, stream) = self.admitted_directory_snapshot()?;
+        let directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)?;
         let Some(entry_view) = Self::locate_named_child_view(
             &directory_bytes,
             stream.data_length.is_none(),
@@ -239,13 +240,14 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, boot_region, _, _, _) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
-        let (_owner_guard, stream, directory_bytes) = {
-            let _state_guard = state_guard;
-            self.admitted_directory_snapshot(&block_device, &boot_region)
-                .map_err(Error::from)?
-        };
+        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
+        let (_owner_guard, stream) = self.admitted_directory_snapshot().map_err(Error::from)?;
+        let directory_bytes = Self::read_directory_bytes_for_stream(
+            &admission.block_device,
+            &admission.boot_region,
+            stream,
+        )
+        .map_err(Error::from)?;
 
         let mut next_offset = offset;
         if next_offset == 0 {
@@ -271,7 +273,8 @@ impl ExfatInode {
                 }
                 ScannedDirectoryEntry::File(entry_view) => {
                     let candidate_name = entry_view.name()?;
-                    let (inode_type, _, _, _) = entry_view.child_metadata(&boot_region)?;
+                    let (inode_type, _, _, _) =
+                        entry_view.child_metadata(&admission.boot_region)?;
 
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
@@ -319,23 +322,20 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, boot_region, _, upcase_table, options) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
+        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
 
-        let lookup_name = Self::admitted_name(name, &options)?;
-        let lookup_name_hash = upcase_table.name_hash(&lookup_name);
-        let child_inode = {
-            let _state_guard = state_guard;
-            self.lookup_child_by_name(
+        let lookup_name = Self::admitted_name(name, &admission.options)?;
+        let lookup_name_hash = admission.upcase_table.name_hash(&lookup_name);
+        let child_inode = self
+            .lookup_child_by_name(
                 &fs,
-                &block_device,
-                &boot_region,
-                &upcase_table,
+                &admission.block_device,
+                &admission.boot_region,
+                &admission.upcase_table,
                 &lookup_name,
                 lookup_name_hash,
             )
-            .map_err(Error::from)?
-        };
+            .map_err(Error::from)?;
         if let Some(child_inode) = child_inode {
             return Ok(child_inode);
         }

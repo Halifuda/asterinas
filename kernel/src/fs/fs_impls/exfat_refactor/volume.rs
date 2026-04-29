@@ -81,16 +81,16 @@ pub(super) fn query_volume_identity(
 ) -> Result<VolumeIdentityEntries> {
     match query {
         VolumeIdentityQuery::Label => {
-            let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
-                fs.admitted_lookup_state()?;
-            let root_inode = state
+            let admission = fs.admitted_lookup_state()?;
+            let root_inode = admission
+                .state_guard
                 .as_ref()
                 .ok_or(ExfatFsError::UnpublishedState)?
                 .root_inode
                 .clone();
             let label = root_inode.read_root_directory(
-                &block_device,
-                &boot_region,
+                &admission.block_device,
+                &admission.boot_region,
                 direntry::read_volume_label,
             )?;
             let label = match label {
@@ -124,18 +124,28 @@ pub(super) fn update_volume_identity(fs: &ExfatFs, update: VolumeIdentityUpdate)
                     Some(admitted_label)
                 }
             };
-            let (state, block_device, boot_region, _anomaly, _upcase_table, _options) =
-                fs.admitted_mutation_state()?;
-            let root_inode = state
+            let admission = fs.admitted_mutation_state()?;
+            if admission.forced_shutdown {
+                return_errno!(Errno::EIO);
+            }
+            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+                return Err(ExfatFsError::ReadOnlyConflict.into());
+            }
+            let root_inode = admission
+                .state_guard
                 .as_ref()
                 .ok_or(ExfatFsError::UnpublishedState)?
                 .root_inode
                 .clone();
 
             root_inode
-                .rewrite_root_directory(&block_device, &boot_region, |directory_bytes| {
-                    direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
-                })
+                .rewrite_root_directory(
+                    &admission.block_device,
+                    &admission.boot_region,
+                    |directory_bytes| {
+                        direntry::write_volume_label(directory_bytes, admitted_label.as_deref())
+                    },
+                )
                 .map_err(Error::from)
         }
         VolumeIdentityUpdate::Guid(_) | VolumeIdentityUpdate::LabelAndGuid { .. } => {
