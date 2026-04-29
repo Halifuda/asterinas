@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// This module is the exFAT-local byte-backed directory-entry scan and authoring
-// layer. On-disk entry-shape rules live here; higher-level mutation policy does
-// not.
+//! Scans, validates, and authors exFAT directory-entry sets as byte-backed records.
 
 use alloc::{vec, vec::Vec};
 

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Implements directory lookup, readdir, and child-inode materialization.
+//!
+//! Method groups: name lookup, directory-entry scans, readdir emission, and VFS lookup dispatch.
+
 use alloc::string::String;
 
 use aster_block::BlockDevice;

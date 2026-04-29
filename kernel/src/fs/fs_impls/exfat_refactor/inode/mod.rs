@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Defines the exFAT inode owner and forwards VFS trait methods to focused submodules.
+//!
+//! Method groups: root-directory byte APIs, inode construction, and VFS trait dispatch.
+
 mod cached_io;
 mod dir_mutation;
 mod file_mutation;

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Reads and mutates exFAT FAT chains for cluster traversal and topology updates.
+
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::mem;
 

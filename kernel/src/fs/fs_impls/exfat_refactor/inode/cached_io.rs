@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Maps regular-file clusters into page-cache I/O ranges and serves cached reads.
+//!
+//! Method groups: cluster-map validation, page BIO range planning, page waiters, and read dispatch.
+
 use aster_block::{
     BlockDevice,
     bio::{Bio, BioDirection, BioSegment, BioType, BioWaiter},

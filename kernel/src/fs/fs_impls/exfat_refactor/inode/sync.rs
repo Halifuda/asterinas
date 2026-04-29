@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Publishes regular-file dirty state through page-cache and block-device synchronization.
+//!
+//! Method groups: sync-scope classification, pending-sync detection, and VFS sync dispatch.
+
 use aster_block::bio::BioStatus;
 
 use super::{ExfatInode, state::ExfatInodeDirtyState};

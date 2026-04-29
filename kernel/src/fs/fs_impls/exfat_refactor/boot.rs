@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Loads and validates the exFAT boot region and mount-time root-directory anchors.
+
 use core::mem;
 
 use aster_block::BlockDevice;

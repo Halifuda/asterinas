@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Implements volume-administration operations such as forced shutdown and volume labels.
+
 use alloc::{string::String, vec::Vec};
 
 use super::{

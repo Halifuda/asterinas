@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Implements the exFAT filesystem owner, mount admission, allocation, and VFS registration.
+
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use aster_block::{BlockDevice, bio::BioStatus};
