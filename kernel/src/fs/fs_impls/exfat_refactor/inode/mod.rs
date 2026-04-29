@@ -19,7 +19,7 @@ use aster_block::{
     id::Sid,
 };
 use ostd::{
-    mm::{FallibleVmWrite, Segment, VmIo, VmReader, io::util::HasVmReaderWriter},
+    mm::{FallibleVmWrite, Segment, VmReader, io::util::HasVmReaderWriter},
     sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard},
 };
 use spin::Once;
@@ -63,9 +63,9 @@ pub(super) struct ExfatInode {
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
     parent: Weak<Self>,
+    page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
     stream: RwLock<ExfatInodeStream>,
-    this: Weak<Self>,
 }
 
 impl ExfatInode {
@@ -126,6 +126,7 @@ impl ExfatInode {
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),
             parent,
+            page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
             stream: RwLock::new(ExfatInodeStream {
                 data_length,
@@ -133,7 +134,6 @@ impl ExfatInode {
                 valid_data_length,
                 no_fat_chain,
             }),
-            this: weak_self.clone(),
         })
     }
 

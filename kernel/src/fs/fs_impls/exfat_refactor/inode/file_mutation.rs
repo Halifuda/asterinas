@@ -22,6 +22,7 @@ use crate::{
     },
     prelude::*,
     time::clocks::RealTimeCoarseClock,
+    vm::vmo::{CommitFlags, get_page_idx_range},
 };
 
 impl ExfatInode {
@@ -43,22 +44,42 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.admitted_mutation_state().map_err(Error::from)?;
-        if admission.forced_shutdown
-            || admission.anomaly.clear_to_zero
-            || admission.anomaly.media_failure
-        {
-            return_errno!(Errno::EIO);
-        }
-        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
-            return_errno!(Errno::EROFS);
-        }
         if !reader.has_remain() {
             return Ok(0);
         }
 
         let write_len = reader.remain();
-        {
+        let page_cache = self.page_cache_handle().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
+        })?;
+        loop {
+            let (_owner_guard, _stream, provisional_data_length, provisional_valid_data_length) =
+                self.admitted_regular_file_stream_snapshot()?;
+            let provisional_effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
+                provisional_data_length
+            } else {
+                offset
+            };
+            let provisional_write_end = provisional_effective_offset
+                .checked_add(write_len)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let preflush_start = provisional_valid_data_length.min(provisional_effective_offset);
+            let preflush_range = preflush_start..provisional_write_end;
+            if !preflush_range.is_empty() && page_cache.has_dirty_pages(preflush_range.clone()) {
+                page_cache.evict_range(preflush_range.clone())?;
+            }
+
+            let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+            if admission.forced_shutdown
+                || admission.anomaly.clear_to_zero
+                || admission.anomaly.media_failure
+            {
+                return_errno!(Errno::EIO);
+            }
+            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+                return_errno!(Errno::EROFS);
+            }
+
             let _owner_guard = self.admission.write();
             let mut stream = self.stream.write();
             let Some(data_length) = stream.data_length else {
@@ -76,15 +97,38 @@ impl ExfatInode {
             } else {
                 offset
             };
+            let write_end = effective_offset
+                .checked_add(write_len)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            if data_length != provisional_data_length
+                || valid_data_length != provisional_valid_data_length
+                || effective_offset != provisional_effective_offset
+                || write_end != provisional_write_end
+            {
+                drop(stream);
+                drop(_owner_guard);
+                drop(admission);
+                continue;
+            }
             if status_flags.contains(StatusFlags::O_DIRECT)
                 && (!effective_offset.is_multiple_of(admission.boot_region.sector_size)
                     || !write_len.is_multiple_of(admission.boot_region.sector_size))
             {
                 return_errno!(Errno::EINVAL);
             }
-            let write_end = effective_offset
-                .checked_add(write_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let cache_invalidate_start = valid_data_length.min(effective_offset);
+            let cache_invalidate_range = cache_invalidate_start..write_end;
+            if cache_invalidate_range != preflush_range
+                || (!cache_invalidate_range.is_empty()
+                    && page_cache.has_dirty_pages(cache_invalidate_range.clone()))
+            {
+                drop(stream);
+                drop(_owner_guard);
+                drop(admission);
+                continue;
+            }
+            let block_device = admission.block_device.clone();
+            let boot_region = admission.boot_region;
             let publication = admission
                 .state_guard
                 .as_ref()
@@ -103,6 +147,19 @@ impl ExfatInode {
             } else {
                 *stream
             };
+            let published_valid_data_length = valid_data_length.max(write_end);
+            let timestamp = RealTimeCoarseClock::get().read_time();
+            let allocated_clusters = if published_data_length == 0 {
+                0
+            } else {
+                published_data_length.div_ceil(boot_region.cluster_size)
+            };
+            let allocated_sectors = allocated_clusters
+                .checked_mul(boot_region.sectors_per_cluster)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            drop(stream);
+            drop(_owner_guard);
+            drop(admission);
 
             let zero_fill_len = if effective_offset > valid_data_length {
                 effective_offset
@@ -111,71 +168,70 @@ impl ExfatInode {
             } else {
                 0
             };
-            if zero_fill_len != 0 {
-                Self::mutate_regular_file_range(
-                    &admission.block_device,
-                    &admission.boot_region,
-                    &published_stream,
-                    published_data_length,
-                    valid_data_length,
-                    zero_fill_len,
-                    |chunk| {
-                        chunk.fill(0);
-                        Ok(())
-                    },
-                )?;
+            let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
+            if published_data_length > data_length {
+                page_cache.resize(published_data_length)?;
             }
-            Self::mutate_regular_file_range(
-                &admission.block_device,
-                &admission.boot_region,
-                &published_stream,
-                published_data_length,
-                effective_offset,
-                write_len,
-                |chunk| {
-                    let mut writer = VmWriter::from(chunk).to_fallible();
-                    writer.write_fallible(reader)?;
-                    Ok(())
-                },
-            )?;
+            for page_idx in get_page_idx_range(&cache_mutation_range) {
+                page_cache
+                    .pages()
+                    .commit_on(page_idx, CommitFlags::empty())?;
+            }
 
-            let published_valid_data_length = valid_data_length.max(write_end);
-            let timestamp = RealTimeCoarseClock::get().read_time();
+            let _owner_guard = self.admission.write();
+            let mut stream = self.stream.write();
+            let Some(current_data_length) = stream.data_length else {
+                return_errno!(Errno::EINVAL);
+            };
+            let Some(current_valid_data_length) = stream.valid_data_length else {
+                return_errno!(Errno::EINVAL);
+            };
+            if current_valid_data_length > current_data_length {
+                return_errno!(Errno::EINVAL);
+            }
+            let current_effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
+                current_data_length
+            } else {
+                offset
+            };
+            let current_write_end = current_effective_offset
+                .checked_add(write_len)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let current_cache_invalidate_range =
+                current_valid_data_length.min(current_effective_offset)..current_write_end;
+            if current_data_length != data_length
+                || current_valid_data_length != valid_data_length
+                || current_effective_offset != effective_offset
+                || current_write_end != write_end
+                || current_cache_invalidate_range != cache_invalidate_range
+                || (!current_cache_invalidate_range.is_empty()
+                    && page_cache.has_dirty_pages(current_cache_invalidate_range.clone()))
+            {
+                drop(stream);
+                drop(_owner_guard);
+                continue;
+            }
+            if zero_fill_len != 0 {
+                page_cache.fill_zeros(valid_data_length..effective_offset)?;
+            }
+            page_cache.pages().write(effective_offset, reader)?;
+
             published_stream.data_length = Some(published_data_length);
             published_stream.valid_data_length = Some(published_valid_data_length);
-            let page_cache = self
-                .page_cache
-                .get()
-                .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
-            let cache_invalidate_start = valid_data_length.min(effective_offset);
-            if let Some(page_cache) = page_cache {
-                if published_data_length > data_length {
-                    page_cache.resize(published_data_length)?;
-                }
-                page_cache.discard_range(cache_invalidate_start..write_end);
-            }
             if let Err(error) = self.republish_regular_file_entry_set(
-                &admission.block_device,
-                &admission.boot_region,
+                &block_device,
+                &boot_region,
                 published_stream,
                 timestamp,
             ) {
+                if !current_cache_invalidate_range.is_empty() {
+                    page_cache.discard_range(current_cache_invalidate_range);
+                }
                 if published_data_length > data_length {
-                    if let Some(page_cache) = page_cache {
-                        let _ = page_cache.resize(data_length);
-                    }
+                    let _ = page_cache.resize(data_length);
                 }
                 return Err(error);
             }
-
-            let allocated_clusters = if published_data_length == 0 {
-                0
-            } else {
-                published_data_length.div_ceil(admission.boot_region.cluster_size)
-            };
-            let allocated_sectors = allocated_clusters
-                .checked_mul(admission.boot_region.sectors_per_cluster)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
             {
                 let mut metadata = self.metadata.write();
@@ -186,8 +242,8 @@ impl ExfatInode {
             }
             *stream = published_stream;
             self.mark_content_publication_dirty();
+            break;
         }
-        drop(admission);
         if status_flags.contains(StatusFlags::O_SYNC) {
             self.sync_all()?;
         } else if status_flags.contains(StatusFlags::O_DSYNC) {

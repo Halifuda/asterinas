@@ -21,6 +21,27 @@ impl InodeSyncScope {
 }
 
 impl ExfatInode {
+    pub(in crate::fs::fs_impls::exfat_refactor) fn has_pending_regular_file_sync(&self) -> bool {
+        if self.metadata.read().type_ != crate::fs::file::InodeType::File {
+            return false;
+        }
+
+        let dirty_state = *self.dirty_state.read();
+        if dirty_state.needs_sync_all() {
+            return true;
+        }
+
+        let Some(data_length) = self.stream.read().data_length else {
+            return false;
+        };
+        self.page_cache
+            .get()
+            .and_then(|maybe_page_cache| maybe_page_cache.as_ref())
+            .is_some_and(|page_cache| {
+                data_length != 0 && page_cache.has_dirty_pages(0..data_length)
+            })
+    }
+
     pub(super) fn sync_regular_file(&self, scope: InodeSyncScope) -> Result<()> {
         let fs = self
             .fs
