@@ -15,7 +15,7 @@ use super::{
 use crate::{
     fs::{
         file::{InodeMode, InodeType, chmod, mkmod},
-        vfs::inode::Metadata,
+        vfs::{file_system::FsFlags, inode::Metadata},
     },
     prelude::*,
     process::{Gid, Uid},
@@ -37,32 +37,27 @@ impl ExfatInode {
         let Some(fs) = self.fs.upgrade() else {
             return metadata;
         };
-        let Ok((state_guard, _block_device, boot_region, anomaly, _upcase_table, _options)) =
-            fs.admitted_lookup_state()
-        else {
+        let Ok(admission) = fs.admitted_lookup_state() else {
             return metadata;
         };
-        if anomaly.clear_to_zero || anomaly.media_failure {
-            drop(state_guard);
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return metadata;
         }
 
         let Ok((owner_guard, _stream, data_length, _valid_data_length)) =
             self.admitted_regular_file_stream_snapshot()
         else {
-            drop(state_guard);
             return metadata;
         };
-        let Ok(allocated_sectors) = Self::regular_file_allocated_sectors(&boot_region, data_length)
+        let Ok(allocated_sectors) =
+            Self::regular_file_allocated_sectors(&admission.boot_region, data_length)
         else {
             drop(owner_guard);
-            drop(state_guard);
             return metadata;
         };
         metadata.size = data_length;
         metadata.nr_sectors_allocated = allocated_sectors;
         drop(owner_guard);
-        drop(state_guard);
         metadata
     }
 
@@ -124,10 +119,15 @@ impl ExfatInode {
             let fs = self.fs.upgrade().ok_or_else(|| {
                 Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
             })?;
-            let (_state_guard, block_device, boot_region, anomaly, _upcase_table, _options) =
-                fs.admitted_mutation_state().map_err(Error::from)?;
-            if anomaly.clear_to_zero || anomaly.media_failure {
+            let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+            if admission.forced_shutdown
+                || admission.anomaly.clear_to_zero
+                || admission.anomaly.media_failure
+            {
                 return_errno!(Errno::EIO);
+            }
+            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+                return_errno!(Errno::EROFS);
             }
 
             let requested_writable = mode.intersects(mkmod!(a+w));
@@ -141,8 +141,8 @@ impl ExfatInode {
 
             let durable_updated = self.rewrite_inode_entry_set(
                 InodeRewriteTarget::Directory,
-                &block_device,
-                &boot_region,
+                &admission.block_device,
+                &admission.boot_region,
                 |entry_view, _source_entry_set| {
                     let current_attributes = entry_view.file_attributes();
                     let current_writable =
@@ -191,17 +191,22 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (_state_guard, block_device, boot_region, anomaly, _upcase_table, _options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown
+            || admission.anomaly.clear_to_zero
+            || admission.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
+        }
+        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+            return_errno!(Errno::EROFS);
         }
 
         let requested_writable = mode.intersects(mkmod!(a+w));
         let durable_updated = self.rewrite_inode_entry_set(
             InodeRewriteTarget::RegularFile,
-            &block_device,
-            &boot_region,
+            &admission.block_device,
+            &admission.boot_region,
             |entry_view, _source_entry_set| {
                 if requested_writable
                     == (entry_view.file_attributes() & direntry::FILE_ATTRIBUTE_READ_ONLY != 0)
@@ -285,12 +290,16 @@ impl ExfatInode {
             // `meso_09` mount-policy follow-up gives `ExfatFs` an explicit owner-local
             // `allow_utime` admission path and the broader metadata policy decides whether this
             // VFS-facing request should keep refusing or be absorbed into another durable family.
-            let Ok((_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options)) =
-                fs.admitted_mutation_state().map_err(Error::from)
-            else {
+            let Ok(admission) = fs.admitted_mutation_state().map_err(Error::from) else {
                 return;
             };
-            if anomaly.clear_to_zero || anomaly.media_failure {
+            if admission.forced_shutdown
+                || admission.anomaly.clear_to_zero
+                || admission.anomaly.media_failure
+            {
+                return;
+            }
+            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
                 return;
             }
             return;
@@ -307,12 +316,16 @@ impl ExfatInode {
         // TODO: `set_ctime()` still shares the generic mounted-mutation gate until the later
         // `meso_09` mount-policy follow-up gives `ExfatFs` an explicit owner-local `allow_utime`
         // admission path for timestamp setters. Remove this seam once that dedicated gate exists.
-        let Ok((_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options)) =
-            fs.admitted_mutation_state().map_err(Error::from)
-        else {
+        let Ok(admission) = fs.admitted_mutation_state().map_err(Error::from) else {
             return;
         };
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        if admission.forced_shutdown
+            || admission.anomaly.clear_to_zero
+            || admission.anomaly.media_failure
+        {
+            return;
+        }
+        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
             return;
         }
 
@@ -348,10 +361,15 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown
+            || admission.anomaly.clear_to_zero
+            || admission.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
+        }
+        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+            return_errno!(Errno::EROFS);
         }
 
         let _owner_guard = self.admission.write();
@@ -376,12 +394,16 @@ impl ExfatInode {
         // yet own explicit `allow_utime` / timezone policy. Once the later `meso_09`
         // mount-policy follow-up publishes that owner-local policy under `ExfatFs`, remove this
         // seam and route timestamp admission plus UTC-offset selection through that dedicated path.
-        let Ok((_state_guard, block_device, boot_region, anomaly, _upcase_table, _options)) =
-            fs.admitted_mutation_state().map_err(Error::from)
-        else {
+        let Ok(admission) = fs.admitted_mutation_state().map_err(Error::from) else {
             return;
         };
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        if admission.forced_shutdown
+            || admission.anomaly.clear_to_zero
+            || admission.anomaly.media_failure
+        {
+            return;
+        }
+        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
             return;
         }
 
@@ -393,8 +415,8 @@ impl ExfatInode {
                 if self
                     .rewrite_inode_entry_set(
                         InodeRewriteTarget::Directory,
-                        &block_device,
-                        &boot_region,
+                        &admission.block_device,
+                        &admission.boot_region,
                         |entry_view, source_entry_set| match field_kind {
                             InodeTimestampField::Accessed => {
                                 let utc_offset_byte = *source_entry_set
@@ -455,8 +477,8 @@ impl ExfatInode {
                 if self
                     .rewrite_inode_entry_set(
                         InodeRewriteTarget::RegularFile,
-                        &block_device,
-                        &boot_region,
+                        &admission.block_device,
+                        &admission.boot_region,
                         |entry_view, source_entry_set| match field_kind {
                             InodeTimestampField::Accessed => {
                                 let utc_offset_byte = *source_entry_set

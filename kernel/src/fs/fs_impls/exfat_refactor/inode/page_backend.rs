@@ -36,9 +36,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             self.inode.fs.upgrade().ok_or_else(|| {
                 Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
             })?;
-        let (block_device, boot_region, anomaly, _, _) =
-            fs.published_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.published_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
@@ -46,7 +45,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             self.inode.admitted_regular_file_stream_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
-        let initialized_sector_len = initialized_len - (initialized_len % boot_region.sector_size);
+        let initialized_sector_len =
+            initialized_len - (initialized_len % admission.boot_region.sector_size);
         if initialized_sector_len < PAGE_SIZE {
             frame
                 .writer()
@@ -58,8 +58,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
         }
 
         ExfatInode::regular_file_page_waiter(
-            &block_device,
-            &boot_region,
+            &admission.block_device,
+            &admission.boot_region,
             frame,
             &stream,
             data_length,
@@ -74,12 +74,11 @@ impl PageCacheBackend for ExfatFilePageBackend {
             self.inode.fs.upgrade().ok_or_else(|| {
                 Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
             })?;
-        let (block_device, boot_region, anomaly, _, options) =
-            fs.published_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.published_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
-        if options.fs_flags.contains(FsFlags::RDONLY) {
+        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
@@ -88,16 +87,16 @@ impl PageCacheBackend for ExfatFilePageBackend {
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len = initialized_len
-            .div_ceil(boot_region.sector_size)
-            .checked_mul(boot_region.sector_size)
+            .div_ceil(admission.boot_region.sector_size)
+            .checked_mul(admission.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             return Ok(BioWaiter::new());
         }
 
         ExfatInode::regular_file_page_waiter(
-            &block_device,
-            &boot_region,
+            &admission.block_device,
+            &admission.boot_region,
             frame,
             &stream,
             data_length,

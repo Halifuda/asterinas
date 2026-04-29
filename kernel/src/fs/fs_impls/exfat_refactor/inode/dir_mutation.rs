@@ -46,8 +46,14 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (mut state_guard, block_device, boot_region, _anomaly, upcase_table, options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
+        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+        let block_device = &admission.block_device;
+        let boot_region = &admission.boot_region;
+        let upcase_table = &admission.upcase_table;
+        let options = &admission.options;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -75,7 +81,8 @@ impl ExfatInode {
                 return_errno!(Errno::EEXIST);
             }
 
-            let publication = state_guard
+            let publication = admission
+                .state_guard
                 .as_mut()
                 .ok_or(ExfatFsError::UnpublishedState)
                 .map_err(Error::from)?;
@@ -195,8 +202,14 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (mut state_guard, block_device, boot_region, _anomaly, upcase_table, options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
+        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+        let block_device = &admission.block_device;
+        let boot_region = &admission.boot_region;
+        let upcase_table = &admission.upcase_table;
+        let options = &admission.options;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -258,7 +271,8 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = state_guard
+            let publication = admission
+                .state_guard
                 .as_mut()
                 .ok_or(ExfatFsError::UnpublishedState)
                 .map_err(Error::from)?;
@@ -282,8 +296,14 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (mut state_guard, block_device, boot_region, _anomaly, upcase_table, options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
+        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+        let block_device = &admission.block_device;
+        let boot_region = &admission.boot_region;
+        let upcase_table = &admission.upcase_table;
+        let options = &admission.options;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -359,7 +379,8 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = state_guard
+            let publication = admission
+                .state_guard
                 .as_mut()
                 .ok_or(ExfatFsError::UnpublishedState)
                 .map_err(Error::from)?;
@@ -403,8 +424,14 @@ impl ExfatInode {
             return_errno!(Errno::EXDEV);
         }
 
-        let (mut state_guard, block_device, boot_region, _anomaly, upcase_table, options) =
-            fs.admitted_mutation_state().map_err(Error::from)?;
+        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        if admission.forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+        let block_device = &admission.block_device;
+        let boot_region = &admission.boot_region;
+        let upcase_table = &admission.upcase_table;
+        let options = &admission.options;
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
@@ -464,7 +491,8 @@ impl ExfatInode {
                 .transpose()
                 .map_err(Error::from)?
                 .flatten();
-                let publication = state_guard
+                let publication = admission
+                    .state_guard
                     .as_mut()
                     .ok_or(ExfatFsError::UnpublishedState)
                     .map_err(Error::from)?;
@@ -531,7 +559,8 @@ impl ExfatInode {
             .transpose()
             .map_err(Error::from)?
             .flatten();
-            let publication = state_guard
+            let publication = admission
+                .state_guard
                 .as_mut()
                 .ok_or(ExfatFsError::UnpublishedState)
                 .map_err(Error::from)?;
@@ -1116,9 +1145,10 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<()> {
-        let (_owner_guard, stream, child_directory_bytes) = child_inode
-            .admitted_directory_snapshot(block_device, boot_region)
-            .map_err(Error::from)?;
+        let (_owner_guard, stream) = child_inode.admitted_directory_snapshot().map_err(Error::from)?;
+        let child_directory_bytes =
+            Self::read_directory_bytes_for_stream(block_device, boot_region, stream)
+                .map_err(Error::from)?;
         if let Some(first_child_scan) = child_inode
             .first_directory_child_scan(stream, &child_directory_bytes)
             .map_err(Error::from)?

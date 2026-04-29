@@ -26,9 +26,8 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (state_guard, block_device, _boot_region, anomaly, _upcase_table, _options) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
@@ -40,8 +39,9 @@ impl ExfatInode {
             .page_cache
             .get()
             .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
+        let block_device = admission.block_device.clone();
         drop(owner_guard);
-        drop(state_guard);
+        drop(admission);
 
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
             data_length != 0 && page_cache.has_dirty_pages(0..data_length)
@@ -50,9 +50,8 @@ impl ExfatInode {
         if needs_page_writeback {
             if let Some(page_cache) = page_cache {
                 page_cache.evict_range(0..data_length)?;
-                let (_state_guard, _block_device, _boot_region, anomaly, _upcase_table, _options) =
-                    fs.admitted_lookup_state().map_err(Error::from)?;
-                if anomaly.clear_to_zero || anomaly.media_failure {
+                let readmission = fs.admitted_lookup_state().map_err(Error::from)?;
+                if readmission.anomaly.clear_to_zero || readmission.anomaly.media_failure {
                     return_errno!(Errno::EIO);
                 }
 
@@ -64,15 +63,8 @@ impl ExfatInode {
         if needs_page_writeback || needs_device_sync {
             match block_device.sync()? {
                 BioStatus::Complete => {
-                    let (
-                        _state_guard,
-                        _block_device,
-                        _boot_region,
-                        anomaly,
-                        _upcase_table,
-                        _options,
-                    ) = fs.admitted_lookup_state().map_err(Error::from)?;
-                    if anomaly.clear_to_zero || anomaly.media_failure {
+                    let readmission = fs.admitted_lookup_state().map_err(Error::from)?;
+                    if readmission.anomaly.clear_to_zero || readmission.anomaly.media_failure {
                         return_errno!(Errno::EIO);
                     }
 

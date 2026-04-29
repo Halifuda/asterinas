@@ -34,9 +34,8 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let (_state_guard, block_device, boot_region, anomaly, _upcase_table, _options) =
-            fs.admitted_lookup_state().map_err(Error::from)?;
-        if anomaly.clear_to_zero || anomaly.media_failure {
+        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
+        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
 
@@ -53,7 +52,11 @@ impl ExfatInode {
         let parent_stream = *parent.stream.read();
         let mut metadata = *self.metadata.read();
         let directory_bytes =
-            Self::read_directory_bytes_for_stream(&block_device, &boot_region, parent_stream)
+            Self::read_directory_bytes_for_stream(
+                &admission.block_device,
+                &admission.boot_region,
+                parent_stream,
+            )
                 .map_err(Error::from)?;
         let entry_index =
             usize::try_from(metadata.ino as u32).map_err(|_| Error::new(Errno::EIO))?;
@@ -72,7 +75,7 @@ impl ExfatInode {
         }
 
         let (inode_type, _first_cluster, data_length, _no_fat_chain) = entry_view
-            .child_metadata(&boot_region)
+            .child_metadata(&admission.boot_region)
             .map_err(Error::from)?;
         if inode_type != InodeType::Dir {
             return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
@@ -150,7 +153,8 @@ impl ExfatInode {
         metadata.last_meta_change_at = last_modify_at;
         metadata.last_modify_at = last_modify_at;
         metadata.nr_sectors_allocated =
-            Self::regular_file_allocated_sectors(&boot_region, data_length).map_err(Error::from)?;
+            Self::regular_file_allocated_sectors(&admission.boot_region, data_length)
+                .map_err(Error::from)?;
         metadata.size = data_length;
         Ok(metadata)
     }

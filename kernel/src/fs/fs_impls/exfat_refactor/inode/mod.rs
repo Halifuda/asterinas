@@ -138,14 +138,17 @@ impl ExfatInode {
     }
 
     pub(super) fn new_root(fs: &Arc<ExfatFs>, root_cluster: u32, cluster_size: usize) -> Arc<Self> {
+        let root_ino = u64::from(root_cluster);
         let mut metadata = Metadata::new_dir(
-            u64::from(root_cluster),
+            root_ino,
             mkmod!(u+rwx, g+rx, o+rx),
             cluster_size,
             fs.container_device_id(),
         );
         metadata.size = cluster_size;
-        Self::new(fs, metadata, root_cluster, None, None, false, Weak::new())
+        fs.get_or_create_cached_inode(root_ino, || {
+            Self::new(fs, metadata, root_cluster, None, None, false, Weak::new())
+        })
     }
 
     fn new_child(
@@ -160,30 +163,32 @@ impl ExfatInode {
         valid_data_length: usize,
         no_fat_chain: bool,
     ) -> Arc<Self> {
-        let mut metadata = match inode_type {
-            InodeType::Dir => Metadata::new_dir(
-                ino,
-                mkmod!(u+rwx, g+rx, o+rx),
-                cluster_size,
-                fs.container_device_id(),
-            ),
-            _ => Metadata::new_file(
-                ino,
-                mkmod!(u+rw, g+r, o+r),
-                cluster_size,
-                fs.container_device_id(),
-            ),
-        };
-        metadata.size = size;
-        Self::new(
-            fs,
-            metadata,
-            first_cluster,
-            Some(data_length),
-            Some(valid_data_length),
-            no_fat_chain,
-            parent,
-        )
+        fs.get_or_create_cached_inode(ino, || {
+            let mut metadata = match inode_type {
+                InodeType::Dir => Metadata::new_dir(
+                    ino,
+                    mkmod!(u+rwx, g+rx, o+rx),
+                    cluster_size,
+                    fs.container_device_id(),
+                ),
+                _ => Metadata::new_file(
+                    ino,
+                    mkmod!(u+rw, g+r, o+r),
+                    cluster_size,
+                    fs.container_device_id(),
+                ),
+            };
+            metadata.size = size;
+            Self::new(
+                fs,
+                metadata,
+                first_cluster,
+                Some(data_length),
+                Some(valid_data_length),
+                no_fat_chain,
+                parent,
+            )
+        })
     }
 }
 
