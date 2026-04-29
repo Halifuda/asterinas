@@ -6,8 +6,10 @@
 
 use alloc::{vec, vec::Vec};
 
-use super::{boot::BootRegion, fs::ExfatFsError, upcase::UpcaseTable};
-use crate::fs::file::InodeType;
+use super::{
+    boot::BootRegion, invalid_on_disk_layout, invalid_operation_input, upcase::UpcaseTable,
+};
+use crate::{fs::file::InodeType, prelude::*};
 
 pub(super) const DIRECTORY_ENTRY_SIZE: usize = 32;
 pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
@@ -31,13 +33,13 @@ impl DirectoryEntrySlotRange {
     pub(super) fn new(
         first_entry_index: usize,
         entry_count: usize,
-    ) -> core::result::Result<Self, ExfatFsError> {
+    ) -> Result<Self> {
         if entry_count == 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         first_entry_index
             .checked_add(entry_count)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         Ok(Self {
             entry_count,
             first_entry_index,
@@ -52,10 +54,10 @@ impl DirectoryEntrySlotRange {
         self.first_entry_index
     }
 
-    pub(super) fn next_entry_index(self) -> core::result::Result<usize, ExfatFsError> {
+    pub(super) fn next_entry_index(self) -> Result<usize> {
         self.first_entry_index
             .checked_add(self.entry_count)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
     }
 }
 
@@ -114,9 +116,9 @@ impl FileEntryClusterMap {
         data_length: u64,
         valid_data_length: u64,
         no_fat_chain: bool,
-    ) -> core::result::Result<Self, ExfatFsError> {
+    ) -> Result<Self> {
         if valid_data_length > data_length {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(Self {
             data_length,
@@ -158,11 +160,11 @@ impl FileEntrySetView<'_> {
     pub(super) fn child_metadata(
         self,
         boot_region: &BootRegion,
-    ) -> core::result::Result<(InodeType, u32, usize, bool), ExfatFsError> {
+    ) -> Result<(InodeType, u32, usize, bool)> {
         file_entry_child_metadata(self.primary_entry, self.stream_entry, boot_region)
     }
 
-    pub(super) fn name(self) -> core::result::Result<Vec<u16>, ExfatFsError> {
+    pub(super) fn name(self) -> Result<Vec<u16>> {
         file_name(self.entry_set, self.secondary_count, self.stream_entry)
     }
 
@@ -224,7 +226,7 @@ impl FileEntrySetView<'_> {
         )
     }
 
-    pub(super) fn cluster_map(self) -> core::result::Result<FileEntryClusterMap, ExfatFsError> {
+    pub(super) fn cluster_map(self) -> Result<FileEntryClusterMap> {
         FileEntryClusterMap::new(
             u32::from_le_bytes([
                 self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET],
@@ -317,19 +319,19 @@ impl RepublishedFileEntrySet {
         &mut self,
         name: &[u16],
         name_hash: u16,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let current_name_entry_count =
             usize::from(self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET])
                 .div_ceil(15);
         let requested_name_entry_count = file_entry_set_entry_count(name.len())?
             .checked_sub(2)
-            .ok_or(ExfatFsError::InvalidOperationInput)?;
+            .ok_or(invalid_operation_input())?;
         if requested_name_entry_count != current_name_entry_count {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
 
         self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET] =
-            u8::try_from(name.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+            u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
         self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET
             ..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
             .copy_from_slice(&name_hash.to_le_bytes());
@@ -337,19 +339,19 @@ impl RepublishedFileEntrySet {
         for name_entry_index in 0..current_name_entry_count {
             let name_entry_offset = (name_entry_index + 2)
                 .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                .ok_or(invalid_on_disk_layout())?;
             self.entry_set[name_entry_offset + 2..name_entry_offset + DIRECTORY_ENTRY_SIZE].fill(0);
         }
 
         for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
             let name_entry_offset = (name_entry_index + 2)
                 .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
+                .ok_or(invalid_operation_input())?;
             for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
                 let code_unit_offset = name_entry_offset
                     .checked_add(2)
                     .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
-                    .ok_or(ExfatFsError::InvalidOperationInput)?;
+                    .ok_or(invalid_operation_input())?;
                 self.entry_set[code_unit_offset..code_unit_offset + 2]
                     .copy_from_slice(&name_code_unit.to_le_bytes());
             }
@@ -366,14 +368,14 @@ impl RepublishedFileEntrySet {
 
 pub(super) fn file_entry_set_entry_count(
     name_length: usize,
-) -> core::result::Result<usize, ExfatFsError> {
+) -> Result<usize> {
     if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
-        return Err(ExfatFsError::InvalidOperationInput);
+        return Err(invalid_operation_input());
     }
     name_length
         .div_ceil(15)
         .checked_add(2)
-        .ok_or(ExfatFsError::InvalidOperationInput)
+        .ok_or(invalid_operation_input())
 }
 
 pub(super) fn encode_file_entry_set(
@@ -383,16 +385,16 @@ pub(super) fn encode_file_entry_set(
     first_cluster: u32,
     data_length: usize,
     no_fat_chain: bool,
-) -> core::result::Result<Vec<u8>, ExfatFsError> {
+) -> Result<Vec<u8>> {
     let entry_count = file_entry_set_entry_count(name.len())?;
     let secondary_count = entry_count
         .checked_sub(1)
-        .ok_or(ExfatFsError::InvalidOperationInput)?;
+        .ok_or(invalid_operation_input())?;
     let secondary_count =
-        u8::try_from(secondary_count).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
     let entry_set_len = entry_count
         .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOperationInput)?;
+        .ok_or(invalid_operation_input())?;
     let mut entry_set = vec![0; entry_set_len];
 
     entry_set[0] = FILE_DIRECTORY_ENTRY_TYPE;
@@ -400,7 +402,7 @@ pub(super) fn encode_file_entry_set(
     let file_attributes = match inode_type {
         InodeType::Dir => FILE_ATTRIBUTE_DIRECTORY,
         InodeType::File => 0x0020,
-        _ => return Err(ExfatFsError::InvalidOperationInput),
+        _ => return Err(invalid_operation_input()),
     };
     entry_set[4..6].copy_from_slice(&file_attributes.to_le_bytes());
 
@@ -408,11 +410,11 @@ pub(super) fn encode_file_entry_set(
     entry_set[stream_entry_offset] = STREAM_EXTENSION_ENTRY_TYPE;
     entry_set[stream_entry_offset + 1] = if no_fat_chain { 0x03 } else { 0x01 };
     entry_set[stream_entry_offset + 3] =
-        u8::try_from(name.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 4..stream_entry_offset + 6]
         .copy_from_slice(&name_hash.to_le_bytes());
     let data_length =
-        u64::try_from(data_length).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        u64::try_from(data_length).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 8..stream_entry_offset + 16]
         .copy_from_slice(&data_length.to_le_bytes());
     entry_set[stream_entry_offset + 20..stream_entry_offset + 24]
@@ -423,13 +425,13 @@ pub(super) fn encode_file_entry_set(
     for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
         let name_entry_offset = (name_entry_index + 2)
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOperationInput)?;
+            .ok_or(invalid_operation_input())?;
         entry_set[name_entry_offset] = FILE_NAME_ENTRY_TYPE;
         for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
             let code_unit_offset = name_entry_offset
                 .checked_add(2)
                 .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
+                .ok_or(invalid_operation_input())?;
             entry_set[code_unit_offset..code_unit_offset + 2]
                 .copy_from_slice(&name_code_unit.to_le_bytes());
         }
@@ -451,16 +453,16 @@ impl<'a> WritableDirectoryEntrySlotSpan<'a> {
     pub(super) fn new(
         slot_range: DirectoryEntrySlotRange,
         slot_span: &'a mut [u8],
-    ) -> core::result::Result<Self, ExfatFsError> {
+    ) -> Result<Self> {
         let expected_len = slot_range
             .entry_count()
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         if slot_span.is_empty()
             || slot_span.len() != expected_len
             || slot_span.len() % DIRECTORY_ENTRY_SIZE != 0
         {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(Self { slot_span })
     }
@@ -472,7 +474,7 @@ impl<'a> WritableDirectoryEntrySlotSpan<'a> {
 
 pub(super) fn invalidate_entry_set(
     slot_span: &mut WritableDirectoryEntrySlotSpan<'_>,
-) -> core::result::Result<(), ExfatFsError> {
+) -> Result<()> {
     for entry in slot_span.bytes_mut().chunks_exact_mut(DIRECTORY_ENTRY_SIZE) {
         entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
     }
@@ -483,11 +485,11 @@ pub(super) fn renamed_entry_set(
     source_entry_set: FileEntrySetView<'_>,
     name: &[u16],
     name_hash: u16,
-) -> core::result::Result<Vec<u8>, ExfatFsError> {
+) -> Result<Vec<u8>> {
     let entry_count = file_entry_set_entry_count(name.len())?;
     let new_name_entry_count = entry_count
         .checked_sub(2)
-        .ok_or(ExfatFsError::InvalidOperationInput)?;
+        .ok_or(invalid_operation_input())?;
     let current_name_entry_count =
         usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
     if new_name_entry_count == current_name_entry_count {
@@ -497,28 +499,28 @@ pub(super) fn renamed_entry_set(
     }
     let required_secondary_count = current_name_entry_count
         .checked_add(1)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let trailing_secondary_count = source_entry_set
         .secondary_count
         .checked_sub(required_secondary_count)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let secondary_count = new_name_entry_count
         .checked_add(1)
         .and_then(|count| count.checked_add(trailing_secondary_count))
-        .ok_or(ExfatFsError::InvalidOperationInput)?;
+        .ok_or(invalid_operation_input())?;
     let secondary_count =
-        u8::try_from(secondary_count).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
     let entry_set_len = usize::from(secondary_count)
         .checked_add(1)
         .and_then(|entry_count| entry_count.checked_mul(DIRECTORY_ENTRY_SIZE))
-        .ok_or(ExfatFsError::InvalidOperationInput)?;
+        .ok_or(invalid_operation_input())?;
     let mut renamed_entry_set = vec![0; entry_set_len];
     renamed_entry_set[..DIRECTORY_ENTRY_SIZE].copy_from_slice(source_entry_set.primary_entry);
     renamed_entry_set[DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2]
         .copy_from_slice(source_entry_set.stream_entry);
     renamed_entry_set[1] = secondary_count;
     renamed_entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET] =
-        u8::try_from(name.len()).map_err(|_| ExfatFsError::InvalidOperationInput)?;
+        u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     renamed_entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET
         ..DIRECTORY_ENTRY_SIZE + STREAM_NAME_HASH_OFFSET + 2]
         .copy_from_slice(&name_hash.to_le_bytes());
@@ -526,13 +528,13 @@ pub(super) fn renamed_entry_set(
     for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
         let name_entry_offset = (name_entry_index + 2)
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOperationInput)?;
+            .ok_or(invalid_operation_input())?;
         renamed_entry_set[name_entry_offset] = FILE_NAME_ENTRY_TYPE;
         for (name_code_unit_index, name_code_unit) in name_chunk.iter().enumerate() {
             let code_unit_offset = name_entry_offset
                 .checked_add(2)
                 .and_then(|offset| offset.checked_add(name_code_unit_index * 2))
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
+                .ok_or(invalid_operation_input())?;
             renamed_entry_set[code_unit_offset..code_unit_offset + 2]
                 .copy_from_slice(&name_code_unit.to_le_bytes());
         }
@@ -540,10 +542,10 @@ pub(super) fn renamed_entry_set(
 
     let trailing_source_offset = (current_name_entry_count + 2)
         .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let trailing_destination_offset = (new_name_entry_count + 2)
         .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     renamed_entry_set[trailing_destination_offset..]
         .copy_from_slice(&source_entry_set.entry_set[trailing_source_offset..]);
 
@@ -589,15 +591,15 @@ pub(super) fn scan_directory_entry(
     is_root_directory: bool,
     directory_bytes: &[u8],
     mut entry_index: usize,
-) -> core::result::Result<ScannedDirectoryEntry<'_>, ExfatFsError> {
+) -> Result<ScannedDirectoryEntry<'_>> {
     loop {
         let slot_range = DirectoryEntrySlotRange::new(entry_index, 1)?;
         let entry_offset = entry_index
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let entry_end = entry_offset
             .checked_add(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let Some(entry) = directory_bytes.get(entry_offset..entry_end) else {
             return Ok(ScannedDirectoryEntry::EndOfDirectory { entry_index });
         };
@@ -625,7 +627,7 @@ pub(super) fn scan_directory_entry(
                 if is_root_directory && is_root_metadata {
                     entry_index = entry_index
                         .checked_add(1)
-                        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+                        .ok_or(invalid_on_disk_layout())?;
                     continue;
                 }
 
@@ -653,13 +655,13 @@ fn scan_file_entry_set<'a>(
     entry_index: usize,
     entry_offset: usize,
     primary_entry: &'a [u8],
-) -> core::result::Result<ScannedDirectoryEntry<'a>, ExfatFsError> {
+) -> Result<ScannedDirectoryEntry<'a>> {
     let secondary_count = usize::from(primary_entry[1]);
     let slot_range = DirectoryEntrySlotRange::new(
         entry_index,
         secondary_count
             .checked_add(1)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+            .ok_or(invalid_on_disk_layout())?,
     )?;
     let expected_checksum = u16::from_le_bytes([primary_entry[2], primary_entry[3]]);
     let Ok(entry_set) = validated_file_entry_set(
@@ -700,13 +702,13 @@ fn scan_unrecognized_entry_set<'a>(
     entry_offset: usize,
     primary_entry: &[u8],
     entry_type: u8,
-) -> core::result::Result<ScannedDirectoryEntry<'a>, ExfatFsError> {
+) -> Result<ScannedDirectoryEntry<'a>> {
     let secondary_count = usize::from(primary_entry[1]);
     let slot_range = DirectoryEntrySlotRange::new(
         entry_index,
         secondary_count
             .checked_add(1)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?,
+            .ok_or(invalid_on_disk_layout())?,
     )?;
     let expected_checksum = u16::from_le_bytes([primary_entry[2], primary_entry[3]]);
     if validated_file_entry_set(
@@ -736,32 +738,32 @@ fn validated_file_entry_set(
     entry_offset: usize,
     secondary_count: usize,
     expected_checksum: u16,
-) -> core::result::Result<&[u8], ExfatFsError> {
+) -> Result<&[u8]> {
     let entry_set_len = secondary_count
         .checked_add(1)
         .and_then(|entries| entries.checked_mul(DIRECTORY_ENTRY_SIZE))
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let entry_set_end = entry_offset
         .checked_add(entry_set_len)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let entry_set = directory_bytes
         .get(entry_offset..entry_set_end)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     if entry_set_checksum(entry_set, secondary_count) != expected_checksum {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
     Ok(entry_set)
 }
 
-fn file_stream_entry(entry_set: &[u8]) -> core::result::Result<&[u8], ExfatFsError> {
+fn file_stream_entry(entry_set: &[u8]) -> Result<&[u8]> {
     let stream_entry = entry_set
         .get(DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     if stream_entry[0] != STREAM_EXTENSION_ENTRY_TYPE {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
     if stream_entry[1] & 0x01 == 0 {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
     Ok(stream_entry)
 }
@@ -770,33 +772,33 @@ fn file_name(
     entry_set: &[u8],
     secondary_count: usize,
     stream_entry: &[u8],
-) -> core::result::Result<Vec<u16>, ExfatFsError> {
+) -> Result<Vec<u16>> {
     let name_length = usize::from(stream_entry[3]);
     if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
 
     let name_entry_count = name_length.div_ceil(15);
     let required_secondary_count = name_entry_count
         .checked_add(1)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     if secondary_count < required_secondary_count {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
 
     let mut candidate_name = Vec::with_capacity(name_length);
     for name_entry_index in 0..name_entry_count {
         let name_entry_offset = (name_entry_index + 2)
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let name_entry_end = name_entry_offset
             .checked_add(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let name_entry = entry_set
             .get(name_entry_offset..name_entry_end)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         if name_entry[0] != FILE_NAME_ENTRY_TYPE {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         for code_unit_bytes in name_entry[2..].chunks_exact(2) {
             if candidate_name.len() == name_length {
@@ -806,7 +808,7 @@ fn file_name(
         }
     }
     if candidate_name.len() != name_length {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
 
     validate_trailing_secondaries(entry_set, required_secondary_count, secondary_count)?;
@@ -817,22 +819,22 @@ fn validate_trailing_secondaries(
     entry_set: &[u8],
     required_secondary_count: usize,
     secondary_count: usize,
-) -> core::result::Result<(), ExfatFsError> {
+) -> Result<()> {
     for trailing_secondary_index in required_secondary_count..secondary_count {
         let trailing_secondary_offset = (trailing_secondary_index + 1)
             .checked_mul(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let trailing_secondary_end = trailing_secondary_offset
             .checked_add(DIRECTORY_ENTRY_SIZE)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         let trailing_secondary = entry_set
             .get(trailing_secondary_offset..trailing_secondary_end)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+            .ok_or(invalid_on_disk_layout())?;
         if trailing_secondary[0] & ENTRY_TYPE_IN_USE_BIT == 0
             || trailing_secondary[0] & ENTRY_TYPE_CATEGORY_BIT == 0
             || trailing_secondary[0] & ENTRY_TYPE_IMPORTANCE_BIT == 0
         {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
     }
     Ok(())
@@ -842,7 +844,7 @@ fn file_entry_child_metadata(
     entry: &[u8],
     stream_entry: &[u8],
     boot_region: &BootRegion,
-) -> core::result::Result<(InodeType, u32, usize, bool), ExfatFsError> {
+) -> Result<(InodeType, u32, usize, bool)> {
     let file_attributes = u16::from_le_bytes([entry[4], entry[5]]);
     let inode_type = if file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
         InodeType::Dir
@@ -865,15 +867,15 @@ fn file_entry_child_metadata(
         stream_entry[30],
         stream_entry[31],
     ]))
-    .map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+    .map_err(|_| invalid_on_disk_layout())?;
     let no_fat_chain = stream_entry[1] & 0x02 != 0;
     if data_length != 0 {
         boot_region.validate_stream_data(
             first_cluster,
-            u64::try_from(data_length).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?,
+            u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
         )?;
     } else if first_cluster != 0 {
-        return Err(ExfatFsError::InvalidOnDiskLayout);
+        return Err(invalid_on_disk_layout());
     }
     Ok((inode_type, first_cluster, data_length, no_fat_chain))
 }
@@ -892,17 +894,17 @@ pub(super) fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u1
 
 pub(super) fn slot_range_bytes(
     slot_range: DirectoryEntrySlotRange,
-) -> core::result::Result<core::ops::Range<usize>, ExfatFsError> {
+) -> Result<core::ops::Range<usize>> {
     let byte_start = slot_range
         .first_entry_index()
         .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let byte_len = slot_range
         .entry_count()
         .checked_mul(DIRECTORY_ENTRY_SIZE)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     let byte_end = byte_start
         .checked_add(byte_len)
-        .ok_or(ExfatFsError::InvalidOnDiskLayout)?;
+        .ok_or(invalid_on_disk_layout())?;
     Ok(byte_start..byte_end)
 }

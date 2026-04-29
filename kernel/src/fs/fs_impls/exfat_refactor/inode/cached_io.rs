@@ -11,7 +11,7 @@ use super::{
     super::{
         boot::BootRegion,
         fat::{FatChainStep, FatReader},
-        fs::ExfatFsError,
+        invalid_on_disk_layout,
     },
     ExfatInode, ExfatInodeStream,
 };
@@ -306,7 +306,7 @@ impl ExfatInode {
                 let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
                 let cluster_start = boot_region.cluster_offset(current_cluster).map_err(|_| {
                     if stream.no_fat_chain {
-                        Error::from(ExfatFsError::InvalidOnDiskLayout)
+                        invalid_on_disk_layout()
                     } else {
                         Error::new(Errno::EIO)
                     }

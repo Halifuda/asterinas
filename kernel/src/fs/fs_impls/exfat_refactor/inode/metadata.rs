@@ -8,7 +8,7 @@ use super::{
     super::{
         boot::BootRegion,
         direntry::{self, FileEntrySetView, FileEntryTimestamp, ScannedDirectoryEntry},
-        fs::ExfatFsError,
+        invalid_on_disk_layout,
     },
     ExfatInode, InodeRewriteTarget, InodeTimestampField,
 };
@@ -99,7 +99,7 @@ impl ExfatInode {
         &self,
         entry_view: FileEntrySetView<'_>,
         boot_region: &BootRegion,
-    ) -> core::result::Result<(), ExfatFsError> {
+    ) -> Result<()> {
         let (inode_type, _first_cluster, data_length, _no_fat_chain) =
             entry_view.child_metadata(boot_region)?;
         let _create_at = Self::decoded_exfat_timestamp(
@@ -120,7 +120,7 @@ impl ExfatInode {
         let allocated_sectors = Self::regular_file_allocated_sectors(boot_region, data_length)?;
         let mut metadata = self.metadata.write();
         if metadata.type_ != inode_type {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         let writable_bits = metadata.mode & mkmod!(a+w);
         metadata.mode = chmod!(metadata.mode, a-w);
@@ -628,7 +628,7 @@ impl ExfatInode {
         .map_err(Error::from)?
         {
             ScannedDirectoryEntry::File(entry_view) => entry_view,
-            _ => return Err(Error::from(ExfatFsError::InvalidOnDiskLayout)),
+            _ => return Err(Error::from(invalid_on_disk_layout())),
         };
         let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
             .child_metadata(boot_region)
@@ -636,12 +636,12 @@ impl ExfatInode {
         match target {
             InodeRewriteTarget::Directory => {
                 if !entry_view.is_directory() || inode_type != InodeType::Dir {
-                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                    return Err(Error::from(invalid_on_disk_layout()));
                 }
             }
             InodeRewriteTarget::RegularFile => {
                 if entry_view.is_directory() || inode_type != InodeType::File {
-                    return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+                    return Err(Error::from(invalid_on_disk_layout()));
                 }
             }
         }
@@ -653,7 +653,7 @@ impl ExfatInode {
         };
         let destination_entry_set = directory_bytes
             .get_mut(slot_range_bytes)
-            .ok_or(ExfatFsError::InvalidOnDiskLayout)
+            .ok_or(invalid_on_disk_layout())
             .map_err(Error::from)?;
         destination_entry_set.copy_from_slice(&republished_entry_set);
         Self::write_directory_bytes_for_stream(

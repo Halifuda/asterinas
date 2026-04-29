@@ -12,6 +12,8 @@ use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
     boot::BootRegion,
     fat::FatReader,
+    device_io, inconsistent_bitmap_accounting, invalid_mount_input, invalid_operation_input,
+    read_only_conflict, unpublished_state, unsupported_remount_delta,
     inode::ExfatInode,
     upcase::UpcaseTable,
 };
@@ -26,48 +28,10 @@ use crate::{
 
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ExfatFsError {
-    InvalidOperationInput,
-    InvalidMountInput,
-    InvalidOnDiskLayout,
-    DeviceIo,
-    NoSpace,
-    UnsupportedRemountDelta,
-    ReadOnlyConflict,
-    UnpublishedState,
-    InconsistentAccounting,
-}
-
-impl From<ExfatFsError> for Error {
-    fn from(error: ExfatFsError) -> Self {
-        match error {
-            ExfatFsError::InvalidOperationInput => {
-                Error::with_message(Errno::EINVAL, "invalid exFAT operation input")
-            }
-            ExfatFsError::InvalidMountInput => Error::new(Errno::EINVAL),
-            ExfatFsError::InvalidOnDiskLayout => {
-                Error::with_message(Errno::EUCLEAN, "invalid exFAT on-disk layout")
-            }
-            ExfatFsError::DeviceIo => Error::new(Errno::EIO),
-            ExfatFsError::NoSpace => Error::new(Errno::ENOSPC),
-            ExfatFsError::UnsupportedRemountDelta => {
-                Error::with_message(Errno::EINVAL, "unsupported exFAT remount delta")
-            }
-            ExfatFsError::ReadOnlyConflict => Error::new(Errno::EROFS),
-            ExfatFsError::UnpublishedState => {
-                Error::with_message(Errno::EINVAL, "filesystem state is not published")
-            }
-            ExfatFsError::InconsistentAccounting => {
-                Error::with_message(Errno::EUCLEAN, "exFAT allocator accounting is inconsistent")
-            }
-        }
-    }
-}
-
 pub(super) struct ExfatFs {
-    allocator: RwLock<Option<FreeSpaceAllocatorState>>,
+    allocator: RwLock<Option<AllocationBitmap>>,
     block_device: Arc<dyn BlockDevice>,
+    boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     inode_cache: RwLock<BTreeMap<u64, Weak<ExfatInode>>>,
     source: Option<String>,
@@ -97,12 +61,12 @@ impl FileSystem for ExfatFs {
 
             let mut state = self.state.write();
             {
-                let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+                let publication = state.as_mut().ok_or_else(unpublished_state)?;
                 if publication.forced_shutdown {
                     return_errno!(Errno::EIO);
                 }
                 if publication.flags.contains(FsFlags::RDONLY) {
-                    return Err(ExfatFsError::ReadOnlyConflict.into());
+                    return Err(read_only_conflict());
                 }
             }
 
@@ -120,7 +84,7 @@ impl FileSystem for ExfatFs {
                 Err(_) => {
                     state
                         .as_mut()
-                        .ok_or(ExfatFsError::UnpublishedState)?
+                        .ok_or_else(unpublished_state)?
                         .anomaly
                         .volume_dirty = true;
                     return_errno!(Errno::EIO);
@@ -129,14 +93,14 @@ impl FileSystem for ExfatFs {
             if flush_status != BioStatus::Complete {
                 state
                     .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .ok_or_else(unpublished_state)?
                     .anomaly
                     .volume_dirty = true;
                 return_errno!(Errno::EIO);
             }
 
             let clean_anomaly = {
-                let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+                let publication = state.as_mut().ok_or_else(unpublished_state)?;
                 if !publication.anomaly.volume_dirty {
                     return Ok(());
                 }
@@ -145,19 +109,16 @@ impl FileSystem for ExfatFs {
                     ..publication.anomaly
                 }
             };
-            let boot_region = state
-                .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .boot_region;
-            if let Err(error) =
-                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
+            if let Err(error) = self
+                .boot_region
+                .write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
             {
                 state
                     .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .ok_or_else(unpublished_state)?
                     .anomaly
                     .volume_dirty = true;
-                return Err(error.into());
+                return Err(error);
             }
 
             let flush_status = match self.block_device.sync() {
@@ -165,7 +126,7 @@ impl FileSystem for ExfatFs {
                 Err(_) => {
                     state
                         .as_mut()
-                        .ok_or(ExfatFsError::UnpublishedState)?
+                        .ok_or_else(unpublished_state)?
                         .anomaly
                         .volume_dirty = true;
                     return Err(Error::new(Errno::EIO));
@@ -174,7 +135,7 @@ impl FileSystem for ExfatFs {
             if flush_status != BioStatus::Complete {
                 state
                     .as_mut()
-                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .ok_or_else(unpublished_state)?
                     .anomaly
                     .volume_dirty = true;
                 return_errno!(Errno::EIO);
@@ -182,7 +143,7 @@ impl FileSystem for ExfatFs {
 
             state
                 .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)?
+                .ok_or_else(unpublished_state)?
                 .anomaly = clean_anomaly;
             return Ok(());
         }
@@ -217,7 +178,7 @@ impl FileSystem for ExfatFs {
             let state = self.state.read();
             state
                 .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)?
+                .ok_or_else(unpublished_state)?
                 .options
                 .clone()
         };
@@ -237,10 +198,15 @@ impl FileSystem for ExfatFs {
 impl ExfatFs {
     // Construction and mount publication
 
-    fn new(block_device: Arc<dyn BlockDevice>, source: Option<String>) -> Arc<Self> {
+    fn new(
+        block_device: Arc<dyn BlockDevice>,
+        boot_region: BootRegion,
+        source: Option<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             allocator: RwLock::new(None),
             block_device,
+            boot_region,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             inode_cache: RwLock::new(BTreeMap::new()),
             source,
@@ -252,39 +218,33 @@ impl ExfatFs {
         block_device: &Arc<dyn BlockDevice>,
         source: Option<&str>,
         options: &ExfatMountOptions,
-    ) -> core::result::Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags), ExfatFsError>
+    ) -> Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags)>
     {
-        let (boot_region, anomaly, bitmap, upcase_table, used_clusters, used_clusters_from_recount) =
+        let (boot_region, anomaly, bitmap, upcase_table) =
             BootRegion::load_mount_state(block_device.as_ref())?;
-        let fs = Self::new(block_device.clone(), source.map(ToString::to_string));
+        let fs = Self::new(
+            block_device.clone(),
+            boot_region,
+            source.map(ToString::to_string),
+        );
         let root_inode =
             ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
         let publication = MountedVolumeState {
             anomaly,
-            boot_region,
             flags: options.fs_flags,
             options: options.clone(),
             root_inode: root_inode.clone(),
             upcase_table,
             forced_shutdown: false,
         };
-        let allocator_state = FreeSpaceAllocatorState {
-            bitmap,
-            used_clusters,
-            used_clusters_from_recount,
-        };
-        fs.publish_mount_state(allocator_state, publication);
+        fs.publish_mount_state(bitmap, publication);
         let super_block = fs.super_block_snapshot()?;
         let root_inode: Arc<dyn Inode> = root_inode;
         Ok((fs, root_inode, super_block, options.fs_flags))
     }
 
-    fn publish_mount_state(
-        &self,
-        allocator_state: FreeSpaceAllocatorState,
-        publication: MountedVolumeState,
-    ) {
-        *self.allocator.write() = Some(allocator_state);
+    fn publish_mount_state(&self, bitmap: AllocationBitmap, publication: MountedVolumeState) {
+        *self.allocator.write() = Some(bitmap);
         *self.state.write() = Some(publication);
     }
 
@@ -292,9 +252,9 @@ impl ExfatFs {
         &self,
         next_flags: FsFlags,
         next_options: &ExfatMountOptions,
-    ) -> core::result::Result<FsFlags, ExfatFsError> {
+    ) -> Result<FsFlags> {
         let mut state = self.state.write();
-        let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        let publication = state.as_mut().ok_or_else(unpublished_state)?;
         let changed_flags = publication.flags ^ next_flags;
         if changed_flags.intersects(
             FsFlags::SYNCHRONOUS
@@ -303,16 +263,16 @@ impl ExfatFs {
                 | FsFlags::SILENT
                 | FsFlags::LAZYTIME,
         ) {
-            return Err(ExfatFsError::UnsupportedRemountDelta);
+            return Err(unsupported_remount_delta());
         }
         if publication.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
-            return Err(ExfatFsError::ReadOnlyConflict);
+            return Err(read_only_conflict());
         }
         if publication.options.iocharset != next_options.iocharset
             || publication.options.keep_last_dots != next_options.keep_last_dots
             || publication.options.zero_size_dir != next_options.zero_size_dir
         {
-            return Err(ExfatFsError::UnsupportedRemountDelta);
+            return Err(unsupported_remount_delta());
         }
         publication.flags = next_flags;
         publication.options = next_options.with_flags(next_flags);
@@ -321,14 +281,12 @@ impl ExfatFs {
 
     // Admission
 
-    pub(super) fn published_lookup_state(
-        &self,
-    ) -> core::result::Result<PublishedLookupState, ExfatFsError> {
+    pub(super) fn published_lookup_state(&self) -> Result<PublishedLookupState> {
         let state = self.state.read();
-        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let publication = state.as_ref().ok_or_else(unpublished_state)?;
         Ok(PublishedLookupState {
             block_device: self.block_device.clone(),
-            boot_region: publication.boot_region,
+            boot_region: self.boot_region,
             anomaly: publication.anomaly,
             upcase_table: publication.upcase_table.clone(),
             options: publication.options.clone(),
@@ -336,14 +294,11 @@ impl ExfatFs {
         })
     }
 
-    pub(super) fn admitted_lookup_state(
-        &self,
-    ) -> core::result::Result<AdmittedLookupState<'_>, ExfatFsError> {
+    pub(super) fn admitted_lookup_state(&self) -> Result<AdmittedLookupState<'_>> {
         let state = self.state.read();
-        let (boot_region, anomaly, upcase_table, options, forced_shutdown) = {
-            let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let (anomaly, upcase_table, options, forced_shutdown) = {
+            let publication = state.as_ref().ok_or_else(unpublished_state)?;
             (
-                publication.boot_region,
                 publication.anomaly,
                 publication.upcase_table.clone(),
                 publication.options.clone(),
@@ -353,7 +308,7 @@ impl ExfatFs {
         Ok(AdmittedLookupState {
             state_guard: state,
             block_device: self.block_device.clone(),
-            boot_region,
+            boot_region: self.boot_region,
             anomaly,
             upcase_table,
             options,
@@ -361,14 +316,11 @@ impl ExfatFs {
         })
     }
 
-    pub(super) fn admitted_mutation_state(
-        &self,
-    ) -> core::result::Result<AdmittedMutationState<'_>, ExfatFsError> {
+    pub(super) fn admitted_mutation_state(&self) -> Result<AdmittedMutationState<'_>> {
         let mut state = self.state.write();
-        let (boot_region, anomaly, upcase_table, options, forced_shutdown) = {
-            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+        let (anomaly, upcase_table, options, forced_shutdown) = {
+            let publication = state.as_mut().ok_or_else(unpublished_state)?;
             (
-                publication.boot_region,
                 publication.anomaly,
                 publication.upcase_table.clone(),
                 publication.options.clone(),
@@ -378,7 +330,7 @@ impl ExfatFs {
         Ok(AdmittedMutationState {
             state_guard: state,
             block_device: self.block_device.clone(),
-            boot_region,
+            boot_region: self.boot_region,
             anomaly,
             upcase_table,
             options,
@@ -391,101 +343,94 @@ impl ExfatFs {
     fn build_super_block(
         &self,
         publication: &MountedVolumeState,
-        snapshot: &FreeSpaceSnapshot,
-    ) -> SuperBlock {
-        SuperBlock {
+        bitmap: &AllocationBitmap,
+    ) -> Result<SuperBlock> {
+        let total_clusters = self.boot_region.cluster_count_usize()?;
+        let free_clusters = total_clusters
+            .checked_sub(bitmap.used_clusters())
+            .ok_or_else(inconsistent_bitmap_accounting)?;
+        Ok(SuperBlock {
             magic: EXFAT_SUPER_MAGIC,
-            bsize: publication.boot_region.cluster_size,
-            blocks: snapshot.total_clusters,
-            bfree: snapshot.free_clusters,
-            bavail: snapshot.free_clusters,
+            bsize: self.boot_region.cluster_size,
+            blocks: total_clusters,
+            bfree: free_clusters,
+            bavail: free_clusters,
             files: 0,
             ffree: 0,
-            fsid: u64::from(publication.boot_region.volume_serial_number),
+            fsid: u64::from(self.boot_region.volume_serial_number),
             namelen: UpcaseTable::NAME_MAX,
-            frsize: publication.boot_region.cluster_size,
+            frsize: self.boot_region.cluster_size,
             flags: u64::from(publication.flags.bits()),
             container_dev_id: self.block_device.id(),
-        }
+        })
     }
 
-    fn super_block_snapshot(&self) -> core::result::Result<SuperBlock, ExfatFsError> {
+    fn super_block_snapshot(&self) -> Result<SuperBlock> {
         let state = self.state.read();
-        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
+        let publication = state.as_ref().ok_or_else(unpublished_state)?;
         let allocator = self.allocator.read();
-        let allocator_state = allocator.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
-        Ok(self.build_super_block(publication, &snapshot))
-    }
-
-    pub(super) fn free_allocated_space(
-        &self,
-        ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
-        let mut state = self.state.write();
-        let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-        self.free_allocated_space_with_publication(publication, ranges)
+        let bitmap = allocator.as_ref().ok_or_else(unpublished_state)?;
+        self.build_super_block(publication, bitmap)
     }
 
     pub(super) fn allocate_free_space_with_publication(
         &self,
         publication: &MountedVolumeState,
         requested_clusters: usize,
-    ) -> core::result::Result<(Vec<ClusterRange>, FreeSpaceSnapshot), ExfatFsError> {
+    ) -> Result<Vec<ClusterRange>> {
         if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(ExfatFsError::ReadOnlyConflict);
+            return Err(read_only_conflict());
         }
 
         let mut allocator = self.allocator.write();
-        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-        let allocated_ranges = allocator_state.allocate_clusters(
+        let bitmap = allocator.as_mut().ok_or_else(unpublished_state)?;
+        if requested_clusters == 0 {
+            return Err(invalid_operation_input());
+        }
+
+        let mut fat_reader = FatReader::new(self.block_device.as_ref(), &self.boot_region);
+        let allocated_ranges =
+            bitmap.find_free_ranges(&self.boot_region, &mut fat_reader, requested_clusters)?;
+        let normalized_ranges =
+            bitmap.validate_and_normalize_ranges(&self.boot_region, &allocated_ranges)?;
+        let allocated_clusters = bitmap.apply_normalized_ranges(
             self.block_device.as_ref(),
-            &publication.boot_region,
-            requested_clusters,
+            &self.boot_region,
+            &normalized_ranges,
+            AllocationBitmapUpdate::Allocate,
         )?;
-        let snapshot = allocator_state.snapshot(&publication.boot_region)?;
-        Ok((allocated_ranges, snapshot))
+        if allocated_clusters != requested_clusters {
+            return Err(inconsistent_bitmap_accounting());
+        }
+        bitmap.record_allocated_clusters(allocated_clusters)?;
+        Ok(allocated_ranges)
     }
 
     pub(super) fn free_allocated_space_with_publication(
         &self,
         publication: &mut MountedVolumeState,
         ranges: &[ClusterRange],
-    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
+    ) -> Result<()> {
         if publication.flags.contains(FsFlags::RDONLY) {
-            return Err(ExfatFsError::ReadOnlyConflict);
+            return Err(read_only_conflict());
         }
 
         let mut allocator = self.allocator.write();
-        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-        allocator_state.free_clusters(
+        let bitmap = allocator.as_mut().ok_or_else(unpublished_state)?;
+        let normalized_ranges = bitmap.validate_and_normalize_ranges(&self.boot_region, ranges)?;
+        let released_clusters = bitmap.apply_normalized_ranges(
             self.block_device.as_ref(),
-            &publication.boot_region,
-            ranges,
+            &self.boot_region,
+            &normalized_ranges,
+            AllocationBitmapUpdate::Free,
         )?;
+        bitmap.record_released_clusters(released_clusters)?;
         if publication.options.discard {
             // Current Asterinas block devices expose no trim BIO, so downgrade
             // only the advisory policy.
             publication.options.discard = false;
         }
-        allocator_state.snapshot(&publication.boot_region)
-    }
-
-    fn cached_free_space_snapshot(&self) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
-        let state = self.state.read();
-        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-        let allocator = self.allocator.read();
-        let allocator_state = allocator.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-        allocator_state.snapshot(&publication.boot_region)
-    }
-
-    fn recount_free_space(&self) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
-        let state = self.state.write();
-        let publication = state.as_ref().ok_or(ExfatFsError::UnpublishedState)?;
-        let mut allocator = self.allocator.write();
-        let allocator_state = allocator.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-        allocator_state.recount(self.block_device.as_ref(), &publication.boot_region)?;
-        allocator_state.snapshot(&publication.boot_region)
+        Ok(())
     }
 
     // Helpers
@@ -559,7 +504,6 @@ pub(super) struct AdmittedMutationState<'a> {
 #[derive(Clone)]
 pub(super) struct MountedVolumeState {
     pub(super) anomaly: VolumeAnomalyState,
-    pub(super) boot_region: BootRegion,
     pub(super) flags: FsFlags,
     pub(super) options: ExfatMountOptions,
     pub(super) root_inode: Arc<ExfatInode>,
@@ -575,14 +519,11 @@ pub(super) struct VolumeAnomalyState {
 }
 
 impl VolumeAnomalyState {
-    pub(super) fn read(
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<Self, ExfatFsError> {
+    pub(super) fn read(block_device: &dyn BlockDevice, boot_region: &BootRegion) -> Result<Self> {
         let mut boot_sector = vec![0; boot_region.sector_size];
         block_device
             .read_bytes(0, &mut boot_sector)
-            .map_err(|_| ExfatFsError::DeviceIo)?;
+            .map_err(|_| device_io())?;
         let volume_flags = u16::from_le_bytes([boot_sector[106], boot_sector[107]]);
         Ok(Self {
             clear_to_zero: volume_flags & 0x0008 != 0,
@@ -590,101 +531,6 @@ impl VolumeAnomalyState {
             volume_dirty: volume_flags & 0x0002 != 0,
         })
     }
-}
-
-struct FreeSpaceAllocatorState {
-    pub(super) bitmap: AllocationBitmap,
-    used_clusters: usize,
-    pub(super) used_clusters_from_recount: bool,
-}
-
-impl FreeSpaceAllocatorState {
-    fn allocate_clusters(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-        requested_clusters: usize,
-    ) -> core::result::Result<Vec<ClusterRange>, ExfatFsError> {
-        if requested_clusters == 0 {
-            return Err(ExfatFsError::InvalidOperationInput);
-        }
-
-        let mut fat_reader = FatReader::new(block_device, boot_region);
-        let allocated_ranges =
-            self.bitmap
-                .find_free_ranges(boot_region, &mut fat_reader, requested_clusters)?;
-        let allocated_clusters = self.bitmap.apply_update(
-            block_device,
-            boot_region,
-            &allocated_ranges,
-            AllocationBitmapUpdate::Allocate,
-        )?;
-        if allocated_clusters != requested_clusters {
-            return Err(ExfatFsError::InconsistentAccounting);
-        }
-        self.used_clusters = self
-            .used_clusters
-            .checked_add(allocated_clusters)
-            .ok_or(ExfatFsError::InconsistentAccounting)?;
-        Ok(allocated_ranges)
-    }
-
-    fn free_clusters(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-        ranges: &[ClusterRange],
-    ) -> core::result::Result<(), ExfatFsError> {
-        let released_clusters = self.bitmap.apply_update(
-            block_device,
-            boot_region,
-            ranges,
-            AllocationBitmapUpdate::Free,
-        )?;
-        self.used_clusters = self
-            .used_clusters
-            .checked_sub(released_clusters)
-            .ok_or(ExfatFsError::InconsistentAccounting)?;
-        Ok(())
-    }
-
-    fn recount(
-        &mut self,
-        block_device: &dyn BlockDevice,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<(), ExfatFsError> {
-        let mut fat_reader = FatReader::new(block_device, boot_region);
-        let used_clusters = self
-            .bitmap
-            .recount_used_clusters(boot_region, &mut fat_reader)?;
-        self.used_clusters = used_clusters;
-        self.used_clusters_from_recount = true;
-        Ok(())
-    }
-
-    fn snapshot(
-        &self,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<FreeSpaceSnapshot, ExfatFsError> {
-        let total_clusters = boot_region.cluster_count_usize()?;
-        let free_clusters = total_clusters
-            .checked_sub(self.used_clusters)
-            .ok_or(ExfatFsError::InconsistentAccounting)?;
-        Ok(FreeSpaceSnapshot {
-            total_clusters,
-            free_clusters,
-            used_clusters: self.used_clusters,
-            used_clusters_from_recount: self.used_clusters_from_recount,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct FreeSpaceSnapshot {
-    total_clusters: usize,
-    free_clusters: usize,
-    used_clusters: usize,
-    used_clusters_from_recount: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -697,7 +543,7 @@ pub(super) struct ExfatMountOptions {
 }
 
 impl ExfatMountOptions {
-    fn parse(fs_flags: FsFlags, args: Option<&CStr>) -> core::result::Result<Self, ExfatFsError> {
+    fn parse(fs_flags: FsFlags, args: Option<&CStr>) -> Result<Self> {
         let mut options = Self {
             discard: false,
             fs_flags,
@@ -723,13 +569,13 @@ impl ExfatMountOptions {
                     let iocharset = entry
                         .split_once('=')
                         .map(|(_, value)| value)
-                        .ok_or(ExfatFsError::InvalidMountInput)?;
+                        .ok_or_else(invalid_mount_input)?;
                     if !iocharset.eq_ignore_ascii_case("utf8") {
-                        return Err(ExfatFsError::InvalidMountInput);
+                        return Err(invalid_mount_input());
                     }
                     options.iocharset = "utf8".to_string();
                 }
-                _ => return Err(ExfatFsError::InvalidMountInput),
+                _ => return Err(invalid_mount_input()),
             }
         }
         Ok(options)

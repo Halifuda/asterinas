@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::ops::Range;
+
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
 use aster_block::BlockDevice;
@@ -7,21 +9,19 @@ use ostd::mm::VmIo;
 
 use super::{
     boot::BootRegion,
+    device_io, inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
+    no_space,
     fat::{ChainVisitControl, FatChainStep, FatReader},
-    fs::ExfatFsError,
 };
+use crate::prelude::*;
 
-// TODO: `ExfatFsError` is a temporary cross-owner seam for bitmap
-// parsing and mutation while mount bootstrap and `FatReader` still expose that
-// error type. Remove this import once the boot/FAT owners expose bitmap-local
-// error conversion; then `AllocationBitmap` methods should return the
-// bitmap-owned error and `fs.rs` should translate it at the free-space boundary.
 pub(super) const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 
 #[derive(Clone, Copy)]
 pub(super) struct AllocationBitmap {
     pub(super) data_length: u64,
     pub(super) first_cluster: u32,
+    used_clusters: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,7 +41,7 @@ impl AllocationBitmap {
         self,
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
-    ) -> core::result::Result<(usize, bool), ExfatFsError> {
+    ) -> Result<usize> {
         let cluster_count = boot_region.cluster_count_usize()?;
         let (bitmap_bytes, required_bytes) = self.bitmap_lengths(cluster_count, boot_region)?;
         debug_assert!(bitmap_bytes >= required_bytes);
@@ -54,7 +54,7 @@ impl AllocationBitmap {
             for byte in &cluster_bytes[..bytes_to_visit] {
                 if bits_remaining == 0 {
                     if *byte != 0 {
-                        return Err(ExfatFsError::InconsistentAccounting);
+                        return Err(inconsistent_bitmap_accounting());
                     }
                     continue;
                 }
@@ -62,11 +62,11 @@ impl AllocationBitmap {
                 let mask = Self::relevant_bitmap_mask(relevant_bits)?;
                 let masked_byte = *byte & mask;
                 if masked_byte != *byte && (*byte & !mask) != 0 {
-                    return Err(ExfatFsError::InconsistentAccounting);
+                    return Err(inconsistent_bitmap_accounting());
                 }
                 used_clusters = used_clusters
                     .checked_add(masked_byte.count_ones() as usize)
-                    .ok_or(ExfatFsError::InconsistentAccounting)?;
+                    .ok_or_else(inconsistent_bitmap_accounting)?;
                 bits_remaining -= relevant_bits;
             }
             bitmap_bytes_remaining -= bytes_to_visit;
@@ -77,25 +77,18 @@ impl AllocationBitmap {
         });
         match result {
             Ok(()) => (),
-            Err(ExfatFsError::InvalidOnDiskLayout) => {
-                return Err(ExfatFsError::InconsistentAccounting);
+            Err(error) if error.error() == Errno::EUCLEAN => {
+                return Err(inconsistent_bitmap_accounting());
             }
             Err(error) => return Err(error),
         }
         if bits_remaining != 0 || bitmap_bytes_remaining != 0 {
-            return Err(ExfatFsError::InconsistentAccounting);
+            return Err(inconsistent_bitmap_accounting());
         }
-
-        let counted_percent = if cluster_count == 0 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
-        } else {
-            (used_clusters.saturating_mul(100) + cluster_count / 2) / cluster_count
-        };
-        let used_clusters_from_recount = match boot_region.percent_in_use {
-            0xFF => true,
-            percent_in_use => counted_percent != usize::from(percent_in_use),
-        };
-        Ok((used_clusters, used_clusters_from_recount))
+        if cluster_count == 0 {
+            return Err(invalid_on_disk_layout());
+        }
+        Ok(used_clusters)
     }
 
     pub(super) fn find_free_ranges(
@@ -103,9 +96,9 @@ impl AllocationBitmap {
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
         requested_clusters: usize,
-    ) -> core::result::Result<Vec<ClusterRange>, ExfatFsError> {
+    ) -> Result<Vec<ClusterRange>> {
         if requested_clusters == 0 {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
 
         let cluster_count = boot_region.cluster_count_usize()?;
@@ -123,7 +116,7 @@ impl AllocationBitmap {
             for byte in &cluster_bytes[..bytes_to_visit] {
                 if bits_remaining == 0 {
                     if *byte != 0 {
-                        return Err(ExfatFsError::InconsistentAccounting);
+                        return Err(inconsistent_bitmap_accounting());
                     }
                     continue;
                 }
@@ -131,13 +124,13 @@ impl AllocationBitmap {
                 let mask = Self::relevant_bitmap_mask(relevant_bits)?;
                 let masked_byte = *byte & mask;
                 if masked_byte != *byte && (*byte & !mask) != 0 {
-                    return Err(ExfatFsError::InconsistentAccounting);
+                    return Err(inconsistent_bitmap_accounting());
                 }
                 for bit_index in 0..relevant_bits {
                     let bit_mask = 1u8 << bit_index;
                     let cluster_is_used = masked_byte & bit_mask != 0;
                     if cluster_is_used {
-                        if Self::flush_cluster_run(
+                        if Self::commit_run_to_ranges(
                             boot_region,
                             &mut ranges,
                             &mut run_start_index,
@@ -152,15 +145,15 @@ impl AllocationBitmap {
                         }
                         run_cluster_count = run_cluster_count
                             .checked_add(1)
-                            .ok_or(ExfatFsError::InconsistentAccounting)?;
+                            .ok_or_else(inconsistent_bitmap_accounting)?;
                     }
                     next_cluster_index = next_cluster_index
                         .checked_add(1)
-                        .ok_or(ExfatFsError::InconsistentAccounting)?;
+                        .ok_or_else(inconsistent_bitmap_accounting)?;
                     bits_remaining -= 1;
                     if !cluster_is_used
                         && run_cluster_count >= requested_clusters_remaining
-                        && Self::flush_cluster_run(
+                        && Self::commit_run_to_ranges(
                             boot_region,
                             &mut ranges,
                             &mut run_start_index,
@@ -174,7 +167,7 @@ impl AllocationBitmap {
             }
             bitmap_bytes_remaining -= bytes_to_visit;
             if bits_remaining == 0
-                && Self::flush_cluster_run(
+                && Self::commit_run_to_ranges(
                     boot_region,
                     &mut ranges,
                     &mut run_start_index,
@@ -191,8 +184,8 @@ impl AllocationBitmap {
         });
         match result {
             Ok(()) => (),
-            Err(ExfatFsError::InvalidOnDiskLayout) => {
-                return Err(ExfatFsError::InconsistentAccounting);
+            Err(error) if error.error() == Errno::EUCLEAN => {
+                return Err(inconsistent_bitmap_accounting());
             }
             Err(error) => return Err(error),
         }
@@ -200,52 +193,67 @@ impl AllocationBitmap {
             return Ok(ranges);
         }
         if bits_remaining != 0 || bitmap_bytes_remaining != 0 {
-            return Err(ExfatFsError::InconsistentAccounting);
+            return Err(inconsistent_bitmap_accounting());
         }
-        Err(ExfatFsError::NoSpace)
+        Err(no_space())
     }
 
-    pub(super) fn apply_update(
+    pub(super) fn validate_and_normalize_ranges(
         self,
-        block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
         cluster_ranges: &[ClusterRange],
-        update: AllocationBitmapUpdate,
-    ) -> core::result::Result<usize, ExfatFsError> {
+    ) -> Result<Vec<Range<usize>>> {
         if cluster_ranges.is_empty() {
-            return Err(ExfatFsError::InvalidOperationInput);
+            return Err(invalid_operation_input());
         }
 
         let cluster_count = boot_region.cluster_count_usize()?;
         let mut normalized_ranges = Vec::with_capacity(cluster_ranges.len());
         for cluster_range in cluster_ranges {
             if cluster_range.cluster_count == 0 {
-                return Err(ExfatFsError::InvalidOperationInput);
+                return Err(invalid_operation_input());
             }
 
             let start_index = boot_region
                 .cluster_index(cluster_range.start_cluster)
-                .map_err(|_| ExfatFsError::InvalidOperationInput)?;
+                .map_err(|_| invalid_operation_input())?;
             let end_index = start_index
                 .checked_add(cluster_range.cluster_count)
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
+                .ok_or_else(invalid_operation_input)?;
             if end_index > cluster_count {
-                return Err(ExfatFsError::InvalidOperationInput);
+                return Err(invalid_operation_input());
             }
             normalized_ranges.push(start_index..end_index);
         }
         normalized_ranges.sort_by_key(|range| range.start);
         for window in normalized_ranges.windows(2) {
             if window[0].end > window[1].start {
-                return Err(ExfatFsError::InvalidOperationInput);
+                return Err(invalid_operation_input());
             }
         }
-        let mut expected_cluster_count = 0usize;
-        for normalized_range in &normalized_ranges {
-            expected_cluster_count = expected_cluster_count
-                .checked_add(normalized_range.end - normalized_range.start)
-                .ok_or(ExfatFsError::InvalidOperationInput)?;
+        if normalized_ranges.iter().all(Range::is_empty) {
+            return Err(invalid_operation_input());
         }
+        Ok(normalized_ranges)
+    }
+
+    pub(super) fn apply_normalized_ranges(
+        self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+        normalized_ranges: &[Range<usize>],
+        update: AllocationBitmapUpdate,
+    ) -> Result<usize> {
+        if normalized_ranges.is_empty() {
+            return Err(invalid_operation_input());
+        }
+
+        let cluster_count = boot_region.cluster_count_usize()?;
+        let expected_cluster_count = normalized_ranges.iter().try_fold(0usize, |total, range| {
+            total
+                .checked_add(range.end - range.start)
+                .ok_or_else(invalid_operation_input)
+        })?;
         let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
         let mut cluster_buffer = vec![0; boot_region.cluster_size];
         let mut current_cluster = self.first_cluster;
@@ -258,26 +266,26 @@ impl AllocationBitmap {
 
         while bitmap_bytes_remaining != 0 {
             if !visited_clusters.insert(current_cluster) {
-                return Err(ExfatFsError::InconsistentAccounting);
+                return Err(inconsistent_bitmap_accounting());
             }
             let cluster_offset = boot_region.cluster_offset(current_cluster)?;
             block_device
                 .read_bytes(cluster_offset, &mut cluster_buffer)
-                .map_err(|_| ExfatFsError::DeviceIo)?;
+                .map_err(|_| device_io())?;
 
             let bytes_to_visit = bitmap_bytes_remaining.min(cluster_buffer.len());
             let mut cluster_dirty = false;
             for byte in &mut cluster_buffer[..bytes_to_visit] {
                 if current_cluster_index >= cluster_count {
                     if *byte != 0 {
-                        return Err(ExfatFsError::InconsistentAccounting);
+                        return Err(inconsistent_bitmap_accounting());
                     }
                     continue;
                 }
                 let relevant_bits = (cluster_count - current_cluster_index).min(u8::BITS as usize);
                 let mask = Self::relevant_bitmap_mask(relevant_bits)?;
                 if *byte & !mask != 0 {
-                    return Err(ExfatFsError::InconsistentAccounting);
+                    return Err(inconsistent_bitmap_accounting());
                 }
 
                 let mut next_byte = *byte;
@@ -298,20 +306,20 @@ impl AllocationBitmap {
                     match update {
                         AllocationBitmapUpdate::Allocate => {
                             if next_byte & bit_mask != 0 {
-                                return Err(ExfatFsError::InconsistentAccounting);
+                                return Err(inconsistent_bitmap_accounting());
                             }
                             next_byte |= bit_mask;
                         }
                         AllocationBitmapUpdate::Free => {
                             if next_byte & bit_mask == 0 {
-                                return Err(ExfatFsError::InconsistentAccounting);
+                                return Err(inconsistent_bitmap_accounting());
                             }
                             next_byte &= !bit_mask;
                         }
                     }
                     updated_clusters = updated_clusters
                         .checked_add(1)
-                        .ok_or(ExfatFsError::InconsistentAccounting)?;
+                        .ok_or_else(inconsistent_bitmap_accounting)?;
                 }
 
                 if next_byte != *byte {
@@ -324,7 +332,7 @@ impl AllocationBitmap {
             if cluster_dirty {
                 block_device
                     .write_bytes(cluster_offset, &cluster_buffer)
-                    .map_err(|_| ExfatFsError::DeviceIo)?;
+                    .map_err(|_| device_io())?;
             }
             bitmap_bytes_remaining -= bytes_to_visit;
             if bitmap_bytes_remaining == 0 {
@@ -332,28 +340,43 @@ impl AllocationBitmap {
             }
             current_cluster = match fat_reader.next_cluster(current_cluster)? {
                 FatChainStep::Continue(next_cluster) => next_cluster,
-                FatChainStep::End => return Err(ExfatFsError::InconsistentAccounting),
+                FatChainStep::End => return Err(inconsistent_bitmap_accounting()),
             };
         }
 
         if updated_clusters != expected_cluster_count {
-            return Err(ExfatFsError::InconsistentAccounting);
+            return Err(inconsistent_bitmap_accounting());
         }
         Ok(updated_clusters)
     }
 
-    pub(super) fn recount_used_clusters(
-        self,
-        boot_region: &BootRegion,
-        fat_reader: &mut FatReader<'_>,
-    ) -> core::result::Result<usize, ExfatFsError> {
-        let (used_clusters, _) = self.count_used_clusters(boot_region, fat_reader)?;
-        Ok(used_clusters)
+    pub(super) fn record_allocated_clusters(&mut self, allocated_clusters: usize) -> Result<()> {
+        self.used_clusters = self
+            .used_clusters
+            .checked_add(allocated_clusters)
+            .ok_or_else(inconsistent_bitmap_accounting)?;
+        Ok(())
     }
 
-    pub(super) fn parse(entry: &[u8]) -> core::result::Result<Self, ExfatFsError> {
+    pub(super) fn record_released_clusters(&mut self, released_clusters: usize) -> Result<()> {
+        self.used_clusters = self
+            .used_clusters
+            .checked_sub(released_clusters)
+            .ok_or_else(inconsistent_bitmap_accounting)?;
+        Ok(())
+    }
+
+    pub(super) fn set_used_clusters(&mut self, used_clusters: usize) {
+        self.used_clusters = used_clusters;
+    }
+
+    pub(super) fn used_clusters(self) -> usize {
+        self.used_clusters
+    }
+
+    pub(super) fn parse(entry: &[u8]) -> Result<Self> {
         if entry.len() != 32 {
-            return Err(ExfatFsError::InvalidOnDiskLayout);
+            return Err(invalid_on_disk_layout());
         }
         Ok(Self {
             first_cluster: u32::from_le_bytes([entry[20], entry[21], entry[22], entry[23]]),
@@ -361,31 +384,27 @@ impl AllocationBitmap {
                 entry[24], entry[25], entry[26], entry[27], entry[28], entry[29], entry[30],
                 entry[31],
             ]),
+            used_clusters: 0,
         })
     }
 
-    fn bitmap_lengths(
-        self,
-        cluster_count: usize,
-        boot_region: &BootRegion,
-    ) -> core::result::Result<(usize, usize), ExfatFsError> {
+    fn bitmap_lengths(self, cluster_count: usize, boot_region: &BootRegion) -> Result<(usize, usize)> {
         boot_region.validate_stream_data(self.first_cluster, self.data_length)?;
         let required_bytes = cluster_count.div_ceil(8);
-        let bitmap_bytes =
-            usize::try_from(self.data_length).map_err(|_| ExfatFsError::InvalidOnDiskLayout)?;
+        let bitmap_bytes = usize::try_from(self.data_length).map_err(|_| invalid_on_disk_layout())?;
         if bitmap_bytes < required_bytes {
-            return Err(ExfatFsError::InconsistentAccounting);
+            return Err(inconsistent_bitmap_accounting());
         }
         Ok((bitmap_bytes, required_bytes))
     }
 
-    fn flush_cluster_run(
+    fn commit_run_to_ranges(
         boot_region: &BootRegion,
         ranges: &mut Vec<ClusterRange>,
         run_start_index: &mut Option<usize>,
         run_cluster_count: &mut usize,
         requested_clusters_remaining: &mut usize,
-    ) -> core::result::Result<bool, ExfatFsError> {
+    ) -> Result<bool> {
         let Some(start_cluster_index) = run_start_index.take() else {
             *run_cluster_count = 0;
             return Ok(*requested_clusters_remaining == 0);
@@ -404,18 +423,17 @@ impl AllocationBitmap {
         Ok(*requested_clusters_remaining == 0)
     }
 
-    fn relevant_bitmap_mask(relevant_bits: usize) -> core::result::Result<u8, ExfatFsError> {
+    fn relevant_bitmap_mask(relevant_bits: usize) -> Result<u8> {
         if relevant_bits > u8::BITS as usize {
-            return Err(ExfatFsError::InconsistentAccounting);
+            return Err(inconsistent_bitmap_accounting());
         }
         if relevant_bits == u8::BITS as usize {
             return Ok(u8::MAX);
         }
-        let shift =
-            u32::try_from(relevant_bits).map_err(|_| ExfatFsError::InconsistentAccounting)?;
+        let shift = u32::try_from(relevant_bits).map_err(|_| inconsistent_bitmap_accounting())?;
         let shifted = 1u16
             .checked_shl(shift)
-            .ok_or(ExfatFsError::InconsistentAccounting)?;
+            .ok_or_else(inconsistent_bitmap_accounting)?;
         Ok((shifted - 1) as u8)
     }
 }

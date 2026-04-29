@@ -6,7 +6,11 @@ use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::{
-    super::{bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader, fs::ExfatFsError},
+    super::{
+        bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader,
+        inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
+        unpublished_state,
+    },
     ExfatFs, ExfatInode, ExfatInodeStream, InodeRewriteTarget, MountedVolumeState,
 };
 use crate::{
@@ -126,8 +130,7 @@ impl ExfatInode {
             let publication = admission
                 .state_guard
                 .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+                .ok_or_else(unpublished_state)?;
             let published_data_length = data_length.max(write_end);
             let mut published_stream = if write_end > data_length {
                 Self::grow_regular_file_stream(
@@ -293,8 +296,7 @@ impl ExfatInode {
             let publication = admission
                 .state_guard
                 .as_ref()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
+                .ok_or_else(unpublished_state)?;
             let mut published_stream = Self::grow_regular_file_stream(
                 &fs,
                 publication,
@@ -383,9 +385,9 @@ impl ExfatInode {
                     .start_cluster
                     .checked_add(
                         u32::try_from(retained_in_range - 1)
-                            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?,
+                            .map_err(|_| invalid_on_disk_layout())?,
                     )
-                    .ok_or_else(|| Error::from(ExfatFsError::InvalidOnDiskLayout))?;
+                    .ok_or_else(invalid_on_disk_layout)?;
                 if let Some(previous_retained_cluster) = previous_retained_cluster {
                     if previous_retained_cluster.checked_add(1) != Some(range.start_cluster) {
                         retained_is_contiguous = false;
@@ -401,9 +403,9 @@ impl ExfatInode {
                     .start_cluster
                     .checked_add(
                         u32::try_from(retained_in_range)
-                            .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?,
+                            .map_err(|_| invalid_on_disk_layout())?,
                     )
-                    .ok_or_else(|| Error::from(ExfatFsError::InvalidOnDiskLayout))?;
+                    .ok_or_else(invalid_on_disk_layout)?;
                 released_ranges.push(ClusterRange {
                     start_cluster: released_start_cluster,
                     cluster_count: range.cluster_count - retained_in_range,
@@ -412,7 +414,7 @@ impl ExfatInode {
             retained_clusters_remaining -= retained_in_range;
         }
         if retained_clusters_remaining != 0 {
-            return Err(Error::from(ExfatFsError::InvalidOnDiskLayout));
+            return Err(invalid_on_disk_layout());
         }
 
         let published_stream = ExfatInodeStream {
@@ -462,10 +464,8 @@ impl ExfatInode {
             let publication = admission
                 .state_guard
                 .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)
-                .map_err(Error::from)?;
-            fs.free_allocated_space_with_publication(publication, &released_ranges)
-                .map_err(Error::from)?;
+                .ok_or_else(unpublished_state)?;
+            fs.free_allocated_space_with_publication(publication, &released_ranges)?;
         }
         Ok(())
     }
@@ -578,30 +578,28 @@ impl ExfatInode {
         let additional_clusters = target_allocated_clusters
             .checked_sub(current_allocated_clusters)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        let (allocated_ranges, _) = fs
-            .allocate_free_space_with_publication(publication, additional_clusters)
-            .map_err(Error::from)?;
+        let allocated_ranges = fs.allocate_free_space_with_publication(publication, additional_clusters)?;
         let allocated_cluster_count =
             allocated_ranges
                 .iter()
                 .try_fold(0usize, |total_clusters, range| {
                     total_clusters
                         .checked_add(range.cluster_count)
-                        .ok_or_else(|| Error::from(ExfatFsError::InconsistentAccounting))
+                        .ok_or_else(inconsistent_bitmap_accounting)
                 })?;
         if allocated_cluster_count != additional_clusters {
-            return Err(Error::from(ExfatFsError::InconsistentAccounting));
+            return Err(inconsistent_bitmap_accounting());
         }
         let first_new_cluster = allocated_ranges
             .first()
-            .ok_or_else(|| Error::from(ExfatFsError::InconsistentAccounting))?
+            .ok_or_else(inconsistent_bitmap_accounting)?
             .start_cluster;
         let stays_contiguous = if current_allocated_clusters == 0 {
             allocated_ranges.len() == 1
         } else if stream.no_fat_chain {
             stream.first_cluster.checked_add(
                 u32::try_from(current_allocated_clusters)
-                    .map_err(|_| Error::from(ExfatFsError::InvalidOnDiskLayout))?,
+                    .map_err(|_| invalid_on_disk_layout())?,
             ) == Some(first_new_cluster)
                 && allocated_ranges.len() == 1
         } else {
@@ -609,23 +607,22 @@ impl ExfatInode {
         };
         if !stays_contiguous {
             let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-            let link_allocated_ranges_fn =
-                |fat_reader: &mut FatReader<'_>| -> core::result::Result<(), ExfatFsError> {
+            let link_allocated_ranges_fn = |fat_reader: &mut FatReader<'_>| -> Result<()> {
                     for (range_index, range) in allocated_ranges.iter().enumerate() {
                         let next_range_start = allocated_ranges
                             .get(range_index + 1)
                             .map(|next_range| next_range.start_cluster);
                         match (range.cluster_count, next_range_start) {
-                            (0, _) => return Err(ExfatFsError::InvalidOperationInput),
+                            (0, _) => return Err(invalid_operation_input()),
                             (1, None) => fat_reader.terminate_cluster_chain(range.start_cluster)?,
                             (cluster_count, None) => {
                                 let last_cluster = range
                                     .start_cluster
                                     .checked_add(
                                         u32::try_from(cluster_count - 1)
-                                            .map_err(|_| ExfatFsError::InvalidOperationInput)?,
+                                            .map_err(|_| invalid_operation_input())?,
                                     )
-                                    .ok_or(ExfatFsError::InvalidOperationInput)?;
+                                    .ok_or_else(invalid_operation_input)?;
                                 fat_reader.link_contiguous_chain_to_cluster(
                                     range.start_cluster,
                                     cluster_count - 1,
