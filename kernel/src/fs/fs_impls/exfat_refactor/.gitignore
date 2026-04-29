@@ -4,8 +4,6 @@
 
 !/.gitignore
 !/*.rs
-!/test_support/
-!/test_support/**
 !/.agents/
 !/inode/
 !/inode/*

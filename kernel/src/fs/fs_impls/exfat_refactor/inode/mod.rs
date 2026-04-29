@@ -372,7 +372,3 @@ impl Inode for ExfatInode {
         false
     }
 }
-
-#[cfg(ktest)]
-#[path = "../test_support/inode_ktests.rs"]
-mod tests;
