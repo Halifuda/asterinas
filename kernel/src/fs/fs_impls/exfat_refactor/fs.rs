@@ -85,20 +85,49 @@ impl FileSystem for ExfatFs {
     }
 
     fn sync(&self) -> Result<()> {
-        let mut state = self.state.write();
-        {
-            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-            if publication.forced_shutdown {
-                return_errno!(Errno::EIO);
+        loop {
+            let live_inodes = self.live_cached_inodes();
+            for inode in &live_inodes {
+                if let Err(error) = inode.sync_all() {
+                    if let Some(publication) = self.state.write().as_mut() {
+                        publication.anomaly.volume_dirty = true;
+                    }
+                    return Err(error);
+                }
             }
-            if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(ExfatFsError::ReadOnlyConflict.into());
-            }
-        }
 
-        let flush_status = match self.block_device.sync() {
-            Ok(status) => status,
-            Err(_) => {
+            let mut state = self.state.write();
+            {
+                let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+                if publication.forced_shutdown {
+                    return_errno!(Errno::EIO);
+                }
+                if publication.flags.contains(FsFlags::RDONLY) {
+                    return Err(ExfatFsError::ReadOnlyConflict.into());
+                }
+            }
+
+            if self
+                .live_cached_inodes()
+                .into_iter()
+                .any(|inode| inode.has_pending_regular_file_sync())
+            {
+                drop(state);
+                continue;
+            }
+
+            let flush_status = match self.block_device.sync() {
+                Ok(status) => status,
+                Err(_) => {
+                    state
+                        .as_mut()
+                        .ok_or(ExfatFsError::UnpublishedState)?
+                        .anomaly
+                        .volume_dirty = true;
+                    return_errno!(Errno::EIO);
+                }
+            };
+            if flush_status != BioStatus::Complete {
                 state
                     .as_mut()
                     .ok_or(ExfatFsError::UnpublishedState)?
@@ -106,79 +135,58 @@ impl FileSystem for ExfatFs {
                     .volume_dirty = true;
                 return_errno!(Errno::EIO);
             }
-        };
-        if flush_status != BioStatus::Complete {
-            state
-                .as_mut()
+
+            let clean_anomaly = {
+                let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
+                if !publication.anomaly.volume_dirty {
+                    return Ok(());
+                }
+                VolumeAnomalyState {
+                    volume_dirty: false,
+                    ..publication.anomaly
+                }
+            };
+            let boot_region = state
+                .as_ref()
                 .ok_or(ExfatFsError::UnpublishedState)?
-                .anomaly
-                .volume_dirty = true;
-            return_errno!(Errno::EIO);
-        }
-
-        let clean_anomaly = {
-            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-            if publication.forced_shutdown {
-                return_errno!(Errno::EIO);
-            }
-            if publication.flags.contains(FsFlags::RDONLY) {
-                return Err(ExfatFsError::ReadOnlyConflict.into());
-            }
-            if !publication.anomaly.volume_dirty {
-                return Ok(());
-            }
-            VolumeAnomalyState {
-                volume_dirty: false,
-                ..publication.anomaly
-            }
-        };
-        let boot_region = state
-            .as_ref()
-            .ok_or(ExfatFsError::UnpublishedState)?
-            .boot_region;
-        if let Err(error) =
-            boot_region.write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
-        {
-            state
-                .as_mut()
-                .ok_or(ExfatFsError::UnpublishedState)?
-                .anomaly
-                .volume_dirty = true;
-            return Err(error.into());
-        }
-
-        {
-            let publication = state.as_mut().ok_or(ExfatFsError::UnpublishedState)?;
-            if publication.flags.contains(FsFlags::RDONLY) {
-                publication.anomaly.volume_dirty = true;
-                return Err(ExfatFsError::ReadOnlyConflict.into());
-            }
-        }
-
-        let flush_status = match self.block_device.sync() {
-            Ok(status) => status,
-            Err(_) => {
+                .boot_region;
+            if let Err(error) =
+                boot_region.write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
+            {
                 state
                     .as_mut()
                     .ok_or(ExfatFsError::UnpublishedState)?
                     .anomaly
                     .volume_dirty = true;
-                return Err(Error::new(Errno::EIO));
+                return Err(error.into());
             }
-        };
-        if flush_status != BioStatus::Complete {
+
+            let flush_status = match self.block_device.sync() {
+                Ok(status) => status,
+                Err(_) => {
+                    state
+                        .as_mut()
+                        .ok_or(ExfatFsError::UnpublishedState)?
+                        .anomaly
+                        .volume_dirty = true;
+                    return Err(Error::new(Errno::EIO));
+                }
+            };
+            if flush_status != BioStatus::Complete {
+                state
+                    .as_mut()
+                    .ok_or(ExfatFsError::UnpublishedState)?
+                    .anomaly
+                    .volume_dirty = true;
+                return_errno!(Errno::EIO);
+            }
+
             state
                 .as_mut()
                 .ok_or(ExfatFsError::UnpublishedState)?
-                .anomaly
-                .volume_dirty = true;
-            return_errno!(Errno::EIO);
+                .anomaly = clean_anomaly;
+            return Ok(());
         }
-        state
-            .as_mut()
-            .ok_or(ExfatFsError::UnpublishedState)?
-            .anomaly = clean_anomaly;
-        Ok(())
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
@@ -492,12 +500,7 @@ impl ExfatFs {
         ino: u64,
         create_inode_fn: impl FnOnce() -> Arc<ExfatInode>,
     ) -> Arc<ExfatInode> {
-        if let Some(cached_inode) = self
-            .inode_cache
-            .read()
-            .get(&ino)
-            .and_then(Weak::upgrade)
-        {
+        if let Some(cached_inode) = self.inode_cache.read().get(&ino).and_then(Weak::upgrade) {
             return cached_inode;
         }
 
@@ -509,6 +512,19 @@ impl ExfatFs {
         let inode = create_inode_fn();
         inode_cache.insert(ino, Arc::downgrade(&inode));
         inode
+    }
+
+    fn live_cached_inodes(&self) -> Vec<Arc<ExfatInode>> {
+        let mut inode_cache = self.inode_cache.write();
+        let mut live_inodes = Vec::with_capacity(inode_cache.len());
+        inode_cache.retain(|_, inode| match inode.upgrade() {
+            Some(inode) => {
+                live_inodes.push(inode);
+                true
+            }
+            None => false,
+        });
+        live_inodes
     }
 }
 

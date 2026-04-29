@@ -78,7 +78,7 @@ impl ExfatInode {
 
         let child_inode = Self::new_child(
             fs,
-            self.this.clone(),
+            self.weak_self(),
             ino,
             inode_type,
             boot_region.cluster_size,
@@ -312,7 +312,7 @@ impl ExfatInode {
         }
         if name == "." || name == ".." {
             let inode: Arc<dyn Inode> = self
-                .this
+                .weak_self()
                 .upgrade()
                 .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not published"))?;
             return Ok(inode);

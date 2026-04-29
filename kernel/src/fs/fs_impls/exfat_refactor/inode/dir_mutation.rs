@@ -170,7 +170,7 @@ impl ExfatInode {
             };
             let child_inode = Self::new_child(
                 &fs,
-                self.this.clone(),
+                self.weak_self(),
                 self.entry_location_ino(slot_range.first_entry_index())
                     .map_err(Error::from)?,
                 type_,
@@ -1145,7 +1145,9 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<()> {
-        let (_owner_guard, stream) = child_inode.admitted_directory_snapshot().map_err(Error::from)?;
+        let (_owner_guard, stream) = child_inode
+            .admitted_directory_snapshot()
+            .map_err(Error::from)?;
         let child_directory_bytes =
             Self::read_directory_bytes_for_stream(block_device, boot_region, stream)
                 .map_err(Error::from)?;

@@ -2,8 +2,6 @@
 
 use core::time::Duration;
 
-use aster_block::BlockDevice;
-
 use super::{
     super::{
         boot::BootRegion,

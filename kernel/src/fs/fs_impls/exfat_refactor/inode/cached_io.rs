@@ -362,21 +362,33 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.admitted_lookup_state().map_err(Error::from)?;
-        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
+        let admission = fs.published_lookup_state().map_err(Error::from)?;
+        if admission.forced_shutdown
+            || admission.anomaly.clear_to_zero
+            || admission.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, stream, data_length, valid_data_length) =
+        let (_owner_guard, _stream, data_length, _valid_data_length) =
             self.admitted_regular_file_stream_snapshot()?;
-        Self::read_regular_file_at(
-            &admission.block_device,
-            &admission.boot_region,
-            stream,
-            data_length,
-            valid_data_length,
-            offset,
-            writer,
-        )
+        if !writer.has_avail() || data_length == 0 {
+            return Ok(0);
+        }
+
+        let page_cache = self.page_cache_handle().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
+        })?;
+        let read_start = offset.min(data_length);
+        let read_end = offset
+            .checked_add(writer.avail())
+            .ok_or_else(|| Error::new(Errno::EINVAL))?
+            .min(data_length);
+        if read_start == read_end {
+            return Ok(0);
+        }
+
+        page_cache.pages().read(read_start, writer)?;
+        Ok(read_end - read_start)
     }
 }

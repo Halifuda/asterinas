@@ -51,13 +51,12 @@ impl ExfatInode {
         let _parent_guard = parent.admission.read();
         let parent_stream = *parent.stream.read();
         let mut metadata = *self.metadata.read();
-        let directory_bytes =
-            Self::read_directory_bytes_for_stream(
-                &admission.block_device,
-                &admission.boot_region,
-                parent_stream,
-            )
-                .map_err(Error::from)?;
+        let directory_bytes = Self::read_directory_bytes_for_stream(
+            &admission.block_device,
+            &admission.boot_region,
+            parent_stream,
+        )
+        .map_err(Error::from)?;
         let entry_index =
             usize::try_from(metadata.ino as u32).map_err(|_| Error::new(Errno::EIO))?;
         let entry_view = match direntry::scan_directory_entry(

@@ -30,49 +30,88 @@ pub(super) struct ExfatInodeStream {
     pub(super) no_fat_chain: bool,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DirtyLevel {
+    Clean,
+    Metadata,
+    Data,
+    DataAndMetadata,
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct ExfatInodeDirtyState {
-    data_generation: u64,
-    required_metadata_generation: u64,
-    metadata_generation: u64,
-    persisted_data_generation: u64,
-    persisted_required_metadata_generation: u64,
-    persisted_metadata_generation: u64,
+    next_generation: u64,
+    content_generation: Option<u64>,
+    metadata_generation: Option<u64>,
 }
 
 impl ExfatInodeDirtyState {
+    fn next_dirty_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.next_generation
+    }
+
+    pub(super) fn dirty_level(self) -> DirtyLevel {
+        match (self.content_generation, self.metadata_generation) {
+            (None, None) => DirtyLevel::Clean,
+            (None, Some(_)) => DirtyLevel::Metadata,
+            (Some(_), None) => DirtyLevel::Data,
+            (Some(_), Some(_)) => DirtyLevel::DataAndMetadata,
+        }
+    }
+
     pub(super) fn mark_content_publication(&mut self) {
-        self.data_generation = self.data_generation.saturating_add(1);
-        self.required_metadata_generation = self.required_metadata_generation.saturating_add(1);
-        self.metadata_generation = self.metadata_generation.saturating_add(1);
+        let generation = self.next_dirty_generation();
+        self.content_generation = Some(generation);
+        self.metadata_generation = None;
     }
 
     pub(super) fn mark_metadata_publication(&mut self) {
-        self.metadata_generation = self.metadata_generation.saturating_add(1);
+        self.metadata_generation = Some(self.next_dirty_generation());
     }
 
     pub(super) fn needs_sync_data(self) -> bool {
-        self.data_generation > self.persisted_data_generation
-            || self.required_metadata_generation > self.persisted_required_metadata_generation
+        matches!(
+            self.dirty_level(),
+            DirtyLevel::Data | DirtyLevel::DataAndMetadata
+        )
     }
 
     pub(super) fn needs_sync_all(self) -> bool {
-        self.needs_sync_data() || self.metadata_generation > self.persisted_metadata_generation
+        self.dirty_level() != DirtyLevel::Clean
+    }
+
+    fn clear_published_content(&mut self, admitted: Self) {
+        if admitted
+            .content_generation
+            .zip(self.content_generation)
+            .is_some_and(|(admitted_generation, current_generation)| {
+                current_generation <= admitted_generation
+            })
+        {
+            self.content_generation = None;
+        }
+    }
+
+    fn clear_published_metadata(&mut self, admitted: Self) {
+        if admitted
+            .metadata_generation
+            .zip(self.metadata_generation)
+            .is_some_and(|(admitted_generation, current_generation)| {
+                current_generation <= admitted_generation
+            })
+        {
+            self.metadata_generation = None;
+        }
     }
 
     pub(super) fn publish_data(&mut self, admitted: Self) {
-        self.persisted_data_generation =
-            self.persisted_data_generation.max(admitted.data_generation);
-        self.persisted_required_metadata_generation = self
-            .persisted_required_metadata_generation
-            .max(admitted.required_metadata_generation);
+        self.clear_published_content(admitted);
     }
 
     pub(super) fn publish_all(&mut self, admitted: Self) {
-        self.publish_data(admitted);
-        self.persisted_metadata_generation = self
-            .persisted_metadata_generation
-            .max(admitted.metadata_generation);
+        self.clear_published_content(admitted);
+        self.clear_published_metadata(admitted);
     }
 }
 
@@ -291,7 +330,7 @@ impl ExfatInode {
             );
         Ok(Self::new_child(
             fs,
-            parent.this.clone(),
+            parent.weak_self(),
             child_ino,
             inode_type,
             boot_region.cluster_size,
