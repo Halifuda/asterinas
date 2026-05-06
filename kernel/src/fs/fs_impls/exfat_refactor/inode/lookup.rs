@@ -204,16 +204,14 @@ impl ExfatInode {
         let upcase_table = mount_access.upcase_table();
         let lookup_name = Self::admitted_name(name, &mount_access.options())?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
-        let child_inode = self
-            .lookup_child_by_name(
-                &fs,
-                &block_device,
-                &boot_region,
-                &upcase_table,
-                &lookup_name,
-                lookup_name_hash,
-            )
-            ?;
+        let child_inode = self.lookup_child_by_name(
+            &fs,
+            &block_device,
+            &boot_region,
+            &upcase_table,
+            &lookup_name,
+            lookup_name_hash,
+        )?;
         if let Some(child_inode) = child_inode {
             return Ok(child_inode);
         }

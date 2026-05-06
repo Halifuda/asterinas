@@ -36,34 +36,8 @@ impl ExfatInode {
             return metadata;
         }
 
-        let Some(fs) = self.fs.upgrade() else {
-            return metadata;
-        };
-        let Ok(lookup_mount_snapshot) = fs.lookup_mount_snapshot() else {
-            return metadata;
-        };
-        if lookup_mount_snapshot.anomaly.clear_to_zero
-            || lookup_mount_snapshot.anomaly.media_failure
-        {
-            return metadata;
-        }
-
-        let Ok((inode_state_guard, _cluster_map, data_length, _valid_data_length)) =
-            self.admitted_regular_file_cluster_map_snapshot()
-        else {
-            return metadata;
-        };
-        let Ok(allocated_sectors) =
-            Self::regular_file_allocated_sectors(&lookup_mount_snapshot.boot_region, data_length)
-        else {
-            drop(inode_state_guard);
-            return metadata;
-        };
-        let mut metadata = metadata;
-        metadata.size = data_length;
-        metadata.nr_sectors_allocated = allocated_sectors;
-        drop(inode_state_guard);
-        metadata
+        let _inode_state_guard = self.inode_state.read();
+        *self.metadata.read()
     }
 
     pub(super) fn metadata_impl(&self) -> Metadata {
@@ -156,7 +130,11 @@ impl ExfatInode {
             {
                 return_errno!(Errno::EIO);
             }
-            if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+            if mutation_mount_state
+                .options
+                .fs_flags
+                .contains(FsFlags::RDONLY)
+            {
                 return_errno!(Errno::EROFS);
             }
 
@@ -222,7 +200,11 @@ impl ExfatInode {
         {
             return_errno!(Errno::EIO);
         }
-        if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+        if mutation_mount_state
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY)
+        {
             return_errno!(Errno::EROFS);
         }
 
@@ -316,7 +298,11 @@ impl ExfatInode {
             {
                 return;
             }
-            if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+            if mutation_mount_state
+                .options
+                .fs_flags
+                .contains(FsFlags::RDONLY)
+            {
                 return;
             }
             return;
@@ -342,7 +328,11 @@ impl ExfatInode {
         {
             return;
         }
-        if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+        if mutation_mount_state
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY)
+        {
             return;
         }
 
@@ -385,7 +375,11 @@ impl ExfatInode {
         {
             return_errno!(Errno::EIO);
         }
-        if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+        if mutation_mount_state
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY)
+        {
             return_errno!(Errno::EROFS);
         }
 
@@ -420,7 +414,11 @@ impl ExfatInode {
         {
             return;
         }
-        if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+        if mutation_mount_state
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY)
+        {
             return;
         }
 
@@ -632,23 +630,19 @@ impl ExfatInode {
             block_device,
             boot_region,
             parent_cluster_map,
-        )
-        ?;
+        )?;
         let entry_index =
             usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
         let entry_view = match direntry::scan_directory_entry(
             parent_cluster_map.data_length.is_none(),
             &directory_bytes,
             entry_index,
-        )
-        ?
-        {
+        )? {
             ScannedDirectoryEntry::File(entry_view) => entry_view,
             _ => return Err(Error::from(invalid_on_disk_layout())),
         };
-        let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
-            .child_metadata(boot_region)
-            ?;
+        let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+            entry_view.child_metadata(boot_region)?;
         match target {
             InodeRewriteTarget::Directory => {
                 if !entry_view.is_directory() || inode_type != InodeType::Dir {
@@ -668,16 +662,14 @@ impl ExfatInode {
         };
         let destination_entry_set = directory_bytes
             .get_mut(slot_range_bytes)
-            .ok_or(invalid_on_disk_layout())
-            ?;
+            .ok_or(invalid_on_disk_layout())?;
         destination_entry_set.copy_from_slice(&republished_entry_set);
         Self::write_directory_bytes_for_cluster_map(
             block_device,
             boot_region,
             &directory_bytes,
             parent_cluster_map,
-        )
-        ?;
+        )?;
         let mut metadata = self.metadata.write();
         update_metadata_fn(&mut metadata);
         Ok(true)

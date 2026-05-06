@@ -15,7 +15,6 @@ use super::{
     super::{
         boot::BootRegion,
         fat::{FatChainStep, FatReader},
-        invalid_on_disk_layout,
     },
     ExfatInode, ExfatInodeClusterMap,
 };
@@ -89,24 +88,26 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.published_lookup_state().map_err(Error::from)?;
-        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
+        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+        if lookup_mount_snapshot.anomaly.clear_to_zero
+            || lookup_mount_snapshot.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
         }
 
-        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
-            self.admitted_regular_file_cluster_map_snapshot()?;
+        let (cluster_map, data_length, valid_data_length) =
+            self.regular_file_cluster_map_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, &cluster_map, data_length)?;
+        Self::validate_regular_file_mapping_shape(boot_region, cluster_map.as_ref(), data_length)?;
         let cluster_size = boot_region.cluster_size;
         let cluster_index = offset / cluster_size;
         let cluster = Self::mapped_regular_file_cluster(
             block_device,
             boot_region,
-            &cluster_map,
+            cluster_map.as_ref(),
             data_length,
             cluster_index,
         )?;
@@ -258,98 +259,6 @@ impl ExfatInode {
         Ok(bio_waiter)
     }
 
-    pub(super) fn read_regular_file_at(
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
-        data_length: usize,
-        valid_data_length: usize,
-        offset: usize,
-        writer: &mut VmWriter,
-    ) -> Result<usize> {
-        if !writer.has_avail() {
-            return Ok(0);
-        }
-        if data_length == 0 {
-            return Ok(0);
-        }
-
-        Self::validate_regular_file_mapping_shape(boot_region, &cluster_map, data_length)?;
-        if offset >= data_length {
-            return Ok(0);
-        }
-
-        let read_end = offset
-            .checked_add(writer.avail())
-            .ok_or_else(|| Error::new(Errno::EINVAL))?
-            .min(data_length);
-        let initialized_end = read_end.min(valid_data_length);
-        let mut initialized_remaining = if offset >= initialized_end {
-            0
-        } else {
-            initialized_end
-                .checked_sub(offset)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?
-        };
-        let mut copied_len = 0usize;
-        if initialized_remaining != 0 {
-            let cluster_size = boot_region.cluster_size;
-            let cluster_index = offset / cluster_size;
-            let mut cluster_offset = offset % cluster_size;
-            let mut fat_reader = (!cluster_map.no_fat_chain)
-                .then(|| FatReader::new(block_device.as_ref(), boot_region));
-            let mut cluster_buffer = vec![0; cluster_size];
-            let mut current_cluster = Self::mapped_regular_file_cluster(
-                block_device,
-                boot_region,
-                &cluster_map,
-                data_length,
-                cluster_index,
-            )?;
-            while initialized_remaining != 0 {
-                let chunk_len = initialized_remaining.min(cluster_size - cluster_offset);
-                let cluster_start = boot_region.cluster_offset(current_cluster).map_err(|_| {
-                    if cluster_map.no_fat_chain {
-                        invalid_on_disk_layout()
-                    } else {
-                        Error::new(Errno::EIO)
-                    }
-                })?;
-                block_device
-                    .read_bytes(cluster_start, &mut cluster_buffer)
-                    .map_err(|_| Error::new(Errno::EIO))?;
-                let chunk_end = cluster_offset
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                let mut reader = VmReader::from(&cluster_buffer[cluster_offset..chunk_end]);
-                copied_len = copied_len
-                    .checked_add(writer.write_fallible(&mut reader)?)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                initialized_remaining -= chunk_len;
-                cluster_offset = 0;
-                if initialized_remaining == 0 {
-                    break;
-                }
-                let using_fat_chain = fat_reader.is_some();
-                current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())
-                {
-                    Ok(Some(next_cluster)) => next_cluster,
-                    Ok(None) | Err(_) if using_fat_chain => return_errno!(Errno::EIO),
-                    Ok(None) | Err(_) => return_errno!(Errno::EINVAL),
-                };
-            }
-        }
-
-        let zeroed_len = read_end
-            .checked_sub(initialized_end)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        copied_len = copied_len
-            .checked_add(writer.fill_zeros(zeroed_len)?)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-
-        Ok(copied_len)
-    }
-
     pub(super) fn read_at_impl(
         &self,
         offset: usize,
@@ -366,16 +275,16 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.published_lookup_state().map_err(Error::from)?;
-        if admission.forced_shutdown
-            || admission.anomaly.clear_to_zero
-            || admission.anomaly.media_failure
+        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+        if lookup_mount_snapshot.forced_shutdown
+            || lookup_mount_snapshot.anomaly.clear_to_zero
+            || lookup_mount_snapshot.anomaly.media_failure
         {
             return_errno!(Errno::EIO);
         }
 
-        let (_inode_state_guard, _cluster_map, data_length, _valid_data_length) =
-            self.admitted_regular_file_cluster_map_snapshot()?;
+        let (_cluster_map, data_length, _valid_data_length) =
+            self.regular_file_cluster_map_snapshot()?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);
         }

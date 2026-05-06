@@ -22,8 +22,7 @@ use super::{
         direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
         fs::{
-            ExfatFs, ExfatMountOptions, LookupMountState, MountedVolumeState,
-            MutationMountState,
+            ExfatFs, ExfatMountOptions, LookupMountState, MountedVolumeState, MutationMountState,
         },
         invalid_on_disk_layout, invalid_operation_input, unpublished_state,
         upcase::UpcaseTable,
@@ -239,9 +238,7 @@ impl ExfatInode {
             return_errno!(Errno::ENOTDIR);
         }
         let mount_state = match mode {
-            DirectoryContextMode::Lookup => {
-                DirectoryMountState::Lookup(fs.lookup_mount_state()?)
-            }
+            DirectoryContextMode::Lookup => DirectoryMountState::Lookup(fs.lookup_mount_state()?),
             DirectoryContextMode::Mutation => {
                 DirectoryMountState::Mutation(fs.mutation_mount_state()?)
             }
@@ -257,17 +254,17 @@ impl ExfatInode {
         Ok((inode_state_guard, cluster_map))
     }
 
-    pub(super) fn admitted_regular_file_cluster_map_snapshot(
+    pub(super) fn regular_file_cluster_map_snapshot(
         &self,
-    ) -> Result<(InodeStateReadGuard<'_>, ExfatInodeClusterMap, usize, usize)> {
+    ) -> Result<(Arc<ExfatInodeClusterMap>, usize, usize)> {
         match self.metadata.read().type_ {
             InodeType::Dir => return_errno!(Errno::EISDIR),
             InodeType::File => {}
             _ => return_errno!(Errno::EOPNOTSUPP),
         }
 
-        let inode_state_guard = self.inode_state.read();
-        let cluster_map = *self.cluster_map.read();
+        let _inode_state_guard = self.inode_state.read();
+        let cluster_map = Arc::new(*self.cluster_map.read());
         let Some(data_length) = cluster_map.data_length else {
             return_errno!(Errno::EINVAL);
         };
@@ -280,12 +277,15 @@ impl ExfatInode {
         if data_length == 0 && (cluster_map.first_cluster != 0 || valid_data_length != 0) {
             return_errno!(Errno::EINVAL);
         }
-        Ok((
-            inode_state_guard,
-            cluster_map,
-            data_length,
-            valid_data_length,
-        ))
+        Ok((cluster_map, data_length, valid_data_length))
+    }
+
+    pub(super) fn replace_regular_file_cluster_map(
+        &self,
+        _inode_state_guard: &InodeStateWriteGuard<'_>,
+        cluster_map: ExfatInodeClusterMap,
+    ) {
+        *self.cluster_map.write() = cluster_map;
     }
 
     // Directory I/O

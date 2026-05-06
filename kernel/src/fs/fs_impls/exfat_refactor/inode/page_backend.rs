@@ -48,17 +48,19 @@ impl PageCacheBackend for ExfatFilePageBackend {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.published_lookup_state().map_err(Error::from)?;
-        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
+        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+        if lookup_mount_snapshot.anomaly.clear_to_zero
+            || lookup_mount_snapshot.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
         }
 
-        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
-            inode.admitted_regular_file_cluster_map_snapshot()?;
+        let (cluster_map, data_length, valid_data_length) =
+            inode.regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len =
-            initialized_len - (initialized_len % admission.boot_region.sector_size);
+            initialized_len - (initialized_len % lookup_mount_snapshot.boot_region.sector_size);
         if initialized_sector_len < PAGE_SIZE {
             frame
                 .writer()
@@ -70,10 +72,10 @@ impl PageCacheBackend for ExfatFilePageBackend {
         }
 
         ExfatInode::regular_file_page_waiter(
-            &admission.block_device,
-            &admission.boot_region,
+            &lookup_mount_snapshot.block_device,
+            &lookup_mount_snapshot.boot_region,
             frame,
-            &cluster_map,
+            cluster_map.as_ref(),
             data_length,
             file_offset,
             initialized_sector_len,
@@ -87,31 +89,37 @@ impl PageCacheBackend for ExfatFilePageBackend {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.published_lookup_state().map_err(Error::from)?;
-        if admission.anomaly.clear_to_zero || admission.anomaly.media_failure {
+        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+        if lookup_mount_snapshot.anomaly.clear_to_zero
+            || lookup_mount_snapshot.anomaly.media_failure
+        {
             return_errno!(Errno::EIO);
         }
-        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+        if lookup_mount_snapshot
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY)
+        {
             return_errno!(Errno::EROFS);
         }
 
-        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
-            inode.admitted_regular_file_cluster_map_snapshot()?;
+        let (cluster_map, data_length, valid_data_length) =
+            inode.regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
         let initialized_sector_len = initialized_len
-            .div_ceil(admission.boot_region.sector_size)
-            .checked_mul(admission.boot_region.sector_size)
+            .div_ceil(lookup_mount_snapshot.boot_region.sector_size)
+            .checked_mul(lookup_mount_snapshot.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             return Ok(BioWaiter::new());
         }
 
         ExfatInode::regular_file_page_waiter(
-            &admission.block_device,
-            &admission.boot_region,
+            &lookup_mount_snapshot.block_device,
+            &lookup_mount_snapshot.boot_region,
             frame,
-            &cluster_map,
+            cluster_map.as_ref(),
             data_length,
             file_offset,
             initialized_sector_len,
@@ -122,7 +130,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
     fn npages(&self) -> usize {
         self.inode
             .upgrade()
-            .map(|inode| inode.metadata.read().size.div_ceil(PAGE_SIZE))
+            .map(|inode| inode.metadata_projection().size.div_ceil(PAGE_SIZE))
             .unwrap_or(0)
     }
 }
