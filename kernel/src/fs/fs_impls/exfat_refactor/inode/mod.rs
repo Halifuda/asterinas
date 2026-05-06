@@ -22,15 +22,15 @@ use spin::Once;
 
 use self::{
     state::{
-        DirectoryContextMode, ExfatInodeDirtyState, ExfatInodeClusterMap, InodeRewriteTarget,
+        DirectoryContextMode, ExfatInodeClusterMap, ExfatInodeDirtyState, InodeRewriteTarget,
         InodeTimestampField,
     },
     sync::InodeSyncScope,
 };
 use super::{
     boot::BootRegion,
-    invalid_operation_input,
     fs::{ExfatFs, MountedVolumeState},
+    invalid_operation_input,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -49,7 +49,7 @@ use crate::{
 };
 
 pub(super) struct ExfatInode {
-    admission: RwMutex<()>,
+    inode_state: RwMutex<()>,
     dirty_state: RwLock<ExfatInodeDirtyState>,
     extension: Extension,
     fs: Weak<ExfatFs>,
@@ -66,7 +66,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<Vec<u8>> {
-        let _directory_guard = self.admission.read();
+        let _directory_guard = self.inode_state.read();
         let cluster_map = *self.cluster_map.read();
         if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
@@ -87,7 +87,12 @@ impl ExfatInode {
             return Err(invalid_operation_input());
         }
 
-        Self::write_directory_bytes_for_cluster_map(block_device, boot_region, directory_bytes, cluster_map)
+        Self::write_directory_bytes_for_cluster_map(
+            block_device,
+            boot_region,
+            directory_bytes,
+            cluster_map,
+        )
     }
 
     fn new(
@@ -100,7 +105,7 @@ impl ExfatInode {
         parent: Weak<Self>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
-            admission: RwMutex::new(()),
+            inode_state: RwMutex::new(()),
             dirty_state: RwLock::new(ExfatInodeDirtyState::default()),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),

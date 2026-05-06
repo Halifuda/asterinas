@@ -4,7 +4,7 @@
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
-use aster_block::{BlockDevice, bio::BioStatus};
+use aster_block::{bio::BioStatus, BlockDevice};
 use ostd::{
     mm::VmIo,
     sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard},
@@ -13,10 +13,12 @@ use ostd::{
 use super::{
     bitmap::{AllocationBitmap, AllocationBitmapUpdate, ClusterRange},
     boot::BootRegion,
+    device_io,
     fat::FatReader,
-    device_io, inconsistent_bitmap_accounting, invalid_mount_input, invalid_operation_input,
-    read_only_conflict, unpublished_state, unsupported_remount_delta,
+    inconsistent_bitmap_accounting,
     inode::ExfatInode,
+    invalid_mount_input, invalid_operation_input, read_only_conflict, unpublished_state,
+    unsupported_remount_delta,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -31,13 +33,15 @@ use crate::{
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
 pub(super) struct ExfatFs {
-    allocator: RwLock<Option<AllocationBitmap>>,
+    allocator: RwMutex<Option<AllocationBitmap>>,
     block_device: Arc<dyn BlockDevice>,
     boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     inode_cache: RwLock<BTreeMap<u64, Weak<ExfatInode>>>,
+    pub(super) root_inode: RwMutex<Option<Arc<ExfatInode>>>,
     source: Option<String>,
-    pub(super) state: RwMutex<Option<MountedVolumeState>>,
+    pub(super) mount_state: RwMutex<Option<MountedVolumeState>>,
+    upcase_table: RwMutex<Option<Arc<UpcaseTable>>>,
 }
 
 impl FileSystem for ExfatFs {
@@ -54,20 +58,20 @@ impl FileSystem for ExfatFs {
             let live_inodes = self.live_cached_inodes();
             for inode in &live_inodes {
                 if let Err(error) = inode.sync_all() {
-                    if let Some(publication) = self.state.write().as_mut() {
-                        publication.anomaly.volume_dirty = true;
+                    if let Some(mount_state) = self.mount_state.write().as_mut() {
+                        mount_state.anomaly.volume_dirty = true;
                     }
                     return Err(error);
                 }
             }
 
-            let mut state = self.state.write();
+            let mut mount_state = self.mount_state.write();
             {
-                let publication = state.as_mut().ok_or_else(unpublished_state)?;
-                if publication.forced_shutdown {
+                let mount_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
+                if mount_state.forced_shutdown {
                     return_errno!(Errno::EIO);
                 }
-                if publication.flags.contains(FsFlags::RDONLY) {
+                if mount_state.flags.contains(FsFlags::RDONLY) {
                     return Err(read_only_conflict());
                 }
             }
@@ -77,14 +81,14 @@ impl FileSystem for ExfatFs {
                 .into_iter()
                 .any(|inode| inode.has_pending_regular_file_sync())
             {
-                drop(state);
+                drop(mount_state);
                 continue;
             }
 
             let flush_status = match self.block_device.sync() {
                 Ok(status) => status,
                 Err(_) => {
-                    state
+                    mount_state
                         .as_mut()
                         .ok_or_else(unpublished_state)?
                         .anomaly
@@ -93,7 +97,7 @@ impl FileSystem for ExfatFs {
                 }
             };
             if flush_status != BioStatus::Complete {
-                state
+                mount_state
                     .as_mut()
                     .ok_or_else(unpublished_state)?
                     .anomaly
@@ -102,20 +106,20 @@ impl FileSystem for ExfatFs {
             }
 
             let clean_anomaly = {
-                let publication = state.as_mut().ok_or_else(unpublished_state)?;
-                if !publication.anomaly.volume_dirty {
+                let mount_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
+                if !mount_state.anomaly.volume_dirty {
                     return Ok(());
                 }
                 VolumeAnomalyState {
                     volume_dirty: false,
-                    ..publication.anomaly
+                    ..mount_state.anomaly
                 }
             };
             if let Err(error) = self
                 .boot_region
                 .write_volume_anomaly_state(self.block_device.as_ref(), clean_anomaly)
             {
-                state
+                mount_state
                     .as_mut()
                     .ok_or_else(unpublished_state)?
                     .anomaly
@@ -126,7 +130,7 @@ impl FileSystem for ExfatFs {
             let flush_status = match self.block_device.sync() {
                 Ok(status) => status,
                 Err(_) => {
-                    state
+                    mount_state
                         .as_mut()
                         .ok_or_else(unpublished_state)?
                         .anomaly
@@ -135,7 +139,7 @@ impl FileSystem for ExfatFs {
                 }
             };
             if flush_status != BioStatus::Complete {
-                state
+                mount_state
                     .as_mut()
                     .ok_or_else(unpublished_state)?
                     .anomaly
@@ -143,20 +147,17 @@ impl FileSystem for ExfatFs {
                 return_errno!(Errno::EIO);
             }
 
-            state
-                .as_mut()
-                .ok_or_else(unpublished_state)?
-                .anomaly = clean_anomaly;
+            mount_state.as_mut().ok_or_else(unpublished_state)?.anomaly = clean_anomaly;
             return Ok(());
         }
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
-        let state = self.state.read();
-        let publication = state
+        let root_inode = self.root_inode.read();
+        let root_inode = root_inode
             .as_ref()
             .unwrap_or_else(|| unreachable!("mounted exFAT instances must publish a root inode"));
-        let root_inode: Arc<dyn Inode> = publication.root_inode.clone();
+        let root_inode: Arc<dyn Inode> = root_inode.clone();
         root_inode
     }
 
@@ -168,17 +169,17 @@ impl FileSystem for ExfatFs {
     }
 
     fn flags(&self) -> FsFlags {
-        let state = self.state.read();
-        let publication = state.as_ref().unwrap_or_else(|| {
+        let mount_state = self.mount_state.read();
+        let mount_state = mount_state.as_ref().unwrap_or_else(|| {
             unreachable!("mounted exFAT instances must publish filesystem flags")
         });
-        publication.flags
+        mount_state.flags
     }
 
     fn set_fs_flags(&self, flags: FsFlags, data: Option<CString>, _ctx: &Context) -> Result<()> {
         let current_options = {
-            let state = self.state.read();
-            state
+            let mount_state = self.mount_state.read();
+            mount_state
                 .as_ref()
                 .ok_or_else(unpublished_state)?
                 .options
@@ -206,13 +207,15 @@ impl ExfatFs {
         source: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            allocator: RwLock::new(None),
+            allocator: RwMutex::new(None),
             block_device,
             boot_region,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             inode_cache: RwLock::new(BTreeMap::new()),
+            root_inode: RwMutex::new(None),
             source,
-            state: RwMutex::new(None),
+            mount_state: RwMutex::new(None),
+            upcase_table: RwMutex::new(None),
         })
     }
 
@@ -220,8 +223,7 @@ impl ExfatFs {
         block_device: &Arc<dyn BlockDevice>,
         source: Option<&str>,
         options: &ExfatMountOptions,
-    ) -> Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags)>
-    {
+    ) -> Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags)> {
         let (boot_region, anomaly, bitmap, upcase_table) =
             BootRegion::load_mount_state(block_device.as_ref())?;
         let fs = Self::new(
@@ -231,23 +233,29 @@ impl ExfatFs {
         );
         let root_inode =
             ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
-        let publication = MountedVolumeState {
+        let mount_state = MountedVolumeState {
             anomaly,
             flags: options.fs_flags,
             options: options.clone(),
-            root_inode: root_inode.clone(),
-            upcase_table,
             forced_shutdown: false,
         };
-        fs.publish_mount_state(bitmap, publication);
+        fs.publish_mount_state(bitmap, root_inode.clone(), upcase_table, mount_state);
         let super_block = fs.super_block_snapshot()?;
         let root_inode: Arc<dyn Inode> = root_inode;
         Ok((fs, root_inode, super_block, options.fs_flags))
     }
 
-    fn publish_mount_state(&self, bitmap: AllocationBitmap, publication: MountedVolumeState) {
+    fn publish_mount_state(
+        &self,
+        bitmap: AllocationBitmap,
+        root_inode: Arc<ExfatInode>,
+        upcase_table: Arc<UpcaseTable>,
+        mount_state: MountedVolumeState,
+    ) {
         *self.allocator.write() = Some(bitmap);
-        *self.state.write() = Some(publication);
+        *self.root_inode.write() = Some(root_inode);
+        *self.upcase_table.write() = Some(upcase_table);
+        *self.mount_state.write() = Some(mount_state);
     }
 
     fn remount_published(
@@ -255,9 +263,9 @@ impl ExfatFs {
         next_flags: FsFlags,
         next_options: &ExfatMountOptions,
     ) -> Result<FsFlags> {
-        let mut state = self.state.write();
-        let publication = state.as_mut().ok_or_else(unpublished_state)?;
-        let changed_flags = publication.flags ^ next_flags;
+        let mut mount_state = self.mount_state.write();
+        let mount_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
+        let changed_flags = mount_state.flags ^ next_flags;
         if changed_flags.intersects(
             FsFlags::SYNCHRONOUS
                 | FsFlags::MANDLOCK
@@ -267,48 +275,60 @@ impl ExfatFs {
         ) {
             return Err(unsupported_remount_delta());
         }
-        if publication.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
+        if mount_state.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
             return Err(read_only_conflict());
         }
-        if publication.options.iocharset != next_options.iocharset
-            || publication.options.keep_last_dots != next_options.keep_last_dots
-            || publication.options.zero_size_dir != next_options.zero_size_dir
+        if mount_state.options.iocharset != next_options.iocharset
+            || mount_state.options.keep_last_dots != next_options.keep_last_dots
+            || mount_state.options.zero_size_dir != next_options.zero_size_dir
         {
             return Err(unsupported_remount_delta());
         }
-        publication.flags = next_flags;
-        publication.options = next_options.with_flags(next_flags);
+        mount_state.flags = next_flags;
+        mount_state.options = next_options.with_flags(next_flags);
         Ok(next_flags)
     }
 
     // Admission
 
-    pub(super) fn published_lookup_state(&self) -> Result<PublishedLookupState> {
-        let state = self.state.read();
-        let publication = state.as_ref().ok_or_else(unpublished_state)?;
-        Ok(PublishedLookupState {
+    pub(super) fn lookup_mount_snapshot(&self) -> Result<LookupMountSnapshot> {
+        let mount_state = self.mount_state.read();
+        let mount_state = mount_state.as_ref().ok_or_else(unpublished_state)?;
+        let upcase_table = self.upcase_table.read();
+        let upcase_table = upcase_table.as_ref().ok_or_else(unpublished_state)?;
+        Ok(LookupMountSnapshot {
             block_device: self.block_device.clone(),
             boot_region: self.boot_region,
-            anomaly: publication.anomaly,
-            upcase_table: publication.upcase_table.clone(),
-            options: publication.options.clone(),
-            forced_shutdown: publication.forced_shutdown,
+            anomaly: mount_state.anomaly,
+            upcase_table: upcase_table.clone(),
+            options: mount_state.options.clone(),
+            forced_shutdown: mount_state.forced_shutdown,
         })
     }
 
-    pub(super) fn admitted_lookup_state(&self) -> Result<AdmittedLookupState<'_>> {
-        let state = self.state.read();
-        let (anomaly, upcase_table, options, forced_shutdown) = {
-            let publication = state.as_ref().ok_or_else(unpublished_state)?;
+    // A3 narrows the primary read-side name to `lookup_mount_snapshot()`, but
+    // cached I/O and page-backend packet siblings still call this wrapper.
+    // Remove it once those callers move to `lookup_mount_snapshot()`.
+    pub(super) fn published_lookup_state(&self) -> Result<LookupMountSnapshot> {
+        self.lookup_mount_snapshot()
+    }
+
+    pub(super) fn lookup_mount_state(&self) -> Result<LookupMountState<'_>> {
+        let mount_state = self.mount_state.read();
+        let upcase_table = {
+            let upcase_table = self.upcase_table.read();
+            upcase_table.as_ref().ok_or_else(unpublished_state)?.clone()
+        };
+        let (anomaly, options, forced_shutdown) = {
+            let mount_state = mount_state.as_ref().ok_or_else(unpublished_state)?;
             (
-                publication.anomaly,
-                publication.upcase_table.clone(),
-                publication.options.clone(),
-                publication.forced_shutdown,
+                mount_state.anomaly,
+                mount_state.options.clone(),
+                mount_state.forced_shutdown,
             )
         };
-        Ok(AdmittedLookupState {
-            state_guard: state,
+        Ok(LookupMountState {
+            state_guard: mount_state,
             block_device: self.block_device.clone(),
             boot_region: self.boot_region,
             anomaly,
@@ -318,19 +338,22 @@ impl ExfatFs {
         })
     }
 
-    pub(super) fn admitted_mutation_state(&self) -> Result<AdmittedMutationState<'_>> {
-        let mut state = self.state.write();
-        let (anomaly, upcase_table, options, forced_shutdown) = {
-            let publication = state.as_mut().ok_or_else(unpublished_state)?;
+    pub(super) fn mutation_mount_state(&self) -> Result<MutationMountState<'_>> {
+        let mut mount_state = self.mount_state.write();
+        let upcase_table = {
+            let upcase_table = self.upcase_table.read();
+            upcase_table.as_ref().ok_or_else(unpublished_state)?.clone()
+        };
+        let (anomaly, options, forced_shutdown) = {
+            let mount_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
             (
-                publication.anomaly,
-                publication.upcase_table.clone(),
-                publication.options.clone(),
-                publication.forced_shutdown,
+                mount_state.anomaly,
+                mount_state.options.clone(),
+                mount_state.forced_shutdown,
             )
         };
-        Ok(AdmittedMutationState {
-            state_guard: state,
+        Ok(MutationMountState {
+            state_guard: mount_state,
             block_device: self.block_device.clone(),
             boot_region: self.boot_region,
             anomaly,
@@ -338,13 +361,20 @@ impl ExfatFs {
             options,
             forced_shutdown,
         })
+    }
+
+    // A3 renames the primary mutation carrier to `mutation_mount_state()`, but
+    // `inode/file_mutation.rs` still depends on this wrapper outside the packet
+    // write-set. Remove it once that file moves to `mutation_mount_state()`.
+    pub(super) fn admitted_mutation_state(&self) -> Result<MutationMountState<'_>> {
+        self.mutation_mount_state()
     }
 
     // Superblock
 
     fn build_super_block(
         &self,
-        publication: &MountedVolumeState,
+        mount_state: &MountedVolumeState,
         bitmap: &AllocationBitmap,
     ) -> Result<SuperBlock> {
         let total_clusters = self.boot_region.cluster_count_usize()?;
@@ -362,25 +392,25 @@ impl ExfatFs {
             fsid: u64::from(self.boot_region.volume_serial_number),
             namelen: UpcaseTable::NAME_MAX,
             frsize: self.boot_region.cluster_size,
-            flags: u64::from(publication.flags.bits()),
+            flags: u64::from(mount_state.flags.bits()),
             container_dev_id: self.block_device.id(),
         })
     }
 
     fn super_block_snapshot(&self) -> Result<SuperBlock> {
-        let state = self.state.read();
-        let publication = state.as_ref().ok_or_else(unpublished_state)?;
+        let mount_state = self.mount_state.read();
+        let mount_state = mount_state.as_ref().ok_or_else(unpublished_state)?;
         let allocator = self.allocator.read();
         let bitmap = allocator.as_ref().ok_or_else(unpublished_state)?;
-        self.build_super_block(publication, bitmap)
+        self.build_super_block(mount_state, bitmap)
     }
 
     pub(super) fn allocate_free_space_with_publication(
         &self,
-        publication: &MountedVolumeState,
+        mount_state: &MountedVolumeState,
         requested_clusters: usize,
     ) -> Result<Vec<ClusterRange>> {
-        if publication.flags.contains(FsFlags::RDONLY) {
+        if mount_state.flags.contains(FsFlags::RDONLY) {
             return Err(read_only_conflict());
         }
 
@@ -410,10 +440,10 @@ impl ExfatFs {
 
     pub(super) fn free_allocated_space_with_publication(
         &self,
-        publication: &mut MountedVolumeState,
+        mount_state: &mut MountedVolumeState,
         ranges: &[ClusterRange],
     ) -> Result<()> {
-        if publication.flags.contains(FsFlags::RDONLY) {
+        if mount_state.flags.contains(FsFlags::RDONLY) {
             return Err(read_only_conflict());
         }
 
@@ -427,10 +457,10 @@ impl ExfatFs {
             AllocationBitmapUpdate::Free,
         )?;
         bitmap.record_released_clusters(released_clusters)?;
-        if publication.options.discard {
+        if mount_state.options.discard {
             // Current Asterinas block devices expose no trim BIO, so downgrade
             // only the advisory policy.
-            publication.options.discard = false;
+            mount_state.options.discard = false;
         }
         Ok(())
     }
@@ -474,7 +504,7 @@ impl ExfatFs {
     }
 }
 
-pub(super) struct PublishedLookupState {
+pub(super) struct LookupMountSnapshot {
     pub(super) block_device: Arc<dyn BlockDevice>,
     pub(super) boot_region: BootRegion,
     pub(super) anomaly: VolumeAnomalyState,
@@ -483,7 +513,7 @@ pub(super) struct PublishedLookupState {
     pub(super) forced_shutdown: bool,
 }
 
-pub(super) struct AdmittedLookupState<'a> {
+pub(super) struct LookupMountState<'a> {
     pub(super) state_guard: RwMutexReadGuard<'a, Option<MountedVolumeState>>,
     pub(super) block_device: Arc<dyn BlockDevice>,
     pub(super) boot_region: BootRegion,
@@ -493,7 +523,7 @@ pub(super) struct AdmittedLookupState<'a> {
     pub(super) forced_shutdown: bool,
 }
 
-pub(super) struct AdmittedMutationState<'a> {
+pub(super) struct MutationMountState<'a> {
     pub(super) state_guard: RwMutexWriteGuard<'a, Option<MountedVolumeState>>,
     pub(super) block_device: Arc<dyn BlockDevice>,
     pub(super) boot_region: BootRegion,
@@ -508,8 +538,6 @@ pub(super) struct MountedVolumeState {
     pub(super) anomaly: VolumeAnomalyState,
     pub(super) flags: FsFlags,
     pub(super) options: ExfatMountOptions,
-    pub(super) root_inode: Arc<ExfatInode>,
-    pub(super) upcase_table: Arc<UpcaseTable>,
     pub(super) forced_shutdown: bool,
 }
 

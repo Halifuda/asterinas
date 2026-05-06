@@ -94,7 +94,7 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
             self.admitted_regular_file_cluster_map_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
@@ -296,8 +296,8 @@ impl ExfatInode {
             let cluster_size = boot_region.cluster_size;
             let cluster_index = offset / cluster_size;
             let mut cluster_offset = offset % cluster_size;
-            let mut fat_reader =
-                (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
+            let mut fat_reader = (!cluster_map.no_fat_chain)
+                .then(|| FatReader::new(block_device.as_ref(), boot_region));
             let mut cluster_buffer = vec![0; cluster_size];
             let mut current_cluster = Self::mapped_regular_file_cluster(
                 block_device,
@@ -374,7 +374,7 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, _cluster_map, data_length, _valid_data_length) =
+        let (_inode_state_guard, _cluster_map, data_length, _valid_data_length) =
             self.admitted_regular_file_cluster_map_snapshot()?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);

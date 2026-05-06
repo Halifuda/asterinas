@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Stores inode cluster-map, dirty-state, admission, timestamp, and guard-order helpers.
+//! Stores inode cluster-map, dirty-state, inode-state admission, timestamp, and guard-order helpers.
 //!
 //! Method groups: dirty-state transitions, directory admission, regular-file snapshots,
 //! directory byte I/O, timestamp conversion, child construction, and ordered write guards.
@@ -18,18 +18,22 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use super::{
     super::{
         boot::BootRegion,
+        device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
         fs::{
-            AdmittedLookupState, AdmittedMutationState, ExfatFs, ExfatMountOptions,
-            MountedVolumeState,
+            ExfatFs, ExfatMountOptions, LookupMountState, MountedVolumeState,
+            MutationMountState,
         },
-        device_io, invalid_on_disk_layout, invalid_operation_input, unpublished_state,
+        invalid_on_disk_layout, invalid_operation_input, unpublished_state,
         upcase::UpcaseTable,
     },
     ExfatInode,
 };
 use crate::{fs::file::InodeType, prelude::*};
+
+pub(super) type InodeStateReadGuard<'a> = RwMutexReadGuard<'a, ()>;
+pub(super) type InodeStateWriteGuard<'a> = RwMutexWriteGuard<'a, ()>;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct ExfatInodeClusterMap {
@@ -42,6 +46,12 @@ pub(super) struct ExfatInodeClusterMap {
     pub(super) no_fat_chain: bool,
 }
 
+/// Classifies which published portions of an inode still need persistence.
+///
+/// `Metadata` means only inode entry-set metadata remains dirty. `Data` means
+/// file-content publication remains dirty and therefore also implies the later
+/// entry-set republish that made that content visible. `DataAndMetadata` keeps
+/// both generations outstanding until `sync_all()` clears the admitted window.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum DirtyLevel {
     Clean,
@@ -50,6 +60,12 @@ pub(super) enum DirtyLevel {
     DataAndMetadata,
 }
 
+/// Tracks the admitted dirty generations that Level-2 inode state has published.
+///
+/// `content_generation` advances when mutation publishes new data visibility or
+/// stream-shape state. `metadata_generation` advances when metadata-only
+/// publication succeeds. `next_generation` stays monotonic so sync can clear
+/// only the admitted window that was proven durable after wakeup.
 #[derive(Clone, Copy, Default)]
 pub(super) struct ExfatInodeDirtyState {
     next_generation: u64,
@@ -145,62 +161,68 @@ pub(super) enum DirectoryContextMode {
     Mutation,
 }
 
-pub(super) struct AdmittedDirectoryContext<'a> {
-    access: DirectoryContextAccess<'a>,
+pub(super) struct DirectoryMountAccess<'a> {
+    mount_state: DirectoryMountState<'a>,
 }
 
-enum DirectoryContextAccess<'a> {
-    Lookup(AdmittedLookupState<'a>),
-    Mutation(AdmittedMutationState<'a>),
+enum DirectoryMountState<'a> {
+    Lookup(LookupMountState<'a>),
+    Mutation(MutationMountState<'a>),
 }
 
-impl AdmittedDirectoryContext<'_> {
+impl DirectoryMountAccess<'_> {
     pub(super) fn block_device(&self) -> Arc<dyn BlockDevice> {
-        match &self.access {
-            DirectoryContextAccess::Lookup(admission) => admission.block_device.clone(),
-            DirectoryContextAccess::Mutation(admission) => admission.block_device.clone(),
+        match &self.mount_state {
+            DirectoryMountState::Lookup(mount_state) => mount_state.block_device.clone(),
+            DirectoryMountState::Mutation(mount_state) => mount_state.block_device.clone(),
         }
     }
 
     pub(super) fn boot_region(&self) -> BootRegion {
-        match &self.access {
-            DirectoryContextAccess::Lookup(admission) => admission.boot_region,
-            DirectoryContextAccess::Mutation(admission) => admission.boot_region,
+        match &self.mount_state {
+            DirectoryMountState::Lookup(mount_state) => mount_state.boot_region,
+            DirectoryMountState::Mutation(mount_state) => mount_state.boot_region,
         }
     }
 
     pub(super) fn forced_shutdown(&self) -> bool {
-        match &self.access {
-            DirectoryContextAccess::Lookup(admission) => admission.forced_shutdown,
-            DirectoryContextAccess::Mutation(admission) => admission.forced_shutdown,
+        match &self.mount_state {
+            DirectoryMountState::Lookup(mount_state) => mount_state.forced_shutdown,
+            DirectoryMountState::Mutation(mount_state) => mount_state.forced_shutdown,
         }
     }
 
     pub(super) fn options(&self) -> ExfatMountOptions {
-        match &self.access {
-            DirectoryContextAccess::Lookup(admission) => admission.options.clone(),
-            DirectoryContextAccess::Mutation(admission) => admission.options.clone(),
+        match &self.mount_state {
+            DirectoryMountState::Lookup(mount_state) => mount_state.options.clone(),
+            DirectoryMountState::Mutation(mount_state) => mount_state.options.clone(),
         }
     }
 
-    pub(super) fn publication(&mut self) -> Result<&mut MountedVolumeState> {
-        let DirectoryContextAccess::Mutation(admission) = &mut self.access else {
+    pub(super) fn mount_state_mut(&mut self) -> Result<&mut MountedVolumeState> {
+        let DirectoryMountState::Mutation(mount_state) = &mut self.mount_state else {
             return_errno_with_message!(
                 Errno::EINVAL,
-                "lookup admission has no mutation publication"
+                "lookup mount access has no mutable mount state"
             );
         };
-        admission
+        mount_state
             .state_guard
             .as_mut()
-            .ok_or(unpublished_state())
-            .map_err(Error::from)
+            .ok_or_else(unpublished_state)
+    }
+
+    // A3 renames the primary mutation accessor to `mount_state_mut()`, but
+    // `inode/dir_mutation.rs` still calls `publication()` outside the packet
+    // write-set. Remove this wrapper once that file moves to `mount_state_mut()`.
+    pub(super) fn publication(&mut self) -> Result<&mut MountedVolumeState> {
+        self.mount_state_mut()
     }
 
     pub(super) fn upcase_table(&self) -> Arc<UpcaseTable> {
-        match &self.access {
-            DirectoryContextAccess::Lookup(admission) => admission.upcase_table.clone(),
-            DirectoryContextAccess::Mutation(admission) => admission.upcase_table.clone(),
+        match &self.mount_state {
+            DirectoryMountState::Lookup(mount_state) => mount_state.upcase_table.clone(),
+            DirectoryMountState::Mutation(mount_state) => mount_state.upcase_table.clone(),
         }
     }
 }
@@ -212,39 +234,39 @@ impl ExfatInode {
         &self,
         fs: &'a Arc<ExfatFs>,
         mode: DirectoryContextMode,
-    ) -> Result<AdmittedDirectoryContext<'a>> {
+    ) -> Result<DirectoryMountAccess<'a>> {
         if self.metadata.read().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
-        let access = match mode {
+        let mount_state = match mode {
             DirectoryContextMode::Lookup => {
-                DirectoryContextAccess::Lookup(fs.admitted_lookup_state().map_err(Error::from)?)
+                DirectoryMountState::Lookup(fs.lookup_mount_state()?)
             }
             DirectoryContextMode::Mutation => {
-                DirectoryContextAccess::Mutation(fs.admitted_mutation_state().map_err(Error::from)?)
+                DirectoryMountState::Mutation(fs.mutation_mount_state()?)
             }
         };
-        Ok(AdmittedDirectoryContext { access })
+        Ok(DirectoryMountAccess { mount_state })
     }
 
     pub(super) fn admitted_directory_snapshot(
         &self,
-    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeClusterMap)> {
-        let owner = self.admission.read();
+    ) -> Result<(InodeStateReadGuard<'_>, ExfatInodeClusterMap)> {
+        let inode_state_guard = self.inode_state.read();
         let cluster_map = *self.cluster_map.read();
-        Ok((owner, cluster_map))
+        Ok((inode_state_guard, cluster_map))
     }
 
     pub(super) fn admitted_regular_file_cluster_map_snapshot(
         &self,
-    ) -> Result<(RwMutexReadGuard<'_, ()>, ExfatInodeClusterMap, usize, usize)> {
+    ) -> Result<(InodeStateReadGuard<'_>, ExfatInodeClusterMap, usize, usize)> {
         match self.metadata.read().type_ {
             InodeType::Dir => return_errno!(Errno::EISDIR),
             InodeType::File => {}
             _ => return_errno!(Errno::EOPNOTSUPP),
         }
 
-        let owner = self.admission.read();
+        let inode_state_guard = self.inode_state.read();
         let cluster_map = *self.cluster_map.read();
         let Some(data_length) = cluster_map.data_length else {
             return_errno!(Errno::EINVAL);
@@ -258,7 +280,12 @@ impl ExfatInode {
         if data_length == 0 && (cluster_map.first_cluster != 0 || valid_data_length != 0) {
             return_errno!(Errno::EINVAL);
         }
-        Ok((owner, cluster_map, data_length, valid_data_length))
+        Ok((
+            inode_state_guard,
+            cluster_map,
+            data_length,
+            valid_data_length,
+        ))
     }
 
     // Directory I/O
@@ -288,8 +315,7 @@ impl ExfatInode {
             return Err(invalid_on_disk_layout());
         }
 
-        let data_length_u64 =
-            u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
+        let data_length_u64 = u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
         boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64)?;
         if cluster_map.no_fat_chain {
             let mut remaining = data_length;
@@ -424,20 +450,25 @@ impl ExfatInode {
 
     // Dirty tracking
 
-    pub(super) fn mark_content_publication_dirty(&self) {
+    // The caller must already hold Level-2 inode-state authority, so these
+    // helpers never reacquire `inode_state` internally.
+    pub(super) fn mark_content_publication_dirty(
+        &self,
+        _inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) {
         self.dirty_state.write().mark_content_publication();
     }
 
-    pub(super) fn mark_metadata_publication_dirty(&self) {
+    pub(super) fn mark_metadata_publication_dirty(
+        &self,
+        _inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) {
         self.dirty_state.write().mark_metadata_publication();
     }
 
     // Identity
 
-    pub(super) fn entry_location_ino(
-        &self,
-        entry_index: usize,
-    ) -> Result<u64> {
+    pub(super) fn entry_location_ino(&self, entry_index: usize) -> Result<u64> {
         let cluster_map = self.cluster_map.read();
         Ok((u64::from(cluster_map.first_cluster) << 32)
             | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
@@ -521,12 +552,11 @@ impl ExfatInode {
 
         let encoded_date = u16::from_le_bytes([timestamp_bytes[2], timestamp_bytes[3]]);
         let encoded_year = 1980i32 + i32::from(encoded_date >> 9);
-        let encoded_month = u8::try_from((encoded_date >> 5) & 0x0f)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let encoded_month =
+            u8::try_from((encoded_date >> 5) & 0x0f).map_err(|_| invalid_on_disk_layout())?;
         let encoded_day =
             u8::try_from(encoded_date & 0x1f).map_err(|_| invalid_on_disk_layout())?;
-        let month =
-            Month::try_from(encoded_month).map_err(|_| invalid_on_disk_layout())?;
+        let month = Month::try_from(encoded_month).map_err(|_| invalid_on_disk_layout())?;
         let date = Date::from_calendar_date(encoded_year, month, encoded_day)
             .map_err(|_| invalid_on_disk_layout())?;
 
@@ -542,10 +572,10 @@ impl ExfatInode {
                 .and_then(|seconds| seconds.checked_add(ten_ms_increment / 100))
                 .ok_or(invalid_on_disk_layout())?;
             let milliseconds = u16::from(ten_ms_increment % 100) * 10;
-            let hour = u8::try_from((encoded_time >> 11) & 0x1f)
-                .map_err(|_| invalid_on_disk_layout())?;
-            let minute = u8::try_from((encoded_time >> 5) & 0x3f)
-                .map_err(|_| invalid_on_disk_layout())?;
+            let hour =
+                u8::try_from((encoded_time >> 11) & 0x1f).map_err(|_| invalid_on_disk_layout())?;
+            let minute =
+                u8::try_from((encoded_time >> 5) & 0x3f).map_err(|_| invalid_on_disk_layout())?;
             Time::from_hms_milli(hour, minute, seconds, milliseconds)
                 .map_err(|_| invalid_on_disk_layout())?
         } else {
@@ -559,9 +589,7 @@ impl ExfatInode {
         Ok(Duration::from_nanos(unix_timestamp_nanos))
     }
 
-    pub(super) fn exfat_utc_offset(
-        utc_offset_byte: u8,
-    ) -> Result<UtcOffset> {
+    pub(super) fn exfat_utc_offset(utc_offset_byte: u8) -> Result<UtcOffset> {
         if utc_offset_byte & 0x80 == 0 {
             return Ok(UtcOffset::UTC);
         }
@@ -577,7 +605,7 @@ impl ExfatInode {
     ) -> Result<([u8; 4], u8, u8)> {
         let unix_nanos =
             i128::try_from(timestamp.as_nanos()).map_err(|_| Error::new(Errno::EINVAL))?;
-        let utc_offset = Self::exfat_utc_offset(utc_offset_byte).map_err(Error::from)?;
+        let utc_offset = Self::exfat_utc_offset(utc_offset_byte)?;
         let date_time = OffsetDateTime::from_unix_timestamp_nanos(unix_nanos)
             .map_err(|_| Error::new(Errno::EINVAL))?
             .to_offset(utc_offset);
@@ -644,12 +672,12 @@ impl ExfatInode {
 
     pub(super) fn directory_write_guards_by_ino<'a>(
         mut directories: Vec<&'a ExfatInode>,
-    ) -> Vec<RwMutexWriteGuard<'a, ()>> {
+    ) -> Vec<InodeStateWriteGuard<'a>> {
         directories.sort_by_key(|directory| directory.metadata.read().ino);
         directories.dedup_by_key(|directory| directory.metadata.read().ino);
         directories
             .into_iter()
-            .map(|directory| directory.admission.write())
+            .map(|directory| directory.inode_state.write())
             .collect()
     }
 }
