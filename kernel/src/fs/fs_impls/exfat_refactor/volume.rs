@@ -5,9 +5,8 @@
 use alloc::{string::String, vec::Vec};
 
 use super::{
-    direntry::DIRECTORY_ENTRY_SIZE,
-    invalid_on_disk_layout, invalid_operation_input, read_only_conflict, unpublished_state,
-    fs::ExfatFs,
+    direntry::DIRECTORY_ENTRY_SIZE, fs::ExfatFs, invalid_on_disk_layout, invalid_operation_input,
+    read_only_conflict, unpublished_state,
 };
 use crate::{
     fs::vfs::file_system::FsFlags, prelude::*, process::credentials::capabilities::CapSet,
@@ -41,7 +40,7 @@ pub(super) fn handle_volume_admin_request(
     match request {
         VolumeAdminRequest::ForceShutdown => {
             ensure_privileged_fn()?;
-            admit_forced_shutdown(fs).map_err(Error::from)
+            admit_forced_shutdown(fs)
         }
         VolumeAdminRequest::WriteVolumeLabel(label) => {
             ensure_privileged_fn()?;
@@ -51,15 +50,17 @@ pub(super) fn handle_volume_admin_request(
 }
 
 pub(super) fn read_volume_label(fs: &ExfatFs) -> Result<Option<String>> {
-    let admission = fs.admitted_lookup_state()?;
-    let root_inode = admission
-        .state_guard
+    let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+    let root_inode = fs
+        .root_inode
+        .read()
         .as_ref()
         .ok_or_else(unpublished_state)?
-        .root_inode
         .clone();
-    let directory_bytes =
-        root_inode.read_root_directory_bytes(&admission.block_device, &admission.boot_region)?;
+    let directory_bytes = root_inode.read_root_directory_bytes(
+        &lookup_mount_snapshot.block_device,
+        &lookup_mount_snapshot.boot_region,
+    )?;
     let label = decode_volume_label_entry(&directory_bytes)?;
     match label {
         Some(label) => String::from_utf16(&label)
@@ -81,35 +82,37 @@ pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<
             Some(admitted_label)
         }
     };
-    let admission = fs.admitted_mutation_state()?;
-    if admission.forced_shutdown {
+    let mutation_mount_state = fs.mutation_mount_state()?;
+    if mutation_mount_state.forced_shutdown {
         return_errno!(Errno::EIO);
     }
-    if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+    if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
         return Err(read_only_conflict());
     }
-    let root_inode = admission
-        .state_guard
+    let root_inode = fs
+        .root_inode
+        .read()
         .as_ref()
         .ok_or_else(unpublished_state)?
-        .root_inode
         .clone();
-    let mut directory_bytes =
-        root_inode.read_root_directory_bytes(&admission.block_device, &admission.boot_region)?;
+    let mut directory_bytes = root_inode.read_root_directory_bytes(
+        &mutation_mount_state.block_device,
+        &mutation_mount_state.boot_region,
+    )?;
     encode_volume_label_entry(&mut directory_bytes, admitted_label.as_deref())?;
     root_inode
         .rewrite_root_directory_bytes(
-            &admission.block_device,
-            &admission.boot_region,
+            &mutation_mount_state.block_device,
+            &mutation_mount_state.boot_region,
             &directory_bytes,
-        )
-        .map_err(Error::from)
+        )?;
+    Ok(())
 }
 
 pub(super) fn admit_forced_shutdown(fs: &ExfatFs) -> Result<()> {
-    let mut state = fs.state.write();
-    let publication = state.as_mut().ok_or_else(unpublished_state)?;
-    publication.forced_shutdown = true;
+    let mut mount_state = fs.mount_state.write();
+    let mounted_volume_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
+    mounted_volume_state.forced_shutdown = true;
     Ok(())
 }
 
@@ -148,10 +151,7 @@ fn decode_volume_label_entry(directory_bytes: &[u8]) -> Result<Option<Vec<u16>>>
     Ok(Some(label))
 }
 
-fn encode_volume_label_entry(
-    directory_bytes: &mut [u8],
-    label: Option<&[u16]>,
-) -> Result<()> {
+fn encode_volume_label_entry(directory_bytes: &mut [u8], label: Option<&[u16]>) -> Result<()> {
     let existing_entry_index = locate_volume_label_entry(directory_bytes)?;
     let Some(label) = label.filter(|label| !label.is_empty()) else {
         if let Some(existing_entry_index) = existing_entry_index {
@@ -196,11 +196,7 @@ fn encode_volume_label_entry(
         u8::try_from(label.len()).map_err(|_| invalid_operation_input())?;
     for (index, code_unit) in label.iter().enumerate() {
         let code_unit_offset = VOLUME_LABEL_UTF16_OFFSET
-            .checked_add(
-                index
-                    .checked_mul(2)
-                    .ok_or_else(invalid_on_disk_layout)?,
-            )
+            .checked_add(index.checked_mul(2).ok_or_else(invalid_on_disk_layout)?)
             .ok_or_else(invalid_on_disk_layout)?;
         encoded_entry[code_unit_offset..code_unit_offset + 2]
             .copy_from_slice(&code_unit.to_le_bytes());

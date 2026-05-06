@@ -53,7 +53,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             return_errno!(Errno::EIO);
         }
 
-        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
             inode.admitted_regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
@@ -95,7 +95,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             return_errno!(Errno::EROFS);
         }
 
-        let (_owner_guard, cluster_map, data_length, valid_data_length) =
+        let (_inode_state_guard, cluster_map, data_length, valid_data_length) =
             inode.admitted_regular_file_cluster_map_snapshot()?;
         let (file_offset, initialized_len) =
             ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;

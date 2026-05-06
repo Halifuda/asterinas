@@ -118,13 +118,12 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let context = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot().map_err(Error::from)?;
+        let mount_access = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
+        let block_device = mount_access.block_device();
+        let boot_region = mount_access.boot_region();
+        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot()?;
         let directory_bytes =
-            Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)
-                .map_err(Error::from)?;
+            Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)?;
 
         let mut next_offset = offset;
         if next_offset == 0 {
@@ -199,11 +198,11 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let context = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let upcase_table = context.upcase_table();
-        let lookup_name = Self::admitted_name(name, &context.options())?;
+        let mount_access = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
+        let block_device = mount_access.block_device();
+        let boot_region = mount_access.boot_region();
+        let upcase_table = mount_access.upcase_table();
+        let lookup_name = Self::admitted_name(name, &mount_access.options())?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         let child_inode = self
             .lookup_child_by_name(
@@ -214,7 +213,7 @@ impl ExfatInode {
                 &lookup_name,
                 lookup_name_hash,
             )
-            .map_err(Error::from)?;
+            ?;
         if let Some(child_inode) = child_inode {
             return Ok(child_inode);
         }
