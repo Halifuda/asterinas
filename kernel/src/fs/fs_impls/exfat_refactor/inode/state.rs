@@ -5,7 +5,7 @@
 //! Method groups: dirty-state transitions, directory admission, regular-file snapshots,
 //! directory byte I/O, timestamp conversion, child construction, and ordered write guards.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::time::Duration;
 
 use aster_block::BlockDevice;
@@ -17,6 +17,7 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 
 use super::{
     super::{
+        bitmap::ClusterRange,
         boot::BootRegion,
         device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange},
@@ -43,6 +44,81 @@ pub(super) struct ExfatInodeClusterMap {
     // `None` is reserved for the unbounded root directory.
     pub(super) valid_data_length: Option<usize>,
     pub(super) no_fat_chain: bool,
+}
+
+#[derive(Clone)]
+pub(in crate::fs::fs_impls::exfat_refactor) struct RegularFileClusterMapGeneration {
+    cluster_map: ExfatInodeClusterMap,
+    cluster_ranges: Vec<ClusterRange>,
+}
+
+impl RegularFileClusterMapGeneration {
+    pub(super) fn cluster_map(&self) -> ExfatInodeClusterMap {
+        self.cluster_map
+    }
+
+    pub(super) fn cluster_ranges(&self) -> &[ClusterRange] {
+        &self.cluster_ranges
+    }
+
+    pub(super) fn validated_lengths(&self) -> Result<(usize, usize)> {
+        let Some(data_length) = self.cluster_map.data_length else {
+            return_errno!(Errno::EINVAL);
+        };
+        let Some(valid_data_length) = self.cluster_map.valid_data_length else {
+            return_errno!(Errno::EINVAL);
+        };
+        if valid_data_length > data_length {
+            return_errno!(Errno::EINVAL);
+        }
+        if data_length == 0 {
+            if self.cluster_map.first_cluster != 0 || valid_data_length != 0 {
+                return_errno!(Errno::EINVAL);
+            }
+            if !self.cluster_ranges.is_empty() {
+                return_errno!(Errno::EINVAL);
+            }
+            return Ok((0, 0));
+        }
+        Ok((data_length, valid_data_length))
+    }
+
+    pub(super) fn mapped_cluster(
+        &self,
+        boot_region: &BootRegion,
+        cluster_index: usize,
+    ) -> Result<u32> {
+        let (data_length, _) = self.validated_lengths()?;
+        let allocated_clusters = data_length.div_ceil(boot_region.cluster_size);
+        let materialized_clusters =
+            self.cluster_ranges
+                .iter()
+                .try_fold(0usize, |total_clusters, range| {
+                    total_clusters
+                        .checked_add(range.cluster_count)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))
+                })?;
+        if materialized_clusters != allocated_clusters {
+            return_errno!(Errno::EINVAL);
+        }
+        if cluster_index >= allocated_clusters {
+            return_errno!(Errno::EINVAL);
+        }
+
+        let mut remaining_clusters = cluster_index;
+        for range in &self.cluster_ranges {
+            if remaining_clusters < range.cluster_count {
+                return range
+                    .start_cluster
+                    .checked_add(
+                        u32::try_from(remaining_clusters).map_err(|_| Error::new(Errno::EINVAL))?,
+                    )
+                    .ok_or_else(|| Error::new(Errno::EINVAL));
+            }
+            remaining_clusters -= range.cluster_count;
+        }
+        return_errno!(Errno::EINVAL);
+    }
 }
 
 /// Classifies which published portions of an inode still need persistence.
@@ -254,17 +330,11 @@ impl ExfatInode {
         Ok((inode_state_guard, cluster_map))
     }
 
-    pub(super) fn regular_file_cluster_map_snapshot(
-        &self,
-    ) -> Result<(Arc<ExfatInodeClusterMap>, usize, usize)> {
-        match self.metadata.read().type_ {
-            InodeType::Dir => return_errno!(Errno::EISDIR),
-            InodeType::File => {}
-            _ => return_errno!(Errno::EOPNOTSUPP),
-        }
-
-        let _inode_state_guard = self.inode_state.read();
-        let cluster_map = Arc::new(*self.cluster_map.read());
+    fn build_regular_file_cluster_map_generation(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: ExfatInodeClusterMap,
+    ) -> Result<RegularFileClusterMapGeneration> {
         let Some(data_length) = cluster_map.data_length else {
             return_errno!(Errno::EINVAL);
         };
@@ -274,18 +344,149 @@ impl ExfatInode {
         if valid_data_length > data_length {
             return_errno!(Errno::EINVAL);
         }
-        if data_length == 0 && (cluster_map.first_cluster != 0 || valid_data_length != 0) {
-            return_errno!(Errno::EINVAL);
+        if data_length == 0 {
+            if cluster_map.first_cluster != 0 || valid_data_length != 0 {
+                return_errno!(Errno::EINVAL);
+            }
+            return Ok(RegularFileClusterMapGeneration {
+                cluster_map,
+                cluster_ranges: Vec::new(),
+            });
         }
-        Ok((cluster_map, data_length, valid_data_length))
+
+        boot_region.validate_stream_data(
+            cluster_map.first_cluster,
+            u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?,
+        )?;
+        let allocated_clusters = data_length.div_ceil(boot_region.cluster_size);
+        let cluster_ranges = if cluster_map.no_fat_chain {
+            let last_cluster = cluster_map
+                .first_cluster
+                .checked_add(
+                    u32::try_from(allocated_clusters.saturating_sub(1))
+                        .map_err(|_| invalid_on_disk_layout())?,
+                )
+                .ok_or_else(invalid_on_disk_layout)?;
+            if !boot_region.is_valid_cluster(last_cluster) {
+                return Err(invalid_on_disk_layout());
+            }
+            vec![ClusterRange {
+                start_cluster: cluster_map.first_cluster,
+                cluster_count: allocated_clusters,
+            }]
+        } else {
+            let mut cluster_ranges: Vec<ClusterRange> = Vec::new();
+            let mut current_cluster = cluster_map.first_cluster;
+            let mut visited_clusters = BTreeSet::new();
+            let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+            for cluster_index in 0..allocated_clusters {
+                if !visited_clusters.insert(current_cluster) {
+                    return Err(invalid_on_disk_layout());
+                }
+                match cluster_ranges.last_mut() {
+                    Some(range)
+                        if range.start_cluster.checked_add(
+                            u32::try_from(range.cluster_count)
+                                .map_err(|_| invalid_on_disk_layout())?,
+                        ) == Some(current_cluster) =>
+                    {
+                        range.cluster_count += 1;
+                    }
+                    _ => cluster_ranges.push(ClusterRange {
+                        start_cluster: current_cluster,
+                        cluster_count: 1,
+                    }),
+                }
+                if cluster_index + 1 == allocated_clusters {
+                    break;
+                }
+                current_cluster = match fat_reader.next_cluster(current_cluster)? {
+                    FatChainStep::Continue(next_cluster) => next_cluster,
+                    FatChainStep::End => return Err(invalid_on_disk_layout()),
+                };
+            }
+            cluster_ranges
+        };
+        Ok(RegularFileClusterMapGeneration {
+            cluster_map,
+            cluster_ranges,
+        })
+    }
+
+    fn regular_file_cluster_map_generation_for(
+        &self,
+        cluster_map: ExfatInodeClusterMap,
+    ) -> Result<Arc<RegularFileClusterMapGeneration>> {
+        if let Some(generation) = self
+            .regular_file_cluster_map_generation
+            .read()
+            .as_ref()
+            .filter(|generation| generation.cluster_map() == cluster_map)
+            .cloned()
+        {
+            return Ok(generation);
+        }
+
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let candidate_generation = Arc::new(Self::build_regular_file_cluster_map_generation(
+            &fs.immutable_block_device(),
+            &fs.immutable_boot_region(),
+            cluster_map,
+        )?);
+        let mut cached_generation = self.regular_file_cluster_map_generation.write();
+        if let Some(generation) = cached_generation
+            .as_ref()
+            .filter(|generation| generation.cluster_map() == cluster_map)
+            .cloned()
+        {
+            return Ok(generation);
+        }
+
+        *cached_generation = Some(candidate_generation.clone());
+        Ok(candidate_generation)
+    }
+
+    pub(super) fn current_regular_file_cluster_map_generation(
+        &self,
+        _inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) -> Result<Arc<RegularFileClusterMapGeneration>> {
+        if self.metadata.read().type_ != InodeType::File {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+        let cluster_map = *self.cluster_map.read();
+        self.regular_file_cluster_map_generation_for(cluster_map)
+    }
+
+    pub(super) fn regular_file_cluster_map_snapshot(
+        &self,
+    ) -> Result<(Arc<RegularFileClusterMapGeneration>, usize, usize)> {
+        match self.metadata.read().type_ {
+            InodeType::Dir => return_errno!(Errno::EISDIR),
+            InodeType::File => {}
+            _ => return_errno!(Errno::EOPNOTSUPP),
+        }
+
+        let _inode_state_guard = self.inode_state.read();
+        let cluster_map = *self.cluster_map.read();
+        let generation = self.regular_file_cluster_map_generation_for(cluster_map)?;
+        let (data_length, valid_data_length) = generation.validated_lengths()?;
+        Ok((generation, data_length, valid_data_length))
     }
 
     pub(super) fn replace_regular_file_cluster_map(
         &self,
         _inode_state_guard: &InodeStateWriteGuard<'_>,
         cluster_map: ExfatInodeClusterMap,
-    ) {
+    ) -> Result<Arc<RegularFileClusterMapGeneration>> {
+        let previous_generation =
+            self.current_regular_file_cluster_map_generation(_inode_state_guard)?;
+        let next_generation = self.regular_file_cluster_map_generation_for(cluster_map)?;
         *self.cluster_map.write() = cluster_map;
+        *self.regular_file_cluster_map_generation.write() = Some(next_generation);
+        Ok(previous_generation)
     }
 
     // Directory I/O

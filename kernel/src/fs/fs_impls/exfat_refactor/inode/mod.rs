@@ -20,6 +20,7 @@ use aster_block::BlockDevice;
 use ostd::{mm::VmReader, sync::RwMutex};
 use spin::Once;
 
+pub(in crate::fs::fs_impls::exfat_refactor) use self::state::RegularFileClusterMapGeneration;
 use self::{
     state::{
         DirectoryContextMode, ExfatInodeClusterMap, ExfatInodeDirtyState, InodeRewriteTarget,
@@ -57,6 +58,8 @@ pub(super) struct ExfatInode {
     parent: Weak<Self>,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
+    regular_file_page_cache_state: RwLock<Option<page_backend::RegularFilePageCacheState>>,
+    regular_file_cluster_map_generation: RwLock<Option<Arc<RegularFileClusterMapGeneration>>>,
     cluster_map: RwLock<ExfatInodeClusterMap>,
 }
 
@@ -113,6 +116,8 @@ impl ExfatInode {
             parent,
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
+            regular_file_page_cache_state: RwLock::new(None),
+            regular_file_cluster_map_generation: RwLock::new(None),
             cluster_map: RwLock::new(ExfatInodeClusterMap {
                 data_length,
                 first_cluster,

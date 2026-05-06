@@ -16,7 +16,7 @@ use super::{
     device_io,
     fat::FatReader,
     inconsistent_bitmap_accounting,
-    inode::ExfatInode,
+    inode::{ExfatInode, RegularFileClusterMapGeneration},
     invalid_mount_input, invalid_operation_input, read_only_conflict, unpublished_state,
     unsupported_remount_delta,
     upcase::UpcaseTable,
@@ -32,8 +32,78 @@ use crate::{
 
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
+struct RetiredClusterRanges {
+    cluster_map: Arc<RegularFileClusterMapGeneration>,
+    ranges: Vec<ClusterRange>,
+}
+
+struct AllocationBitmapState {
+    bitmap: AllocationBitmap,
+    retired_ranges: Vec<RetiredClusterRanges>,
+}
+
+impl AllocationBitmapState {
+    fn new(bitmap: AllocationBitmap) -> Self {
+        Self {
+            bitmap,
+            retired_ranges: Vec::new(),
+        }
+    }
+
+    fn release_retired_ranges(
+        &mut self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+    ) -> Result<()> {
+        let mut pending_retirements = Vec::new();
+        let mut retired_ranges = core::mem::take(&mut self.retired_ranges).into_iter();
+        while let Some(retired) = retired_ranges.next() {
+            if Arc::strong_count(&retired.cluster_map) != 1 {
+                pending_retirements.push(retired);
+                continue;
+            }
+
+            let release_result = (|| {
+                let normalized_ranges = self
+                    .bitmap
+                    .validate_and_normalize_ranges(boot_region, &retired.ranges)?;
+                let released_clusters = self.bitmap.apply_normalized_ranges(
+                    block_device,
+                    boot_region,
+                    &normalized_ranges,
+                    AllocationBitmapUpdate::Free,
+                )?;
+                self.bitmap.record_released_clusters(released_clusters)?;
+                Ok(())
+            })();
+            if let Err(error) = release_result {
+                pending_retirements.push(retired);
+                pending_retirements.extend(retired_ranges);
+                self.retired_ranges = pending_retirements;
+                return Err(error);
+            }
+        }
+        self.retired_ranges = pending_retirements;
+        Ok(())
+    }
+
+    fn retire_regular_file_clusters(
+        &mut self,
+        cluster_map: Arc<RegularFileClusterMapGeneration>,
+        ranges: Vec<ClusterRange>,
+    ) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.retired_ranges.push(RetiredClusterRanges {
+            cluster_map,
+            ranges,
+        });
+    }
+}
+
 pub(super) struct ExfatFs {
-    allocator: RwMutex<Option<AllocationBitmap>>,
+    allocator: RwMutex<Option<AllocationBitmapState>>,
     block_device: Arc<dyn BlockDevice>,
     boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
@@ -252,7 +322,7 @@ impl ExfatFs {
         upcase_table: Arc<UpcaseTable>,
         mount_state: MountedVolumeState,
     ) {
-        *self.allocator.write() = Some(bitmap);
+        *self.allocator.write() = Some(AllocationBitmapState::new(bitmap));
         *self.root_inode.write() = Some(root_inode);
         *self.upcase_table.write() = Some(upcase_table);
         *self.mount_state.write() = Some(mount_state);
@@ -368,11 +438,11 @@ impl ExfatFs {
     fn build_super_block(
         &self,
         mount_state: &MountedVolumeState,
-        bitmap: &AllocationBitmap,
+        bitmap: &AllocationBitmapState,
     ) -> Result<SuperBlock> {
         let total_clusters = self.boot_region.cluster_count_usize()?;
         let free_clusters = total_clusters
-            .checked_sub(bitmap.used_clusters())
+            .checked_sub(bitmap.bitmap.used_clusters())
             .ok_or_else(inconsistent_bitmap_accounting)?;
         Ok(SuperBlock {
             magic: EXFAT_SUPER_MAGIC,
@@ -408,17 +478,22 @@ impl ExfatFs {
         }
 
         let mut allocator = self.allocator.write();
-        let bitmap = allocator.as_mut().ok_or_else(unpublished_state)?;
+        let allocator_state = allocator.as_mut().ok_or_else(unpublished_state)?;
         if requested_clusters == 0 {
             return Err(invalid_operation_input());
         }
+        allocator_state.release_retired_ranges(self.block_device.as_ref(), &self.boot_region)?;
 
         let mut fat_reader = FatReader::new(self.block_device.as_ref(), &self.boot_region);
-        let allocated_ranges =
-            bitmap.find_free_ranges(&self.boot_region, &mut fat_reader, requested_clusters)?;
-        let normalized_ranges =
-            bitmap.validate_and_normalize_ranges(&self.boot_region, &allocated_ranges)?;
-        let allocated_clusters = bitmap.apply_normalized_ranges(
+        let allocated_ranges = allocator_state.bitmap.find_free_ranges(
+            &self.boot_region,
+            &mut fat_reader,
+            requested_clusters,
+        )?;
+        let normalized_ranges = allocator_state
+            .bitmap
+            .validate_and_normalize_ranges(&self.boot_region, &allocated_ranges)?;
+        let allocated_clusters = allocator_state.bitmap.apply_normalized_ranges(
             self.block_device.as_ref(),
             &self.boot_region,
             &normalized_ranges,
@@ -427,7 +502,9 @@ impl ExfatFs {
         if allocated_clusters != requested_clusters {
             return Err(inconsistent_bitmap_accounting());
         }
-        bitmap.record_allocated_clusters(allocated_clusters)?;
+        allocator_state
+            .bitmap
+            .record_allocated_clusters(allocated_clusters)?;
         Ok(allocated_ranges)
     }
 
@@ -441,15 +518,19 @@ impl ExfatFs {
         }
 
         let mut allocator = self.allocator.write();
-        let bitmap = allocator.as_mut().ok_or_else(unpublished_state)?;
-        let normalized_ranges = bitmap.validate_and_normalize_ranges(&self.boot_region, ranges)?;
-        let released_clusters = bitmap.apply_normalized_ranges(
+        let allocator_state = allocator.as_mut().ok_or_else(unpublished_state)?;
+        let normalized_ranges = allocator_state
+            .bitmap
+            .validate_and_normalize_ranges(&self.boot_region, ranges)?;
+        let released_clusters = allocator_state.bitmap.apply_normalized_ranges(
             self.block_device.as_ref(),
             &self.boot_region,
             &normalized_ranges,
             AllocationBitmapUpdate::Free,
         )?;
-        bitmap.record_released_clusters(released_clusters)?;
+        allocator_state
+            .bitmap
+            .record_released_clusters(released_clusters)?;
         if mount_state.options.discard {
             // Current Asterinas block devices expose no trim BIO, so downgrade
             // only the advisory policy.
@@ -458,7 +539,26 @@ impl ExfatFs {
         Ok(())
     }
 
+    pub(super) fn retire_regular_file_clusters(
+        &self,
+        cluster_map: Arc<RegularFileClusterMapGeneration>,
+        ranges: Vec<ClusterRange>,
+    ) -> Result<()> {
+        let mut allocator = self.allocator.write();
+        let allocator_state = allocator.as_mut().ok_or_else(unpublished_state)?;
+        allocator_state.retire_regular_file_clusters(cluster_map, ranges);
+        Ok(())
+    }
+
     // Helpers
+
+    pub(super) fn immutable_block_device(&self) -> Arc<dyn BlockDevice> {
+        self.block_device.clone()
+    }
+
+    pub(super) fn immutable_boot_region(&self) -> BootRegion {
+        self.boot_region
+    }
 
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
