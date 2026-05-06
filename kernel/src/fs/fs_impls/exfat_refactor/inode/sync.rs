@@ -58,8 +58,8 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (inode_state_guard, _cluster_map, data_length, _valid_data_length) =
-            self.admitted_regular_file_cluster_map_snapshot()?;
+        let (_cluster_map, data_length, _valid_data_length) =
+            self.regular_file_cluster_map_snapshot()?;
         let admitted_dirty_state = *self.dirty_state.read();
         let needs_device_sync = scope.needs_device_sync(admitted_dirty_state);
         let page_cache = self
@@ -67,7 +67,6 @@ impl ExfatInode {
             .get()
             .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
         let block_device = lookup_mount_snapshot.block_device.clone();
-        drop(inode_state_guard);
         drop(lookup_mount_snapshot);
 
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
@@ -84,8 +83,8 @@ impl ExfatInode {
                     return_errno!(Errno::EIO);
                 }
 
-                let (_inode_state_guard, _cluster_map, _data_length, _valid_data_length) =
-                    self.admitted_regular_file_cluster_map_snapshot()?;
+                let (_cluster_map, _data_length, _valid_data_length) =
+                    self.regular_file_cluster_map_snapshot()?;
             }
         }
 
@@ -99,8 +98,8 @@ impl ExfatInode {
                         return_errno!(Errno::EIO);
                     }
 
-                    let (_inode_state_guard, _cluster_map, _data_length, _valid_data_length) =
-                        self.admitted_regular_file_cluster_map_snapshot()?;
+                    let (_cluster_map, _data_length, _valid_data_length) =
+                        self.regular_file_cluster_map_snapshot()?;
                     let mut dirty_state = self.dirty_state.write();
                     match scope {
                         InodeSyncScope::Data => dirty_state.publish_data(admitted_dirty_state),

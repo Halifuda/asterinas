@@ -4,7 +4,7 @@
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
-use aster_block::{bio::BioStatus, BlockDevice};
+use aster_block::{BlockDevice, bio::BioStatus};
 use ostd::{
     mm::VmIo,
     sync::{RwMutex, RwMutexReadGuard, RwMutexWriteGuard},
@@ -304,13 +304,6 @@ impl ExfatFs {
             options: mount_state.options.clone(),
             forced_shutdown: mount_state.forced_shutdown,
         })
-    }
-
-    // A3 narrows the primary read-side name to `lookup_mount_snapshot()`, but
-    // cached I/O and page-backend packet siblings still call this wrapper.
-    // Remove it once those callers move to `lookup_mount_snapshot()`.
-    pub(super) fn published_lookup_state(&self) -> Result<LookupMountSnapshot> {
-        self.lookup_mount_snapshot()
     }
 
     pub(super) fn lookup_mount_state(&self) -> Result<LookupMountState<'_>> {
