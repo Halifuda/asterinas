@@ -8,7 +8,7 @@
 use core::{ops::Range, time::Duration};
 
 use aster_block::BlockDevice;
-use ostd::mm::VmIo;
+use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
@@ -17,12 +17,13 @@ use super::{
         unpublished_state,
     },
     ExfatFs, ExfatInode, ExfatInodeClusterMap, InodeRewriteTarget, MountedVolumeState,
+    page_backend::RegularFilePageCacheState,
     state::InodeStateWriteGuard,
 };
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
-        vfs::{file_system::FsFlags, inode::Inode},
+        vfs::{file_system::FsFlags, inode::Inode, page_cache::PageCache},
     },
     prelude::*,
     time::clocks::RealTimeCoarseClock,
@@ -56,23 +57,7 @@ impl ExfatInode {
         let page_cache = self.page_cache_handle().ok_or_else(|| {
             Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
         })?;
-        loop {
-            let (_cluster_map, provisional_data_length, provisional_valid_data_length) =
-                self.regular_file_cluster_map_snapshot()?;
-            let provisional_effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
-                provisional_data_length
-            } else {
-                offset
-            };
-            let provisional_write_end = provisional_effective_offset
-                .checked_add(write_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let preflush_start = provisional_valid_data_length.min(provisional_effective_offset);
-            let preflush_range = preflush_start..provisional_write_end;
-            if !preflush_range.is_empty() && page_cache.has_dirty_pages(preflush_range.clone()) {
-                page_cache.evict_range(preflush_range.clone())?;
-            }
-
+        {
             let admission = fs.admitted_mutation_state().map_err(Error::from)?;
             if admission.forced_shutdown
                 || admission.anomaly.clear_to_zero
@@ -85,16 +70,10 @@ impl ExfatInode {
             }
 
             let inode_state_guard = self.inode_state.write();
-            let cluster_map = *self.cluster_map.read();
-            let Some(data_length) = cluster_map.data_length else {
-                return_errno!(Errno::EINVAL);
-            };
-            let Some(valid_data_length) = cluster_map.valid_data_length else {
-                return_errno!(Errno::EINVAL);
-            };
-            if valid_data_length > data_length {
-                return_errno!(Errno::EINVAL);
-            }
+            let cluster_map_generation =
+                self.current_regular_file_cluster_map_generation(&inode_state_guard)?;
+            let cluster_map = cluster_map_generation.cluster_map();
+            let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
 
             let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
                 data_length
@@ -104,124 +83,83 @@ impl ExfatInode {
             let write_end = effective_offset
                 .checked_add(write_len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            if data_length != provisional_data_length
-                || valid_data_length != provisional_valid_data_length
-                || effective_offset != provisional_effective_offset
-                || write_end != provisional_write_end
-            {
-                drop(inode_state_guard);
-                drop(admission);
-                continue;
-            }
             if status_flags.contains(StatusFlags::O_DIRECT)
                 && (!effective_offset.is_multiple_of(admission.boot_region.sector_size)
                     || !write_len.is_multiple_of(admission.boot_region.sector_size))
             {
                 return_errno!(Errno::EINVAL);
             }
-            let cache_invalidate_start = valid_data_length.min(effective_offset);
-            let cache_invalidate_range = cache_invalidate_start..write_end;
-            if cache_invalidate_range != preflush_range
-                || (!cache_invalidate_range.is_empty()
-                    && page_cache.has_dirty_pages(cache_invalidate_range.clone()))
-            {
-                drop(inode_state_guard);
-                drop(admission);
-                continue;
-            }
-            let block_device = admission.block_device.clone();
-            let boot_region = admission.boot_region;
+
+            let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
             let published_data_length = data_length.max(write_end);
             let published_valid_data_length = valid_data_length.max(write_end);
             let timestamp = RealTimeCoarseClock::get().read_time();
-            drop(inode_state_guard);
-            drop(admission);
-
-            let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
-            if published_data_length > data_length {
-                page_cache.resize(published_data_length)?;
-            }
-            for page_idx in get_page_idx_range(&cache_mutation_range) {
-                page_cache
-                    .pages()
-                    .commit_on(page_idx, CommitFlags::empty())?;
-            }
-
-            let admission = fs.admitted_mutation_state().map_err(Error::from)?;
-            if admission.forced_shutdown
-                || admission.anomaly.clear_to_zero
-                || admission.anomaly.media_failure
-            {
-                return_errno!(Errno::EIO);
-            }
-            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
-                return_errno!(Errno::EROFS);
-            }
-            let inode_state_guard = self.inode_state.write();
-            let cluster_map = *self.cluster_map.read();
-            let Some(current_data_length) = cluster_map.data_length else {
-                return_errno!(Errno::EINVAL);
-            };
-            let Some(current_valid_data_length) = cluster_map.valid_data_length else {
-                return_errno!(Errno::EINVAL);
-            };
-            if current_valid_data_length > current_data_length {
-                return_errno!(Errno::EINVAL);
-            }
-            let current_effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
-                current_data_length
-            } else {
-                offset
-            };
-            let current_write_end = current_effective_offset
-                .checked_add(write_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let current_cache_invalidate_range =
-                current_valid_data_length.min(current_effective_offset)..current_write_end;
-            if current_data_length != data_length
-                || current_valid_data_length != valid_data_length
-                || current_effective_offset != effective_offset
-                || current_write_end != write_end
-                || current_cache_invalidate_range != cache_invalidate_range
-                || (!current_cache_invalidate_range.is_empty()
-                    && page_cache.has_dirty_pages(current_cache_invalidate_range.clone()))
-            {
-                drop(inode_state_guard);
-                continue;
-            }
-            let mount_state = admission
-                .state_guard
-                .as_ref()
-                .ok_or_else(unpublished_state)?;
-            let rollback_cache_invalidate_range = current_cache_invalidate_range.clone();
-            self.grow_and_republish_regular_file(
+            let _page_cache_state = self.install_regular_file_page_cache_state(
                 &inode_state_guard,
-                &fs,
-                mount_state,
-                &block_device,
-                &boot_region,
-                cluster_map,
-                effective_offset,
-                published_data_length,
-                published_valid_data_length,
-                timestamp,
-                |cluster_map, zero_fill_range| {
-                    if !zero_fill_range.is_empty() {
-                        page_cache.fill_zeros(zero_fill_range)?;
-                    }
-                    page_cache.pages().write(effective_offset, reader)?;
-                    Ok(())
+                RegularFilePageCacheState {
+                    anomaly: admission.anomaly,
+                    block_device: admission.block_device.clone(),
+                    boot_region: admission.boot_region,
+                    cluster_map: cluster_map_generation.clone(),
+                    data_length,
+                    read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
+                    valid_data_length,
                 },
-                || {
-                    if !rollback_cache_invalidate_range.is_empty() {
-                        page_cache.discard_range(rollback_cache_invalidate_range);
-                    }
-                    if published_data_length > data_length {
-                        let _ = page_cache.resize(data_length);
-                    }
-                },
-            )?;
-            break;
+            );
+            let write_result = (|| {
+                if !cache_mutation_range.is_empty()
+                    && page_cache.has_dirty_pages(cache_mutation_range.clone())
+                {
+                    page_cache.evict_range(cache_mutation_range.clone())?;
+                }
+                if published_data_length > data_length {
+                    page_cache.resize(published_data_length)?;
+                }
+                Self::prepare_regular_file_page_cache_range(
+                    page_cache,
+                    data_length,
+                    cache_mutation_range.clone(),
+                )?;
+
+                let mount_state = admission
+                    .state_guard
+                    .as_ref()
+                    .ok_or_else(unpublished_state)?;
+                let rollback_cache_mutation_range = cache_mutation_range.clone();
+                self.grow_and_republish_regular_file(
+                    &inode_state_guard,
+                    &fs,
+                    mount_state,
+                    &admission.block_device,
+                    &admission.boot_region,
+                    cluster_map,
+                    effective_offset,
+                    published_data_length,
+                    published_valid_data_length,
+                    timestamp,
+                    |_cluster_map, zero_fill_range| {
+                        if !zero_fill_range.is_empty() {
+                            page_cache.fill_zeros(zero_fill_range)?;
+                        }
+                        page_cache.pages().write(effective_offset, reader)?;
+                        Ok(())
+                    },
+                    || {
+                        if !rollback_cache_mutation_range.is_empty() {
+                            page_cache.discard_range(rollback_cache_mutation_range);
+                        }
+                        if published_data_length > data_length {
+                            let _ = page_cache.resize(data_length);
+                        }
+                    },
+                )
+            })();
+            if let Err(error) = write_result {
+                if published_data_length > data_length {
+                    let _ = page_cache.resize(data_length);
+                }
+                return Err(error);
+            }
         }
         if status_flags.contains(StatusFlags::O_SYNC) {
             self.sync_all()?;
@@ -243,7 +181,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        let admission = fs.admitted_mutation_state().map_err(Error::from)?;
         if admission.forced_shutdown
             || admission.anomaly.clear_to_zero
             || admission.anomaly.media_failure
@@ -255,16 +193,10 @@ impl ExfatInode {
         }
 
         let inode_state_guard = self.inode_state.write();
-        let cluster_map = *self.cluster_map.read();
-        let Some(data_length) = cluster_map.data_length else {
-            return_errno!(Errno::EINVAL);
-        };
-        let Some(valid_data_length) = cluster_map.valid_data_length else {
-            return_errno!(Errno::EINVAL);
-        };
-        if valid_data_length > data_length {
-            return_errno!(Errno::EINVAL);
-        }
+        let cluster_map_generation =
+            self.current_regular_file_cluster_map_generation(&inode_state_guard)?;
+        let cluster_map = cluster_map_generation.cluster_map();
+        let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
         if new_size == data_length {
             return Ok(());
         }
@@ -276,71 +208,95 @@ impl ExfatInode {
                 .state_guard
                 .as_ref()
                 .ok_or_else(unpublished_state)?;
-            self.grow_and_republish_regular_file(
-                &inode_state_guard,
-                &fs,
-                mount_state,
-                &admission.block_device,
-                &admission.boot_region,
-                cluster_map,
-                new_size,
-                new_size,
-                new_size,
-                timestamp,
-                |cluster_map, zero_fill_range| {
-                    if zero_fill_range.is_empty() {
-                        if let Some(page_cache) = page_cache
-                            && new_size > data_length
-                        {
-                            page_cache.resize(new_size)?;
-                        }
-                        return Ok(());
-                    }
-
-                    if let Some(page_cache) = page_cache {
+            let page_cache_result = if let Some(page_cache) = page_cache {
+                let _page_cache_state = self.install_regular_file_page_cache_state(
+                    &inode_state_guard,
+                    RegularFilePageCacheState {
+                        anomaly: admission.anomaly,
+                        block_device: admission.block_device.clone(),
+                        boot_region: admission.boot_region,
+                        cluster_map: cluster_map_generation.clone(),
+                        data_length,
+                        read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
+                        valid_data_length,
+                    },
+                );
+                self.grow_and_republish_regular_file(
+                    &inode_state_guard,
+                    &fs,
+                    mount_state,
+                    &admission.block_device,
+                    &admission.boot_region,
+                    cluster_map,
+                    new_size,
+                    new_size,
+                    new_size,
+                    timestamp,
+                    |_cluster_map, zero_fill_range| {
                         if new_size > data_length {
                             page_cache.resize(new_size)?;
                         }
-                        page_cache.fill_zeros(zero_fill_range)?;
-                        return Ok(());
-                    }
-
-                    Self::mutate_regular_file_range(
-                        &admission.block_device,
-                        &admission.boot_region,
-                        cluster_map,
-                        new_size,
-                        zero_fill_range.start,
-                        zero_fill_range
-                            .end
-                            .checked_sub(zero_fill_range.start)
-                            .ok_or_else(|| Error::new(Errno::EINVAL))?,
-                        |chunk| {
-                            chunk.fill(0);
-                            Ok(())
-                        },
-                    )
-                },
-                || {
-                    if let Some(page_cache) = page_cache {
-                        if valid_data_length < new_size {
-                            page_cache.discard_range(valid_data_length..new_size);
+                        Self::prepare_regular_file_page_cache_range(
+                            page_cache,
+                            data_length,
+                            zero_fill_range.clone(),
+                        )?;
+                        if !zero_fill_range.is_empty() {
+                            page_cache.fill_zeros(zero_fill_range)?;
                         }
-                        let _ = page_cache.resize(data_length);
+                        Ok(())
+                    },
+                    || {},
+                )
+            } else {
+                self.grow_and_republish_regular_file(
+                    &inode_state_guard,
+                    &fs,
+                    mount_state,
+                    &admission.block_device,
+                    &admission.boot_region,
+                    cluster_map,
+                    new_size,
+                    new_size,
+                    new_size,
+                    timestamp,
+                    |cluster_map, zero_fill_range| {
+                        if zero_fill_range.is_empty() {
+                            return Ok(());
+                        }
+
+                        Self::mutate_regular_file_range(
+                            &admission.block_device,
+                            &admission.boot_region,
+                            cluster_map,
+                            new_size,
+                            zero_fill_range.start,
+                            zero_fill_range
+                                .end
+                                .checked_sub(zero_fill_range.start)
+                                .ok_or_else(|| Error::new(Errno::EINVAL))?,
+                            |chunk| {
+                                chunk.fill(0);
+                                Ok(())
+                            },
+                        )
+                    },
+                    || {},
+                )
+            };
+            if let Err(error) = page_cache_result {
+                if let Some(page_cache) = page_cache {
+                    if valid_data_length < new_size {
+                        page_cache.discard_range(valid_data_length..new_size);
                     }
-                },
-            )?;
+                    let _ = page_cache.resize(data_length);
+                }
+                return Err(error);
+            }
             return Ok(());
         }
 
-        let current_ranges = Self::allocated_cluster_ranges(
-            &admission.block_device,
-            &admission.boot_region,
-            cluster_map.first_cluster,
-            data_length,
-            cluster_map.no_fat_chain,
-        )
-        .map_err(Error::from)?;
+        let current_ranges = cluster_map_generation.cluster_ranges();
         let retained_clusters = if new_size == 0 {
             0
         } else {
@@ -350,9 +306,8 @@ impl ExfatInode {
         let mut retained_is_contiguous = true;
         let mut previous_retained_cluster: Option<u32> = None;
         let mut first_retained_cluster = 0u32;
-        let mut last_retained_cluster = 0u32;
         let mut released_ranges = Vec::new();
-        for range in &current_ranges {
+        for range in current_ranges {
             if retained_clusters_remaining == 0 {
                 released_ranges.push(*range);
                 continue;
@@ -375,7 +330,6 @@ impl ExfatInode {
                     first_retained_cluster = range.start_cluster;
                 }
                 previous_retained_cluster = Some(retained_last_cluster);
-                last_retained_cluster = retained_last_cluster;
             }
             if retained_in_range < range.cluster_count {
                 let released_start_cluster = range
@@ -395,7 +349,7 @@ impl ExfatInode {
             return Err(invalid_on_disk_layout());
         }
 
-        let cluster_map = ExfatInodeClusterMap {
+        let next_cluster_map = ExfatInodeClusterMap {
             data_length: Some(new_size),
             first_cluster: if retained_clusters == 0 {
                 0
@@ -411,7 +365,7 @@ impl ExfatInode {
         if let Err(error) = self.republish_regular_file_entry_set(
             &admission.block_device,
             &admission.boot_region,
-            cluster_map,
+            next_cluster_map,
             timestamp,
         ) {
             if let Some(page_cache) = page_cache {
@@ -430,20 +384,41 @@ impl ExfatInode {
             metadata.nr_sectors_allocated = allocated_sectors;
             metadata.size = new_size;
         }
-        self.replace_regular_file_cluster_map(&inode_state_guard, cluster_map);
+        let retired_generation =
+            self.replace_regular_file_cluster_map(&inode_state_guard, next_cluster_map)?;
         self.mark_content_publication_dirty(&inode_state_guard);
-
-        if retained_clusters != 0 && !cluster_map.no_fat_chain {
+        if !cluster_map.no_fat_chain && retained_clusters != 0 {
+            let retained_last_cluster =
+                previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
             FatReader::new(admission.block_device.as_ref(), &admission.boot_region)
-                .terminate_cluster_chain(last_retained_cluster)
+                .terminate_cluster_chain(retained_last_cluster)
                 .map_err(Error::from)?;
         }
+
         if !released_ranges.is_empty() {
-            let mount_state = admission
-                .state_guard
-                .as_mut()
-                .ok_or_else(unpublished_state)?;
-            fs.free_allocated_space_with_publication(mount_state, &released_ranges)?;
+            fs.retire_regular_file_clusters(retired_generation, released_ranges)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_regular_file_page_cache_range(
+        page_cache: &PageCache,
+        current_data_length: usize,
+        range: Range<usize>,
+    ) -> Result<()> {
+        for page_idx in get_page_idx_range(&range) {
+            let page_offset = page_idx
+                .checked_mul(PAGE_SIZE)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let commit_flags = if page_offset >= current_data_length {
+                CommitFlags::WILL_OVERWRITE
+            } else {
+                CommitFlags::empty()
+            };
+            let frame = page_cache.pages().commit_on(page_idx, commit_flags)?;
+            if page_offset >= current_data_length {
+                frame.writer().fill_zeros(PAGE_SIZE);
+            }
         }
         Ok(())
     }
@@ -514,7 +489,7 @@ impl ExfatInode {
                 metadata.last_modify_at = timestamp;
                 metadata.size = new_data_length;
             }
-            self.replace_regular_file_cluster_map(inode_state_guard, next_cluster_map);
+            let _ = self.replace_regular_file_cluster_map(inode_state_guard, next_cluster_map)?;
             self.mark_content_publication_dirty(&inode_state_guard);
             Ok(())
         })();

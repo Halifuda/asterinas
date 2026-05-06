@@ -9,14 +9,14 @@ use aster_block::{
     bio::{Bio, BioDirection, BioSegment, BioType, BioWaiter},
     id::Sid,
 };
-use ostd::mm::{Segment, VmIo};
+use ostd::mm::Segment;
 
 use super::{
     super::{
         boot::BootRegion,
         fat::{FatChainStep, FatReader},
     },
-    ExfatInode, ExfatInodeClusterMap,
+    ExfatInode, ExfatInodeClusterMap, RegularFileClusterMapGeneration,
 };
 use crate::{
     fs::{
@@ -80,7 +80,7 @@ impl ExfatInode {
 
     pub(super) fn map_regular_file_logical_offset(
         &self,
-        block_device: &Arc<dyn BlockDevice>,
+        _block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         offset: usize,
     ) -> Result<Option<usize>> {
@@ -101,16 +101,14 @@ impl ExfatInode {
             return Ok(None);
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, cluster_map.as_ref(), data_length)?;
+        Self::validate_regular_file_mapping_shape(
+            boot_region,
+            &cluster_map.cluster_map(),
+            data_length,
+        )?;
         let cluster_size = boot_region.cluster_size;
         let cluster_index = offset / cluster_size;
-        let cluster = Self::mapped_regular_file_cluster(
-            block_device,
-            boot_region,
-            cluster_map.as_ref(),
-            data_length,
-            cluster_index,
-        )?;
+        let cluster = cluster_map.mapped_cluster(boot_region, cluster_index)?;
         let cluster_start = boot_region
             .cluster_offset(cluster)
             .map_err(|_| Error::new(Errno::EINVAL))?;
@@ -121,9 +119,8 @@ impl ExfatInode {
     }
 
     pub(super) fn regular_file_page_bio_ranges(
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: &ExfatInodeClusterMap,
+        cluster_map: &RegularFileClusterMapGeneration,
         data_length: usize,
         file_offset: usize,
         len: usize,
@@ -132,25 +129,21 @@ impl ExfatInode {
             return Ok(Vec::new());
         }
 
-        Self::validate_regular_file_mapping_shape(boot_region, cluster_map, data_length)?;
+        Self::validate_regular_file_mapping_shape(
+            boot_region,
+            &cluster_map.cluster_map(),
+            data_length,
+        )?;
 
         let cluster_size = boot_region.cluster_size;
-        let cluster_index = file_offset / cluster_size;
+        let mut cluster_index = file_offset / cluster_size;
         let mut cluster_offset = file_offset % cluster_size;
-        let mut current_cluster = Self::mapped_regular_file_cluster(
-            block_device,
-            boot_region,
-            cluster_map,
-            data_length,
-            cluster_index,
-        )?;
         let mut page_offset = 0usize;
         let mut remaining = len;
         let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
-        let mut fat_reader =
-            (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
 
         while remaining != 0 {
+            let current_cluster = cluster_map.mapped_cluster(boot_region, cluster_index)?;
             let chunk_len = remaining.min(cluster_size - cluster_offset);
             let chunk_offset = boot_region
                 .cluster_offset(current_cluster)
@@ -175,17 +168,11 @@ impl ExfatInode {
                 .checked_add(chunk_len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
             remaining -= chunk_len;
+            cluster_index += 1;
             cluster_offset = 0;
             if remaining == 0 {
                 break;
             }
-
-            let using_fat_chain = fat_reader.is_some();
-            current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut()) {
-                Ok(Some(next_cluster)) => next_cluster,
-                Ok(None) | Err(_) if using_fat_chain => return_errno!(Errno::EIO),
-                Ok(None) | Err(_) => return_errno!(Errno::EINVAL),
-            };
         }
 
         Ok(ranges)
@@ -217,14 +204,13 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         frame: &CachePage,
-        cluster_map: &ExfatInodeClusterMap,
+        cluster_map: &RegularFileClusterMapGeneration,
         data_length: usize,
         file_offset: usize,
         initialized_len: usize,
         bio_type: BioType,
     ) -> Result<BioWaiter> {
         let page_ranges = Self::regular_file_page_bio_ranges(
-            block_device,
             boot_region,
             cluster_map,
             data_length,

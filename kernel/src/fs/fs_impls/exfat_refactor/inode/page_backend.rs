@@ -2,13 +2,20 @@
 
 //! Bridges the exFAT inode owner to the generic page-cache backend.
 //!
-//! Method groups: weak-inode backend ownership, page read/write BIO callbacks, page count,
-//! and inode page-cache accessors.
+//! Method groups: weak-inode backend ownership, owner-local callback snapshots, page read/write
+//! BIO callbacks, page count, and inode page-cache accessors.
 
-use aster_block::bio::{BioType, BioWaiter};
+use aster_block::{
+    BlockDevice,
+    bio::{BioType, BioWaiter},
+};
 use ostd::mm::io::util::HasVmReaderWriter;
 
-use super::ExfatInode;
+use super::{
+    super::{boot::BootRegion, fs::VolumeAnomalyState},
+    ExfatInode, RegularFileClusterMapGeneration,
+    state::InodeStateWriteGuard,
+};
 use crate::{
     fs::{
         file::InodeType,
@@ -20,6 +27,27 @@ use crate::{
     prelude::*,
     vm::vmo::Vmo,
 };
+
+#[derive(Clone)]
+pub(super) struct RegularFilePageCacheState {
+    pub(super) anomaly: VolumeAnomalyState,
+    pub(super) block_device: Arc<dyn BlockDevice>,
+    pub(super) boot_region: BootRegion,
+    pub(super) cluster_map: Arc<RegularFileClusterMapGeneration>,
+    pub(super) data_length: usize,
+    pub(super) read_only: bool,
+    pub(super) valid_data_length: usize,
+}
+
+pub(super) struct RegularFilePageCacheGuard<'a> {
+    inode: &'a ExfatInode,
+}
+
+impl Drop for RegularFilePageCacheGuard<'_> {
+    fn drop(&mut self) {
+        *self.inode.regular_file_page_cache_state.write() = None;
+    }
+}
 
 pub(super) struct ExfatFilePageBackend {
     inode: Weak<ExfatInode>,
@@ -39,28 +67,53 @@ impl ExfatFilePageBackend {
     pub(super) fn inode_weak(&self) -> Weak<ExfatInode> {
         self.inode.clone()
     }
-}
 
-impl PageCacheBackend for ExfatFilePageBackend {
-    fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+    fn regular_file_page_cache_state(
+        &self,
+    ) -> Result<(Arc<ExfatInode>, RegularFilePageCacheState)> {
         let inode = self.upgrade_inode()?;
+        if let Some(page_cache_state) = inode.active_regular_file_page_cache_state() {
+            return Ok((inode, page_cache_state));
+        }
+
         let fs = inode
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
-        if lookup_mount_snapshot.anomaly.clear_to_zero
-            || lookup_mount_snapshot.anomaly.media_failure
-        {
-            return_errno!(Errno::EIO);
-        }
-
         let (cluster_map, data_length, valid_data_length) =
             inode.regular_file_cluster_map_snapshot()?;
-        let (file_offset, initialized_len) =
-            ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
+        Ok((
+            inode,
+            RegularFilePageCacheState {
+                anomaly: lookup_mount_snapshot.anomaly,
+                block_device: lookup_mount_snapshot.block_device,
+                boot_region: lookup_mount_snapshot.boot_region,
+                cluster_map,
+                data_length,
+                read_only: lookup_mount_snapshot
+                    .options
+                    .fs_flags
+                    .contains(FsFlags::RDONLY),
+                valid_data_length,
+            },
+        ))
+    }
+}
+
+impl PageCacheBackend for ExfatFilePageBackend {
+    fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+        let (_inode, page_cache_state) = self.regular_file_page_cache_state()?;
+        if page_cache_state.anomaly.clear_to_zero || page_cache_state.anomaly.media_failure {
+            return_errno!(Errno::EIO);
+        }
+        let (file_offset, initialized_len) = ExfatInode::regular_file_page_range(
+            idx,
+            page_cache_state.data_length,
+            page_cache_state.valid_data_length,
+        )?;
         let initialized_sector_len =
-            initialized_len - (initialized_len % lookup_mount_snapshot.boot_region.sector_size);
+            initialized_len - (initialized_len % page_cache_state.boot_region.sector_size);
         if initialized_sector_len < PAGE_SIZE {
             frame
                 .writer()
@@ -72,11 +125,11 @@ impl PageCacheBackend for ExfatFilePageBackend {
         }
 
         ExfatInode::regular_file_page_waiter(
-            &lookup_mount_snapshot.block_device,
-            &lookup_mount_snapshot.boot_region,
+            &page_cache_state.block_device,
+            &page_cache_state.boot_region,
             frame,
-            cluster_map.as_ref(),
-            data_length,
+            page_cache_state.cluster_map.as_ref(),
+            page_cache_state.data_length,
             file_offset,
             initialized_sector_len,
             BioType::Read,
@@ -84,43 +137,32 @@ impl PageCacheBackend for ExfatFilePageBackend {
     }
 
     fn write_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
-        let inode = self.upgrade_inode()?;
-        let fs = inode
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
-        if lookup_mount_snapshot.anomaly.clear_to_zero
-            || lookup_mount_snapshot.anomaly.media_failure
-        {
+        let (_inode, page_cache_state) = self.regular_file_page_cache_state()?;
+        if page_cache_state.anomaly.clear_to_zero || page_cache_state.anomaly.media_failure {
             return_errno!(Errno::EIO);
         }
-        if lookup_mount_snapshot
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY)
-        {
+        if page_cache_state.read_only {
             return_errno!(Errno::EROFS);
         }
-
-        let (cluster_map, data_length, valid_data_length) =
-            inode.regular_file_cluster_map_snapshot()?;
-        let (file_offset, initialized_len) =
-            ExfatInode::regular_file_page_range(idx, data_length, valid_data_length)?;
+        let (file_offset, initialized_len) = ExfatInode::regular_file_page_range(
+            idx,
+            page_cache_state.data_length,
+            page_cache_state.valid_data_length,
+        )?;
         let initialized_sector_len = initialized_len
-            .div_ceil(lookup_mount_snapshot.boot_region.sector_size)
-            .checked_mul(lookup_mount_snapshot.boot_region.sector_size)
+            .div_ceil(page_cache_state.boot_region.sector_size)
+            .checked_mul(page_cache_state.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             return Ok(BioWaiter::new());
         }
 
         ExfatInode::regular_file_page_waiter(
-            &lookup_mount_snapshot.block_device,
-            &lookup_mount_snapshot.boot_region,
+            &page_cache_state.block_device,
+            &page_cache_state.boot_region,
             frame,
-            cluster_map.as_ref(),
-            data_length,
+            page_cache_state.cluster_map.as_ref(),
+            page_cache_state.data_length,
             file_offset,
             initialized_sector_len,
             BioType::Write,
@@ -128,14 +170,31 @@ impl PageCacheBackend for ExfatFilePageBackend {
     }
 
     fn npages(&self) -> usize {
-        self.inode
-            .upgrade()
-            .map(|inode| inode.metadata_projection().size.div_ceil(PAGE_SIZE))
-            .unwrap_or(0)
+        self.inode.upgrade().map_or(0, |inode| {
+            inode.active_regular_file_page_cache_state().map_or_else(
+                || inode.metadata_projection().size.div_ceil(PAGE_SIZE),
+                |page_cache_state| page_cache_state.data_length.div_ceil(PAGE_SIZE),
+            )
+        })
     }
 }
 
 impl ExfatInode {
+    pub(super) fn install_regular_file_page_cache_state(
+        &self,
+        _inode_state_guard: &InodeStateWriteGuard<'_>,
+        page_cache_state: RegularFilePageCacheState,
+    ) -> RegularFilePageCacheGuard<'_> {
+        let mut active_page_cache_state = self.regular_file_page_cache_state.write();
+        debug_assert!(active_page_cache_state.is_none());
+        *active_page_cache_state = Some(page_cache_state);
+        RegularFilePageCacheGuard { inode: self }
+    }
+
+    fn active_regular_file_page_cache_state(&self) -> Option<RegularFilePageCacheState> {
+        self.regular_file_page_cache_state.read().clone()
+    }
+
     pub(super) fn weak_self(&self) -> Weak<Self> {
         self.page_backend.inode_weak()
     }

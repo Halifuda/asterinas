@@ -36,7 +36,6 @@ impl ExfatInode {
             return metadata;
         }
 
-        let _inode_state_guard = self.inode_state.read();
         *self.metadata.read()
     }
 
