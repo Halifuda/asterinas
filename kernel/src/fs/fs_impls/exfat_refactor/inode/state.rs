@@ -305,6 +305,11 @@ impl ExfatInode {
         Ok((inode_state_guard, cluster_map))
     }
 
+}
+
+// ---- Cluster map resolution ----
+impl ExfatInode {
+
     fn resolve_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -465,6 +470,11 @@ impl ExfatInode {
     }
 
     // Directory I/O
+
+}
+
+// ---- Directory byte I/O ----
+impl ExfatInode {
 
     pub(super) fn read_directory_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
@@ -628,6 +638,11 @@ impl ExfatInode {
 
     // The caller must already hold Level-2 inode-state authority, so these
     // helpers never reacquire `inode_state` internally.
+}
+
+// ---- Dirty-state transitions ----
+impl ExfatInode {
+
     pub(super) fn mark_content_dirty(&self, _inode_state_guard: &InodeStateWriteGuard<'_>) {
         self.dirty_state.write().mark_content_dirty();
     }
@@ -643,6 +658,11 @@ impl ExfatInode {
         Ok((u64::from(cluster_map.first_cluster) << 32)
             | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
     }
+
+}
+
+// ---- Timestamps, name validation, write guards ----
+impl ExfatInode {
 
     pub(super) fn child_inode_from_directory_entry(
         parent: &Self,
