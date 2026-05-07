@@ -16,7 +16,7 @@ use super::{
         boot::BootRegion,
         fat::{FatChainStep, FatReader},
     },
-    ExfatInode, ExfatInodeClusterMap, RegularFileClusterMapGeneration,
+    ClusterMap, ExfatInode, StreamExtensionDirEntry,
 };
 use crate::{
     fs::{
@@ -29,7 +29,7 @@ use crate::{
 impl ExfatInode {
     pub(super) fn validate_regular_file_mapping_shape(
         boot_region: &BootRegion,
-        cluster_map: &ExfatInodeClusterMap,
+        cluster_map: &StreamExtensionDirEntry,
         data_length: usize,
     ) -> Result<()> {
         let data_length_u64 = u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
@@ -42,7 +42,7 @@ impl ExfatInode {
     pub(super) fn mapped_regular_file_cluster(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: &ExfatInodeClusterMap,
+        cluster_map: &StreamExtensionDirEntry,
         data_length: usize,
         cluster_index: usize,
     ) -> Result<u32> {
@@ -88,22 +88,20 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
-        if lookup_mount_snapshot.anomaly.clear_to_zero
-            || lookup_mount_snapshot.anomaly.media_failure
-        {
+        let mount_state = fs.mount_state_read_guard()?;
+        if mount_state.flags.clear_to_zero || mount_state.flags.media_failure {
             return_errno!(Errno::EIO);
         }
 
         let (cluster_map, data_length, valid_data_length) =
-            self.regular_file_cluster_map_snapshot()?;
+            self.cluster_map_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
         }
 
         Self::validate_regular_file_mapping_shape(
             boot_region,
-            &cluster_map.cluster_map(),
+            &cluster_map.stream_extension(),
             data_length,
         )?;
         let cluster_size = boot_region.cluster_size;
@@ -120,7 +118,7 @@ impl ExfatInode {
 
     pub(super) fn regular_file_page_bio_ranges(
         boot_region: &BootRegion,
-        cluster_map: &RegularFileClusterMapGeneration,
+        cluster_map: &ClusterMap,
         data_length: usize,
         file_offset: usize,
         len: usize,
@@ -131,7 +129,7 @@ impl ExfatInode {
 
         Self::validate_regular_file_mapping_shape(
             boot_region,
-            &cluster_map.cluster_map(),
+            &cluster_map.stream_extension(),
             data_length,
         )?;
 
@@ -204,7 +202,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         frame: &CachePage,
-        cluster_map: &RegularFileClusterMapGeneration,
+        cluster_map: &ClusterMap,
         data_length: usize,
         file_offset: usize,
         initialized_len: usize,
@@ -261,16 +259,16 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
-        if lookup_mount_snapshot.forced_shutdown
-            || lookup_mount_snapshot.anomaly.clear_to_zero
-            || lookup_mount_snapshot.anomaly.media_failure
+        let mount_state = fs.mount_state_read_guard()?;
+        if mount_state.forced_shutdown
+            || mount_state.flags.clear_to_zero
+            || mount_state.flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
 
         let (_cluster_map, data_length, _valid_data_length) =
-            self.regular_file_cluster_map_snapshot()?;
+            self.cluster_map_snapshot()?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);
         }

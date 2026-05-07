@@ -8,9 +8,7 @@ use core::mem;
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
-use super::{
-    boot::BootRegion, device_io, invalid_on_disk_layout, invalid_operation_input,
-};
+use super::{boot::BootRegion, device_io, invalid_on_disk_layout, invalid_operation_input};
 use crate::prelude::*;
 
 const FAT_END_OF_CHAIN: u32 = 0xFFFF_FFFF;
@@ -79,10 +77,7 @@ impl<'a> FatReader<'a> {
         }
     }
 
-    pub(super) fn next_cluster(
-        &mut self,
-        current_cluster: u32,
-    ) -> Result<FatChainStep> {
+    pub(super) fn next_cluster(&mut self, current_cluster: u32) -> Result<FatChainStep> {
         let entry_offset = u64::from(self.boot_region.fat_offset_sectors)
             .checked_mul(
                 u64::try_from(self.boot_region.sector_size)
@@ -90,8 +85,8 @@ impl<'a> FatReader<'a> {
             )
             .and_then(|offset| offset.checked_add(u64::from(current_cluster) * 4))
             .ok_or_else(invalid_on_disk_layout)?;
-        let sector_size = u64::try_from(self.boot_region.sector_size)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let sector_size =
+            u64::try_from(self.boot_region.sector_size).map_err(|_| invalid_on_disk_layout())?;
         let sector_index = entry_offset / sector_size;
         if self.cached_sector_index != Some(sector_index) {
             let sector_offset = sector_index
@@ -105,8 +100,8 @@ impl<'a> FatReader<'a> {
                 .map_err(|_| device_io())?;
             self.cached_sector_index = Some(sector_index);
         }
-        let entry_within_sector = usize::try_from(entry_offset % sector_size)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let entry_within_sector =
+            usize::try_from(entry_offset % sector_size).map_err(|_| invalid_on_disk_layout())?;
         let entry_end = entry_within_sector
             .checked_add(mem::size_of::<u32>())
             .ok_or_else(invalid_on_disk_layout)?;
@@ -168,10 +163,7 @@ impl<'a> FatReader<'a> {
         self.write_cluster_entry(appended_cluster, FAT_END_OF_CHAIN)?;
         for cluster_offset in (0..cluster_count).rev() {
             let current_cluster = start_cluster
-                .checked_add(
-                    u32::try_from(cluster_offset)
-                        .map_err(|_| invalid_operation_input())?,
-                )
+                .checked_add(u32::try_from(cluster_offset).map_err(|_| invalid_operation_input())?)
                 .ok_or_else(invalid_operation_input)?;
             if !self.boot_region.is_valid_cluster(current_cluster) {
                 return Err(invalid_operation_input());
@@ -193,18 +185,11 @@ impl<'a> FatReader<'a> {
         Ok(())
     }
 
-    pub(super) fn terminate_cluster_chain(
-        &mut self,
-        cluster: u32,
-    ) -> Result<()> {
+    pub(super) fn terminate_cluster_chain(&mut self, cluster: u32) -> Result<()> {
         self.write_cluster_entry(cluster, FAT_END_OF_CHAIN)
     }
 
-    fn write_cluster_entry(
-        &mut self,
-        cluster: u32,
-        next_cluster: u32,
-    ) -> Result<()> {
+    fn write_cluster_entry(&mut self, cluster: u32, next_cluster: u32) -> Result<()> {
         if !self.boot_region.is_valid_cluster(cluster) {
             return Err(invalid_operation_input());
         }
@@ -216,8 +201,8 @@ impl<'a> FatReader<'a> {
             )
             .and_then(|offset| offset.checked_add(u64::from(cluster) * 4))
             .ok_or_else(invalid_on_disk_layout)?;
-        let sector_size = u64::try_from(self.boot_region.sector_size)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let sector_size =
+            u64::try_from(self.boot_region.sector_size).map_err(|_| invalid_on_disk_layout())?;
         let sector_index = entry_offset / sector_size;
         if self.cached_sector_index != Some(sector_index) {
             let sector_offset = sector_index
@@ -232,8 +217,8 @@ impl<'a> FatReader<'a> {
             self.cached_sector_index = Some(sector_index);
         }
 
-        let entry_within_sector = usize::try_from(entry_offset % sector_size)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let entry_within_sector =
+            usize::try_from(entry_offset % sector_size).map_err(|_| invalid_on_disk_layout())?;
         let entry_end = entry_within_sector
             .checked_add(mem::size_of::<u32>())
             .ok_or_else(invalid_on_disk_layout)?;

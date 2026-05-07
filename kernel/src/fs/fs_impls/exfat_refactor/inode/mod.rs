@@ -20,12 +20,11 @@ use aster_block::BlockDevice;
 use ostd::{mm::VmReader, sync::RwMutex};
 use spin::Once;
 
-pub(in crate::fs::fs_impls::exfat_refactor) use self::state::RegularFileClusterMapGeneration;
+pub(in crate::fs::fs_impls::exfat_refactor) use self::state::{
+    ClusterMap, StreamExtensionDirEntry,
+};
 use self::{
-    state::{
-        DirectoryContextMode, ExfatInodeClusterMap, ExfatInodeDirtyState, InodeRewriteTarget,
-        InodeTimestampField,
-    },
+    state::{InodeDirtyState, InodeTimestampField},
     sync::InodeSyncScope,
 };
 use super::{
@@ -51,16 +50,16 @@ use crate::{
 
 pub(super) struct ExfatInode {
     inode_state: RwMutex<()>,
-    dirty_state: RwLock<ExfatInodeDirtyState>,
+    dirty_state: RwLock<InodeDirtyState>,
     extension: Extension,
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
     parent: Weak<Self>,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
-    regular_file_page_cache_state: RwLock<Option<page_backend::RegularFilePageCacheState>>,
-    regular_file_cluster_map_generation: RwLock<Option<Arc<RegularFileClusterMapGeneration>>>,
-    cluster_map: RwLock<ExfatInodeClusterMap>,
+    page_cache_context: RwLock<Option<page_backend::PageCacheContext>>,
+    cluster_map: RwLock<Option<Arc<ClusterMap>>>,
+    dir_entry_stream: RwLock<StreamExtensionDirEntry>,
 }
 
 impl ExfatInode {
@@ -70,7 +69,7 @@ impl ExfatInode {
         boot_region: &BootRegion,
     ) -> Result<Vec<u8>> {
         let _directory_guard = self.inode_state.read();
-        let cluster_map = *self.cluster_map.read();
+        let cluster_map = *self.dir_entry_stream.read();
         if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
@@ -85,7 +84,7 @@ impl ExfatInode {
         directory_bytes: &[u8],
     ) -> Result<()> {
         let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-        let cluster_map = *self.cluster_map.read();
+        let cluster_map = *self.dir_entry_stream.read();
         if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
@@ -109,16 +108,16 @@ impl ExfatInode {
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             inode_state: RwMutex::new(()),
-            dirty_state: RwLock::new(ExfatInodeDirtyState::default()),
+            dirty_state: RwLock::new(InodeDirtyState::default()),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),
             parent,
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
-            regular_file_page_cache_state: RwLock::new(None),
-            regular_file_cluster_map_generation: RwLock::new(None),
-            cluster_map: RwLock::new(ExfatInodeClusterMap {
+            page_cache_context: RwLock::new(None),
+            cluster_map: RwLock::new(None),
+            dir_entry_stream: RwLock::new(StreamExtensionDirEntry {
                 data_length,
                 first_cluster,
                 valid_data_length,
@@ -332,7 +331,7 @@ impl Inode for ExfatInode {
     fn sync_all(&self) -> Result<()> {
         match self.type_() {
             InodeType::File => self.sync_regular_file(InodeSyncScope::All),
-            // exFAT publishes directory metadata through the parent entry during mutation, so
+            // exFAT rewrites directory metadata through the parent entry during mutation, so
             // directories do not retain a separate deferred writeback path for `sync_all()`.
             InodeType::Dir => Ok(()),
             _ => Ok(()),
@@ -359,7 +358,7 @@ impl Inode for ExfatInode {
     fn fs(&self) -> Arc<dyn FileSystem> {
         match Weak::upgrade(&self.fs) {
             Some(fs) => fs,
-            None => unreachable!("published exFAT inode must keep its filesystem alive"),
+            None => unreachable!("mounted exFAT inode must keep its filesystem alive"),
         }
     }
 

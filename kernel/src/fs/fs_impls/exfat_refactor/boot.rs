@@ -9,9 +9,10 @@ use ostd::mm::VmIo;
 
 use super::{
     bitmap::{ALLOCATION_BITMAP_ENTRY_TYPE, AllocationBitmap},
+    device_io,
     fat::{ChainVisitControl, FatReader},
-    device_io, invalid_on_disk_layout,
-    fs::VolumeAnomalyState,
+    fs::VolumeFlags,
+    invalid_on_disk_layout,
     upcase::{UPCASE_TABLE_ENTRY_TYPE, UpcaseTable},
 };
 use crate::prelude::*;
@@ -38,17 +39,19 @@ pub(super) struct BootRegion {
 impl BootRegion {
     pub(super) fn load_mount_state(
         block_device: &dyn BlockDevice,
-    ) -> Result<(Self, VolumeAnomalyState, AllocationBitmap, Arc<UpcaseTable>)> {
+    ) -> Result<(Self, VolumeFlags, AllocationBitmap, Arc<UpcaseTable>)> {
         let boot_region = Self::load(block_device)?;
-        let anomaly = VolumeAnomalyState::read(block_device, &boot_region)?;
+        let flags = VolumeFlags::read(block_device, &boot_region)?;
         let mut fat_reader = FatReader::new(block_device, &boot_region);
-        let (mut bitmap, upcase_entry) =
-            Self::scan_root_directory(&boot_region, &mut fat_reader)?;
-        let upcase_table =
-            Arc::new(UpcaseTable::load(&boot_region, &mut fat_reader, upcase_entry)?);
+        let (mut bitmap, upcase_entry) = Self::scan_root_directory(&boot_region, &mut fat_reader)?;
+        let upcase_table = Arc::new(UpcaseTable::load(
+            &boot_region,
+            &mut fat_reader,
+            upcase_entry,
+        )?);
         let used_clusters = bitmap.count_used_clusters(&boot_region, &mut fat_reader)?;
         bitmap.set_used_clusters(used_clusters);
-        Ok((boot_region, anomaly, bitmap, upcase_table))
+        Ok((boot_region, flags, bitmap, upcase_table))
     }
 
     fn load(block_device: &dyn BlockDevice) -> Result<Self> {
@@ -161,8 +164,8 @@ impl BootRegion {
             return Err(invalid_on_disk_layout());
         }
         let cluster_index = u64::from(cluster - FIRST_DATA_CLUSTER);
-        let sectors_per_cluster = u64::try_from(self.sectors_per_cluster)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let sectors_per_cluster =
+            u64::try_from(self.sectors_per_cluster).map_err(|_| invalid_on_disk_layout())?;
         let sector_index = cluster_index
             .checked_mul(sectors_per_cluster)
             .and_then(|offset| offset.checked_add(u64::from(self.cluster_heap_offset_sectors)))
@@ -178,10 +181,7 @@ impl BootRegion {
         usize::try_from(self.cluster_count).map_err(|_| invalid_on_disk_layout())
     }
 
-    pub(super) fn cluster_from_index(
-        &self,
-        cluster_index: usize,
-    ) -> Result<u32> {
+    pub(super) fn cluster_from_index(&self, cluster_index: usize) -> Result<u32> {
         let cluster_index = u32::try_from(cluster_index).map_err(|_| invalid_on_disk_layout())?;
         let cluster = FIRST_DATA_CLUSTER
             .checked_add(cluster_index)
@@ -200,7 +200,8 @@ impl BootRegion {
     }
 
     pub(super) fn data_capacity_bytes(&self) -> Result<u64> {
-        let cluster_size = u64::try_from(self.cluster_size).map_err(|_| invalid_on_disk_layout())?;
+        let cluster_size =
+            u64::try_from(self.cluster_size).map_err(|_| invalid_on_disk_layout())?;
         u64::from(self.cluster_count)
             .checked_mul(cluster_size)
             .ok_or_else(invalid_on_disk_layout)
@@ -215,11 +216,7 @@ impl BootRegion {
                     .unwrap_or(u32::MAX)
     }
 
-    pub(super) fn validate_stream_data(
-        &self,
-        first_cluster: u32,
-        data_length: u64,
-    ) -> Result<()> {
+    pub(super) fn validate_stream_data(&self, first_cluster: u32, data_length: u64) -> Result<()> {
         if !self.is_valid_cluster(first_cluster) || data_length == 0 {
             return Err(invalid_on_disk_layout());
         }
@@ -229,10 +226,7 @@ impl BootRegion {
         Ok(())
     }
 
-    fn validate_checksum(
-        &self,
-        block_device: &dyn BlockDevice,
-    ) -> Result<()> {
+    fn validate_checksum(&self, block_device: &dyn BlockDevice) -> Result<()> {
         let checksum_region_len = self
             .sector_size
             .checked_mul(11)
@@ -261,8 +255,7 @@ impl BootRegion {
         }
         let data_sectors = u64::from(self.cluster_count)
             .checked_mul(
-                u64::try_from(self.sectors_per_cluster)
-                    .map_err(|_| invalid_on_disk_layout())?,
+                u64::try_from(self.sectors_per_cluster).map_err(|_| invalid_on_disk_layout())?,
             )
             .ok_or_else(invalid_on_disk_layout)?;
         let heap_end = u64::from(self.cluster_heap_offset_sectors)
@@ -321,10 +314,10 @@ impl BootRegion {
         ))
     }
 
-    pub(super) fn write_volume_anomaly_state(
+    pub(super) fn write_volume_flags(
         &self,
         block_device: &dyn BlockDevice,
-        anomaly: VolumeAnomalyState,
+        flags: VolumeFlags,
     ) -> Result<()> {
         let mut boot_sector = vec![0; self.sector_size];
         block_device
@@ -332,13 +325,13 @@ impl BootRegion {
             .map_err(|_| device_io())?;
 
         let mut volume_flags = 0u16;
-        if anomaly.volume_dirty {
+        if flags.volume_dirty {
             volume_flags |= 0x0002;
         }
-        if anomaly.media_failure {
+        if flags.media_failure {
             volume_flags |= 0x0004;
         }
-        if anomaly.clear_to_zero {
+        if flags.clear_to_zero {
             volume_flags |= 0x0008;
         }
         boot_sector[106..108].copy_from_slice(&volume_flags.to_le_bytes());

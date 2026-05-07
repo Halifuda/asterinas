@@ -6,7 +6,7 @@ use alloc::{string::String, vec::Vec};
 
 use super::{
     direntry::DIRECTORY_ENTRY_SIZE, fs::ExfatFs, invalid_on_disk_layout, invalid_operation_input,
-    read_only_conflict, unpublished_state,
+    not_mounted, read_only_conflict,
 };
 use crate::{
     fs::vfs::file_system::FsFlags, prelude::*, process::credentials::capabilities::CapSet,
@@ -40,7 +40,7 @@ pub(super) fn handle_volume_admin_request(
     match request {
         VolumeAdminRequest::ForceShutdown => {
             ensure_privileged_fn()?;
-            admit_forced_shutdown(fs)
+            set_forced_shutdown(fs)
         }
         VolumeAdminRequest::WriteVolumeLabel(label) => {
             ensure_privileged_fn()?;
@@ -50,17 +50,15 @@ pub(super) fn handle_volume_admin_request(
 }
 
 pub(super) fn read_volume_label(fs: &ExfatFs) -> Result<Option<String>> {
-    let lookup_mount_snapshot = fs.lookup_mount_snapshot()?;
+    let block_device = fs.immutable_block_device();
+    let boot_region = fs.immutable_boot_region();
     let root_inode = fs
         .root_inode
         .read()
         .as_ref()
-        .ok_or_else(unpublished_state)?
+        .ok_or_else(not_mounted)?
         .clone();
-    let directory_bytes = root_inode.read_root_directory_bytes(
-        &lookup_mount_snapshot.block_device,
-        &lookup_mount_snapshot.boot_region,
-    )?;
+    let directory_bytes = root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
     let label = decode_volume_label_entry(&directory_bytes)?;
     match label {
         Some(label) => String::from_utf16(&label)
@@ -71,48 +69,46 @@ pub(super) fn read_volume_label(fs: &ExfatFs) -> Result<Option<String>> {
 }
 
 pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<()> {
-    let admitted_label = match label {
+    let label = match label {
         None => None,
         Some(label) if label.is_empty() => None,
         Some(label) => {
-            let admitted_label: Vec<u16> = label.encode_utf16().collect();
-            if admitted_label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
+            let label: Vec<u16> = label.encode_utf16().collect();
+            if label.len() > VOLUME_LABEL_MAX_CODE_UNITS {
                 return_errno_with_message!(Errno::EINVAL, "invalid exFAT volume label");
             }
-            Some(admitted_label)
+            Some(label)
         }
     };
-    let mutation_mount_state = fs.mutation_mount_state()?;
+    let mutation_mount_state = fs.mount_state_write_guard()?;
+    let block_device = fs.immutable_block_device();
+    let boot_region = fs.immutable_boot_region();
     if mutation_mount_state.forced_shutdown {
         return_errno!(Errno::EIO);
     }
-    if mutation_mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
+    if mutation_mount_state
+        .options
+        .fs_flags
+        .contains(FsFlags::RDONLY)
+    {
         return Err(read_only_conflict());
     }
     let root_inode = fs
         .root_inode
         .read()
         .as_ref()
-        .ok_or_else(unpublished_state)?
+        .ok_or_else(not_mounted)?
         .clone();
-    let mut directory_bytes = root_inode.read_root_directory_bytes(
-        &mutation_mount_state.block_device,
-        &mutation_mount_state.boot_region,
-    )?;
-    encode_volume_label_entry(&mut directory_bytes, admitted_label.as_deref())?;
-    root_inode
-        .rewrite_root_directory_bytes(
-            &mutation_mount_state.block_device,
-            &mutation_mount_state.boot_region,
-            &directory_bytes,
-        )?;
+    let mut directory_bytes = root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
+    encode_volume_label_entry(&mut directory_bytes, label.as_deref())?;
+    root_inode.rewrite_root_directory_bytes(&block_device, &boot_region, &directory_bytes)?;
     Ok(())
 }
 
-pub(super) fn admit_forced_shutdown(fs: &ExfatFs) -> Result<()> {
+pub(super) fn set_forced_shutdown(fs: &ExfatFs) -> Result<()> {
     let mut mount_state = fs.mount_state.write();
-    let mounted_volume_state = mount_state.as_mut().ok_or_else(unpublished_state)?;
-    mounted_volume_state.forced_shutdown = true;
+    let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
+    mount_state.forced_shutdown = true;
     Ok(())
 }
 
