@@ -43,8 +43,8 @@ fn read_only_conflict() -> Error {
     Error::new(Errno::EROFS)
 }
 
-fn unpublished_state() -> Error {
-    Error::with_message(Errno::EINVAL, "filesystem state is not published")
+fn not_mounted() -> Error {
+    Error::with_message(Errno::EINVAL, "filesystem is not mounted")
 }
 
 fn unsupported_remount_delta() -> Error {

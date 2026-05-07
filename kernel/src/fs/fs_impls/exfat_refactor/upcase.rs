@@ -137,9 +137,7 @@ impl UpcaseTable {
                 }
 
                 for code_unit in mapping.len()..run_end {
-                    mapping.push(
-                        u16::try_from(code_unit).map_err(|_| invalid_on_disk_layout())?,
-                    );
+                    mapping.push(u16::try_from(code_unit).map_err(|_| invalid_on_disk_layout())?);
                 }
             }
 
@@ -163,10 +161,7 @@ impl UpcaseTable {
         Ok(mapping)
     }
 
-    pub(super) fn upcase_code_unit(
-        &self,
-        code_unit: u16,
-    ) -> u16 {
+    pub(super) fn upcase_code_unit(&self, code_unit: u16) -> u16 {
         self.mapping
             .get(usize::from(code_unit))
             .copied()

@@ -11,10 +11,10 @@ use aster_block::BlockDevice;
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, DirectoryEntryAnomalyKind, FileEntrySetView, ScannedDirectoryEntry},
+        direntry::{self, DirEntryIssueKind, FileEntrySetView, ScannedDirEntry},
         invalid_on_disk_layout,
     },
-    DirectoryContextMode, ExfatFs, ExfatInode, UpcaseTable,
+    ExfatFs, ExfatInode, UpcaseTable,
 };
 use crate::{
     fs::{file::InodeType, utils::DirentVisitor, vfs::inode::Inode},
@@ -31,7 +31,7 @@ impl ExfatInode {
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> Result<Option<Arc<dyn Inode>>> {
-        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot()?;
+        let (_owner_guard, cluster_map) = self.directory_snapshot()?;
         let directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)?;
         let Some(entry_view) = Self::locate_named_child_view(
@@ -52,8 +52,10 @@ impl ExfatInode {
                 u32::try_from(slot_range.first_entry_index())
                     .map_err(|_| invalid_on_disk_layout())?,
             );
-        let valid_data_length = usize::try_from(entry_view.cluster_map()?.valid_data_length())
-            .map_err(|_| invalid_on_disk_layout())?;
+        let valid_data_length = entry_view
+            .cluster_map()?
+            .valid_data_length
+            .ok_or_else(invalid_on_disk_layout)?;
         if valid_data_length > data_length {
             return Err(invalid_on_disk_layout());
         }
@@ -84,12 +86,12 @@ impl ExfatInode {
     ) -> Result<Option<FileEntrySetView<'a>>> {
         let mut entry_index = 0usize;
         loop {
-            match direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)? {
-                ScannedDirectoryEntry::EndOfDirectory { .. } => return Ok(None),
-                ScannedDirectoryEntry::Vacant(slot_range) => {
+            match direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)? {
+                ScannedDirEntry::EndOfDirectory { .. } => return Ok(None),
+                ScannedDirEntry::Vacant(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
                 }
-                ScannedDirectoryEntry::File(entry_view) => {
+                ScannedDirEntry::File(entry_view) => {
                     let candidate_name = entry_view.name()?;
                     if entry_view.stored_name_hash() == lookup_name_hash
                         && upcase_table.names_equal(lookup_name, &candidate_name)
@@ -98,8 +100,8 @@ impl ExfatInode {
                     }
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
-                ScannedDirectoryEntry::Anomaly { kind, slot_range } => {
-                    if kind == DirectoryEntryAnomalyKind::BenignUnrecognizedEntrySet {
+                ScannedDirEntry::Issue { kind, slot_range } => {
+                    if kind == DirEntryIssueKind::BenignUnrecognizedEntrySet {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
@@ -118,10 +120,10 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_access = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
-        let block_device = mount_access.block_device();
-        let boot_region = mount_access.boot_region();
-        let (_owner_guard, cluster_map) = self.admitted_directory_snapshot()?;
+        let mount_guard = self.directory_access_guard(&fs, false)?;
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let (_owner_guard, cluster_map) = self.directory_snapshot()?;
         let directory_bytes =
             Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)?;
 
@@ -138,16 +140,16 @@ impl ExfatInode {
         let mut visible_offset = 2usize;
         let mut entry_index = 0usize;
         loop {
-            match direntry::scan_directory_entry(
+            match direntry::scan_dir_entry(
                 cluster_map.data_length.is_none(),
                 &directory_bytes,
                 entry_index,
             )? {
-                ScannedDirectoryEntry::EndOfDirectory { .. } => break,
-                ScannedDirectoryEntry::Vacant(slot_range) => {
+                ScannedDirEntry::EndOfDirectory { .. } => break,
+                ScannedDirEntry::Vacant(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
                 }
-                ScannedDirectoryEntry::File(entry_view) => {
+                ScannedDirEntry::File(entry_view) => {
                     let candidate_name = entry_view.name()?;
                     let (inode_type, _, _, _) = entry_view.child_metadata(&boot_region)?;
 
@@ -169,8 +171,8 @@ impl ExfatInode {
                         .ok_or(invalid_on_disk_layout())?;
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
-                ScannedDirectoryEntry::Anomaly { kind, slot_range } => {
-                    if kind == DirectoryEntryAnomalyKind::BenignUnrecognizedEntrySet {
+                ScannedDirEntry::Issue { kind, slot_range } => {
+                    if kind == DirEntryIssueKind::BenignUnrecognizedEntrySet {
                         entry_index = slot_range.next_entry_index()?;
                         continue;
                     }
@@ -190,7 +192,7 @@ impl ExfatInode {
             let inode: Arc<dyn Inode> = self
                 .weak_self()
                 .upgrade()
-                .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not published"))?;
+                .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not mounted"))?;
             return Ok(inode);
         }
 
@@ -198,11 +200,11 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_access = self.admitted_directory_context(&fs, DirectoryContextMode::Lookup)?;
-        let block_device = mount_access.block_device();
-        let boot_region = mount_access.boot_region();
-        let upcase_table = mount_access.upcase_table();
-        let lookup_name = Self::admitted_name(name, &mount_access.options())?;
+        let mount_guard = self.directory_access_guard(&fs, false)?;
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let upcase_table = mount_guard.upcase_table();
+        let lookup_name = Self::validate_name(name, &mount_guard.options())?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         let child_inode = self.lookup_child_by_name(
             &fs,

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Implements regular-file writes, resizes, entry-set republish, and cluster-map growth.
+//! Implements regular-file writes, resizes, entry-set write-back, and cluster-map growth.
 //!
-//! Method groups: write/resize entry points, shared growth publication, entry-set publication,
+//! Method groups: write/resize entry points, shared growth commit, entry-set write-back,
 //! growth topology helpers, and cluster-level mutation.
 
 use core::{ops::Range, time::Duration};
@@ -12,12 +12,12 @@ use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
-        bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader,
+        bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader, fs::ClusterAllocGuard,
         inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
-        unpublished_state,
+        not_mounted,
     },
-    ExfatFs, ExfatInode, ExfatInodeClusterMap, InodeRewriteTarget, MountedVolumeState,
-    page_backend::RegularFilePageCacheState,
+    ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
+    page_backend::PageCacheContext,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -58,10 +58,12 @@ impl ExfatInode {
             Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
         })?;
         {
-            let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+            let mut admission = fs.mount_state_write_guard().map_err(Error::from)?;
+            let block_device = fs.immutable_block_device();
+            let boot_region = fs.immutable_boot_region();
             if admission.forced_shutdown
-                || admission.anomaly.clear_to_zero
-                || admission.anomaly.media_failure
+                || admission.flags.clear_to_zero
+                || admission.flags.media_failure
             {
                 return_errno!(Errno::EIO);
             }
@@ -71,8 +73,8 @@ impl ExfatInode {
 
             let inode_state_guard = self.inode_state.write();
             let cluster_map_generation =
-                self.current_regular_file_cluster_map_generation(&inode_state_guard)?;
-            let cluster_map = cluster_map_generation.cluster_map();
+                self.current_cluster_map(&inode_state_guard)?;
+            let cluster_map = cluster_map_generation.stream_extension();
             let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
 
             let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
@@ -84,22 +86,22 @@ impl ExfatInode {
                 .checked_add(write_len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
             if status_flags.contains(StatusFlags::O_DIRECT)
-                && (!effective_offset.is_multiple_of(admission.boot_region.sector_size)
-                    || !write_len.is_multiple_of(admission.boot_region.sector_size))
+                && (!effective_offset.is_multiple_of(boot_region.sector_size)
+                    || !write_len.is_multiple_of(boot_region.sector_size))
             {
                 return_errno!(Errno::EINVAL);
             }
 
             let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
-            let published_data_length = data_length.max(write_end);
-            let published_valid_data_length = valid_data_length.max(write_end);
+            let new_data_length = data_length.max(write_end);
+            let new_valid_data_length = valid_data_length.max(write_end);
             let timestamp = RealTimeCoarseClock::get().read_time();
-            let _page_cache_state = self.install_regular_file_page_cache_state(
+            let _page_cache_context = self.install_page_cache_context(
                 &inode_state_guard,
-                RegularFilePageCacheState {
-                    anomaly: admission.anomaly,
-                    block_device: admission.block_device.clone(),
-                    boot_region: admission.boot_region,
+                PageCacheContext {
+                    flags: admission.flags,
+                    block_device: block_device.clone(),
+                    boot_region,
                     cluster_map: cluster_map_generation.clone(),
                     data_length,
                     read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
@@ -112,8 +114,8 @@ impl ExfatInode {
                 {
                     page_cache.evict_range(cache_mutation_range.clone())?;
                 }
-                if published_data_length > data_length {
-                    page_cache.resize(published_data_length)?;
+                if new_data_length > data_length {
+                    page_cache.resize(new_data_length)?;
                 }
                 Self::prepare_regular_file_page_cache_range(
                     page_cache,
@@ -121,21 +123,18 @@ impl ExfatInode {
                     cache_mutation_range.clone(),
                 )?;
 
-                let mount_state = admission
-                    .state_guard
-                    .as_ref()
-                    .ok_or_else(unpublished_state)?;
+                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                 let rollback_cache_mutation_range = cache_mutation_range.clone();
-                self.grow_and_republish_regular_file(
+                self.grow_and_commit_regular_file(
                     &inode_state_guard,
                     &fs,
                     mount_state,
-                    &admission.block_device,
-                    &admission.boot_region,
+                    &block_device,
+                    &boot_region,
                     cluster_map,
                     effective_offset,
-                    published_data_length,
-                    published_valid_data_length,
+                    new_data_length,
+                    new_valid_data_length,
                     timestamp,
                     |_cluster_map, zero_fill_range| {
                         if !zero_fill_range.is_empty() {
@@ -148,14 +147,14 @@ impl ExfatInode {
                         if !rollback_cache_mutation_range.is_empty() {
                             page_cache.discard_range(rollback_cache_mutation_range);
                         }
-                        if published_data_length > data_length {
+                        if new_data_length > data_length {
                             let _ = page_cache.resize(data_length);
                         }
                     },
                 )
             })();
             if let Err(error) = write_result {
-                if published_data_length > data_length {
+                if new_data_length > data_length {
                     let _ = page_cache.resize(data_length);
                 }
                 return Err(error);
@@ -181,10 +180,12 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let admission = fs.admitted_mutation_state().map_err(Error::from)?;
+        let mut admission = fs.mount_state_write_guard().map_err(Error::from)?;
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
         if admission.forced_shutdown
-            || admission.anomaly.clear_to_zero
-            || admission.anomaly.media_failure
+            || admission.flags.clear_to_zero
+            || admission.flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
@@ -194,8 +195,8 @@ impl ExfatInode {
 
         let inode_state_guard = self.inode_state.write();
         let cluster_map_generation =
-            self.current_regular_file_cluster_map_generation(&inode_state_guard)?;
-        let cluster_map = cluster_map_generation.cluster_map();
+            self.current_cluster_map(&inode_state_guard)?;
+        let cluster_map = cluster_map_generation.stream_extension();
         let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
         if new_size == data_length {
             return Ok(());
@@ -204,29 +205,26 @@ impl ExfatInode {
         let timestamp = RealTimeCoarseClock::get().read_time();
 
         if new_size > data_length {
-            let mount_state = admission
-                .state_guard
-                .as_ref()
-                .ok_or_else(unpublished_state)?;
             let page_cache_result = if let Some(page_cache) = page_cache {
-                let _page_cache_state = self.install_regular_file_page_cache_state(
+                let _page_cache_context = self.install_page_cache_context(
                     &inode_state_guard,
-                    RegularFilePageCacheState {
-                        anomaly: admission.anomaly,
-                        block_device: admission.block_device.clone(),
-                        boot_region: admission.boot_region,
+                    PageCacheContext {
+                    flags: admission.flags,
+                        block_device: block_device.clone(),
+                        boot_region,
                         cluster_map: cluster_map_generation.clone(),
                         data_length,
                         read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
                         valid_data_length,
                     },
                 );
-                self.grow_and_republish_regular_file(
+                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                self.grow_and_commit_regular_file(
                     &inode_state_guard,
                     &fs,
                     mount_state,
-                    &admission.block_device,
-                    &admission.boot_region,
+                    &block_device,
+                    &boot_region,
                     cluster_map,
                     new_size,
                     new_size,
@@ -249,12 +247,13 @@ impl ExfatInode {
                     || {},
                 )
             } else {
-                self.grow_and_republish_regular_file(
+                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                self.grow_and_commit_regular_file(
                     &inode_state_guard,
                     &fs,
                     mount_state,
-                    &admission.block_device,
-                    &admission.boot_region,
+                    &block_device,
+                    &boot_region,
                     cluster_map,
                     new_size,
                     new_size,
@@ -266,8 +265,8 @@ impl ExfatInode {
                         }
 
                         Self::mutate_regular_file_range(
-                            &admission.block_device,
-                            &admission.boot_region,
+                            &block_device,
+                            &boot_region,
                             cluster_map,
                             new_size,
                             zero_fill_range.start,
@@ -300,7 +299,7 @@ impl ExfatInode {
         let retained_clusters = if new_size == 0 {
             0
         } else {
-            new_size.div_ceil(admission.boot_region.cluster_size)
+            new_size.div_ceil(boot_region.cluster_size)
         };
         let mut retained_clusters_remaining = retained_clusters;
         let mut retained_is_contiguous = true;
@@ -349,7 +348,7 @@ impl ExfatInode {
             return Err(invalid_on_disk_layout());
         }
 
-        let next_cluster_map = ExfatInodeClusterMap {
+        let next_cluster_map = StreamExtensionDirEntry {
             data_length: Some(new_size),
             first_cluster: if retained_clusters == 0 {
                 0
@@ -362,9 +361,9 @@ impl ExfatInode {
         if let Some(page_cache) = page_cache {
             page_cache.resize(new_size)?;
         }
-        if let Err(error) = self.republish_regular_file_entry_set(
-            &admission.block_device,
-            &admission.boot_region,
+        if let Err(error) = self.write_back_regular_file_entry_set(
+            &block_device,
+            &boot_region,
             next_cluster_map,
             timestamp,
         ) {
@@ -375,7 +374,7 @@ impl ExfatInode {
         }
 
         let allocated_sectors = retained_clusters
-            .checked_mul(admission.boot_region.sectors_per_cluster)
+            .checked_mul(boot_region.sectors_per_cluster)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         {
             let mut metadata = self.metadata.write();
@@ -385,18 +384,18 @@ impl ExfatInode {
             metadata.size = new_size;
         }
         let retired_generation =
-            self.replace_regular_file_cluster_map(&inode_state_guard, next_cluster_map)?;
-        self.mark_content_publication_dirty(&inode_state_guard);
+            self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
+        self.mark_content_dirty(&inode_state_guard);
         if !cluster_map.no_fat_chain && retained_clusters != 0 {
             let retained_last_cluster =
                 previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
-            FatReader::new(admission.block_device.as_ref(), &admission.boot_region)
+            FatReader::new(block_device.as_ref(), &boot_region)
                 .terminate_cluster_chain(retained_last_cluster)
                 .map_err(Error::from)?;
         }
 
         if !released_ranges.is_empty() {
-            fs.retire_regular_file_clusters(retired_generation, released_ranges)?;
+            fs.lazy_reclaim_clusters(retired_generation, released_ranges)?;
         }
         Ok(())
     }
@@ -423,19 +422,19 @@ impl ExfatInode {
         Ok(())
     }
 
-    fn grow_and_republish_regular_file(
+    fn grow_and_commit_regular_file(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
-        mount_state: &MountedVolumeState,
+        mount_state: &mut MountedVolumeState,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         zero_fill_end: usize,
         new_data_length: usize,
         new_valid_data_length: usize,
         timestamp: Duration,
-        apply_growth_fn: impl FnOnce(&ExfatInodeClusterMap, Range<usize>) -> Result<()>,
+        apply_growth_fn: impl FnOnce(&StreamExtensionDirEntry, Range<usize>) -> Result<()>,
         rollback_growth_fn: impl FnOnce(),
     ) -> Result<()> {
         let result = (|| {
@@ -454,20 +453,40 @@ impl ExfatInode {
             }
             let zero_fill_range =
                 current_valid_data_length..current_valid_data_length.max(zero_fill_end);
+            let current_allocated_clusters = if current_data_length == 0 {
+                0
+            } else {
+                current_data_length.div_ceil(boot_region.cluster_size)
+            };
+            let target_allocated_clusters = new_data_length.div_ceil(boot_region.cluster_size);
+            let additional_clusters = target_allocated_clusters
+                .checked_sub(current_allocated_clusters)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            let cluster_alloc_guard = if additional_clusters == 0 {
+                None
+            } else {
+                Some(ClusterAllocGuard::allocate(
+                    fs,
+                    mount_state,
+                    additional_clusters,
+                )?)
+            };
+            let allocated_ranges = cluster_alloc_guard
+                .as_ref()
+                .map_or(&[][..], ClusterAllocGuard::ranges);
 
-            let mut next_cluster_map = Self::grow_regular_file_cluster_map(
-                fs,
-                mount_state,
+            let mut next_cluster_map = Self::grow_cluster_map(
                 block_device,
                 boot_region,
                 cluster_map,
                 new_data_length,
+                allocated_ranges,
             )?;
             apply_growth_fn(&next_cluster_map, zero_fill_range)?;
 
             next_cluster_map.data_length = Some(new_data_length);
             next_cluster_map.valid_data_length = Some(new_valid_data_length);
-            self.republish_regular_file_entry_set(
+            self.write_back_regular_file_entry_set(
                 block_device,
                 boot_region,
                 next_cluster_map,
@@ -489,8 +508,11 @@ impl ExfatInode {
                 metadata.last_modify_at = timestamp;
                 metadata.size = new_data_length;
             }
-            let _ = self.replace_regular_file_cluster_map(inode_state_guard, next_cluster_map)?;
-            self.mark_content_publication_dirty(&inode_state_guard);
+            let _ = self.replace_cluster_map(inode_state_guard, next_cluster_map)?;
+            self.mark_content_dirty(&inode_state_guard);
+            if let Some(cluster_alloc_guard) = cluster_alloc_guard {
+                cluster_alloc_guard.commit();
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -499,13 +521,13 @@ impl ExfatInode {
         result
     }
 
-    // Entry-set publication
+    // Entry-set write-back
 
-    pub(super) fn republish_regular_file_entry_set(
+    pub(super) fn write_back_regular_file_entry_set(
         &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         timestamp: Duration,
     ) -> Result<()> {
         let Some(data_length) = cluster_map.data_length else {
@@ -531,36 +553,22 @@ impl ExfatInode {
         }
 
         self.rewrite_inode_entry_set(
-            InodeRewriteTarget::RegularFile,
             block_device,
             boot_region,
             |entry_view| {
-                let valid_data_length =
-                    u64::try_from(valid_data_length).map_err(|_| Error::new(Errno::EINVAL))?;
-                let data_length =
-                    u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
                 let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
                     Self::encoded_exfat_timestamp_fields(
                         timestamp,
                         entry_view.last_modified_timestamp().utc_offset_byte(),
                     )?;
-                let entry_cluster_map = direntry::FileEntryClusterMap::new(
-                    cluster_map.first_cluster,
-                    data_length,
-                    valid_data_length,
-                    cluster_map.no_fat_chain,
-                )
-                .map_err(Error::from)?;
-                let mut republished_entry_set = entry_view.republished();
-                republished_entry_set.set_cluster_map(entry_cluster_map);
-                republished_entry_set.set_last_modified_timestamp(
-                    direntry::FileEntryTimestamp::new(
-                        timestamp_bytes,
-                        Some(hundredths_increment),
-                        encoded_utc_offset_byte,
-                    ),
-                );
-                Ok(Some(republished_entry_set.into_bytes()))
+                let mut mutable_entry_set = entry_view.to_mutable();
+                mutable_entry_set.set_cluster_map(&cluster_map)?;
+                mutable_entry_set.set_last_modified_timestamp(direntry::FileEntryTimestamp::new(
+                    timestamp_bytes,
+                    Some(hundredths_increment),
+                    encoded_utc_offset_byte,
+                ));
+                Ok(Some(mutable_entry_set.into_bytes()))
             },
             |_| {},
         )?;
@@ -569,14 +577,13 @@ impl ExfatInode {
 
     // Cluster-map topology
 
-    pub(super) fn grow_regular_file_cluster_map(
-        fs: &Arc<ExfatFs>,
-        mount_state: &MountedVolumeState,
+    pub(super) fn grow_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         new_data_length: usize,
-    ) -> Result<ExfatInodeClusterMap> {
+        allocated_ranges: &[ClusterRange],
+    ) -> Result<StreamExtensionDirEntry> {
         let Some(current_data_length) = cluster_map.data_length else {
             return_errno!(Errno::EINVAL);
         };
@@ -598,7 +605,7 @@ impl ExfatInode {
         };
         let target_allocated_clusters = new_data_length.div_ceil(boot_region.cluster_size);
         if target_allocated_clusters == current_allocated_clusters {
-            return Ok(ExfatInodeClusterMap {
+            return Ok(StreamExtensionDirEntry {
                 data_length: Some(new_data_length),
                 ..cluster_map
             });
@@ -607,8 +614,6 @@ impl ExfatInode {
         let additional_clusters = target_allocated_clusters
             .checked_sub(current_allocated_clusters)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        let allocated_ranges =
-            fs.allocate_free_space_with_publication(mount_state, additional_clusters)?;
         let allocated_cluster_count =
             allocated_ranges
                 .iter()
@@ -659,10 +664,10 @@ impl ExfatInode {
     fn allocate_initial_regular_file_clusters(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         new_data_length: usize,
         allocated_ranges: &[ClusterRange],
-    ) -> Result<ExfatInodeClusterMap> {
+    ) -> Result<StreamExtensionDirEntry> {
         let first_new_cluster = allocated_ranges
             .first()
             .ok_or_else(inconsistent_bitmap_accounting)?
@@ -673,7 +678,7 @@ impl ExfatInode {
             Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
                 .map_err(Error::from)?;
         }
-        Ok(ExfatInodeClusterMap {
+        Ok(StreamExtensionDirEntry {
             data_length: Some(new_data_length),
             first_cluster: first_new_cluster,
             no_fat_chain: is_single_contiguous_allocation,
@@ -682,10 +687,10 @@ impl ExfatInode {
     }
 
     fn extend_contiguous_regular_file_clusters(
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         new_data_length: usize,
-    ) -> ExfatInodeClusterMap {
-        ExfatInodeClusterMap {
+    ) -> StreamExtensionDirEntry {
+        StreamExtensionDirEntry {
             data_length: Some(new_data_length),
             ..cluster_map
         }
@@ -694,11 +699,11 @@ impl ExfatInode {
     fn extend_fragmented_regular_file_clusters(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         current_allocated_clusters: usize,
         new_data_length: usize,
         allocated_ranges: &[ClusterRange],
-    ) -> Result<ExfatInodeClusterMap> {
+    ) -> Result<StreamExtensionDirEntry> {
         let first_new_cluster = allocated_ranges
             .first()
             .ok_or_else(inconsistent_bitmap_accounting)?
@@ -719,7 +724,7 @@ impl ExfatInode {
         }
         Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
             .map_err(Error::from)?;
-        Ok(ExfatInodeClusterMap {
+        Ok(StreamExtensionDirEntry {
             data_length: Some(new_data_length),
             no_fat_chain: false,
             ..cluster_map
@@ -768,7 +773,7 @@ impl ExfatInode {
     pub(super) fn mutate_regular_file_range(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: &ExfatInodeClusterMap,
+        cluster_map: &StreamExtensionDirEntry,
         data_length: usize,
         offset: usize,
         len: usize,

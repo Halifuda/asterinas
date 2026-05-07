@@ -12,14 +12,14 @@ use super::{
         bitmap::ClusterRange,
         boot::BootRegion,
         direntry::{
-            self, DIRECTORY_ENTRY_SIZE, DirectoryEntrySlotRange, FileEntrySetView,
-            ScannedDirectoryEntry, WritableDirectoryEntrySlotSpan,
+            self, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, FileEntrySetView,
+            MutableDirEntrySlotSpan, ScannedDirEntry,
         },
         fat::{ChainVisitControl, FatReader},
-        inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
+        fs::ClusterAllocGuard,
+        invalid_on_disk_layout, invalid_operation_input,
     },
-    DirectoryContextMode, ExfatFs, ExfatInode, ExfatInodeClusterMap, MountedVolumeState,
-    UpcaseTable,
+    ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry, UpcaseTable,
 };
 use crate::{
     fs::{
@@ -29,51 +29,6 @@ use crate::{
     prelude::*,
     time::clocks::RealTimeCoarseClock,
 };
-
-struct AllocatedDirectoryClusterGuard<'a> {
-    fs: &'a Arc<ExfatFs>,
-    publication: &'a mut MountedVolumeState,
-    allocated_ranges: Option<Vec<ClusterRange>>,
-}
-
-impl<'a> AllocatedDirectoryClusterGuard<'a> {
-    fn allocate(fs: &'a Arc<ExfatFs>, publication: &'a mut MountedVolumeState) -> Result<Self> {
-        let allocated_ranges = fs.allocate_free_space_with_publication(publication, 1)?;
-        let guard = Self {
-            fs,
-            publication,
-            allocated_ranges: Some(allocated_ranges),
-        };
-        if !matches!(
-            guard.allocated_ranges.as_deref(),
-            Some([allocated_range]) if allocated_range.cluster_count == 1
-        ) {
-            return Err(inconsistent_bitmap_accounting());
-        }
-        Ok(guard)
-    }
-
-    fn allocated_cluster(&self) -> u32 {
-        match self.allocated_ranges.as_deref() {
-            Some([allocated_range]) => allocated_range.start_cluster,
-            _ => unreachable!("validated single-cluster allocation"),
-        }
-    }
-
-    fn commit(mut self) {
-        self.allocated_ranges = None;
-    }
-}
-
-impl Drop for AllocatedDirectoryClusterGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(allocated_ranges) = self.allocated_ranges.take() {
-            let _ = self
-                .fs
-                .free_allocated_space_with_publication(self.publication, &allocated_ranges);
-        }
-    }
-}
 
 impl ExfatInode {
     // VFS entry points
@@ -92,25 +47,25 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
-        if context.forced_shutdown() {
+        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let upcase_table = context.upcase_table();
-        let options = context.options();
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let upcase_table = mount_guard.upcase_table();
+        let options = mount_guard.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
-        let admitted_name = Self::admitted_name(name, &options)?;
-        let name_hash = upcase_table.name_hash(&admitted_name);
+        let name = Self::validate_name(name, &options)?;
+        let name_hash = upcase_table.name_hash(&name);
         let required_entry_count =
-            direntry::file_entry_set_entry_count(admitted_name.len()).map_err(Error::from)?;
+            direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
         let child_inode = {
             let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-            let cluster_map = *self.cluster_map.read();
+            let cluster_map = *self.dir_entry_stream.read();
             let current_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -121,7 +76,7 @@ impl ExfatInode {
                 &current_directory_bytes,
                 cluster_map.data_length.is_none(),
                 &upcase_table,
-                &admitted_name,
+                &name,
                 name_hash,
             )
             .map_err(Error::from)?
@@ -130,11 +85,11 @@ impl ExfatInode {
                 return_errno!(Errno::EEXIST);
             }
 
-            let publication = context.publication()?;
-            let (cluster_map, mut published_directory_bytes, slot_range) = self
+            let mount_state = mount_guard.mount_state_mut()?;
+            let (cluster_map, mut directory_bytes, slot_range) = self
                 .reserve_directory_entry_slots(
                     cluster_map,
-                    publication,
+                    mount_state,
                     &fs,
                     &block_device,
                     &boot_region,
@@ -142,57 +97,57 @@ impl ExfatInode {
                 )
                 .map_err(Error::from)?;
 
-            let (first_cluster, data_length, no_fat_chain) = if type_ == InodeType::Dir
-                && !options.zero_size_dir
-            {
-                let allocated_directory_cluster =
-                    AllocatedDirectoryClusterGuard::allocate(&fs, publication)
+            let (first_cluster, data_length, no_fat_chain) =
+                if type_ == InodeType::Dir && !options.zero_size_dir {
+                    let allocated_directory_cluster =
+                        ClusterAllocGuard::allocate(&fs, mount_state, 1).map_err(Error::from)?;
+                    let allocated_cluster = allocated_directory_cluster
+                        .single_cluster()
                         .map_err(Error::from)?;
-                let allocated_cluster = allocated_directory_cluster.allocated_cluster();
-                if let Err(error) = Self::initialize_directory_cluster(
-                    &block_device,
-                    &boot_region,
-                    allocated_cluster,
-                ) {
-                    return Err(Error::from(error));
-                }
-                let entry_set = direntry::encode_file_entry_set(
-                    &admitted_name,
-                    name_hash,
-                    type_,
-                    allocated_cluster,
-                    boot_region.cluster_size,
-                    true,
-                )
-                .map_err(Error::from)?;
-                let slot_range_bytes =
-                    direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
-                published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
-                Self::write_directory_bytes_for_cluster_map(
-                    &block_device,
-                    &boot_region,
-                    &published_directory_bytes,
-                    cluster_map,
-                )
-                .map_err(Error::from)?;
-                allocated_directory_cluster.commit();
-                (allocated_cluster, boot_region.cluster_size, true)
-            } else {
-                let entry_set =
-                    direntry::encode_file_entry_set(&admitted_name, name_hash, type_, 0, 0, false)
-                        .map_err(Error::from)?;
-                let slot_range_bytes =
-                    direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
-                published_directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
-                Self::write_directory_bytes_for_cluster_map(
-                    &block_device,
-                    &boot_region,
-                    &published_directory_bytes,
-                    cluster_map,
-                )
-                .map_err(Error::from)?;
-                (0, 0, false)
-            };
+                    if let Err(error) = Self::initialize_directory_cluster(
+                        &block_device,
+                        &boot_region,
+                        allocated_cluster,
+                    ) {
+                        return Err(Error::from(error));
+                    }
+                    let entry_set = direntry::encode_file_entry_set(
+                        &name,
+                        name_hash,
+                        type_,
+                        allocated_cluster,
+                        boot_region.cluster_size,
+                        true,
+                    )
+                    .map_err(Error::from)?;
+                    let slot_range_bytes =
+                        direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
+                    directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
+                    Self::write_directory_bytes_for_cluster_map(
+                        &block_device,
+                        &boot_region,
+                        &directory_bytes,
+                        cluster_map,
+                    )
+                    .map_err(Error::from)?;
+                    allocated_directory_cluster.commit();
+                    (allocated_cluster, boot_region.cluster_size, true)
+                } else {
+                    let entry_set =
+                        direntry::encode_file_entry_set(&name, name_hash, type_, 0, 0, false)
+                            .map_err(Error::from)?;
+                    let slot_range_bytes =
+                        direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
+                    directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
+                    Self::write_directory_bytes_for_cluster_map(
+                        &block_device,
+                        &boot_region,
+                        &directory_bytes,
+                        cluster_map,
+                    )
+                    .map_err(Error::from)?;
+                    (0, 0, false)
+                };
 
             let child_size = if type_ == InodeType::Dir {
                 data_length
@@ -229,24 +184,24 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
-        if context.forced_shutdown() {
+        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let upcase_table = context.upcase_table();
-        let options = context.options();
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let upcase_table = mount_guard.upcase_table();
+        let options = mount_guard.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
-        let admitted_name = Self::admitted_name(name, &options)?;
-        let lookup_name_hash = upcase_table.name_hash(&admitted_name);
+        let name = Self::validate_name(name, &options)?;
+        let lookup_name_hash = upcase_table.name_hash(&name);
 
         let allocated_cluster_ranges = {
             let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-            let cluster_map = *self.cluster_map.read();
+            let cluster_map = *self.dir_entry_stream.read();
             let is_root_directory = cluster_map.data_length.is_none();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -258,7 +213,7 @@ impl ExfatInode {
                 &directory_bytes,
                 is_root_directory,
                 &upcase_table,
-                &admitted_name,
+                &name,
                 lookup_name_hash,
             )
             .map_err(Error::from)?
@@ -289,8 +244,7 @@ impl ExfatInode {
                 .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
-                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
-                    .map_err(Error::from)?;
+                MutableDirEntrySlotSpan::new(slot_range, removed_entry_set).map_err(Error::from)?;
             direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
             Self::write_directory_bytes_for_cluster_map(
                 &block_device,
@@ -303,9 +257,8 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = context.publication()?;
-            let _ =
-                fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
+            let mount_state = mount_guard.mount_state_mut()?;
+            let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
         }
         self.refresh_directory_metadata_after_namespace_mutation(
             &block_device,
@@ -320,24 +273,24 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
-        if context.forced_shutdown() {
+        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let upcase_table = context.upcase_table();
-        let options = context.options();
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let upcase_table = mount_guard.upcase_table();
+        let options = mount_guard.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
-        let admitted_name = Self::admitted_name(name, &options)?;
-        let lookup_name_hash = upcase_table.name_hash(&admitted_name);
+        let name = Self::validate_name(name, &options)?;
+        let lookup_name_hash = upcase_table.name_hash(&name);
 
         let allocated_cluster_ranges = {
             let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-            let cluster_map = *self.cluster_map.read();
+            let cluster_map = *self.dir_entry_stream.read();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -348,7 +301,7 @@ impl ExfatInode {
                 &directory_bytes,
                 cluster_map.data_length.is_none(),
                 &upcase_table,
-                &admitted_name,
+                &name,
                 lookup_name_hash,
             )
             .map_err(Error::from)?
@@ -394,8 +347,7 @@ impl ExfatInode {
                 .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
-                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
-                    .map_err(Error::from)?;
+                MutableDirEntrySlotSpan::new(slot_range, removed_entry_set).map_err(Error::from)?;
             direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)?;
             Self::write_directory_bytes_for_cluster_map(
                 &block_device,
@@ -408,9 +360,8 @@ impl ExfatInode {
         };
 
         if !allocated_cluster_ranges.is_empty() {
-            let publication = context.publication()?;
-            let _ =
-                fs.free_allocated_space_with_publication(publication, &allocated_cluster_ranges);
+            let mount_state = mount_guard.mount_state_mut()?;
+            let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
         }
         self.refresh_directory_metadata_after_namespace_mutation(
             &block_device,
@@ -437,7 +388,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut context = self.admitted_directory_context(&fs, DirectoryContextMode::Mutation)?;
+        let mut mount_guard = self.directory_access_guard(&fs, true)?;
         let target_fs = target_directory
             .fs
             .upgrade()
@@ -445,26 +396,26 @@ impl ExfatInode {
         if !Arc::ptr_eq(&fs, &target_fs) {
             return_errno!(Errno::EXDEV);
         }
-        if context.forced_shutdown() {
+        if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
-        let block_device = context.block_device();
-        let boot_region = context.boot_region();
-        let upcase_table = context.upcase_table();
-        let options = context.options();
+        let block_device = mount_guard.block_device();
+        let boot_region = mount_guard.boot_region();
+        let upcase_table = mount_guard.upcase_table();
+        let options = mount_guard.options();
         if options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
-        let admitted_old_name = Self::admitted_name(old_name, &options)?;
-        let admitted_new_name = Self::admitted_name(new_name, &options)?;
-        let old_name_hash = upcase_table.name_hash(&admitted_old_name);
-        let new_name_hash = upcase_table.name_hash(&admitted_new_name);
+        let old_name = Self::validate_name(old_name, &options)?;
+        let new_name = Self::validate_name(new_name, &options)?;
+        let old_name_hash = upcase_table.name_hash(&old_name);
+        let new_name_hash = upcase_table.name_hash(&new_name);
 
         if self.metadata.read().ino == target_directory.metadata.read().ino {
             let renamed = {
                 let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-                let cluster_map = *self.cluster_map.read();
+                let cluster_map = *self.dir_entry_stream.read();
                 let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                     &block_device,
                     &boot_region,
@@ -475,7 +426,7 @@ impl ExfatInode {
                     &directory_bytes,
                     cluster_map.data_length.is_none(),
                     &upcase_table,
-                    &admitted_old_name,
+                    &old_name,
                     old_name_hash,
                 )
                 .map_err(Error::from)?
@@ -486,7 +437,7 @@ impl ExfatInode {
                     &directory_bytes,
                     cluster_map.data_length.is_none(),
                     &upcase_table,
-                    &admitted_new_name,
+                    &new_name,
                     new_name_hash,
                 )
                 .map_err(Error::from)?
@@ -514,19 +465,19 @@ impl ExfatInode {
                 .transpose()
                 .map_err(Error::from)?
                 .flatten();
-                let publication = context.publication()?;
-                let cluster_map = *self.cluster_map.read();
+                let mount_state = mount_guard.mount_state_mut()?;
+                let cluster_map = *self.dir_entry_stream.read();
                 self.rename_within_directory(
                     cluster_map,
                     target_child_inode.as_ref(),
-                    publication,
+                    mount_state,
                     &fs,
                     &block_device,
                     &boot_region,
                     &upcase_table,
-                    &admitted_old_name,
+                    &old_name,
                     old_name_hash,
-                    &admitted_new_name,
+                    &new_name,
                     new_name_hash,
                 )?
             };
@@ -543,7 +494,7 @@ impl ExfatInode {
         {
             let _directory_guards =
                 Self::directory_write_guards_by_ino(vec![self, target_directory]);
-            let target_cluster_map = *target_directory.cluster_map.read();
+            let target_cluster_map = *target_directory.dir_entry_stream.read();
             let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -554,7 +505,7 @@ impl ExfatInode {
                 &target_directory_bytes,
                 target_cluster_map.data_length.is_none(),
                 &upcase_table,
-                &admitted_new_name,
+                &new_name,
                 new_name_hash,
             )
             .map_err(Error::from)?
@@ -581,22 +532,22 @@ impl ExfatInode {
             .transpose()
             .map_err(Error::from)?
             .flatten();
-            let publication = context.publication()?;
-            let source_cluster_map = *self.cluster_map.read();
-            let target_cluster_map = *target_directory.cluster_map.read();
+            let mount_state = mount_guard.mount_state_mut()?;
+            let source_cluster_map = *self.dir_entry_stream.read();
+            let target_cluster_map = *target_directory.dir_entry_stream.read();
             self.rename_across_directories(
                 source_cluster_map,
                 target_directory,
                 target_cluster_map,
                 target_child_inode.as_ref(),
-                publication,
+                mount_state,
                 &fs,
                 &block_device,
                 &boot_region,
                 &upcase_table,
-                &admitted_old_name,
+                &old_name,
                 old_name_hash,
-                &admitted_new_name,
+                &new_name,
                 new_name_hash,
             )?;
         }
@@ -617,9 +568,9 @@ impl ExfatInode {
 
     pub(super) fn rename_within_directory(
         &self,
-        mut cluster_map: ExfatInodeClusterMap,
+        mut cluster_map: StreamExtensionDirEntry,
         target_child_inode: Option<&Arc<Self>>,
-        publication: &mut MountedVolumeState,
+        mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -683,7 +634,7 @@ impl ExfatInode {
                 cluster_map,
                 current_directory_bytes,
                 reusable_slot_range,
-                publication,
+                mount_state,
                 fs,
                 block_device,
                 boot_region,
@@ -725,17 +676,17 @@ impl ExfatInode {
             replaced_target_slot_range,
             (final_slot_range != source_slot_range).then_some(source_slot_range),
         )?;
-        Self::cleanup_replaced_target_ranges(fs, publication, &replaced_target_ranges);
+        Self::cleanup_replaced_target_ranges(fs, mount_state, &replaced_target_ranges);
         Ok(true)
     }
 
     pub(super) fn rename_across_directories(
         &self,
-        source_cluster_map: ExfatInodeClusterMap,
+        source_cluster_map: StreamExtensionDirEntry,
         target_directory: &ExfatInode,
-        mut target_cluster_map: ExfatInodeClusterMap,
+        mut target_cluster_map: StreamExtensionDirEntry,
         target_child_inode: Option<&Arc<Self>>,
-        publication: &mut MountedVolumeState,
+        mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -793,14 +744,14 @@ impl ExfatInode {
             };
         let (
             updated_target_cluster_map,
-            published_target_directory_bytes,
+            target_directory_bytes,
             target_slot_range,
             _reserved_target_slot,
         ) = target_directory.reserve_rename_destination_slot(
             target_cluster_map,
             target_directory_bytes,
             replaced_target_slot_range,
-            publication,
+            mount_state,
             fs,
             block_device,
             boot_region,
@@ -811,7 +762,7 @@ impl ExfatInode {
             block_device,
             boot_region,
             target_cluster_map,
-            published_target_directory_bytes,
+            target_directory_bytes,
             Some((target_slot_range, &renamed_entry_set)),
             None,
             None,
@@ -825,7 +776,7 @@ impl ExfatInode {
             Some(source_slot_range),
             None,
         )?;
-        Self::cleanup_replaced_target_ranges(fs, publication, &replaced_target_ranges);
+        Self::cleanup_replaced_target_ranges(fs, mount_state, &replaced_target_ranges);
         Ok(())
     }
 
@@ -835,7 +786,7 @@ impl ExfatInode {
         is_root_directory: bool,
         directory_bytes: &[u8],
         required_entry_count: usize,
-    ) -> Result<Option<DirectoryEntrySlotRange>> {
+    ) -> Result<Option<DirEntrySlotRange>> {
         if required_entry_count == 0 {
             return Err(invalid_operation_input());
         }
@@ -848,8 +799,8 @@ impl ExfatInode {
         let mut run_start_index = 0usize;
         let mut entry_index = 0usize;
         loop {
-            match direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)? {
-                ScannedDirectoryEntry::EndOfDirectory { entry_index } => {
+            match direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)? {
+                ScannedDirEntry::EndOfDirectory { entry_index } => {
                     let available_entries = total_entries
                         .checked_sub(entry_index)
                         .ok_or(invalid_on_disk_layout())?;
@@ -860,14 +811,14 @@ impl ExfatInode {
                         .checked_add(available_entries)
                         .ok_or(invalid_on_disk_layout())?;
                     if run_length >= required_entry_count {
-                        return Ok(Some(DirectoryEntrySlotRange::new(
+                        return Ok(Some(DirEntrySlotRange::new(
                             run_start_index,
                             required_entry_count,
                         )?));
                     }
                     return Ok(None);
                 }
-                ScannedDirectoryEntry::Vacant(slot_range) => {
+                ScannedDirEntry::Vacant(slot_range) => {
                     if run_length == 0 {
                         run_start_index = slot_range.first_entry_index();
                     }
@@ -875,18 +826,18 @@ impl ExfatInode {
                         .checked_add(slot_range.entry_count())
                         .ok_or(invalid_on_disk_layout())?;
                     if run_length >= required_entry_count {
-                        return Ok(Some(DirectoryEntrySlotRange::new(
+                        return Ok(Some(DirEntrySlotRange::new(
                             run_start_index,
                             required_entry_count,
                         )?));
                     }
                     entry_index = slot_range.next_entry_index()?;
                 }
-                ScannedDirectoryEntry::File(entry_view) => {
+                ScannedDirEntry::File(entry_view) => {
                     run_length = 0;
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
-                ScannedDirectoryEntry::Anomaly { .. } => {
+                ScannedDirEntry::Issue { .. } => {
                     return Err(invalid_on_disk_layout());
                 }
             }
@@ -895,13 +846,13 @@ impl ExfatInode {
 
     pub(super) fn reserve_directory_entry_slots(
         &self,
-        mut cluster_map: ExfatInodeClusterMap,
-        publication: &mut MountedVolumeState,
+        mut cluster_map: StreamExtensionDirEntry,
+        mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         required_entry_count: usize,
-    ) -> Result<(ExfatInodeClusterMap, Vec<u8>, DirectoryEntrySlotRange)> {
+    ) -> Result<(StreamExtensionDirEntry, Vec<u8>, DirEntrySlotRange)> {
         loop {
             let directory_bytes =
                 Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)?;
@@ -914,7 +865,7 @@ impl ExfatInode {
             }
             cluster_map = self.grow_directory_cluster_map(
                 cluster_map,
-                publication,
+                mount_state,
                 fs,
                 block_device,
                 boot_region,
@@ -926,15 +877,14 @@ impl ExfatInode {
 
     pub(super) fn grow_directory_cluster_map(
         &self,
-        cluster_map: ExfatInodeClusterMap,
-        publication: &mut MountedVolumeState,
+        cluster_map: StreamExtensionDirEntry,
+        mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> Result<ExfatInodeClusterMap> {
-        let allocated_directory_cluster =
-            AllocatedDirectoryClusterGuard::allocate(fs, publication)?;
-        let allocated_cluster = allocated_directory_cluster.allocated_cluster();
+    ) -> Result<StreamExtensionDirEntry> {
+        let allocated_directory_cluster = ClusterAllocGuard::allocate(fs, mount_state, 1)?;
+        let allocated_cluster = allocated_directory_cluster.single_cluster()?;
         Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)?;
         let updated_cluster_map = self.attach_directory_cluster(
             cluster_map,
@@ -948,11 +898,11 @@ impl ExfatInode {
 
     pub(super) fn attach_directory_cluster(
         &self,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         allocated_cluster: u32,
-    ) -> Result<ExfatInodeClusterMap> {
+    ) -> Result<StreamExtensionDirEntry> {
         let next_data_length = match cluster_map.data_length {
             Some(data_length) => data_length
                 .checked_add(boot_region.cluster_size)
@@ -982,32 +932,32 @@ impl ExfatInode {
         }
 
         let updated_cluster_map = match cluster_map.data_length {
-            Some(0) => ExfatInodeClusterMap {
+            Some(0) => StreamExtensionDirEntry {
                 first_cluster: allocated_cluster,
                 data_length: Some(next_data_length),
                 no_fat_chain: false,
                 ..cluster_map
             },
-            Some(_) if cluster_map.no_fat_chain => ExfatInodeClusterMap {
+            Some(_) if cluster_map.no_fat_chain => StreamExtensionDirEntry {
                 data_length: Some(next_data_length),
                 no_fat_chain: false,
                 ..cluster_map
             },
-            Some(_) => ExfatInodeClusterMap {
+            Some(_) => StreamExtensionDirEntry {
                 data_length: Some(next_data_length),
                 ..cluster_map
             },
-            None => ExfatInodeClusterMap {
+            None => StreamExtensionDirEntry {
                 data_length: None,
                 ..cluster_map
             },
         };
         {
-            let mut published_cluster_map = self.cluster_map.write();
-            if *published_cluster_map != cluster_map {
+            let mut current_cluster_map = self.dir_entry_stream.write();
+            if *current_cluster_map != cluster_map {
                 return Err(invalid_on_disk_layout());
             }
-            *published_cluster_map = updated_cluster_map;
+            *current_cluster_map = updated_cluster_map;
         }
         let mut metadata = self.metadata.write();
         metadata.size = metadata
@@ -1020,20 +970,20 @@ impl ExfatInode {
     // Validation helpers
 
     fn first_directory_child_scan<'a>(
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         directory_bytes: &'a [u8],
-    ) -> Result<Option<ScannedDirectoryEntry<'a>>> {
+    ) -> Result<Option<ScannedDirEntry<'a>>> {
         let is_root_directory = cluster_map.data_length.is_none();
         let mut entry_index = 0usize;
         loop {
             let entry_scan =
-                direntry::scan_directory_entry(is_root_directory, directory_bytes, entry_index)?;
+                direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)?;
             match entry_scan {
-                ScannedDirectoryEntry::EndOfDirectory { .. } => return Ok(None),
-                ScannedDirectoryEntry::Vacant(slot_range) => {
+                ScannedDirEntry::EndOfDirectory { .. } => return Ok(None),
+                ScannedDirEntry::Vacant(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
                 }
-                ScannedDirectoryEntry::Anomaly { .. } | ScannedDirectoryEntry::File(_) => {
+                ScannedDirEntry::Issue { .. } | ScannedDirEntry::File(_) => {
                     return Ok(Some(entry_scan));
                 }
             }
@@ -1045,9 +995,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<()> {
-        let (_owner_guard, cluster_map) = child_inode
-            .admitted_directory_snapshot()
-            .map_err(Error::from)?;
+        let (_owner_guard, cluster_map) = child_inode.directory_snapshot().map_err(Error::from)?;
         let child_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
                 .map_err(Error::from)?;
@@ -1056,11 +1004,11 @@ impl ExfatInode {
                 .map_err(Error::from)?
         {
             match first_child_scan {
-                ScannedDirectoryEntry::Anomaly { .. } => {
+                ScannedDirEntry::Issue { .. } => {
                     return Err(Error::from(invalid_on_disk_layout()));
                 }
-                ScannedDirectoryEntry::File(_) => return_errno!(Errno::ENOTEMPTY),
-                ScannedDirectoryEntry::EndOfDirectory { .. } | ScannedDirectoryEntry::Vacant(_) => {
+                ScannedDirEntry::File(_) => return_errno!(Errno::ENOTEMPTY),
+                ScannedDirEntry::EndOfDirectory { .. } | ScannedDirEntry::Vacant(_) => {
                     unreachable!()
                 }
             }
@@ -1138,7 +1086,7 @@ impl ExfatInode {
 
     fn lookup_rename_source_view<'a>(
         directory_bytes: &'a [u8],
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         upcase_table: &UpcaseTable,
         old_name: &[u16],
         old_name_hash: u16,
@@ -1156,11 +1104,11 @@ impl ExfatInode {
 
     fn lookup_rename_target_view<'a>(
         directory_bytes: &'a [u8],
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         upcase_table: &UpcaseTable,
         new_name: &[u16],
         new_name_hash: u16,
-        excluded_slot_range: Option<DirectoryEntrySlotRange>,
+        excluded_slot_range: Option<DirEntrySlotRange>,
     ) -> Result<Option<FileEntrySetView<'a>>> {
         Ok(Self::locate_named_child_view(
             directory_bytes,
@@ -1179,7 +1127,7 @@ impl ExfatInode {
         source_inode_type: InodeType,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> Result<Option<(DirectoryEntrySlotRange, Vec<ClusterRange>)>> {
+    ) -> Result<Option<(DirEntrySlotRange, Vec<ClusterRange>)>> {
         let Some(target_view) = target_view else {
             return Ok(None);
         };
@@ -1212,15 +1160,15 @@ impl ExfatInode {
 
     fn reserve_rename_destination_slot(
         &self,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         current_directory_bytes: Vec<u8>,
-        reusable_slot_range: Option<DirectoryEntrySlotRange>,
-        publication: &mut MountedVolumeState,
+        reusable_slot_range: Option<DirEntrySlotRange>,
+        mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         required_entry_count: usize,
-    ) -> Result<(ExfatInodeClusterMap, Vec<u8>, DirectoryEntrySlotRange, bool)> {
+    ) -> Result<(StreamExtensionDirEntry, Vec<u8>, DirEntrySlotRange, bool)> {
         if let Some(slot_range) = reusable_slot_range
             .filter(|slot_range| slot_range.entry_count() >= required_entry_count)
         {
@@ -1229,7 +1177,7 @@ impl ExfatInode {
         let (updated_cluster_map, directory_bytes, slot_range) = self
             .reserve_directory_entry_slots(
                 cluster_map,
-                publication,
+                mount_state,
                 fs,
                 block_device,
                 boot_region,
@@ -1242,21 +1190,20 @@ impl ExfatInode {
     fn persist_rename_directory_update(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: ExfatInodeClusterMap,
+        cluster_map: StreamExtensionDirEntry,
         mut directory_bytes: Vec<u8>,
-        published_entry: Option<(DirectoryEntrySlotRange, &[u8])>,
-        first_invalidated_slot: Option<DirectoryEntrySlotRange>,
-        second_invalidated_slot: Option<DirectoryEntrySlotRange>,
+        written_entry: Option<(DirEntrySlotRange, &[u8])>,
+        first_invalidated_slot: Option<DirEntrySlotRange>,
+        second_invalidated_slot: Option<DirEntrySlotRange>,
     ) -> Result<()> {
-        let mut invalidate_slot_range = |slot_range: DirectoryEntrySlotRange| -> Result<()> {
+        let mut invalidate_slot_range = |slot_range: DirEntrySlotRange| -> Result<()> {
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
             let removed_entry_set = directory_bytes
                 .get_mut(slot_range_bytes)
                 .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut removed_entry_set =
-                WritableDirectoryEntrySlotSpan::new(slot_range, removed_entry_set)
-                    .map_err(Error::from)?;
+                MutableDirEntrySlotSpan::new(slot_range, removed_entry_set).map_err(Error::from)?;
             direntry::invalidate_entry_set(&mut removed_entry_set).map_err(Error::from)
         };
         if let Some(slot_range) = first_invalidated_slot {
@@ -1267,7 +1214,7 @@ impl ExfatInode {
         {
             invalidate_slot_range(slot_range)?;
         }
-        if let Some((destination_slot_range, renamed_entry_set)) = published_entry {
+        if let Some((destination_slot_range, renamed_entry_set)) = written_entry {
             if first_invalidated_slot != Some(destination_slot_range)
                 && second_invalidated_slot != Some(destination_slot_range)
             {
@@ -1280,7 +1227,7 @@ impl ExfatInode {
                 .ok_or(invalid_on_disk_layout())
                 .map_err(Error::from)?;
             let mut destination_entry_set =
-                WritableDirectoryEntrySlotSpan::new(destination_slot_range, destination_entry_set)
+                MutableDirEntrySlotSpan::new(destination_slot_range, destination_entry_set)
                     .map_err(Error::from)?;
             destination_entry_set
                 .bytes_mut()
@@ -1300,12 +1247,12 @@ impl ExfatInode {
 
     fn cleanup_replaced_target_ranges(
         fs: &Arc<ExfatFs>,
-        publication: &mut MountedVolumeState,
+        mount_state: &mut MountedVolumeState,
         replaced_target_ranges: &[ClusterRange],
     ) {
         if replaced_target_ranges.is_empty() {
             return;
         }
-        let _ = fs.free_allocated_space_with_publication(publication, replaced_target_ranges);
+        let _ = fs.free_clusters(mount_state, replaced_target_ranges);
     }
 }

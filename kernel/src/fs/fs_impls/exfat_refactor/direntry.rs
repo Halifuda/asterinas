@@ -5,7 +5,8 @@
 use alloc::{vec, vec::Vec};
 
 use super::{
-    boot::BootRegion, invalid_on_disk_layout, invalid_operation_input, upcase::UpcaseTable,
+    boot::BootRegion, inode::StreamExtensionDirEntry, invalid_on_disk_layout,
+    invalid_operation_input, upcase::UpcaseTable,
 };
 use crate::{fs::file::InodeType, prelude::*};
 
@@ -22,16 +23,13 @@ const LAST_MODIFIED_UTC_OFFSET_OFFSET: usize = 23;
 const LAST_ACCESSED_UTC_OFFSET_OFFSET: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct DirectoryEntrySlotRange {
+pub(super) struct DirEntrySlotRange {
     entry_count: usize,
     first_entry_index: usize,
 }
 
-impl DirectoryEntrySlotRange {
-    pub(super) fn new(
-        first_entry_index: usize,
-        entry_count: usize,
-    ) -> Result<Self> {
+impl DirEntrySlotRange {
+    pub(super) fn new(first_entry_index: usize, entry_count: usize) -> Result<Self> {
         if entry_count == 0 {
             return Err(invalid_on_disk_layout());
         }
@@ -60,7 +58,7 @@ impl DirectoryEntrySlotRange {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DirectoryEntryAnomalyKind {
+pub(super) enum DirEntryIssueKind {
     BenignUnrecognizedEntrySet,
     BrokenEntrySet,
     CriticalUnrecognizedEntrySet,
@@ -100,46 +98,74 @@ impl FileEntryTimestamp {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct FileEntryClusterMap {
-    data_length: u64,
-    first_cluster: u32,
-    no_fat_chain: bool,
-    valid_data_length: u64,
-}
-
-impl FileEntryClusterMap {
-    pub(super) fn new(
-        first_cluster: u32,
-        data_length: u64,
-        valid_data_length: u64,
-        no_fat_chain: bool,
-    ) -> Result<Self> {
+impl StreamExtensionDirEntry {
+    pub(super) fn from_file_stream_entry(stream_entry: &[u8]) -> Result<Self> {
+        let data_length = usize::try_from(u64::from_le_bytes([
+            stream_entry[STREAM_DATA_LENGTH_OFFSET],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 1],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 2],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 3],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 4],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 5],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 6],
+            stream_entry[STREAM_DATA_LENGTH_OFFSET + 7],
+        ]))
+        .map_err(|_| invalid_on_disk_layout())?;
+        let valid_data_length = usize::try_from(u64::from_le_bytes([
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 1],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 2],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 3],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 4],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 5],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 6],
+            stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 7],
+        ]))
+        .map_err(|_| invalid_on_disk_layout())?;
         if valid_data_length > data_length {
             return Err(invalid_on_disk_layout());
         }
         Ok(Self {
-            data_length,
-            first_cluster,
-            no_fat_chain,
-            valid_data_length,
+            data_length: Some(data_length),
+            first_cluster: u32::from_le_bytes([
+                stream_entry[STREAM_FIRST_CLUSTER_OFFSET],
+                stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 1],
+                stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 2],
+                stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 3],
+            ]),
+            valid_data_length: Some(valid_data_length),
+            no_fat_chain: stream_entry[STREAM_FLAGS_OFFSET] & 0x02 != 0,
         })
     }
 
-    pub(super) fn data_length(self) -> u64 {
-        self.data_length
-    }
-
-    pub(super) fn first_cluster(self) -> u32 {
-        self.first_cluster
-    }
-
-    pub(super) fn no_fat_chain(self) -> bool {
-        self.no_fat_chain
-    }
-
-    pub(super) fn valid_data_length(self) -> u64 {
-        self.valid_data_length
+    pub(super) fn write_to_file_stream_entry(self, stream_entry: &mut [u8]) -> Result<()> {
+        if stream_entry.len() != DIRECTORY_ENTRY_SIZE {
+            return Err(invalid_operation_input());
+        }
+        let Some(data_length) = self.data_length else {
+            return Err(invalid_operation_input());
+        };
+        let Some(valid_data_length) = self.valid_data_length else {
+            return Err(invalid_operation_input());
+        };
+        if valid_data_length > data_length {
+            return Err(invalid_operation_input());
+        }
+        stream_entry[STREAM_FLAGS_OFFSET] = if self.no_fat_chain { 0x03 } else { 0x01 };
+        stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET..STREAM_VALID_DATA_LENGTH_OFFSET + 8]
+            .copy_from_slice(
+                &u64::try_from(valid_data_length)
+                    .map_err(|_| invalid_operation_input())?
+                    .to_le_bytes(),
+            );
+        stream_entry[STREAM_FIRST_CLUSTER_OFFSET..STREAM_FIRST_CLUSTER_OFFSET + 4]
+            .copy_from_slice(&self.first_cluster.to_le_bytes());
+        stream_entry[STREAM_DATA_LENGTH_OFFSET..STREAM_DATA_LENGTH_OFFSET + 8].copy_from_slice(
+            &u64::try_from(data_length)
+                .map_err(|_| invalid_operation_input())?
+                .to_le_bytes(),
+        );
+        Ok(())
     }
 }
 
@@ -150,7 +176,7 @@ pub(super) struct FileEntrySetView<'a> {
     entry_set: &'a [u8],
     primary_entry: &'a [u8],
     secondary_count: usize,
-    slot_range: DirectoryEntrySlotRange,
+    slot_range: DirEntrySlotRange,
     stream_entry: &'a [u8],
 }
 
@@ -166,7 +192,7 @@ impl FileEntrySetView<'_> {
         file_name(self.entry_set, self.secondary_count, self.stream_entry)
     }
 
-    pub(super) fn slot_range(self) -> DirectoryEntrySlotRange {
+    pub(super) fn slot_range(self) -> DirEntrySlotRange {
         self.slot_range
     }
 
@@ -224,40 +250,12 @@ impl FileEntrySetView<'_> {
         )
     }
 
-    pub(super) fn cluster_map(self) -> Result<FileEntryClusterMap> {
-        FileEntryClusterMap::new(
-            u32::from_le_bytes([
-                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET],
-                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 1],
-                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 2],
-                self.stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 3],
-            ]),
-            u64::from_le_bytes([
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 1],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 2],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 3],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 4],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 5],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 6],
-                self.stream_entry[STREAM_DATA_LENGTH_OFFSET + 7],
-            ]),
-            u64::from_le_bytes([
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 1],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 2],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 3],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 4],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 5],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 6],
-                self.stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET + 7],
-            ]),
-            self.stream_entry[STREAM_FLAGS_OFFSET] & 0x02 != 0,
-        )
+    pub(super) fn cluster_map(self) -> Result<StreamExtensionDirEntry> {
+        StreamExtensionDirEntry::from_file_stream_entry(self.stream_entry)
     }
 
-    pub(super) fn republished(self) -> RepublishedFileEntrySet {
-        RepublishedFileEntrySet {
+    pub(super) fn to_mutable(self) -> MutableFileEntrySet {
+        MutableFileEntrySet {
             entry_set: self.entry_set.to_vec(),
             secondary_count: self.secondary_count,
         }
@@ -271,12 +269,12 @@ impl FileEntrySetView<'_> {
     }
 }
 
-pub(super) struct RepublishedFileEntrySet {
+pub(super) struct MutableFileEntrySet {
     entry_set: Vec<u8>,
     secondary_count: usize,
 }
 
-impl RepublishedFileEntrySet {
+impl MutableFileEntrySet {
     pub(super) fn set_file_attributes(&mut self, file_attributes: u16) {
         self.entry_set[FILE_ATTRIBUTES_OFFSET..FILE_ATTRIBUTES_OFFSET + 2]
             .copy_from_slice(&file_attributes.to_le_bytes());
@@ -296,28 +294,13 @@ impl RepublishedFileEntrySet {
         self.entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = timestamp.utc_offset_byte();
     }
 
-    pub(super) fn set_cluster_map(&mut self, cluster_map: FileEntryClusterMap) {
-        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_FLAGS_OFFSET] = if cluster_map.no_fat_chain() {
-            0x03
-        } else {
-            0x01
-        };
-        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_VALID_DATA_LENGTH_OFFSET
-            ..DIRECTORY_ENTRY_SIZE + STREAM_VALID_DATA_LENGTH_OFFSET + 8]
-            .copy_from_slice(&cluster_map.valid_data_length().to_le_bytes());
-        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_FIRST_CLUSTER_OFFSET
-            ..DIRECTORY_ENTRY_SIZE + STREAM_FIRST_CLUSTER_OFFSET + 4]
-            .copy_from_slice(&cluster_map.first_cluster().to_le_bytes());
-        self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_DATA_LENGTH_OFFSET
-            ..DIRECTORY_ENTRY_SIZE + STREAM_DATA_LENGTH_OFFSET + 8]
-            .copy_from_slice(&cluster_map.data_length().to_le_bytes());
+    pub(super) fn set_cluster_map(&mut self, cluster_map: &StreamExtensionDirEntry) -> Result<()> {
+        cluster_map.write_to_file_stream_entry(
+            &mut self.entry_set[DIRECTORY_ENTRY_SIZE..DIRECTORY_ENTRY_SIZE * 2],
+        )
     }
 
-    fn set_name_fields(
-        &mut self,
-        name: &[u16],
-        name_hash: u16,
-    ) -> Result<()> {
+    fn set_name_fields(&mut self, name: &[u16], name_hash: u16) -> Result<()> {
         let current_name_entry_count =
             usize::from(self.entry_set[DIRECTORY_ENTRY_SIZE + STREAM_NAME_LENGTH_OFFSET])
                 .div_ceil(15);
@@ -364,9 +347,7 @@ impl RepublishedFileEntrySet {
     }
 }
 
-pub(super) fn file_entry_set_entry_count(
-    name_length: usize,
-) -> Result<usize> {
+pub(super) fn file_entry_set_entry_count(name_length: usize) -> Result<usize> {
     if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
         return Err(invalid_operation_input());
     }
@@ -388,8 +369,7 @@ pub(super) fn encode_file_entry_set(
     let secondary_count = entry_count
         .checked_sub(1)
         .ok_or(invalid_operation_input())?;
-    let secondary_count =
-        u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
+    let secondary_count = u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
     let entry_set_len = entry_count
         .checked_mul(DIRECTORY_ENTRY_SIZE)
         .ok_or(invalid_operation_input())?;
@@ -411,14 +391,15 @@ pub(super) fn encode_file_entry_set(
         u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 4..stream_entry_offset + 6]
         .copy_from_slice(&name_hash.to_le_bytes());
-    let data_length =
-        u64::try_from(data_length).map_err(|_| invalid_operation_input())?;
-    entry_set[stream_entry_offset + 8..stream_entry_offset + 16]
-        .copy_from_slice(&data_length.to_le_bytes());
-    entry_set[stream_entry_offset + 20..stream_entry_offset + 24]
-        .copy_from_slice(&first_cluster.to_le_bytes());
-    entry_set[stream_entry_offset + 24..stream_entry_offset + 32]
-        .copy_from_slice(&data_length.to_le_bytes());
+    StreamExtensionDirEntry {
+        data_length: Some(data_length),
+        first_cluster,
+        valid_data_length: Some(data_length),
+        no_fat_chain,
+    }
+    .write_to_file_stream_entry(
+        &mut entry_set[stream_entry_offset..stream_entry_offset + DIRECTORY_ENTRY_SIZE],
+    )?;
 
     for (name_entry_index, name_chunk) in name.chunks(15).enumerate() {
         let name_entry_offset = (name_entry_index + 2)
@@ -441,17 +422,14 @@ pub(super) fn encode_file_entry_set(
 }
 
 // Slot-aligned writable directory-entry bytes reserved by the owner for
-// invalidation, staging, or pre-publication cleanup. This does not prove the
-// bytes are a validated published file entry set.
-pub(super) struct WritableDirectoryEntrySlotSpan<'a> {
+// invalidation, staging, or pre-writeback cleanup. This does not prove the
+// bytes are a validated mounted file entry set.
+pub(super) struct MutableDirEntrySlotSpan<'a> {
     slot_span: &'a mut [u8],
 }
 
-impl<'a> WritableDirectoryEntrySlotSpan<'a> {
-    pub(super) fn new(
-        slot_range: DirectoryEntrySlotRange,
-        slot_span: &'a mut [u8],
-    ) -> Result<Self> {
+impl<'a> MutableDirEntrySlotSpan<'a> {
+    pub(super) fn new(slot_range: DirEntrySlotRange, slot_span: &'a mut [u8]) -> Result<Self> {
         let expected_len = slot_range
             .entry_count()
             .checked_mul(DIRECTORY_ENTRY_SIZE)
@@ -470,9 +448,7 @@ impl<'a> WritableDirectoryEntrySlotSpan<'a> {
     }
 }
 
-pub(super) fn invalidate_entry_set(
-    slot_span: &mut WritableDirectoryEntrySlotSpan<'_>,
-) -> Result<()> {
+pub(super) fn invalidate_entry_set(slot_span: &mut MutableDirEntrySlotSpan<'_>) -> Result<()> {
     for entry in slot_span.bytes_mut().chunks_exact_mut(DIRECTORY_ENTRY_SIZE) {
         entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
     }
@@ -491,7 +467,7 @@ pub(super) fn renamed_entry_set(
     let current_name_entry_count =
         usize::from(source_entry_set.stream_entry[STREAM_NAME_LENGTH_OFFSET]).div_ceil(15);
     if new_name_entry_count == current_name_entry_count {
-        let mut renamed_entry_set = source_entry_set.republished();
+        let mut renamed_entry_set = source_entry_set.to_mutable();
         renamed_entry_set.set_name_fields(name, name_hash)?;
         return Ok(renamed_entry_set.into_bytes());
     }
@@ -506,8 +482,7 @@ pub(super) fn renamed_entry_set(
         .checked_add(1)
         .and_then(|count| count.checked_add(trailing_secondary_count))
         .ok_or(invalid_operation_input())?;
-    let secondary_count =
-        u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
+    let secondary_count = u8::try_from(secondary_count).map_err(|_| invalid_operation_input())?;
     let entry_set_len = usize::from(secondary_count)
         .checked_add(1)
         .and_then(|entry_count| entry_count.checked_mul(DIRECTORY_ENTRY_SIZE))
@@ -554,16 +529,16 @@ pub(super) fn renamed_entry_set(
 
 // Scan result category, not a write-side capability object.
 #[derive(Clone, Copy)]
-pub(super) enum ScannedDirectoryEntry<'a> {
-    Anomaly {
-        kind: DirectoryEntryAnomalyKind,
-        slot_range: DirectoryEntrySlotRange,
+pub(super) enum ScannedDirEntry<'a> {
+    Issue {
+        kind: DirEntryIssueKind,
+        slot_range: DirEntrySlotRange,
     },
     EndOfDirectory {
         entry_index: usize,
     },
     File(FileEntrySetView<'a>),
-    Vacant(DirectoryEntrySlotRange),
+    Vacant(DirEntrySlotRange),
 }
 
 const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
@@ -585,13 +560,13 @@ const STREAM_VALID_DATA_LENGTH_OFFSET: usize = 8;
 const STREAM_FIRST_CLUSTER_OFFSET: usize = 20;
 const STREAM_DATA_LENGTH_OFFSET: usize = 24;
 
-pub(super) fn scan_directory_entry(
+pub(super) fn scan_dir_entry(
     is_root_directory: bool,
     directory_bytes: &[u8],
     mut entry_index: usize,
-) -> Result<ScannedDirectoryEntry<'_>> {
+) -> Result<ScannedDirEntry<'_>> {
     loop {
-        let slot_range = DirectoryEntrySlotRange::new(entry_index, 1)?;
+        let slot_range = DirEntrySlotRange::new(entry_index, 1)?;
         let entry_offset = entry_index
             .checked_mul(DIRECTORY_ENTRY_SIZE)
             .ok_or(invalid_on_disk_layout())?;
@@ -599,20 +574,20 @@ pub(super) fn scan_directory_entry(
             .checked_add(DIRECTORY_ENTRY_SIZE)
             .ok_or(invalid_on_disk_layout())?;
         let Some(entry) = directory_bytes.get(entry_offset..entry_end) else {
-            return Ok(ScannedDirectoryEntry::EndOfDirectory { entry_index });
+            return Ok(ScannedDirEntry::EndOfDirectory { entry_index });
         };
 
         match entry[0] {
             END_OF_DIRECTORY_ENTRY_TYPE => {
-                return Ok(ScannedDirectoryEntry::EndOfDirectory { entry_index });
+                return Ok(ScannedDirEntry::EndOfDirectory { entry_index });
             }
-            0x01..=0x7F => return Ok(ScannedDirectoryEntry::Vacant(slot_range)),
+            0x01..=0x7F => return Ok(ScannedDirEntry::Vacant(slot_range)),
             FILE_DIRECTORY_ENTRY_TYPE => {
                 return scan_file_entry_set(directory_bytes, entry_index, entry_offset, entry);
             }
             entry_type => {
                 if entry_type & ENTRY_TYPE_IN_USE_BIT == 0 {
-                    return Ok(ScannedDirectoryEntry::Vacant(slot_range));
+                    return Ok(ScannedDirEntry::Vacant(slot_range));
                 }
 
                 let is_root_metadata = matches!(
@@ -623,15 +598,13 @@ pub(super) fn scan_directory_entry(
                         | VOLUME_GUID_ENTRY_TYPE
                 );
                 if is_root_directory && is_root_metadata {
-                    entry_index = entry_index
-                        .checked_add(1)
-                        .ok_or(invalid_on_disk_layout())?;
+                    entry_index = entry_index.checked_add(1).ok_or(invalid_on_disk_layout())?;
                     continue;
                 }
 
                 if entry_type & ENTRY_TYPE_CATEGORY_BIT != 0 {
-                    return Ok(ScannedDirectoryEntry::Anomaly {
-                        kind: DirectoryEntryAnomalyKind::UnexpectedSecondaryEntry,
+                    return Ok(ScannedDirEntry::Issue {
+                        kind: DirEntryIssueKind::UnexpectedSecondaryEntry,
                         slot_range,
                     });
                 }
@@ -653,9 +626,9 @@ fn scan_file_entry_set<'a>(
     entry_index: usize,
     entry_offset: usize,
     primary_entry: &'a [u8],
-) -> Result<ScannedDirectoryEntry<'a>> {
+) -> Result<ScannedDirEntry<'a>> {
     let secondary_count = usize::from(primary_entry[1]);
-    let slot_range = DirectoryEntrySlotRange::new(
+    let slot_range = DirEntrySlotRange::new(
         entry_index,
         secondary_count
             .checked_add(1)
@@ -668,24 +641,24 @@ fn scan_file_entry_set<'a>(
         secondary_count,
         expected_checksum,
     ) else {
-        return Ok(ScannedDirectoryEntry::Anomaly {
-            kind: DirectoryEntryAnomalyKind::BrokenEntrySet,
+        return Ok(ScannedDirEntry::Issue {
+            kind: DirEntryIssueKind::BrokenEntrySet,
             slot_range,
         });
     };
     let Ok(stream_entry) = file_stream_entry(entry_set) else {
-        return Ok(ScannedDirectoryEntry::Anomaly {
-            kind: DirectoryEntryAnomalyKind::BrokenEntrySet,
+        return Ok(ScannedDirEntry::Issue {
+            kind: DirEntryIssueKind::BrokenEntrySet,
             slot_range,
         });
     };
     if file_name(entry_set, secondary_count, stream_entry).is_err() {
-        return Ok(ScannedDirectoryEntry::Anomaly {
-            kind: DirectoryEntryAnomalyKind::BrokenEntrySet,
+        return Ok(ScannedDirEntry::Issue {
+            kind: DirEntryIssueKind::BrokenEntrySet,
             slot_range,
         });
     }
-    Ok(ScannedDirectoryEntry::File(FileEntrySetView {
+    Ok(ScannedDirEntry::File(FileEntrySetView {
         entry_set,
         primary_entry,
         secondary_count,
@@ -700,9 +673,9 @@ fn scan_unrecognized_entry_set<'a>(
     entry_offset: usize,
     primary_entry: &[u8],
     entry_type: u8,
-) -> Result<ScannedDirectoryEntry<'a>> {
+) -> Result<ScannedDirEntry<'a>> {
     let secondary_count = usize::from(primary_entry[1]);
-    let slot_range = DirectoryEntrySlotRange::new(
+    let slot_range = DirEntrySlotRange::new(
         entry_index,
         secondary_count
             .checked_add(1)
@@ -717,18 +690,18 @@ fn scan_unrecognized_entry_set<'a>(
     )
     .is_err()
     {
-        return Ok(ScannedDirectoryEntry::Anomaly {
-            kind: DirectoryEntryAnomalyKind::BrokenEntrySet,
+        return Ok(ScannedDirEntry::Issue {
+            kind: DirEntryIssueKind::BrokenEntrySet,
             slot_range,
         });
     }
 
     let kind = if entry_type & ENTRY_TYPE_IMPORTANCE_BIT == 0 {
-        DirectoryEntryAnomalyKind::CriticalUnrecognizedEntrySet
+        DirEntryIssueKind::CriticalUnrecognizedEntrySet
     } else {
-        DirectoryEntryAnomalyKind::BenignUnrecognizedEntrySet
+        DirEntryIssueKind::BenignUnrecognizedEntrySet
     };
-    Ok(ScannedDirectoryEntry::Anomaly { kind, slot_range })
+    Ok(ScannedDirEntry::Issue { kind, slot_range })
 }
 
 fn validated_file_entry_set(
@@ -766,11 +739,7 @@ fn file_stream_entry(entry_set: &[u8]) -> Result<&[u8]> {
     Ok(stream_entry)
 }
 
-fn file_name(
-    entry_set: &[u8],
-    secondary_count: usize,
-    stream_entry: &[u8],
-) -> Result<Vec<u16>> {
+fn file_name(entry_set: &[u8], secondary_count: usize, stream_entry: &[u8]) -> Result<Vec<u16>> {
     let name_length = usize::from(stream_entry[3]);
     if name_length == 0 || name_length > UpcaseTable::NAME_MAX {
         return Err(invalid_on_disk_layout());
@@ -849,33 +818,24 @@ fn file_entry_child_metadata(
     } else {
         InodeType::File
     };
-    let first_cluster = u32::from_le_bytes([
-        stream_entry[20],
-        stream_entry[21],
-        stream_entry[22],
-        stream_entry[23],
-    ]);
-    let data_length = usize::try_from(u64::from_le_bytes([
-        stream_entry[24],
-        stream_entry[25],
-        stream_entry[26],
-        stream_entry[27],
-        stream_entry[28],
-        stream_entry[29],
-        stream_entry[30],
-        stream_entry[31],
-    ]))
-    .map_err(|_| invalid_on_disk_layout())?;
-    let no_fat_chain = stream_entry[1] & 0x02 != 0;
+    let dir_entry_stream = StreamExtensionDirEntry::from_file_stream_entry(stream_entry)?;
+    let Some(data_length) = dir_entry_stream.data_length else {
+        return Err(invalid_on_disk_layout());
+    };
     if data_length != 0 {
         boot_region.validate_stream_data(
-            first_cluster,
+            dir_entry_stream.first_cluster,
             u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
         )?;
-    } else if first_cluster != 0 {
+    } else if dir_entry_stream.first_cluster != 0 {
         return Err(invalid_on_disk_layout());
     }
-    Ok((inode_type, first_cluster, data_length, no_fat_chain))
+    Ok((
+        inode_type,
+        dir_entry_stream.first_cluster,
+        data_length,
+        dir_entry_stream.no_fat_chain,
+    ))
 }
 
 pub(super) fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u16 {
@@ -890,9 +850,7 @@ pub(super) fn entry_set_checksum(entry_set: &[u8], secondary_count: usize) -> u1
     checksum
 }
 
-pub(super) fn slot_range_bytes(
-    slot_range: DirectoryEntrySlotRange,
-) -> Result<core::ops::Range<usize>> {
+pub(super) fn slot_range_bytes(slot_range: DirEntrySlotRange) -> Result<core::ops::Range<usize>> {
     let byte_start = slot_range
         .first_entry_index()
         .checked_mul(DIRECTORY_ENTRY_SIZE)

@@ -2,28 +2,29 @@
 
 //! Owns allocation-bitmap scanning, range normalization, and cached used-cluster accounting.
 
-use core::ops::Range;
-
 use alloc::{collections::BTreeSet, vec, vec::Vec};
+use core::ops::Range;
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::{
     boot::BootRegion,
-    device_io, inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
-    no_space,
+    device_io,
     fat::{ChainVisitControl, FatChainStep, FatReader},
+    inconsistent_bitmap_accounting,
+    inode::ClusterMap,
+    invalid_on_disk_layout, invalid_operation_input, no_space,
 };
 use crate::prelude::*;
 
 pub(super) const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 
-#[derive(Clone, Copy)]
 pub(super) struct AllocationBitmap {
     pub(super) data_length: u64,
     pub(super) first_cluster: u32,
     used_clusters: usize,
+    lazy_reclaimed_clusters: Vec<LazyReclaimedCluster>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,14 +34,19 @@ pub(super) struct ClusterRange {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum AllocationBitmapUpdate {
+pub(super) enum BitmapOp {
     Allocate,
     Free,
 }
 
+struct LazyReclaimedCluster {
+    cluster_map: Arc<ClusterMap>,
+    ranges: Vec<ClusterRange>,
+}
+
 impl AllocationBitmap {
     pub(super) fn count_used_clusters(
-        self,
+        &self,
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
     ) -> Result<usize> {
@@ -94,7 +100,7 @@ impl AllocationBitmap {
     }
 
     pub(super) fn find_free_ranges(
-        self,
+        &self,
         boot_region: &BootRegion,
         fat_reader: &mut FatReader<'_>,
         requested_clusters: usize,
@@ -201,7 +207,7 @@ impl AllocationBitmap {
     }
 
     pub(super) fn validate_and_normalize_ranges(
-        self,
+        &self,
         boot_region: &BootRegion,
         cluster_ranges: &[ClusterRange],
     ) -> Result<Vec<Range<usize>>> {
@@ -240,22 +246,23 @@ impl AllocationBitmap {
     }
 
     pub(super) fn apply_normalized_ranges(
-        self,
+        &self,
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
         normalized_ranges: &[Range<usize>],
-        update: AllocationBitmapUpdate,
+        update: BitmapOp,
     ) -> Result<usize> {
         if normalized_ranges.is_empty() {
             return Err(invalid_operation_input());
         }
 
         let cluster_count = boot_region.cluster_count_usize()?;
-        let expected_cluster_count = normalized_ranges.iter().try_fold(0usize, |total, range| {
-            total
-                .checked_add(range.end - range.start)
-                .ok_or_else(invalid_operation_input)
-        })?;
+        let expected_cluster_count =
+            normalized_ranges.iter().try_fold(0usize, |total, range| {
+                total
+                    .checked_add(range.end - range.start)
+                    .ok_or_else(invalid_operation_input)
+            })?;
         let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
         let mut cluster_buffer = vec![0; boot_region.cluster_size];
         let mut current_cluster = self.first_cluster;
@@ -306,13 +313,13 @@ impl AllocationBitmap {
 
                     let bit_mask = 1u8 << bit_index;
                     match update {
-                        AllocationBitmapUpdate::Allocate => {
+                        BitmapOp::Allocate => {
                             if next_byte & bit_mask != 0 {
                                 return Err(inconsistent_bitmap_accounting());
                             }
                             next_byte |= bit_mask;
                         }
-                        AllocationBitmapUpdate::Free => {
+                        BitmapOp::Free => {
                             if next_byte & bit_mask == 0 {
                                 return Err(inconsistent_bitmap_accounting());
                             }
@@ -372,8 +379,59 @@ impl AllocationBitmap {
         self.used_clusters = used_clusters;
     }
 
-    pub(super) fn used_clusters(self) -> usize {
+    pub(super) fn used_clusters(&self) -> usize {
         self.used_clusters
+    }
+
+    pub(super) fn release_lazy_reclaimed_clusters(
+        &mut self,
+        block_device: &dyn BlockDevice,
+        boot_region: &BootRegion,
+    ) -> Result<()> {
+        let mut pending_lazy_reclaims = Vec::new();
+        let mut lazy_reclaimed_clusters =
+            core::mem::take(&mut self.lazy_reclaimed_clusters).into_iter();
+        while let Some(lazy_reclaimed_cluster) = lazy_reclaimed_clusters.next() {
+            if Arc::strong_count(&lazy_reclaimed_cluster.cluster_map) != 1 {
+                pending_lazy_reclaims.push(lazy_reclaimed_cluster);
+                continue;
+            }
+
+            let release_result = (|| {
+                let normalized_ranges = self
+                    .validate_and_normalize_ranges(boot_region, &lazy_reclaimed_cluster.ranges)?;
+                let released_clusters = self.apply_normalized_ranges(
+                    block_device,
+                    boot_region,
+                    &normalized_ranges,
+                    BitmapOp::Free,
+                )?;
+                self.record_released_clusters(released_clusters)?;
+                Ok(())
+            })();
+            if let Err(error) = release_result {
+                pending_lazy_reclaims.push(lazy_reclaimed_cluster);
+                pending_lazy_reclaims.extend(lazy_reclaimed_clusters);
+                self.lazy_reclaimed_clusters = pending_lazy_reclaims;
+                return Err(error);
+            }
+        }
+        self.lazy_reclaimed_clusters = pending_lazy_reclaims;
+        Ok(())
+    }
+
+    pub(super) fn lazy_reclaim_clusters(
+        &mut self,
+        cluster_map: Arc<ClusterMap>,
+        ranges: Vec<ClusterRange>,
+    ) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.lazy_reclaimed_clusters.push(LazyReclaimedCluster {
+            cluster_map,
+            ranges,
+        });
     }
 
     pub(super) fn parse(entry: &[u8]) -> Result<Self> {
@@ -387,13 +445,19 @@ impl AllocationBitmap {
                 entry[31],
             ]),
             used_clusters: 0,
+            lazy_reclaimed_clusters: Vec::new(),
         })
     }
 
-    fn bitmap_lengths(self, cluster_count: usize, boot_region: &BootRegion) -> Result<(usize, usize)> {
+    fn bitmap_lengths(
+        &self,
+        cluster_count: usize,
+        boot_region: &BootRegion,
+    ) -> Result<(usize, usize)> {
         boot_region.validate_stream_data(self.first_cluster, self.data_length)?;
         let required_bytes = cluster_count.div_ceil(8);
-        let bitmap_bytes = usize::try_from(self.data_length).map_err(|_| invalid_on_disk_layout())?;
+        let bitmap_bytes =
+            usize::try_from(self.data_length).map_err(|_| invalid_on_disk_layout())?;
         if bitmap_bytes < required_bytes {
             return Err(inconsistent_bitmap_accounting());
         }
@@ -411,17 +475,17 @@ impl AllocationBitmap {
             *run_cluster_count = 0;
             return Ok(*requested_clusters_remaining == 0);
         };
-        let admitted_clusters = (*run_cluster_count).min(*requested_clusters_remaining);
+        let allocated_clusters = (*run_cluster_count).min(*requested_clusters_remaining);
         *run_cluster_count = 0;
-        if admitted_clusters == 0 {
+        if allocated_clusters == 0 {
             return Ok(*requested_clusters_remaining == 0);
         }
 
         ranges.push(ClusterRange {
             start_cluster: boot_region.cluster_from_index(start_cluster_index)?,
-            cluster_count: admitted_clusters,
+            cluster_count: allocated_clusters,
         });
-        *requested_clusters_remaining -= admitted_clusters;
+        *requested_clusters_remaining -= allocated_clusters;
         Ok(*requested_clusters_remaining == 0)
     }
 
