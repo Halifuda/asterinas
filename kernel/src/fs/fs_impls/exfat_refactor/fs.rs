@@ -32,54 +32,6 @@ use crate::{
 
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
 
-pub(super) struct ClusterAllocGuard<'a> {
-    fs: &'a Arc<ExfatFs>,
-    mount_state: &'a mut MountedVolumeState,
-    allocated_ranges: Option<Vec<ClusterRange>>,
-}
-
-impl<'a> ClusterAllocGuard<'a> {
-    pub(super) fn allocate(
-        fs: &'a Arc<ExfatFs>,
-        mount_state: &'a mut MountedVolumeState,
-        requested_clusters: usize,
-    ) -> Result<Self> {
-        let allocated_ranges = fs.allocate_clusters(mount_state, requested_clusters)?;
-        Ok(Self {
-            fs,
-            mount_state,
-            allocated_ranges: Some(allocated_ranges),
-        })
-    }
-
-    pub(super) fn ranges(&self) -> &[ClusterRange] {
-        self.allocated_ranges
-            .as_deref()
-            .unwrap_or_else(|| unreachable!("committed allocation guards hold no ranges"))
-    }
-
-    pub(super) fn single_cluster(&self) -> Result<u32> {
-        match self.ranges() {
-            [allocated_range] if allocated_range.cluster_count == 1 => {
-                Ok(allocated_range.start_cluster)
-            }
-            _ => Err(inconsistent_bitmap_accounting()),
-        }
-    }
-
-    pub(super) fn commit(mut self) {
-        self.allocated_ranges = None;
-    }
-}
-
-impl Drop for ClusterAllocGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(allocated_ranges) = self.allocated_ranges.take() {
-            let _ = self.fs.free_clusters(self.mount_state, &allocated_ranges);
-        }
-    }
-}
-
 pub(super) struct ExfatFs {
     allocator: RwMutex<Option<AllocationBitmap>>,
     block_device: Arc<dyn BlockDevice>,
@@ -247,7 +199,7 @@ impl FileSystem for ExfatFs {
 }
 
 impl ExfatFs {
-    // Construction and mount activation
+// ---- Mount lifecycle ----
 
     fn new(
         block_device: Arc<dyn BlockDevice>,
@@ -333,7 +285,10 @@ impl ExfatFs {
         Ok(next_flags)
     }
 
-    // Admission
+}
+
+// ---- Mount guards ----
+impl ExfatFs {
 
     pub(super) fn mount_state_read_guard(&self) -> Result<MountStateReadGuard<'_>> {
         let mount_state = self.mount_state.read();
@@ -381,7 +336,10 @@ impl ExfatFs {
         })
     }
 
-    // Superblock
+}
+
+// ---- Superblock ----
+impl ExfatFs {
 
     fn build_super_block(
         &self,
@@ -415,6 +373,60 @@ impl ExfatFs {
         let bitmap = allocator.as_ref().ok_or_else(not_mounted)?;
         self.build_super_block(mount_state, bitmap)
     }
+
+}
+
+// ---- Allocation ----
+
+pub(super) struct ClusterAllocGuard<'a> {
+    fs: &'a Arc<ExfatFs>,
+    mount_state: &'a mut MountedVolumeState,
+    allocated_ranges: Option<Vec<ClusterRange>>,
+}
+
+impl<'a> ClusterAllocGuard<'a> {
+    pub(super) fn allocate(
+        fs: &'a Arc<ExfatFs>,
+        mount_state: &'a mut MountedVolumeState,
+        requested_clusters: usize,
+    ) -> Result<Self> {
+        let allocated_ranges = fs.allocate_clusters(mount_state, requested_clusters)?;
+        Ok(Self {
+            fs,
+            mount_state,
+            allocated_ranges: Some(allocated_ranges),
+        })
+    }
+
+    pub(super) fn ranges(&self) -> &[ClusterRange] {
+        self.allocated_ranges
+            .as_deref()
+            .unwrap_or_else(|| unreachable!("committed allocation guards hold no ranges"))
+    }
+
+    pub(super) fn single_cluster(&self) -> Result<u32> {
+        match self.ranges() {
+            [allocated_range] if allocated_range.cluster_count == 1 => {
+                Ok(allocated_range.start_cluster)
+            }
+            _ => Err(inconsistent_bitmap_accounting()),
+        }
+    }
+
+    pub(super) fn commit(mut self) {
+        self.allocated_ranges = None;
+    }
+}
+
+impl Drop for ClusterAllocGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(allocated_ranges) = self.allocated_ranges.take() {
+            let _ = self.fs.free_clusters(self.mount_state, &allocated_ranges);
+        }
+    }
+}
+
+impl ExfatFs {
 
     pub(super) fn allocate_clusters(
         &self,
@@ -493,8 +505,6 @@ impl ExfatFs {
         Ok(())
     }
 
-    // Helpers
-
     pub(super) fn immutable_block_device(&self) -> Arc<dyn BlockDevice> {
         self.block_device.clone()
     }
@@ -506,6 +516,11 @@ impl ExfatFs {
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
     }
+
+}
+
+// ---- Inode cache ----
+impl ExfatFs {
 
     pub(super) fn get_or_create_cached_inode(
         &self,

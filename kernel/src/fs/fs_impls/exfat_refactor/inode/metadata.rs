@@ -30,6 +30,8 @@ use crate::{
 impl ExfatInode {
     // Read projection
 
+// ---- meta_read (projection + VFS getters) ----
+
     pub(super) fn metadata_projection(&self) -> Metadata {
         let metadata = *self.metadata.read();
         if metadata.type_ != InodeType::File {
@@ -74,6 +76,11 @@ impl ExfatInode {
     pub(super) fn ctime_impl(&self) -> Duration {
         self.metadata_projection().last_meta_change_at
     }
+
+    }
+
+// ---- meta_write (refresh + setters) ----
+impl ExfatInode {
 
     pub(super) fn refresh_cached_metadata_from_entry_view(
         &self,
@@ -388,6 +395,11 @@ impl ExfatInode {
         return_errno!(Errno::EPERM);
     }
 
+    }
+
+// ---- entry_rewrite (timestamp + directory metadata refresh) ----
+impl ExfatInode {
+
     pub(super) fn rewrite_timestamp(
         &self,
         field_kind: InodeTimestampField,
@@ -533,6 +545,7 @@ impl ExfatInode {
         }
         Ok(())
     }
+
 
     pub(super) fn rewrite_inode_entry_set(
         &self,
