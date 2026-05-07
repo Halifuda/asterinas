@@ -47,7 +47,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        let mut mount_guard = self.mount_access_write_guard(&fs)?;
         if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
@@ -184,7 +184,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        let mut mount_guard = self.mount_access_write_guard(&fs)?;
         if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
@@ -273,7 +273,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        let mut mount_guard = self.mount_access_write_guard(&fs)?;
         if mount_guard.forced_shutdown() {
             return_errno!(Errno::EIO);
         }
@@ -388,7 +388,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut mount_guard = self.directory_access_guard(&fs, true)?;
+        let mut mount_guard = self.mount_access_write_guard(&fs)?;
         let target_fs = target_directory
             .fs
             .upgrade()

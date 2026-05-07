@@ -120,7 +120,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_guard = self.directory_access_guard(&fs, false)?;
+        let mount_guard = self.mount_access_read_guard(&fs)?;
         let block_device = mount_guard.block_device();
         let boot_region = mount_guard.boot_region();
         let (_owner_guard, cluster_map) = self.directory_snapshot()?;
@@ -200,7 +200,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_guard = self.directory_access_guard(&fs, false)?;
+        let mount_guard = self.mount_access_read_guard(&fs)?;
         let block_device = mount_guard.block_device();
         let boot_region = mount_guard.boot_region();
         let upcase_table = mount_guard.upcase_table();
