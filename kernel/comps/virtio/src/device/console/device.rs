@@ -24,8 +24,8 @@ pub struct ConsoleDevice {
     transport: SpinLock<Box<dyn VirtioTransport>>,
     receive_queue: SpinLock<VirtQueue>,
     transmit_queue: SpinLock<VirtQueue>,
-    send_buffer: Arc<DmaStream>,
-    receive_buffer: Arc<DmaStream>,
+    send_buffer: DmaStream,
+    receive_buffer: DmaStream,
     #[expect(clippy::box_collection)]
     callbacks: Rcu<Box<Vec<&'static ConsoleCallback>>>,
 }
@@ -41,15 +41,14 @@ impl AnyConsoleDevice for ConsoleDevice {
             self.send_buffer.sync_to_device(0..len).unwrap();
 
             let slice = Slice::new(&self.send_buffer, 0..len);
-            transmit_queue.add_dma_buf(&[&slice], &[]).unwrap();
+            transmit_queue.add_input_bufs(&[&slice]).unwrap();
 
             if transmit_queue.should_notify() {
                 transmit_queue.notify();
             }
-            while !transmit_queue.can_pop() {
+            while transmit_queue.pop_used().is_err() {
                 spin_loop();
             }
-            transmit_queue.pop_used().unwrap();
         }
     }
 
@@ -93,13 +92,16 @@ impl ConsoleDevice {
         const RECV0_QUEUE_INDEX: u16 = 0;
         const TRANSMIT0_QUEUE_INDEX: u16 = 1;
         let receive_queue =
-            SpinLock::new(VirtQueue::new(RECV0_QUEUE_INDEX, 2, transport.as_mut()).unwrap());
-        let transmit_queue =
-            SpinLock::new(VirtQueue::new(TRANSMIT0_QUEUE_INDEX, 2, transport.as_mut()).unwrap());
+            SpinLock::new(VirtQueue::new(RECV0_QUEUE_INDEX, 2, transport.as_mut())?);
+        let transmit_queue = SpinLock::new(VirtQueue::new(
+            TRANSMIT0_QUEUE_INDEX,
+            2,
+            transport.as_mut(),
+        )?);
 
-        let send_buffer = Arc::new(DmaStream::alloc(1, false).unwrap());
-
-        let receive_buffer = Arc::new(DmaStream::alloc(1, false).unwrap());
+        let send_buffer = DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?;
+        let receive_buffer =
+            DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?;
 
         let device = Arc::new(Self {
             config_manager,
@@ -116,6 +118,7 @@ impl ConsoleDevice {
         // Register IRQ callbacks.
         let mut transport = device.transport.lock();
         let handle_console_input = {
+            // FIXME: This callback captures a strong `Arc`, creating a reference cycle.
             let device = device.clone();
             move |_: &TrapFrame| device.handle_recv_irq()
         };
@@ -163,7 +166,7 @@ impl ConsoleDevice {
             //
             // For the QEMU bug, see details at
             // <https://lore.kernel.org/qemu-devel/20240707111940.232549-3-lrh2000@pku.edu.cn/T/#u>.
-            .add_dma_buf(&[], &[&Slice::new(&self.receive_buffer, 0..1)])
+            .add_output_bufs(&[&Slice::new(&self.receive_buffer, 0..1)])
             .unwrap();
 
         if receive_queue.should_notify() {
@@ -173,5 +176,5 @@ impl ConsoleDevice {
 }
 
 fn config_space_change(_: &TrapFrame) {
-    debug!("Virtio-Console device configuration space change");
+    debug!("console device configuration space change");
 }

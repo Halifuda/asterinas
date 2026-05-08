@@ -205,7 +205,7 @@ impl<D: BlockSet + 'static> MlsDisk<D> {
         // TODO: Error handling the sync operation
         self.inner.sync().unwrap();
 
-        debug!("[MlsDisk] Sync completed. {self:?}");
+        debug!("Sync completed. {self:?}");
         Ok(())
     }
 
@@ -260,7 +260,7 @@ impl<D: BlockSet + 'static> MlsDisk<D> {
             }),
         };
 
-        info!("[MlsDisk] Created successfully! {:?}", &new_self);
+        info!("Created successfully! {:?}", &new_self);
         // XXX: Would `disk::drop()` bring unexpected behavior?
         Ok(new_self)
     }
@@ -312,7 +312,7 @@ impl<D: BlockSet + 'static> MlsDisk<D> {
             }),
         };
 
-        info!("[MlsDisk] Opened successfully! {:?}", &opened_self);
+        info!("Opened successfully! {:?}", &opened_self);
         Ok(opened_self)
     }
 
@@ -363,7 +363,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
         if let Err(e) = &res
             && e.errno() == NotFound
         {
-            warn!("[MlsDisk] read contains empty read on lba {lba}");
+            warn!("read contains empty read on lba {lba}");
             return Ok(());
         }
         res
@@ -378,7 +378,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
         if let Err(e) = &res
             && e.errno() == NotFound
         {
-            warn!("[MlsDisk] readv contains empty read on lba {lba}");
+            warn!("readv contains empty read on lba {lba}");
             return Ok(());
         }
         res
@@ -437,7 +437,7 @@ impl<D: BlockSet + 'static> DiskInner<D> {
 
         let mut res = range_query_ctx.into_results();
         let record_batches = {
-            res.sort_by(|(_, v1), (_, v2)| v1.hba.cmp(&v2.hba));
+            res.sort_by_key(|(_, v1)| v1.hba);
             res.chunk_by(|(_, v1), (_, v2)| v2.hba - v1.hba == 1)
         };
 

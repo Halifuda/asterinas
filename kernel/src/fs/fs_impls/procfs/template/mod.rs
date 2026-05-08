@@ -3,15 +3,17 @@
 use core::time::Duration;
 
 pub(super) use self::{
-    builder::{ProcDirBuilder, ProcFileBuilder, ProcSymBuilder},
-    dir::{DirOps, ProcDir, lookup_child_from_table, populate_children_from_table},
+    dir::{
+        DirOps, ListedEntry, ProcDir, ReaddirEntry, StaticDirEntry, keyed_readdir_entries,
+        listed_entries_from_table, lookup_child_from_table, sequential_readdir_entries,
+        visit_listed_entries, visit_readdir_entries,
+    },
     file::{FileOps, FileOpsByHandle, ProcFile, read_i32_from},
     sym::{ProcSym, SymOps},
 };
-use super::{BLOCK_SIZE, ProcFs};
 use crate::{
     fs::{
-        file::{InodeMode, InodeType},
+        file::InodeMode,
         vfs::{
             file_system::FileSystem,
             inode::{Extension, Metadata},
@@ -21,7 +23,6 @@ use crate::{
     process::{Gid, Uid},
 };
 
-mod builder;
 mod dir;
 mod file;
 mod sym;
@@ -30,16 +31,14 @@ struct Common {
     metadata: RwLock<Metadata>,
     extension: Extension,
     fs: Weak<dyn FileSystem>,
-    is_volatile: bool,
 }
 
 impl Common {
-    fn new(metadata: Metadata, fs: Weak<dyn FileSystem>, is_volatile: bool) -> Self {
+    fn new(metadata: Metadata, fs: Weak<dyn FileSystem>) -> Self {
         Self {
             metadata: RwLock::new(metadata),
             extension: Extension::new(),
             fs,
-            is_volatile,
         }
     }
 
@@ -53,10 +52,6 @@ impl Common {
 
     fn ino(&self) -> u64 {
         self.metadata.read().ino
-    }
-
-    fn type_(&self) -> InodeType {
-        self.metadata.read().type_
     }
 
     fn size(&self) -> usize {
@@ -112,10 +107,6 @@ impl Common {
     fn set_group(&self, gid: Gid) -> Result<()> {
         self.metadata.write().gid = gid;
         Ok(())
-    }
-
-    fn is_volatile(&self) -> bool {
-        self.is_volatile
     }
 
     fn extension(&self) -> &Extension {

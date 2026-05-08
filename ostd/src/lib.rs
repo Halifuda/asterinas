@@ -5,13 +5,12 @@
 #![feature(allocator_api)]
 #![feature(btree_cursors)]
 #![feature(core_intrinsics)]
-#![feature(iter_advance_by)]
 #![feature(linkage)]
-#![feature(macro_metavar_expr)]
 #![feature(min_specialization)]
 #![feature(negative_impls)]
 #![feature(ptr_metadata)]
 #![feature(sync_unsafe_cell)]
+#![cfg_attr(target_arch = "x86_64", feature(iter_advance_by, macro_metavar_expr))]
 #![expect(internal_features)]
 #![no_std]
 #![warn(missing_docs)]
@@ -19,6 +18,13 @@
 extern crate alloc;
 #[macro_use]
 extern crate ostd_pod;
+
+// Set this crate's log prefix for `ostd::log`.
+macro_rules! __log_prefix {
+    () => {
+        ""
+    };
+}
 
 #[cfg_attr(target_arch = "x86_64", path = "arch/x86/mod.rs")]
 #[cfg_attr(target_arch = "riscv64", path = "arch/riscv/mod.rs")]

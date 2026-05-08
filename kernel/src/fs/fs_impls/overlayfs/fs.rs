@@ -23,10 +23,10 @@ use crate::{
         pseudofs::AnonDeviceId,
         utils::{DirentCounter, DirentVisitor, NAME_MAX},
         vfs::{
-            file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
+            file_system::{FileSystem, FsEventSubscriberStats, SuperBlock},
             inode::{Extension, FallocMode, Inode, InodeIo, Metadata, MknodType, SymbolicLink},
             path::{FsPath, Path},
-            registry::{FsProperties, FsType},
+            registry::{FsCreationCtx, FsProperties, FsType},
             xattr::{XATTR_VALUE_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -328,8 +328,10 @@ impl OverlayInode {
             .read_at(offset, writer, status_flags)
     }
 
-    /// Returns the children objects in a unified view.
-    /// The object from the upper layer with the same name will mask the lower ones.
+    /// Visits the children objects in a unified view.
+    ///
+    /// Returns the offset increment needed to advance `offset` to the next unread
+    /// entry. If no entries have been visited, returns an error.
     pub fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
         if self.type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
@@ -337,11 +339,30 @@ impl OverlayInode {
 
         let overlay_dir_visitor = self.readdir_inner(offset)?;
 
-        for (offset, (name, ino, type_)) in overlay_dir_visitor.as_merged_view() {
-            visitor.visit(name, *ino, *type_, *offset)?;
+        let mut last_visited_offset: Option<usize> = None;
+        for (entry_offset, (name, ino, type_)) in overlay_dir_visitor.as_merged_view() {
+            if let Err(e) = visitor.visit(name, *ino, *type_, *entry_offset) {
+                // If nothing has been visited yet, propagate the error.
+                // Otherwise, stop early and return what we have so far.
+                if last_visited_offset.is_none() {
+                    return Err(e);
+                }
+                break;
+            }
+            last_visited_offset = Some(*entry_offset);
         }
 
-        Ok(overlay_dir_visitor.cur_offset())
+        // Return the offset increment that advances the caller from the starting `offset`
+        // to one past the last visited dirent offset. Note: this is not guaranteed to be
+        // equal to the number of entries visited, since offsets may encode layer bits.
+        if let Some(last_off) = last_visited_offset {
+            last_off
+                .checked_sub(offset)
+                .and_then(|v| v.checked_add(1))
+                .ok_or(Error::new(Errno::EOVERFLOW))
+        } else {
+            Ok(0)
+        }
     }
 
     /// Deletes the target file by creating a "whiteout" file from the upper layer.
@@ -717,6 +738,7 @@ impl OverlayInode {
     fn readdir_inner(&self, offset: usize) -> Result<OverlayDirVisitor> {
         let mut overlay_visitor = OverlayDirVisitor::new();
         let (mut layer_idx, fs_offset) = UniqueNoGenerator::parse_unique_offset(offset);
+        overlay_visitor.set_cur_layer(layer_idx);
 
         // Process all the potential whiteout files before `layer_idx`
         if layer_idx > 0 {
@@ -1005,9 +1027,12 @@ struct OverlayDirVisitor {
 
 impl DirentVisitor for OverlayDirVisitor {
     fn visit(&mut self, name: &str, fs_ino: u64, type_: InodeType, fs_offset: usize) -> Result<()> {
-        if self.whiteout_only_mode && name.starts_with(WHITEOUT_PREFIX) {
-            self.dir_set
-                .insert(name[WHITEOUT_PREFIX_SIZE..].to_string());
+        if self.whiteout_only_mode {
+            if name.starts_with(WHITEOUT_PREFIX) {
+                self.dir_set
+                    .insert(name[WHITEOUT_PREFIX_SIZE..].to_string());
+            }
+            // We only want to collect the whiteout files in `whiteout_only_mode`, so directly return.
             return Ok(());
         }
 
@@ -1063,11 +1088,8 @@ impl OverlayDirVisitor {
         !self.whiteout_set.is_empty()
     }
 
-    pub fn cur_offset(&self) -> usize {
-        self.dir_map
-            .last_key_value()
-            .map(|(off, _)| *off)
-            .unwrap_or(0)
+    fn cur_offset(&self) -> Option<usize> {
+        self.dir_map.last_key_value().map(|(off, _)| *off)
     }
 
     fn set_cur_layer(&mut self, layer: LayerIdx) {
@@ -1145,17 +1167,12 @@ impl FsType for OverlayFsType {
         FsProperties::empty()
     }
 
-    fn create(
-        &self,
-        _flags: FsFlags,
-        args: Option<CString>,
-        _disk: Option<Arc<dyn aster_block::BlockDevice>>,
-    ) -> Result<Arc<dyn FileSystem>> {
+    fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
         let mut lower = Vec::new();
         let mut upper = "";
         let mut work = "";
 
-        let args = args.ok_or(Error::new(Errno::EINVAL))?;
+        let args = fs_creation_ctx.args().ok_or(Error::new(Errno::EINVAL))?;
         let args = args.to_string_lossy();
         let entries = args.split(',');
 
@@ -1199,7 +1216,7 @@ impl FsType for OverlayFsType {
             .collect::<Result<Vec<_>>>()?;
         let work = path_resolver.lookup(&FsPath::try_from(work)?)?;
 
-        OverlayFs::new(upper, lower, work).map(|fs| fs as _)
+        Ok(OverlayFs::new(upper, lower, work)?)
     }
 
     fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {
@@ -1465,6 +1482,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(xattr_value.as_slice(), "f2_xattr_value".as_bytes());
+    }
+
+    #[ktest]
+    fn resuming_readdir_should_not_produce_duplicates() {
+        crate::time::clocks::init_for_ktest();
+        crate::fs::vfs::init();
+
+        let mode = InodeMode::all();
+        let root = Path::new_fs_root(new_dummy_mount());
+
+        let upper = {
+            let dir = root.new_fs_child("upper", InodeType::Dir, mode).unwrap();
+            // whiteout for "deleted"
+            dir.new_fs_child(".wh.deleted", InodeType::File, mode)
+                .unwrap();
+            // a normal file that should appear exactly once
+            dir.new_fs_child("normal_file", InodeType::File, mode)
+                .unwrap();
+            dir
+        };
+
+        let lower = {
+            let lower_root = Path::new_fs_root(new_dummy_mount());
+            // this file is whited-out by upper, should NOT appear
+            lower_root
+                .new_fs_child("deleted", InodeType::File, mode)
+                .unwrap();
+            // this file only lives in lower, should appear once
+            lower_root
+                .new_fs_child("another_file", InodeType::File, mode)
+                .unwrap();
+            lower_root
+        };
+
+        let work = root.new_fs_child("work", InodeType::Dir, mode).unwrap();
+        let fs = OverlayFs::new(upper, vec![lower], work).unwrap();
+        let root_inode = fs.root_inode();
+
+        // Simulate multiple batched getdents calls: each call passes the accumulated
+        // offset (sum of all previous return values) as the starting offset, mimicking
+        // how inode_handle::readdir accumulates `*offset += read_cnt`.
+        let mut all_names = Vec::<String>::new();
+        let mut offset = 0usize;
+        loop {
+            let mut batch = Vec::<String>::new();
+            let read_cnt = root_inode.readdir_at(offset, &mut batch).unwrap();
+            all_names.extend(batch);
+            if read_cnt == 0 {
+                break;
+            }
+            offset += read_cnt;
+        }
+
+        assert!(
+            !all_names.contains(&"deleted".to_string()),
+            "whited-out file 'deleted' should not appear"
+        );
+
+        let normal_total = all_names.iter().filter(|n| *n == "normal_file").count();
+        assert_eq!(
+            normal_total, 1,
+            "normal_file should appear exactly once, got {normal_total}"
+        );
+
+        let another_total = all_names.iter().filter(|n| *n == "another_file").count();
+        assert_eq!(
+            another_total, 1,
+            "another_file should appear exactly once, got {another_total}"
+        );
     }
 
     #[ktest]

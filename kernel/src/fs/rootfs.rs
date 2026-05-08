@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core2::io::{Cursor, Read};
 use cpio_decoder::{CpioDecoder, CpioEntry, FileMetadata, FileType};
 use device_id::{DeviceId, MajorId, MinorId};
 use lending_iterator::LendingIterator;
 use libflate::gzip::Decoder as GZipDecoder;
+use no_std_io2::io::{Cursor, Read};
 use ostd::boot::boot_info;
 
 use super::{
@@ -22,7 +22,7 @@ impl<'a> BoxedReader<'a> {
 }
 
 impl Read for BoxedReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> core2::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> no_std_io2::io::Result<usize> {
         self.0.read(buf)
     }
 }
@@ -50,11 +50,7 @@ pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
     while let Some(entry_result) = decoder.next() {
         let mut entry = entry_result?;
         if let Err(e) = try_append_entry_to_rootfs(&mut entry, path_resolver) {
-            warn!(
-                "[kernel] failed to add entry {} to rootfs: {:?}",
-                entry.name(),
-                e
-            );
+            warn!("failed to add entry {} to rootfs: {:?}", entry.name(), e);
         }
     }
 

@@ -12,12 +12,10 @@
 #![feature(format_args_nl)]
 #![feature(linked_list_cursors)]
 #![feature(linked_list_retain)]
-#![feature(negative_impls)]
 #![feature(panic_can_unwind)]
 #![feature(register_tool)]
 #![feature(min_specialization)]
 #![feature(thin_box)]
-#![feature(trait_alias)]
 #![register_tool(component_access_control)]
 
 extern crate alloc;
@@ -28,6 +26,13 @@ extern crate controlled;
 extern crate getset;
 #[macro_use]
 extern crate ostd_pod;
+
+// Set this crate's log prefix for `ostd::log`.
+macro_rules! __log_prefix {
+    () => {
+        ""
+    };
+}
 
 #[cfg_attr(target_arch = "x86_64", path = "arch/x86/mod.rs")]
 #[cfg_attr(target_arch = "riscv64", path = "arch/riscv/mod.rs")]

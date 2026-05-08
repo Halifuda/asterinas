@@ -8,6 +8,7 @@ set -e
 
 ./clone3/clone_exit_signal
 ./clone3/clone_files
+./clone3/clone_invalid_exit_signal
 ./clone3/clone_no_exit_signal
 ./clone3/clone_parent
 ./clone3/clone_process
@@ -39,6 +40,8 @@ set -e
 ./pthread/pthread_signal_test
 ./pthread/pthread_test
 
+./ptrace/ptrace
+
 ./sched/sched_attr_getset
 ./sched/sched_param_getset
 ./sched/sched_param_idle
@@ -50,11 +53,12 @@ set -e
 ./signal/signal_test2
 
 if [ "$(uname -m)" = "x86_64" ]; then
+    ./signal/fault_signals
     ./signal/sigaltstack
-    ./signal/sigtrap
     ./signal/signal_fpu
     ./signal/signal_rflags_df
     ./signal/signal_test
+    ./signal/sigtrap
 fi
 
 ./group_session

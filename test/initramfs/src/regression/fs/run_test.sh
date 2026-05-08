@@ -88,6 +88,7 @@ test_mount_bind_file() {
 echo "Start ext2 fs test......"
 test_ext2 "/ext2" "test_file.txt"
 ./ext2/mknod
+./ext2/open_dir
 ./ext2/rename
 ./ext2/rmdir
 ./ext2/unix_socket
@@ -111,10 +112,14 @@ echo "All mount bind file test passed."
 ./mount/mount_move
 
 ./overlayfs/ovl_test
+./overlayfs/readdir_small_buffer
 
 ./procfs/dentry_cache
+./procfs/fd
+./procfs/getdents
 ./procfs/mountstats
 ./procfs/pid_mem
+./procfs/tid
 
 ./pseudofs/memfd_access_err
 ./pseudofs/pseudo_dentry

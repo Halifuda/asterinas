@@ -63,7 +63,7 @@ impl NsFs {
 }
 
 /// An inode representing a namespace entry in [`NsFs`].
-struct NsInode<T: NsCommonOps> {
+pub(in crate::fs) struct NsInode<T: NsCommonOps> {
     common: PseudoInode,
     ns: Arc<T>,
     name: String,
@@ -89,6 +89,10 @@ impl<T: NsCommonOps> NsInode<T> {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(in crate::fs) fn ns(&self) -> &Arc<T> {
+        &self.ns
     }
 }
 
@@ -329,6 +333,26 @@ pub struct StashedDentry {
     dentry: Mutex<Weak<Dentry>>,
 }
 
+impl PartialEq for StashedDentry {
+    fn eq(&self, other: &Self) -> bool {
+        self.ino == other.ino
+    }
+}
+
+impl Eq for StashedDentry {}
+
+impl PartialOrd for StashedDentry {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StashedDentry {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.ino.cmp(&other.ino)
+    }
+}
+
 impl StashedDentry {
     /// Creates a new, empty cache (no dentry allocated yet).
     pub fn new() -> Self {
@@ -357,7 +381,6 @@ impl StashedDentry {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NsType {
     Cgroup,
-    #[expect(unused)]
     Ipc,
     Mnt,
     #[expect(unused)]
