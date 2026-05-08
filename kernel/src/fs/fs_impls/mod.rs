@@ -30,8 +30,7 @@ pub(super) fn init() {
 
     ext2::init();
     exfat::init();
-    // TODO: Register `exfat_refactor` here only after later ownership passes
-    // absorb the remaining legacy `exfat` runtime responsibilities.
+    exfat_refactor::init();
     overlayfs::init();
     virtiofs::init();
 }

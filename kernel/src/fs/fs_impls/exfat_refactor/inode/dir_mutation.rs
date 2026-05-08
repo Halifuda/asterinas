@@ -799,8 +799,13 @@ impl ExfatInode {
         let mut run_start_index = 0usize;
         let mut entry_index = 0usize;
         loop {
+            let scan_start_index = entry_index;
             match direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)? {
                 ScannedDirEntry::EndOfDirectory { entry_index } => {
+                    if entry_index != scan_start_index {
+                        run_length = 0;
+                        run_start_index = entry_index;
+                    }
                     let available_entries = total_entries
                         .checked_sub(entry_index)
                         .ok_or(invalid_on_disk_layout())?;
@@ -819,8 +824,9 @@ impl ExfatInode {
                     return Ok(None);
                 }
                 ScannedDirEntry::Vacant(slot_range) => {
-                    if run_length == 0 {
+                    if run_length == 0 || slot_range.first_entry_index() != scan_start_index {
                         run_start_index = slot_range.first_entry_index();
+                        run_length = 0;
                     }
                     run_length = run_length
                         .checked_add(slot_range.entry_count())
