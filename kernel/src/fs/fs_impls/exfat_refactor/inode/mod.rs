@@ -39,7 +39,9 @@ use crate::{
         utils::DirentVisitor,
         vfs::{
             file_system::FileSystem,
-            inode::{Extension, FallocMode, Inode, Metadata, MknodType, SymbolicLink},
+            inode::{
+                Extension, FallocMode, Inode, Metadata, MknodType, RevalidationPolicy, SymbolicLink,
+            },
             page_cache::PageCache,
         },
     },
@@ -366,7 +368,18 @@ impl Inode for ExfatInode {
         &self.extension
     }
 
-    fn is_dentry_cacheable(&self) -> bool {
+    fn revalidation_policy(&self) -> RevalidationPolicy {
+        if self.type_() == InodeType::Dir {
+            return RevalidationPolicy::REVALIDATE_EXISTS | RevalidationPolicy::REVALIDATE_ABSENT;
+        }
+        RevalidationPolicy::empty()
+    }
+
+    fn revalidate_exists(&self, _name: &str, _child: &dyn Inode) -> bool {
+        false
+    }
+
+    fn revalidate_absent(&self, _name: &str) -> bool {
         false
     }
 }

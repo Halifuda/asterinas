@@ -30,7 +30,7 @@ use crate::{
 impl ExfatInode {
     // Read projection
 
-// ---- meta_read (projection + VFS getters) ----
+    // ---- meta_read (projection + VFS getters) ----
 
     pub(super) fn metadata_projection(&self) -> Metadata {
         let metadata = *self.metadata.read();
@@ -76,12 +76,10 @@ impl ExfatInode {
     pub(super) fn ctime_impl(&self) -> Duration {
         self.metadata_projection().last_meta_change_at
     }
-
-    }
+}
 
 // ---- meta_write (refresh + setters) ----
 impl ExfatInode {
-
     pub(super) fn refresh_cached_metadata_from_entry_view(
         &self,
         entry_view: FileEntrySetView<'_>,
@@ -257,14 +255,8 @@ impl ExfatInode {
     pub(super) fn set_atime_impl(&self, time: Duration) {
         let inode_type = self.metadata.read().type_;
         match inode_type {
-            InodeType::Dir => self.rewrite_timestamp(
-                InodeTimestampField::Accessed,
-                time,
-            ),
-            InodeType::File => self.rewrite_timestamp(
-                InodeTimestampField::Accessed,
-                time,
-            ),
+            InodeType::Dir => self.rewrite_timestamp(InodeTimestampField::Accessed, time),
+            InodeType::File => self.rewrite_timestamp(InodeTimestampField::Accessed, time),
             _ => self.metadata.write().last_access_at = time,
         }
     }
@@ -272,14 +264,8 @@ impl ExfatInode {
     pub(super) fn set_mtime_impl(&self, time: Duration) {
         let inode_type = self.metadata.read().type_;
         match inode_type {
-            InodeType::Dir => self.rewrite_timestamp(
-                InodeTimestampField::Modified,
-                time,
-            ),
-            InodeType::File => self.rewrite_timestamp(
-                InodeTimestampField::Modified,
-                time,
-            ),
+            InodeType::Dir => self.rewrite_timestamp(InodeTimestampField::Modified, time),
+            InodeType::File => self.rewrite_timestamp(InodeTimestampField::Modified, time),
             _ => self.metadata.write().last_modify_at = time,
         }
     }
@@ -394,17 +380,11 @@ impl ExfatInode {
         }
         return_errno!(Errno::EPERM);
     }
-
-    }
+}
 
 // ---- entry_rewrite (timestamp + directory metadata refresh) ----
 impl ExfatInode {
-
-    pub(super) fn rewrite_timestamp(
-        &self,
-        field_kind: InodeTimestampField,
-        time: Duration,
-    ) {
+    pub(super) fn rewrite_timestamp(&self, field_kind: InodeTimestampField, time: Duration) {
         let Some(fs) = self.fs.upgrade() else {
             return;
         };
@@ -446,38 +426,28 @@ impl ExfatInode {
                     let mut mutable_entry_set = entry_view.to_mutable();
                     match field_kind {
                         InodeTimestampField::Accessed => {
-                            let (
-                                timestamp_bytes,
-                                _ten_ms_increment,
+                            let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
+                                Self::encoded_exfat_timestamp_fields(
+                                    time,
+                                    entry_view.last_accessed_timestamp().utc_offset_byte(),
+                                )?;
+                            mutable_entry_set.set_last_accessed_timestamp(FileEntryTimestamp::new(
+                                [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                None,
                                 encoded_utc_offset_byte,
-                            ) = Self::encoded_exfat_timestamp_fields(
-                                time,
-                                entry_view.last_accessed_timestamp().utc_offset_byte(),
-                            )?;
-                            mutable_entry_set.set_last_accessed_timestamp(
-                                FileEntryTimestamp::new(
-                                    [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
-                                    None,
-                                    encoded_utc_offset_byte,
-                                ),
-                            );
+                            ));
                         }
                         InodeTimestampField::Modified => {
-                            let (
+                            let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                                Self::encoded_exfat_timestamp_fields(
+                                    time,
+                                    entry_view.last_modified_timestamp().utc_offset_byte(),
+                                )?;
+                            mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
                                 timestamp_bytes,
-                                ten_ms_increment,
+                                Some(ten_ms_increment),
                                 encoded_utc_offset_byte,
-                            ) = Self::encoded_exfat_timestamp_fields(
-                                time,
-                                entry_view.last_modified_timestamp().utc_offset_byte(),
-                            )?;
-                            mutable_entry_set.set_last_modified_timestamp(
-                                FileEntryTimestamp::new(
-                                    timestamp_bytes,
-                                    Some(ten_ms_increment),
-                                    encoded_utc_offset_byte,
-                                ),
-                            );
+                            ));
                         }
                     }
                     Ok(Some(mutable_entry_set.into_bytes()))
@@ -545,7 +515,6 @@ impl ExfatInode {
         }
         Ok(())
     }
-
 
     pub(super) fn rewrite_inode_entry_set(
         &self,

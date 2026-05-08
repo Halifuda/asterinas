@@ -50,7 +50,7 @@
 
 ### 2.3 User-Named Surface Closure
 
-*Required when the user or main agent names concrete symbols, helper families, files, `#[cfg(ktest)] mod tests`, or test-support paths. Reviewer must reject the pass if any named surface is absent, treated as exempt because it predates the pass, or kept without strong proof.*
+*Required when the user or main agent names concrete symbols, helper families, files, legacy file-local test modules, or legacy test-support paths. Reviewer must reject the pass if any named surface is absent, treated as exempt because it predates the pass, or kept without strong proof.*
 
 | User-Named Surface | Creator Disposition | Reviewer Judgment | If Kept, Is Proof Strong Enough? | Final Action |
 |--------------------|---------------------|-------------------|----------------------------------|--------------|
@@ -64,13 +64,13 @@
 |----------------|------------------|-------------------------------------|------------------------------|----------|
 | `e.g., MountVolumeStateTarget / Operation / Outcome` | `Yes / No` | `Yes / No` | `Yes / No` | `Accepted / REJECT back to Creator cleanup` |
 
-### 2.5 Test-Code Quality Gate
+### 2.5 Validation-Harness Boundary Gate
 
-*Required when test code or a test-only hierarchy is packeted for review. Checker may provide runtime evidence and touched-surface notes, but Reviewer owns this final static gate.*
+*Required when validation harness/config code is packeted for review. New filesystem-local `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixture, or test-only helper code under `kernel/src/fs/fs_impls/` must be rejected. Upstream-approved harness code must remain outside the filesystem implementation tree.*
 
-| Test Surface | Current Location | Should Move? | Helper Quality | Naming / Split Judgment | Action |
-|--------------|------------------|--------------|----------------|-------------------------|--------|
-| `e.g., #[cfg(ktest)] mod tests in fs.rs` | `path/to/file.rs` | `Yes / No` | `Accepted / Needs cleanup` | `Keep / rename / split / move to test-only subtree` | `Accepted / REJECT back to Creator cleanup` |
+| Validation Surface | Current Location | Approved Lane? | Boundary Judgment | Action |
+|--------------------|------------------|----------------|-------------------|--------|
+| `e.g., xfstests config` | `path/to/harness/file` | `Yes / No` | `Outside fs_impls / violates filesystem-local test ban` | `Accepted / REJECT back to Creator cleanup` |
 
 ## 3. Temporary Seam & Exit Plan Verification
 

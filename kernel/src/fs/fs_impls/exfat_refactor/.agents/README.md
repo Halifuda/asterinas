@@ -34,11 +34,11 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - **Architect (The Planner & System Mapper):**
   Defines the system by internalizing heavy priors. Produces the Global Static Lock Topology, the Bi-Directional Traceability Matrix (mapping all features/specs to the macro-meso-micro hierarchy), and establishes static lock boundaries.
 - **Designer (The Dynamic Path & Lock Orchestrator):**
-  Takes the Architect's static boundaries and dictates the dynamic execution process. Sets ironclad Lock Interaction Contracts and Path Boundary Restraints (e.g., non-blocking mandates), while also emitting both unit-test obligations and meso-level integration-test obligations.
+  Takes the Architect's static boundaries and dictates the dynamic execution process. Sets ironclad Lock Interaction Contracts and Path Boundary Restraints (e.g., non-blocking mandates), while also emitting Creator-synced and meso-level integration validation obligations for upstream-approved validation lanes.
 - **Creator (The Unconditional Executor):**
   Blindly follows the Designer's blueprints inside a main-agent-defined Creator Pass. Each pass names one parent meso-component and an explicit covered-micro set; the Creator implements only that slice and records it in the pass report.
 - **Checker (The Validator & Condenser):**
-  Validates behavior, owns targeted test writing, evaluates `qemu-serial.log` for execution evidence, and records actionable repair batches. Creator-synced Checker passes must mirror the Creator pass exactly; meso-level integration testing is scheduled as a separate Checker-owned pass. *Owns lock-guarded execution.*
+  Validates behavior through upstream-approved external/system-level validation, evaluates preserved guest logs and suite results for execution evidence, and records actionable repair batches. Creator-synced Checker passes must mirror the Creator pass exactly; meso-level integration validation is scheduled as a separate Checker-owned pass. New Checker work must not add filesystem-local ktests or `test_support/` under `kernel/src/fs/fs_impls/`. *Owns lock-guarded execution.*
 - **Reviewer (The Quality Gate):**
   Performs static code-quality reviews on stabilized implementation passes and may directly edit in-scope code to enforce formatting, naming, and style priors before final acceptance.
 
@@ -47,15 +47,15 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `ASTERINAS_ARCHITECT_PRIORS.md`: Asterinas-local architectural context.
 - `ASTERINAS_CODE_QUALITY_PRIORS.md`: Reusable code-quality guidance.
 - `linux-exFAT-implementation-summary.md`: Linux-side implementation map. 
-- *Note on Priors*: We use an **Information Funnel**. Heavy priors (Microsoft specs, Linux source) are internalized by the Architect. Designers internalize Architect outputs + Linux references. Creators only see the Designer's contract, the main-agent-selected pass coverage, and Code Quality priors. Checkers see the Designer test contract plus the relevant Creator pass receipts.
-- `TESTING_GUIDE.md`: How exFAT ktests should be written and executed.
+- *Note on Priors*: We use an **Information Funnel**. Heavy priors (Microsoft specs, Linux source) are internalized by the Architect. Designers internalize Architect outputs + Linux references. Creators only see the Designer's contract, the main-agent-selected pass coverage, and Code Quality priors. Checkers see the Designer validation contract plus the relevant Creator pass receipts.
+- `TESTING_GUIDE.md`: Legacy testing note retained only for historical context; new exFAT refactor validation must use upstream-approved external/system-level methods, currently expected to be NixOS xfstests.
 - `PROTOCOL.md`: Main-agent-owned normative workflow.
 - `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).
 - `subagent-tasks/`: Task packets grouped by `<component-id>`. Packets are lightweight **Dispatch Stubs** rather than heavy prose, avoiding context bloat and preventing Creator overreach.
 - `components/`: Subagent artifact outputs. Specs, evaluations, constraints are placed under exact `<component-id>` folders.
 - `checker-runs/`: Checker execution receipts grouped by parent meso-component (`checker-runs/<meso-component>/...`).
-- `tools/`: Workflow scripts. `checker_lock.sh` is the low-level checker execution lock, `checker_run.sh` is the preferred Checker build/ktest runner that archives per-test `qemu-serial.log`, and `ra_code_nav.py` is the preferred rust-analyzer code-navigation helper for symbol search, file symbols, definitions, references, implementations, and hover output.
+- `tools/`: Workflow scripts. `checker_lock.sh` is the low-level checker execution lock, `checker_run.sh` is the existing Checker compile/build runner and may be wrapped or extended for upstream-approved validation lanes; `ra_code_nav.py` is the preferred rust-analyzer code-navigation helper for symbol search, file symbols, definitions, references, implementations, and hover output.
 - `SYSTEM_BLUEPRINT.md`: The scheduler-owned active global blueprint and traceability matrix.
 - `priors/`: Prior knowledge layer containing heavy context separated for the strict information funnel.
 - `protocol/templates/`: Required handoff formats. Component artifacts use a prefix scheme based on the architectural mapping level (e.g. `pass_03_write_at_creator.md` for an implementation pass under a meso component).

@@ -24,8 +24,8 @@
 *Only list execution-specific overrides (like testing filters) or repair paths. NO architectural summaries, design hints, or "how-to" tutorials here.*
 - [For structural cleanup passes, enumerate each targeted structural objective as a separate bullet instead of bundling them into one generic "cleanup" line.]
 - [For full-surface Reviewer structural-audit passes, explicitly say that every production `struct`, `enum`, return carrier, operation/outcome carrier, and non-trait helper in the named files is in scope; generic "review `fs.rs`" wording is insufficient.]
-- [For user-named repair waves, copy every named symbol, helper family, `#[cfg(ktest)] mod tests`, and test-support path into the packet checklist; downstream artifacts must disposition each one.]
+- [For user-named repair waves, copy every named symbol, helper family, legacy file-local test module, and legacy test-support path into the packet checklist; downstream artifacts must disposition each one.]
 - [For carrier/helper cleanup, state the default rejection rule: temporary carriers, top-level helper families, and thin helpers must be removed, inlined, moved, or strongly proven.]
-- [For full-surface Checker test audits, explicitly enumerate every in-scope existing `#[cfg(ktest)]` module, test helper family, and `test_support/` file; do not rely on generic wording like "check the tests".]
-- [For Checker packets with exact names under `<owner>::tests::*`, state that `#[path = "test_support/..."] mod tests` satisfies the module path and does not require inline test bodies.]
-- [e.g., "Checker: Lock required before running `cargo osdk test`", or "Integration Pass: implement only the meso-level integration scenarios", or "None"]
+- [For full-surface legacy test audits, explicitly enumerate every in-scope pre-existing filesystem-local test module, test helper family, and test-support file; do not rely on generic wording like "check the tests".]
+- [For Checker packets, state the approved validation lane and required receipts, e.g., NixOS xfstests config, exact generic test IDs/groups, filesystem type proof, result/notrun/fail files, and preserved guest logs.]
+- [e.g., "Checker: Lock required before running NixOS xfstests", or "Integration Pass: validate only the meso-level integration scenarios", or "None"]

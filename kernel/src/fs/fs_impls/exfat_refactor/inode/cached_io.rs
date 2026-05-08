@@ -93,8 +93,7 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (cluster_map, data_length, valid_data_length) =
-            self.cluster_map_snapshot()?;
+        let (cluster_map, data_length, valid_data_length) = self.cluster_map_snapshot()?;
         if data_length == 0 || offset >= data_length || offset >= valid_data_length {
             return Ok(None);
         }
@@ -267,8 +266,7 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
 
-        let (_cluster_map, data_length, _valid_data_length) =
-            self.cluster_map_snapshot()?;
+        let (_cluster_map, data_length, _valid_data_length) = self.cluster_map_snapshot()?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);
         }
