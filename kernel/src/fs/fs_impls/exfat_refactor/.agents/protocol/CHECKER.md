@@ -40,7 +40,57 @@ For manual execution, run it in the same verified container with `docker exec co
    - `Failed Test`
    - `Evidence`
    These fields are mandatory before you write any repair advice.
-9. **Condense to Actionable Repairs (The Advisor Duty)**: If validation fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+9. **Preserved Image Triage**: When a filesystem run preserves TEST/SCRATCH
+   images, inspect the failed image before routing repairs if the failure
+   suggests on-disk corruption. Use read-only host/container tools first, for
+   example `fsck.exfat -n -v <image>` and `dump.exfat <image>` for exFAT, and
+   compare the failed image against the corresponding base image with bounded
+   byte dumps around the suspected metadata region. Do not repair the image in
+   place. Record whether the corruption is in boot parameters, allocation
+   bitmap, FAT, upcase table, root directory, or an ordinary directory entry
+   set. If the image contains a decisive corruption snapshot, keep it or mark it
+   with `--preserve-run-id` when pruning old run images.
+10. **Condense to Actionable Repairs (The Advisor Duty)**: If validation fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+
+## NixOS xfstests Prebuilt-Image Lane
+
+When a packet assigns NixOS / xfstests validation for `exfat_refactor`, prefer
+the prebuilt-image lane documented in
+`.agents/XFSTESTS_PREBUILT_IMAGE_GUIDE.md` unless the packet explicitly opens a
+separate guest-side formatter compatibility lane.
+
+Required execution rules for this lane:
+
+1. **No Guest-Side Formatting by Default**: Do not run `mkfs.exfat` inside the
+   Asterinas guest for the first smoke / remount validation loop. TEST and
+   SCRATCH raw images must be formatted outside the guest before QEMU starts.
+2. **Golden Root Image Discipline**: Treat the base NixOS root image as a
+   reusable template. Each run must use a copy or overlay of that root image so
+   guest writes do not pollute the base image.
+3. **exFAT Refactor `.agents` Directory Only**: The wrapper must place reusable
+   images under
+   `kernel/src/fs/fs_impls/exfat_refactor/.agents/xfstests/images/` and mutable
+   receipts under
+   `kernel/src/fs/fs_impls/exfat_refactor/.agents/xfstests/logs/<timestamp>/`.
+   Do not use a repository-root `.agents` directory for this lane.
+4. **Run Directory Contents**: Preserve at least a manifest, reproduce command,
+   QEMU command line, `qemu.log`, `qemu-serial.log`, test stdout/stderr, xfstests
+   result files when xfstests runs, and either copies / overlays / checksums for
+   the root, TEST, and SCRATCH images.
+5. **Fast Rerun Contract**: Rebuild the kernel when kernel code changed, but do
+   not reinstall the NixOS root image unless the NixOS package/config layer
+   changed. Recreate or copy TEST/SCRATCH images per run to keep filesystem state
+   clean.
+6. **Smoke Before Named Tests**: Before running named xfstests, prove
+   `mount -t exfat_refactor`, write, sync or fsync, unmount, remount, and
+   readback on a prebuilt TEST image. If this fails with `Structure needs
+   cleaning`, route it as an exFAT refactor persistence/remount bug.
+7. **Preferred Wrapper**: Use
+   `kernel/src/fs/fs_impls/exfat_refactor/.agents/tools/xfstests_prebuilt_smoke.sh`
+   for the first prebuilt-image smoke unless the packet supplies a newer wrapper.
+   `--prepare-only --no-lock` is allowed only for static wrapper checks; runtime
+   validation must use the Checker lock. Run runtime validation inside
+   `codex-asterinas-dev` from `/root/asterinas`.
 
 ## Allowed Edits
 

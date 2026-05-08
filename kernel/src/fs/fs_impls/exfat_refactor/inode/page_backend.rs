@@ -108,8 +108,10 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.data_length,
             page_cache_context.valid_data_length,
         )?;
-        let initialized_sector_len =
-            initialized_len - (initialized_len % page_cache_context.boot_region.sector_size);
+        let initialized_sector_len = initialized_len
+            .div_ceil(page_cache_context.boot_region.sector_size)
+            .checked_mul(page_cache_context.boot_region.sector_size)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len < PAGE_SIZE {
             frame
                 .writer()
