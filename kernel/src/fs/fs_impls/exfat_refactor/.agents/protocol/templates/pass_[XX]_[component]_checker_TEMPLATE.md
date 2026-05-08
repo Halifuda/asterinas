@@ -2,7 +2,7 @@
 
 # Checker Pass Validation Report / Repair Batch: `{component_name}`
 
-*This artifact is the absolute runtime validation record for one Checker pass. It either acts as a final signature that the assigned pass executed its Designer KTest covenants safely, or it outputs an Actionable Repair Batch.*
+*This artifact is the absolute runtime validation record for one Checker pass. It either acts as a final signature that the assigned pass satisfied its Designer validation contract through the upstream-approved lane, or it outputs an Actionable Repair Batch.*
 
 ## 1. Pass Identity
 
@@ -14,29 +14,29 @@
 **Creator Pass Artifact(s):**
 - `path/to/pass_creator.md` *(or `N/A` for a pure integration pass if no single creator receipt applies)*
 
-## 2. Test Obligations Executed
+## 2. Validation Obligations Executed
 
-**Tests Implemented from `_designer_ktest.md` (Using `#[ktest]` under an owner-adjacent `#[cfg(ktest)] mod tests` path, inline only when tiny or externalized through `#[path = "test_support/..."]` when non-trivial):**
-- `{test_case_name}`: [e.g., verified base case, with placement recorded as `inline tiny` or `test_support/ externalized`]
-- `{integration_or_concurrency_test}`: [e.g., asserted thread starvation during Bio handoff]
+**Validation Scenarios Executed from `_designer_validation.md` (using the upstream-approved lane, currently expected to be NixOS xfstests unless superseded by upstream):**
+- `{scenario_name}`: [e.g., generic/XXX against mounted exFAT image, with result/notrun/fail receipt path]
+- `{integration_or_concurrency_scenario}`: [e.g., xfstests group or explicit upstream suite scenario covering Bio handoff behavior]
 
-## 2.1 Test-Code Surface Record
+## 2.1 Validation Harness Surface Record
 
-*Required whenever Checker created or edited Rust tests or `test_support/` helpers in this pass. Also required when the packet explicitly asks for a full re-audit of existing test surfaces. Checker records touched surfaces and obvious concerns, but Reviewer owns final static approval of test-code quality.*
+*Required whenever Checker created or edited upstream-approved validation harness/config files outside `kernel/src/fs/fs_impls/`. Filesystem-local `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixture, or test-only helper changes under `kernel/src/fs/fs_impls/` are forbidden for new work.*
 
-- **Touched Test Surface:** [List touched test files or say `None` if Checker reused existing tests only.]
-- **Existing Test Surface In Scope:** [List any packeted pre-existing `#[cfg(ktest)]` modules or `test_support/` files that were re-audited, or say `None`.]
-- **Test Placement Justification:** [Choose `inline tiny`, `test_support/ externalized`, or `mixed`; explain briefly.]
-- **Checker Surface Note:** [e.g., `No test-code edits`, `New helper added`, `Possible move/split concern for Reviewer`]
-- **Reviewer Follow-Up Needed:** [Choose `No test-code surface touched`, `Ordinary post-checker Reviewer gate`, or `Full test-code quality re-audit required`.]
+- **Touched Validation Harness Surface:** [List touched upstream-approved harness/config files outside `kernel/src/fs/fs_impls/`, or say `None` if Checker reused existing harness only.]
+- **Existing Legacy Filesystem-Local Test Surface In Scope:** [Only list packeted pre-existing legacy surfaces if the task explicitly named them for cleanup/audit; otherwise say `None`.]
+- **Harness Boundary Justification:** [Explain why any touched harness/config path is outside `kernel/src/fs/fs_impls/` and belongs to the approved validation lane.]
+- **Checker Surface Note:** [e.g., `No harness edits`, `Updated xfstests config`, `Possible harness placement concern for Reviewer`]
+- **Reviewer Follow-Up Needed:** [Choose `No validation harness surface touched`, `Ordinary post-checker Reviewer gate`, or `Validation harness boundary review required`.]
 
 ## 3. Lock-Guarded Evaluation Result
 
-*Document the results from the Checker Execution Lock stage. Prefer `.agents/tools/checker_run.sh` and include both the wrapper command and the underlying Docker command(s). If running manually, include the explicit container command executed in `codex-asterinas-dev`.*
+*Document the results from the Checker Execution Lock stage. For compile/build receipts, prefer `.agents/tools/checker_run.sh`; for filesystem behavior validation, record the exact upstream-approved command sequence, currently expected to be NixOS xfstests unless superseded by upstream. If running manually, include the explicit container command executed in `codex-asterinas-dev` or the exact NixOS/QEMU command.*
 
-- **Reproduce Command**: `.agents/tools/checker_run.sh cargo-check|make-kernel|ktest ...` *(or the exact manual Docker command if the wrapper was not used)*
-- **Execution Proof**: (For `ktest`, show exact-name proof lines proving the targeted `#[ktest]` actually ran. For `cargo-check` or `make-kernel`, show the compile/build command and the decisive success/failure lines.)
-- **qemu-serial.log Scan**: (Required for any QEMU-backed ktest run. If this pass only ran `cargo-check` or `make-kernel`, say `Not applicable`.)
+- **Reproduce Command**: [Exact checker runner, NixOS xfstests, or upstream-approved suite command.]
+- **Execution Proof**: [For xfstests, show suite version/config, filesystem type proof, exact generic test IDs or groups executed, and decisive pass/fail/notrun result files. For `cargo-check` or `make-kernel`, show the compile/build command and decisive success/failure lines.]
+- **Guest / Suite Log Scan**: [Required for QEMU-backed validation. Inspect preserved `qemu-serial.log`, `qemu.log`, xfstests result files, or equivalent traces for panics, TCG errors, stalls, deadlocks, failures, skips, and notrun classifications. If this pass only ran `cargo-check` or `make-kernel`, say `Not applicable`.]
 
 ## 4. Conclusion (Accepted OR Repair Batch)
 

@@ -32,7 +32,7 @@
 ## 5. Next Actions for the Next Thread (CRITICAL)
 *When the next LLM context window starts, what is the EXACT first step it must take? Be highly prescriptive.*
 1. [e.g., "Wait for the Subagent currently running EXR-ALLOC Creator to finish, then review its template."]
-2. [e.g., "Dispatch the synchronized Checker Pass for EXR-WRITEAT-P02 using the Creator receipt and the Designer ktest."]
+2. [e.g., "Dispatch the synchronized Checker Pass for EXR-WRITEAT-P02 using the Creator receipt and the Designer validation contract."]
 
 ## 6. Live File Discipline
 *Keep this reminder in the active handoff so later main-agents do not split one tenure across many files.*

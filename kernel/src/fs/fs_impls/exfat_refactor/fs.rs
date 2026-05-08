@@ -25,7 +25,7 @@ use crate::{
     fs::vfs::{
         file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
         inode::Inode,
-        registry::{FsProperties, FsType},
+        registry::{FsCreationCtx, FsProperties, FsType},
     },
     prelude::*,
 };
@@ -46,7 +46,7 @@ pub(super) struct ExfatFs {
 
 impl FileSystem for ExfatFs {
     fn name(&self) -> &'static str {
-        "exfat"
+        "exfat_refactor"
     }
 
     fn source(&self) -> Option<&str> {
@@ -100,7 +100,7 @@ impl FileSystem for ExfatFs {
                 mount_state
                     .as_mut()
                     .ok_or_else(not_mounted)?
-                        .volume_flags
+                    .volume_flags
                     .volume_dirty = true;
                 return_errno!(Errno::EIO);
             }
@@ -122,7 +122,7 @@ impl FileSystem for ExfatFs {
                 mount_state
                     .as_mut()
                     .ok_or_else(not_mounted)?
-                        .volume_flags
+                    .volume_flags
                     .volume_dirty = true;
                 return Err(error);
             }
@@ -142,7 +142,7 @@ impl FileSystem for ExfatFs {
                 mount_state
                     .as_mut()
                     .ok_or_else(not_mounted)?
-                        .volume_flags
+                    .volume_flags
                     .volume_dirty = true;
                 return_errno!(Errno::EIO);
             }
@@ -199,7 +199,7 @@ impl FileSystem for ExfatFs {
 }
 
 impl ExfatFs {
-// ---- Mount lifecycle ----
+    // ---- Mount lifecycle ----
 
     fn new(
         block_device: Arc<dyn BlockDevice>,
@@ -284,12 +284,10 @@ impl ExfatFs {
         mount_state.options = next_options.with_flags(next_flags);
         Ok(next_flags)
     }
-
 }
 
 // ---- Mount guards ----
 impl ExfatFs {
-
     pub(super) fn mount_state_read_guard(&self) -> Result<MountStateReadGuard<'_>> {
         let mount_state = self.mount_state.read();
         let upcase_table = {
@@ -335,12 +333,10 @@ impl ExfatFs {
             forced_shutdown,
         })
     }
-
 }
 
 // ---- Superblock ----
 impl ExfatFs {
-
     fn build_super_block(
         &self,
         mount_state: &MountedVolumeState,
@@ -373,7 +369,6 @@ impl ExfatFs {
         let bitmap = allocator.as_ref().ok_or_else(not_mounted)?;
         self.build_super_block(mount_state, bitmap)
     }
-
 }
 
 // ---- Allocation ----
@@ -427,7 +422,6 @@ impl Drop for ClusterAllocGuard<'_> {
 }
 
 impl ExfatFs {
-
     pub(super) fn allocate_clusters(
         &self,
         mount_state: &MountedVolumeState,
@@ -516,12 +510,10 @@ impl ExfatFs {
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
     }
-
 }
 
 // ---- Inode cache ----
 impl ExfatFs {
-
     pub(super) fn get_or_create_cached_inode(
         &self,
         ino: u64,
@@ -667,23 +659,17 @@ pub(super) struct ExfatFsType;
 
 impl FsType for ExfatFsType {
     fn name(&self) -> &'static str {
-        "exfat"
+        "exfat_refactor"
     }
 
     fn properties(&self) -> FsProperties {
         FsProperties::NEED_DISK
     }
 
-    fn create(
-        &self,
-        flags: FsFlags,
-        args: Option<CString>,
-        disk: Option<Arc<dyn BlockDevice>>,
-    ) -> Result<Arc<dyn FileSystem>> {
-        let block_device = disk.ok_or(Error::new(Errno::EINVAL))?;
-        let options = MountOptions::parse(flags, args.as_deref())?;
-        let (fs, ..) =
-            ExfatFs::mount_candidate(&block_device, Some(block_device.name()), &options)?;
+    fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+        let block_device = fs_creation_ctx.resolve_block_device()?;
+        let options = MountOptions::parse(fs_creation_ctx.flags(), fs_creation_ctx.args())?;
+        let (fs, ..) = ExfatFs::mount_candidate(&block_device, fs_creation_ctx.source(), &options)?;
         Ok(fs as Arc<dyn FileSystem>)
     }
 

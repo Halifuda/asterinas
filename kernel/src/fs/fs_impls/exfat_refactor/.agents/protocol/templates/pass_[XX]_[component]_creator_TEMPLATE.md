@@ -38,7 +38,7 @@
 
 ## 4. Generated Entity Census
 
-*You MUST list every introduced production entity in the assigned write-set. This includes each new `struct`, `enum`, local type alias, module, and non-trait helper function. Trait-required methods may be grouped explicitly under an impl block instead of listed one-by-one. Test-only entities MUST appear in a separate subsection and are not exempt from reporting.*
+*You MUST list every introduced production entity in the assigned write-set. This includes each new `struct`, `enum`, local type alias, module, and non-trait helper function. Trait-required methods may be grouped explicitly under an impl block instead of listed one-by-one. New filesystem-local test-only entities are forbidden; if the packet explicitly names legacy test-only surfaces for cleanup/audit, disposition them in the user-named surface table instead of growing them.*
 
 ### 4.1 Production Entity Census
 
@@ -53,11 +53,12 @@
 |------------|-----------------|-----------------------------------|
 | `impl FileSystem for ExfatFs` | `name`, `source`, `sync`, `root_inode`, `sb`, `flags`, `set_fs_flags` | Required trait surface; grouped here instead of listed one-by-one |
 
-### 4.3 Test-Only Entity Census
+### 4.3 Filesystem-Local Test Growth Check
 
-| Introduced Symbol | Kind | File | Why Test-Only | Notes |
-|-------------------|------|------|---------------|-------|
-| `e.g., diagnose_boot_gate` | Private fn | `path/to/file.rs` | `#[cfg(ktest)]` checker diagnostics only | Duplicates production parsing intentionally for precise failure gates |
+| Forbidden Surface Type | Introduced In This Pass? | Evidence / Notes |
+|------------------------|--------------------------|------------------|
+| `#[ktest]` / `#[cfg(ktest)]` under `kernel/src/fs/fs_impls/` | `No` | `New filesystem-local ktests are forbidden.` |
+| `test_support/`, memory-disk fixtures, or test-only helpers under `kernel/src/fs/fs_impls/` | `No` | `New validation harness work belongs outside the filesystem implementation tree.` |
 
 ### 4.4 Entity Rejection Table
 
@@ -71,7 +72,7 @@
 
 ### 4.5 User-Named Surface Disposition
 
-*Required when the packet names concrete symbols, helper families, files, `#[cfg(ktest)] mod tests`, or test-support paths from user feedback. Copy each name exactly enough for the main agent and Reviewer to verify it was not skipped.*
+*Required when the packet names concrete symbols, helper families, files, legacy file-local test modules, or legacy test-support paths from user feedback. Copy each name exactly enough for the main agent and Reviewer to verify it was not skipped.*
 
 | User-Named Surface | Action | If Kept, Strong Proof | Evidence / Code Path |
 |--------------------|--------|-----------------------|----------------------|

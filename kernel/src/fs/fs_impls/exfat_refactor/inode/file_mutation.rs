@@ -72,8 +72,7 @@ impl ExfatInode {
             }
 
             let inode_state_guard = self.inode_state.write();
-            let cluster_map_generation =
-                self.current_cluster_map(&inode_state_guard)?;
+            let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
             let cluster_map = cluster_map_generation.stream_extension();
             let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
 
@@ -194,8 +193,7 @@ impl ExfatInode {
         }
 
         let inode_state_guard = self.inode_state.write();
-        let cluster_map_generation =
-            self.current_cluster_map(&inode_state_guard)?;
+        let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
         let cluster_map = cluster_map_generation.stream_extension();
         let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
         if new_size == data_length {
@@ -209,7 +207,7 @@ impl ExfatInode {
                 let _page_cache_context = self.install_page_cache_context(
                     &inode_state_guard,
                     PageCacheContext {
-                    flags: admission.flags,
+                        flags: admission.flags,
                         block_device: block_device.clone(),
                         boot_region,
                         cluster_map: cluster_map_generation.clone(),
@@ -383,8 +381,7 @@ impl ExfatInode {
             metadata.nr_sectors_allocated = allocated_sectors;
             metadata.size = new_size;
         }
-        let retired_generation =
-            self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
+        let retired_generation = self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
         self.mark_content_dirty(&inode_state_guard);
         if !cluster_map.no_fat_chain && retained_clusters != 0 {
             let retained_last_cluster =

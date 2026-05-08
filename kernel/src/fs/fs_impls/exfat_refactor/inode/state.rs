@@ -311,12 +311,10 @@ impl ExfatInode {
         let cluster_map = *self.dir_entry_stream.read();
         Ok((inode_state_guard, cluster_map))
     }
-
 }
 
 // ---- Cluster map resolution ----
 impl ExfatInode {
-
     fn resolve_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -400,10 +398,7 @@ impl ExfatInode {
         })
     }
 
-    fn cluster_map_for(
-        &self,
-        cluster_map: StreamExtensionDirEntry,
-    ) -> Result<Arc<ClusterMap>> {
+    fn cluster_map_for(&self, cluster_map: StreamExtensionDirEntry) -> Result<Arc<ClusterMap>> {
         if let Some(generation) = self
             .cluster_map
             .read()
@@ -447,9 +442,7 @@ impl ExfatInode {
         self.cluster_map_for(cluster_map)
     }
 
-    pub(super) fn cluster_map_snapshot(
-        &self,
-    ) -> Result<(Arc<ClusterMap>, usize, usize)> {
+    pub(super) fn cluster_map_snapshot(&self) -> Result<(Arc<ClusterMap>, usize, usize)> {
         match self.metadata.read().type_ {
             InodeType::Dir => return_errno!(Errno::EISDIR),
             InodeType::File => {}
@@ -468,8 +461,7 @@ impl ExfatInode {
         _inode_state_guard: &InodeStateWriteGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
-        let previous_generation =
-            self.current_cluster_map(_inode_state_guard)?;
+        let previous_generation = self.current_cluster_map(_inode_state_guard)?;
         let next_generation = self.cluster_map_for(cluster_map)?;
         *self.dir_entry_stream.write() = cluster_map;
         *self.cluster_map.write() = Some(next_generation);
@@ -477,12 +469,10 @@ impl ExfatInode {
     }
 
     // Directory I/O
-
 }
 
 // ---- Directory byte I/O ----
 impl ExfatInode {
-
     pub(super) fn read_directory_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -649,7 +639,6 @@ impl ExfatInode {
 
 // ---- Dirty-state transitions ----
 impl ExfatInode {
-
     pub(super) fn mark_content_dirty(&self, _inode_state_guard: &InodeStateWriteGuard<'_>) {
         self.dirty_state.write().mark_content_dirty();
     }
@@ -665,12 +654,10 @@ impl ExfatInode {
         Ok((u64::from(cluster_map.first_cluster) << 32)
             | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
     }
-
 }
 
 // ---- Timestamps, name validation, write guards ----
 impl ExfatInode {
-
     pub(super) fn child_inode_from_directory_entry(
         parent: &Self,
         fs: &Arc<ExfatFs>,

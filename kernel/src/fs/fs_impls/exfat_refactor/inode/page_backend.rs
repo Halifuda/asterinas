@@ -81,12 +81,11 @@ impl ExfatFilePageBackend {
         let mount_state = fs.mount_state_read_guard()?;
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let (cluster_map, data_length, valid_data_length) =
-            inode.cluster_map_snapshot()?;
+        let (cluster_map, data_length, valid_data_length) = inode.cluster_map_snapshot()?;
         Ok((
             inode,
             PageCacheContext {
-                    flags: mount_state.flags,
+                flags: mount_state.flags,
                 block_device,
                 boot_region,
                 cluster_map,

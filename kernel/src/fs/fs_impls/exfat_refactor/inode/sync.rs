@@ -83,7 +83,7 @@ impl ExfatInode {
                 let _page_cache_context = self.install_page_cache_context(
                     &inode_state,
                     PageCacheContext {
-                    flags: mount_state.flags,
+                        flags: mount_state.flags,
                         block_device: block_device.clone(),
                         boot_region,
                         cluster_map: cluster_map.clone(),
