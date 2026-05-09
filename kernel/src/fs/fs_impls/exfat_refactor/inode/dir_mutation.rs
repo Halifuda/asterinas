@@ -411,7 +411,6 @@ impl ExfatInode {
         let new_name = Self::validate_name(new_name, &options)?;
         let old_name_hash = upcase_table.name_hash(&old_name);
         let new_name_hash = upcase_table.name_hash(&new_name);
-
         if self.metadata.read().ino == target_directory.metadata.read().ino {
             let renamed = {
                 let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
@@ -716,7 +715,6 @@ impl ExfatInode {
         let renamed_entry_set = direntry::renamed_entry_set(source_view, new_name, new_name_hash)
             .map_err(Error::from)?;
         let required_entry_count = renamed_entry_set.len() / DIRECTORY_ENTRY_SIZE;
-
         let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
             block_device,
             boot_region,

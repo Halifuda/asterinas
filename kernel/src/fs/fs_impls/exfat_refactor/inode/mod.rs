@@ -376,10 +376,10 @@ impl Inode for ExfatInode {
     }
 
     fn revalidate_exists(&self, _name: &str, _child: &dyn Inode) -> bool {
-        false
+        true
     }
 
     fn revalidate_absent(&self, _name: &str) -> bool {
-        false
+        true
     }
 }
