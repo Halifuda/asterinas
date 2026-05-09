@@ -73,7 +73,6 @@ impl ExfatInode {
             no_fat_chain,
         );
         child_inode.refresh_cached_metadata_from_entry_view(entry_view, boot_region)?;
-        let child_inode: Arc<dyn Inode> = child_inode;
         Ok(Some(child_inode))
     }
 
@@ -187,7 +186,6 @@ impl ExfatInode {
         if self.type_() != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
-
         if name == "." || name == ".." {
             let inode: Arc<dyn Inode> = self
                 .weak_self()
