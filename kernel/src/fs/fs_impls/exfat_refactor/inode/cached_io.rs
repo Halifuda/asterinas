@@ -4,12 +4,15 @@
 //!
 //! Method groups: cluster-map validation, page BIO range planning, page waiters, and read dispatch.
 
+use core::ops::Deref;
+
 use aster_block::{
     BlockDevice,
-    bio::{Bio, BioDirection, BioSegment, BioType, BioWaiter},
+    bio::{Bio, BioCompleteFn, BioDirection, BioSegment, BioType},
     id::Sid,
 };
-use ostd::mm::Segment;
+use io_util::batch::IoBatch;
+use ostd::mm::{Segment, VmIo};
 
 use super::{
     super::{
@@ -17,13 +20,15 @@ use super::{
         fat::{FatChainStep, FatReader},
     },
     ClusterMap, ExfatInode, StreamExtensionDirEntry,
+    page_backend::FragmentedPageIo,
 };
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
-        vfs::{inode::Inode, page_cache::CachePage},
+        vfs::inode::Inode,
     },
     prelude::*,
+    vm::page_cache::LockedCachePage,
 };
 
 impl ExfatInode {
@@ -197,16 +202,17 @@ impl ExfatInode {
         Ok((file_offset, initialized_len))
     }
 
-    pub(super) fn regular_file_page_waiter(
+    pub(super) fn submit_regular_file_page_io(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        frame: &CachePage,
+        locked_page: LockedCachePage,
         cluster_map: &ClusterMap,
         data_length: usize,
         file_offset: usize,
         initialized_len: usize,
-        bio_type: BioType,
-    ) -> Result<BioWaiter> {
+        io_batch: &mut IoBatch,
+        is_read: bool,
+    ) -> Result<()> {
         let page_ranges = Self::regular_file_page_bio_ranges(
             boot_region,
             cluster_map,
@@ -214,8 +220,9 @@ impl ExfatInode {
             file_offset,
             initialized_len,
         )?;
-        let page_segment: ostd::mm::USegment = Segment::from(frame.clone()).into();
-        let mut bio_waiter = BioWaiter::new();
+        let bio_type = if is_read { BioType::Read } else { BioType::Write };
+        let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
+        let page_io = FragmentedPageIo::new(locked_page, page_ranges.len(), is_read);
 
         for (page_offset, disk_offset, len) in page_ranges {
             let page_end = page_offset
@@ -230,16 +237,19 @@ impl ExfatInode {
                     BioType::Flush => return_errno!(Errno::EINVAL),
                 },
             );
+            let page_io = page_io.clone();
+            let complete_fn: BioCompleteFn = Box::new(move |status| page_io.complete(status));
             let bio = Bio::new(
                 bio_type,
                 Sid::from_offset(disk_offset),
                 vec![bio_segment],
-                None,
+                Some(complete_fn),
             );
-            bio_waiter.concat(bio.submit(block_device.as_ref()).map_err(Error::from)?);
+            bio.submit(block_device.as_ref(), io_batch)
+                .map_err(Error::from)?;
         }
 
-        Ok(bio_waiter)
+        Ok(())
     }
 
     pub(super) fn read_at_impl(
@@ -283,7 +293,7 @@ impl ExfatInode {
             return Ok(0);
         }
 
-        page_cache.pages().read(read_start, writer)?;
+        page_cache.read(read_start, writer).map_err(Error::from)?;
         Ok(read_end - read_start)
     }
 }

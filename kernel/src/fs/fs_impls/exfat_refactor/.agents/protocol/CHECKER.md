@@ -86,7 +86,7 @@ Required execution rules for this lane:
    readback on a prebuilt TEST image. If this fails with `Structure needs
    cleaning`, route it as an exFAT refactor persistence/remount bug.
 7. **Preferred Wrapper**: Use
-   `kernel/src/fs/fs_impls/exfat_refactor/.agents/tools/xfstests_prebuilt_smoke.sh`
+   `kernel/src/fs/fs_impls/exfat_refactor/.agents/tools/xfstests_prebuilt_runner.sh`
    for the first prebuilt-image smoke unless the packet supplies a newer wrapper.
    `--prepare-only --no-lock` is allowed only for static wrapper checks; runtime
    validation must use the Checker lock. Run runtime validation inside

@@ -5,7 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rexpect::{reader::Regex, session::PtySession};
+use nix::unistd::Pid;
+use rexpect::{process::signal, reader::Regex, session::PtySession};
 use uuid::Uuid;
 
 use super::{Error, clean_output, truncate_output_for_error};
@@ -27,6 +28,13 @@ pub struct SessionDesc {
     prompt: Cow<'static, str>,
     enter_cmd: Cow<'static, str>,
     exit_cmd: Cow<'static, str>,
+    shutdown_strategy: ShutdownStrategy,
+}
+
+#[derive(Clone, Copy)]
+pub enum ShutdownStrategy {
+    GuestCommand,
+    HostTerminate,
 }
 
 impl SessionDesc {
@@ -40,7 +48,14 @@ impl SessionDesc {
             prompt: prompt.into(),
             enter_cmd: enter_cmd.into(),
             exit_cmd: exit_cmd.into(),
+            shutdown_strategy: ShutdownStrategy::GuestCommand,
         }
+    }
+
+    /// Sets the shutdown strategy used when the root session ends.
+    pub fn shutdown_strategy(mut self, shutdown_strategy: ShutdownStrategy) -> Self {
+        self.shutdown_strategy = shutdown_strategy;
+        self
     }
 }
 
@@ -331,11 +346,27 @@ impl Session {
     }
 
     pub(super) fn shutdown(&mut self) -> Result<(), Error> {
-        self.pty_session
-            .send_line(&self.desc.exit_cmd)
-            .map_err(Error::from)?;
-
-        self.pty_session.process.wait().map_err(Error::from)?;
+        match self.desc.shutdown_strategy {
+            ShutdownStrategy::GuestCommand => {
+                if !self.desc.exit_cmd.is_empty() {
+                    self.pty_session
+                        .send_line(&self.desc.exit_cmd)
+                        .map_err(Error::from)?;
+                }
+                self.pty_session.process.wait().map_err(Error::from)?;
+            }
+            ShutdownStrategy::HostTerminate => {
+                self.pty_session.process.set_kill_timeout(Some(5_000));
+                let process_group_id = -self.pty_session.process.child_pid.as_raw();
+                signal::kill(Pid::from_raw(process_group_id), signal::Signal::SIGTERM).map_err(
+                    |error| Error::Protocol {
+                        reason: format!("failed to terminate QEMU process group: {}", error),
+                        got: String::new(),
+                    },
+                )?;
+                self.pty_session.process.wait().map_err(Error::from)?;
+            }
+        }
 
         Ok(())
     }

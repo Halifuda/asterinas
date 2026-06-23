@@ -161,7 +161,12 @@ parse_args() {
 docker_bash() {
     local command=$1
 
-    docker exec "$container" bash -lc "$command"
+    if command -v docker >/dev/null 2>&1; then
+        docker exec "$container" bash -lc "$command"
+        return
+    fi
+
+    bash -lc "$command"
 }
 
 container_path_exists() {
@@ -177,7 +182,11 @@ copy_container_file_if_present() {
     local host_path=$2
 
     if container_path_exists "$container_path"; then
-        docker cp "$container:$container_path" "$host_path"
+        if command -v docker >/dev/null 2>&1; then
+            docker cp "$container:$container_path" "$host_path"
+        else
+            cp "$container_path" "$host_path"
+        fi
         return 0
     fi
 

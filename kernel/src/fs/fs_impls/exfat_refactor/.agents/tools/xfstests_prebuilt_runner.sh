@@ -5,9 +5,10 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-Usage: xfstests_prebuilt_smoke.sh [--run-id ID] [--timeout TIMEOUT] [--no-lock]
+Usage: xfstests_prebuilt_runner.sh [--run-id ID] [--timeout TIMEOUT] [--no-lock]
                                   [--prepare-only] [--refresh-direct-boot-kernel]
-       xfstests_prebuilt_smoke.sh --prune-old-images [--keep-image-runs N]
+                                  [--reuse-images-from RUN_ID]
+       xfstests_prebuilt_runner.sh --prune-old-images [--keep-image-runs N]
                                   [--preserve-run-id ID] [--prune-dry-run]
 
 Runs the exFAT refactor prebuilt-image NixOS smoke harness.
@@ -26,6 +27,11 @@ Cleanup:
   --keep-image-runs N     Keep images in the newest N run dirs. Default: 3.
   --preserve-run-id ID    Never prune this run id. May be passed more than once.
   --prune-dry-run         Print what would be pruned without deleting files.
+
+Retry / shared image mode:
+  --reuse-images-from ID  Reuse root.img/test.img/scratch.img from
+                          logs/ID/ instead of copying fresh per-run image
+                          duplicates into the current run directory.
 
 Direct boot:
   --refresh-direct-boot-kernel
@@ -46,6 +52,7 @@ PRUNE_OLD_IMAGES=0
 PRUNE_DRY_RUN=0
 KEEP_IMAGE_RUNS=3
 PRESERVE_RUN_IDS=()
+REUSE_IMAGES_FROM=""
 LOCK_HELD=0
 
 while [ "$#" -gt 0 ]; do
@@ -70,6 +77,10 @@ while [ "$#" -gt 0 ]; do
         --refresh-direct-boot-kernel)
             REFRESH_DIRECT_BOOT_KERNEL=1
             shift
+            ;;
+        --reuse-images-from)
+            REUSE_IMAGES_FROM="${2:?missing --reuse-images-from value}"
+            shift 2
             ;;
         --prune-old-images)
             PRUNE_OLD_IMAGES=1
@@ -110,6 +121,7 @@ LOCK_SCRIPT="${AGENTS_DIR}/tools/checker_lock.sh"
 CHECKER_COMPONENT="${CHECKER_COMPONENT:-xfstests_harness_20260508}"
 CHECKER_PHASE="${CHECKER_PHASE:-prebuilt_image_smoke}"
 DIRECT_BOOT_REFRESH_SOURCE=""
+DIRECT_BOOT_REFRESH_MODE="none"
 
 if [ -z "${RUN_ID}" ]; then
     RUN_ID=$(date +%Y%m%d-%H%M%S)-prebuilt-image-smoke
@@ -117,9 +129,18 @@ fi
 
 RUN_DIR="${LOGS_DIR}/${RUN_ID}"
 RUN_DIRECT_BOOT_DIR="${RUN_DIR}/direct-boot"
-ROOT_IMAGE="${RUN_DIR}/root.img"
-TEST_IMAGE="${RUN_DIR}/test.img"
-SCRATCH_IMAGE="${RUN_DIR}/scratch.img"
+SHARED_IMAGE_RUN_DIR=""
+if [ -n "${REUSE_IMAGES_FROM}" ]; then
+    SHARED_IMAGE_RUN_DIR="${LOGS_DIR}/${REUSE_IMAGES_FROM}"
+    ROOT_IMAGE="${SHARED_IMAGE_RUN_DIR}/root.img"
+    TEST_IMAGE="${SHARED_IMAGE_RUN_DIR}/test.img"
+    SCRATCH_IMAGE="${SHARED_IMAGE_RUN_DIR}/scratch.img"
+    PRESERVE_RUN_IDS+=("${REUSE_IMAGES_FROM}")
+else
+    ROOT_IMAGE="${RUN_DIR}/root.img"
+    TEST_IMAGE="${RUN_DIR}/test.img"
+    SCRATCH_IMAGE="${RUN_DIR}/scratch.img"
+fi
 QEMU_SCRIPT="${RUN_DIR}/run-qemu.sh"
 MANIFEST="${RUN_DIR}/manifest.txt"
 STDOUT_LOG="${RUN_DIR}/test-stdout-stderr.log"
@@ -220,6 +241,23 @@ copy_image() {
     cp --reflink=auto --sparse=always "${source}" "${dest}"
 }
 
+validate_reused_images() {
+    local shared_run_dir=$1
+    local image
+
+    if [ ! -d "${shared_run_dir}" ]; then
+        echo "shared image run directory does not exist: ${shared_run_dir}" >&2
+        exit 1
+    fi
+
+    for image in root.img test.img scratch.img; do
+        if [ ! -f "${shared_run_dir}/${image}" ]; then
+            echo "missing shared image: ${shared_run_dir}/${image}" >&2
+            exit 1
+        fi
+    done
+}
+
 acquire_checker_lock() {
     if [ "${USE_LOCK}" -eq 1 ] && [ "${LOCK_HELD}" -eq 0 ]; then
         "${LOCK_SCRIPT}" acquire \
@@ -241,16 +279,22 @@ release_checker_lock() {
 }
 
 refresh_direct_boot_kernel() {
-    local candidate="${ASTERINAS_DIR}/target/osdk/iso_root/boot/aster-kernel-osdk-bin"
+    local candidate="${ASTERINAS_DIR}/target/osdk/aster-kernel-osdk-bin"
     local staged_kernel="${IMAGES_DIR}/direct-boot/kernel"
-    local file_output
 
     if [ "${BOOT_MODE}" != "direct-boot" ]; then
         echo "--refresh-direct-boot-kernel requires BOOT_MODE=direct-boot" >&2
         exit 2
     fi
 
-    make -C "${ASTERINAS_DIR}" kernel BOOT_PROTOCOL=linux-efi-handover64
+    make -C "${ASTERINAS_DIR}" kernel BOOT_METHOD=qemu-direct BOOT_PROTOCOL=linux-efi-handover64
+
+    stage_direct_boot_kernel_if_needed "${candidate}" "${staged_kernel}" "explicit-refresh" 1
+}
+
+validate_direct_boot_kernel_candidate() {
+    local candidate=$1
+    local file_output
 
     if [ ! -f "${candidate}" ]; then
         echo "missing direct-boot kernel candidate: ${candidate}" >&2
@@ -265,13 +309,46 @@ refresh_direct_boot_kernel() {
             exit 1
             ;;
     esac
+}
+
+stage_direct_boot_kernel_if_needed() {
+    local candidate=$1
+    local staged_kernel=$2
+    local refresh_mode=$3
+    local require_candidate=${4:-0}
+
+    if [ ! -f "${candidate}" ]; then
+        if [ "${require_candidate}" -eq 1 ]; then
+            echo "missing direct-boot kernel candidate: ${candidate}" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    validate_direct_boot_kernel_candidate "${candidate}"
+
+    if [ -f "${staged_kernel}" ] && cmp -s "${candidate}" "${staged_kernel}"; then
+        return 0
+    fi
 
     mkdir -p "${IMAGES_DIR}/direct-boot"
     cp -- "${candidate}" "${staged_kernel}"
     chmod 0555 "${staged_kernel}"
     DIRECT_BOOT_REFRESH_SOURCE="${candidate}"
-    echo "refreshed direct-boot kernel: ${staged_kernel}"
+    DIRECT_BOOT_REFRESH_MODE="${refresh_mode}"
+    echo "updated direct-boot kernel (${refresh_mode}): ${staged_kernel}"
     sha256sum "${staged_kernel}"
+}
+
+sync_direct_boot_kernel_if_needed() {
+    local candidate="${ASTERINAS_DIR}/target/osdk/aster-kernel-osdk-bin"
+    local staged_kernel="${IMAGES_DIR}/direct-boot/kernel"
+
+    if [ "${BOOT_MODE}" != "direct-boot" ]; then
+        return 0
+    fi
+
+    stage_direct_boot_kernel_if_needed "${candidate}" "${staged_kernel}" "auto-sync" 0
 }
 
 write_qemu_script() {
@@ -322,8 +399,8 @@ ${boot_loader_args}
     --no-reboot \\
     -nographic \\
     -display "vnc=0.0.0.0:\${VNC_PORT:-42}" \\
-    -monitor chardev:mux \\
-    -chardev stdio,id=mux,mux=on,signal=off,logfile=qemu.log \\
+    -monitor none \\
+    -chardev stdio,id=guest-console,signal=off,logfile=qemu.log \\
     -netdev user,id=net01 \\
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \\
     ${boot_drive_args} \\
@@ -336,7 +413,7 @@ ${boot_loader_args}
     -device virtio-rng-pci,bus=pcie.0,addr=0x8,disable-legacy=on,disable-modern=off,rng=rng0,event_idx=off,indirect_desc=off,queue_reset=off \\
     -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off,mrg_rxbuf=off,ctrl_rx=off,ctrl_rx_extra=off,ctrl_vlan=off,ctrl_vq=off,ctrl_guest_offloads=off,ctrl_mac_addr=off,event_idx=off,queue_reset=off,guest_announce=off,indirect_desc=off \\
     -device virtio-serial-pci,disable-legacy=on,disable-modern=off \\
-    -device virtconsole,chardev=mux \\
+    -device virtconsole,chardev=guest-console \\
     -serial file:qemu-serial.log \\
     \${ACCEL_ARGS} || exit_code=\$?
 
@@ -350,14 +427,46 @@ EOF_QEMU
 }
 
 write_manifest() {
+    local boot_ready_markers
+    local interactive_prompt
+    local shutdown_strategy
+    local shutdown_command
+
+    case "${BOOT_MODE}" in
+        direct-boot)
+            boot_ready_markers='[kernel] rootfs is ready|<<< Asterinas NixOS Stage 2 >>>'
+            interactive_prompt='root@asterinas:'
+            shutdown_strategy='host-terminate'
+            shutdown_command=''
+            ;;
+        root-disk)
+            boot_ready_markers='<<< Asterinas NixOS Stage 2 >>>|root@asterinas:'
+            interactive_prompt='root@asterinas:'
+            shutdown_strategy='guest-command'
+            shutdown_command='poweroff'
+            ;;
+        *)
+            echo "unsupported BOOT_MODE: ${BOOT_MODE}" >&2
+            exit 2
+            ;;
+    esac
+
     {
         echo "run_id=${RUN_ID}"
         echo "created_at=$(date -Iseconds)"
         echo "boot_mode=${BOOT_MODE}"
+        echo "boot_ready_markers=${boot_ready_markers}"
+        echo "interactive_prompt=${interactive_prompt}"
+        echo "shutdown_strategy=${shutdown_strategy}"
+        echo "shutdown_command=${shutdown_command}"
         echo "vnc_port=${VNC_PORT:-42}"
         echo "asterinas_dir=${ASTERINAS_DIR}"
         echo "images_dir=${IMAGES_DIR}"
         echo "run_dir=${RUN_DIR}"
+        if [ -n "${REUSE_IMAGES_FROM}" ]; then
+            echo "reused_images_from=${REUSE_IMAGES_FROM}"
+            echo "shared_image_run_dir=${SHARED_IMAGE_RUN_DIR}"
+        fi
         echo "root_image=${ROOT_IMAGE}"
         echo "test_image=${TEST_IMAGE}"
         echo "scratch_image=${SCRATCH_IMAGE}"
@@ -365,6 +474,7 @@ write_manifest() {
         echo "initrd=${RUN_DIRECT_BOOT_DIR}/initrd"
         echo "kernel_params=${RUN_DIRECT_BOOT_DIR}/kernel-params"
         echo "refresh_direct_boot_kernel=${REFRESH_DIRECT_BOOT_KERNEL}"
+        echo "direct_boot_kernel_sync=${DIRECT_BOOT_REFRESH_MODE}"
         if [ -n "${DIRECT_BOOT_REFRESH_SOURCE}" ]; then
             echo "direct_boot_refresh_source=${DIRECT_BOOT_REFRESH_SOURCE}"
         fi
@@ -386,6 +496,7 @@ write_manifest() {
 
 run_smoke() {
     cd "${ASTERINAS_DIR}/test/nixos/tests/xfstests"
+    NIXOS_TEST_BOOT_MANIFEST="${MANIFEST}" \
     NIXOS_TEST_TIMEOUT="${TIMEOUT}" \
     XFSTESTS_TEST_DEV="/dev/vdb" \
     XFSTESTS_SCRATCH_DEV="/dev/vdc" \
@@ -410,9 +521,15 @@ main() {
         acquire_checker_lock
     fi
 
-    copy_image "${IMAGES_DIR}/root-base.img" "${ROOT_IMAGE}"
-    copy_image "${IMAGES_DIR}/test-base.img" "${TEST_IMAGE}"
-    copy_image "${IMAGES_DIR}/scratch-base.img" "${SCRATCH_IMAGE}"
+    if [ -n "${REUSE_IMAGES_FROM}" ]; then
+        validate_reused_images "${SHARED_IMAGE_RUN_DIR}"
+        echo "Reusing shared images from: ${SHARED_IMAGE_RUN_DIR}"
+    else
+        copy_image "${IMAGES_DIR}/root-base.img" "${ROOT_IMAGE}"
+        copy_image "${IMAGES_DIR}/test-base.img" "${TEST_IMAGE}"
+        copy_image "${IMAGES_DIR}/scratch-base.img" "${SCRATCH_IMAGE}"
+    fi
+    sync_direct_boot_kernel_if_needed
     copy_image "${IMAGES_DIR}/direct-boot/kernel" "${RUN_DIRECT_BOOT_DIR}/kernel"
     copy_image "${IMAGES_DIR}/direct-boot/initrd" "${RUN_DIRECT_BOOT_DIR}/initrd"
     copy_image "${IMAGES_DIR}/direct-boot/kernel-params" "${RUN_DIRECT_BOOT_DIR}/kernel-params"

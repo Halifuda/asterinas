@@ -23,11 +23,11 @@ use super::{
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
-        vfs::{file_system::FsFlags, inode::Inode, page_cache::PageCache},
+        vfs::{file_system::FsFlags, inode::Inode},
     },
     prelude::*,
     time::clocks::RealTimeCoarseClock,
-    vm::vmo::{CommitFlags, get_page_idx_range},
+    vm::page_cache::PageCache,
 };
 
 impl ExfatInode {
@@ -114,7 +114,7 @@ impl ExfatInode {
                     page_cache.evict_range(cache_mutation_range.clone())?;
                 }
                 if new_data_length > data_length {
-                    page_cache.resize(new_data_length)?;
+                    page_cache.resize(new_data_length, data_length)?;
                 }
                 Self::prepare_regular_file_page_cache_range(
                     page_cache,
@@ -123,7 +123,6 @@ impl ExfatInode {
                 )?;
 
                 let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-                let rollback_cache_mutation_range = cache_mutation_range.clone();
                 self.grow_and_commit_regular_file(
                     &inode_state_guard,
                     &fs,
@@ -139,22 +138,19 @@ impl ExfatInode {
                         if !zero_fill_range.is_empty() {
                             page_cache.fill_zeros(zero_fill_range)?;
                         }
-                        page_cache.pages().write(effective_offset, reader)?;
+                        page_cache.write(effective_offset, reader).map_err(Error::from)?;
                         Ok(())
                     },
                     || {
-                        if !rollback_cache_mutation_range.is_empty() {
-                            page_cache.discard_range(rollback_cache_mutation_range);
-                        }
                         if new_data_length > data_length {
-                            let _ = page_cache.resize(data_length);
+                            let _ = page_cache.resize(data_length, new_data_length);
                         }
                     },
                 )
             })();
             if let Err(error) = write_result {
                 if new_data_length > data_length {
-                    let _ = page_cache.resize(data_length);
+                    let _ = page_cache.resize(data_length, new_data_length);
                 }
                 return Err(error);
             }
@@ -230,7 +226,7 @@ impl ExfatInode {
                     timestamp,
                     |_cluster_map, zero_fill_range| {
                         if new_size > data_length {
-                            page_cache.resize(new_size)?;
+                            page_cache.resize(new_size, data_length)?;
                         }
                         Self::prepare_regular_file_page_cache_range(
                             page_cache,
@@ -283,10 +279,7 @@ impl ExfatInode {
             };
             if let Err(error) = page_cache_result {
                 if let Some(page_cache) = page_cache {
-                    if valid_data_length < new_size {
-                        page_cache.discard_range(valid_data_length..new_size);
-                    }
-                    let _ = page_cache.resize(data_length);
+                    let _ = page_cache.resize(data_length, new_size);
                 }
                 return Err(error);
             }
@@ -357,7 +350,7 @@ impl ExfatInode {
             no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
         };
         if let Some(page_cache) = page_cache {
-            page_cache.resize(new_size)?;
+            page_cache.resize(new_size, data_length)?;
         }
         if let Err(error) = self.write_back_regular_file_entry_set(
             &block_device,
@@ -366,7 +359,7 @@ impl ExfatInode {
             timestamp,
         ) {
             if let Some(page_cache) = page_cache {
-                let _ = page_cache.resize(data_length);
+                let _ = page_cache.resize(data_length, new_size);
             }
             return Err(error);
         }
@@ -402,18 +395,25 @@ impl ExfatInode {
         current_data_length: usize,
         range: Range<usize>,
     ) -> Result<()> {
-        for page_idx in get_page_idx_range(&range) {
+        if range.is_empty() {
+            return Ok(());
+        }
+
+        let vmo = page_cache.as_vmo().clone();
+        let start_page_idx = range.start / PAGE_SIZE;
+        let end_page_idx = range.end.div_ceil(PAGE_SIZE);
+        for page_idx in start_page_idx..end_page_idx {
             let page_offset = page_idx
                 .checked_mul(PAGE_SIZE)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let commit_flags = if page_offset >= current_data_length {
-                CommitFlags::WILL_OVERWRITE
-            } else {
-                CommitFlags::empty()
-            };
-            let frame = page_cache.pages().commit_on(page_idx, commit_flags)?;
+            let frame = vmo.commit_on(page_idx)?;
             if page_offset >= current_data_length {
                 frame.writer().fill_zeros(PAGE_SIZE);
+                continue;
+            }
+            if page_offset + PAGE_SIZE > current_data_length {
+                let tail_offset = current_data_length - page_offset;
+                frame.writer().skip(tail_offset).fill_zeros(PAGE_SIZE - tail_offset);
             }
         }
         Ok(())

@@ -689,7 +689,6 @@ impl DirDentry<'_> {
         if is_dot_or_dotdot(old_name) || is_dot_or_dotdot(new_name) {
             return_errno_with_message!(Errno::EISDIR, "old_name or new_name is a directory");
         }
-
         let old_dir_inode = old_dir.inode();
         let new_dir_inode = new_dir.inode();
 

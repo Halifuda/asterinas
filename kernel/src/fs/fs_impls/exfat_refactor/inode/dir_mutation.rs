@@ -64,7 +64,12 @@ impl ExfatInode {
         let required_entry_count =
             direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
         let child_inode = {
-            let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+            let parent_directory = self.parent.upgrade();
+            let mut guarded_directories = vec![self];
+            if let Some(parent_directory) = parent_directory.as_ref() {
+                guarded_directories.push(parent_directory.as_ref());
+            }
+            let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
             let cluster_map = *self.dir_entry_stream.read();
             let current_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -413,7 +418,12 @@ impl ExfatInode {
         let new_name_hash = upcase_table.name_hash(&new_name);
         if self.metadata.read().ino == target_directory.metadata.read().ino {
             let renamed = {
-                let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+                let parent_directory = self.parent.upgrade();
+                let mut guarded_directories = vec![self];
+                if let Some(parent_directory) = parent_directory.as_ref() {
+                    guarded_directories.push(parent_directory.as_ref());
+                }
+                let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
                 let cluster_map = *self.dir_entry_stream.read();
                 let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                     &block_device,
@@ -491,8 +501,12 @@ impl ExfatInode {
         }
 
         {
-            let _directory_guards =
-                Self::directory_write_guards_by_ino(vec![self, target_directory]);
+            let target_parent_directory = target_directory.parent.upgrade();
+            let mut guarded_directories = vec![self, target_directory];
+            if let Some(target_parent_directory) = target_parent_directory.as_ref() {
+                guarded_directories.push(target_parent_directory.as_ref());
+            }
+            let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
             let target_cluster_map = *target_directory.dir_entry_stream.read();
             let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -896,6 +910,8 @@ impl ExfatInode {
             boot_region,
             allocated_cluster,
         )?;
+        self.write_back_directory_entry_set(block_device, boot_region, updated_cluster_map)?;
+        self.commit_directory_cluster_map(updated_cluster_map, cluster_map, boot_region)?;
         allocated_directory_cluster.commit();
         Ok(updated_cluster_map)
     }
@@ -939,16 +955,19 @@ impl ExfatInode {
             Some(0) => StreamExtensionDirEntry {
                 first_cluster: allocated_cluster,
                 data_length: Some(next_data_length),
+                valid_data_length: Some(next_data_length),
                 no_fat_chain: false,
                 ..cluster_map
             },
             Some(_) if cluster_map.no_fat_chain => StreamExtensionDirEntry {
                 data_length: Some(next_data_length),
+                valid_data_length: Some(next_data_length),
                 no_fat_chain: false,
                 ..cluster_map
             },
             Some(_) => StreamExtensionDirEntry {
                 data_length: Some(next_data_length),
+                valid_data_length: Some(next_data_length),
                 ..cluster_map
             },
             None => StreamExtensionDirEntry {
@@ -956,9 +975,67 @@ impl ExfatInode {
                 ..cluster_map
             },
         };
+        Ok(updated_cluster_map)
+    }
+
+    fn write_back_directory_entry_set(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        updated_cluster_map: StreamExtensionDirEntry,
+    ) -> Result<()> {
+        if updated_cluster_map.data_length.is_none() {
+            return Ok(());
+        }
+        if updated_cluster_map.valid_data_length.is_none() {
+            return Err(invalid_on_disk_layout());
+        }
+
+        let parent = self.parent.upgrade().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+        })?;
+        let parent_cluster_map = *parent.dir_entry_stream.read();
+        let mut parent_directory_bytes = Self::read_directory_bytes_for_cluster_map(
+            block_device,
+            boot_region,
+            parent_cluster_map,
+        )?;
+        let entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let entry_view = match direntry::scan_dir_entry(
+            parent_cluster_map.data_length.is_none(),
+            &parent_directory_bytes,
+            entry_index,
+        )? {
+            ScannedDirEntry::File(entry_view) if entry_view.is_directory() => entry_view,
+            _ => return Err(Error::from(invalid_on_disk_layout())),
+        };
+        let slot_range_bytes = direntry::slot_range_bytes(entry_view.slot_range())?;
+        let mut updated_entry_set = entry_view.to_mutable();
+        updated_entry_set.set_cluster_map(&updated_cluster_map)?;
+        let updated_entry_set_bytes = updated_entry_set.into_bytes();
+        let destination_entry_set = parent_directory_bytes
+            .get_mut(slot_range_bytes)
+            .ok_or(invalid_on_disk_layout())?;
+        destination_entry_set.copy_from_slice(&updated_entry_set_bytes);
+        Self::write_directory_bytes_for_cluster_map(
+            block_device,
+            boot_region,
+            &parent_directory_bytes,
+            parent_cluster_map,
+        )?;
+        Ok(())
+    }
+
+    fn commit_directory_cluster_map(
+        &self,
+        updated_cluster_map: StreamExtensionDirEntry,
+        previous_cluster_map: StreamExtensionDirEntry,
+        boot_region: &BootRegion,
+    ) -> Result<()> {
         {
             let mut current_cluster_map = self.dir_entry_stream.write();
-            if *current_cluster_map != cluster_map {
+            if *current_cluster_map != previous_cluster_map {
                 return Err(invalid_on_disk_layout());
             }
             *current_cluster_map = updated_cluster_map;
@@ -968,7 +1045,7 @@ impl ExfatInode {
             .size
             .checked_add(boot_region.cluster_size)
             .ok_or(invalid_on_disk_layout())?;
-        Ok(updated_cluster_map)
+        Ok(())
     }
 
     // Validation helpers

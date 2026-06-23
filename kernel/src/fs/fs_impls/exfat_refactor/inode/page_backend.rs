@@ -5,10 +5,10 @@
 //! Method groups: weak-inode backend ownership, owner-local callback snapshots, page read/write
 //! BIO callbacks, page count, and inode page-cache accessors.
 
-use aster_block::{
-    BlockDevice,
-    bio::{BioType, BioWaiter},
-};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use aster_block::{BlockDevice, bio::BioStatus};
+use io_util::batch::IoBatch;
 use ostd::mm::io::util::HasVmReaderWriter;
 
 use super::{
@@ -19,13 +19,10 @@ use super::{
 use crate::{
     fs::{
         file::InodeType,
-        vfs::{
-            file_system::FsFlags,
-            page_cache::{CachePage, PageCache, PageCacheBackend},
-        },
+        vfs::file_system::FsFlags,
     },
     prelude::*,
-    vm::vmo::Vmo,
+    vm::page_cache::{CachePageExt, LockedCachePage, PageCache, PageCacheBackend},
 };
 
 #[derive(Clone)]
@@ -97,8 +94,57 @@ impl ExfatFilePageBackend {
     }
 }
 
+pub(super) struct FragmentedPageIo {
+    page: Option<LockedCachePage>,
+    pending: AtomicUsize,
+    failed: AtomicBool,
+    is_read: bool,
+}
+
+impl FragmentedPageIo {
+    pub(super) fn new(page: LockedCachePage, pending: usize, is_read: bool) -> Arc<Self> {
+        Arc::new(Self {
+            page: Some(page),
+            pending: AtomicUsize::new(pending),
+            failed: AtomicBool::new(false),
+            is_read,
+        })
+    }
+
+    pub(super) fn complete(self: Arc<Self>, status: BioStatus) {
+        if status != BioStatus::Complete && status != BioStatus::Zeros {
+            self.failed.store(true, Ordering::Release);
+        }
+
+        if self.pending.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+
+        let page = self
+            .page
+            .as_ref()
+            .expect("fragmented page completion must still own the locked page");
+        if self.is_read {
+            if !self.failed.load(Ordering::Acquire) {
+                page.set_up_to_date();
+            }
+            return;
+        }
+
+        page.clear_writing_back();
+        if self.failed.load(Ordering::Acquire) {
+            ostd::error!("exFAT writeback failed for a fragmented cached page; data may be lost");
+        }
+    }
+}
+
 impl PageCacheBackend for ExfatFilePageBackend {
-    fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+    fn read_page_async(
+        &self,
+        idx: usize,
+        locked_page: LockedCachePage,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
         let (_inode, page_cache_context) = self.page_cache_context()?;
         if page_cache_context.flags.clear_to_zero || page_cache_context.flags.media_failure {
             return_errno!(Errno::EIO);
@@ -113,28 +159,35 @@ impl PageCacheBackend for ExfatFilePageBackend {
             .checked_mul(page_cache_context.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len < PAGE_SIZE {
-            frame
+            locked_page
                 .writer()
                 .skip(initialized_sector_len)
                 .fill_zeros(PAGE_SIZE - initialized_sector_len);
         }
         if initialized_sector_len == 0 {
-            return Ok(BioWaiter::new());
+            locked_page.set_up_to_date();
+            return Ok(());
         }
 
-        ExfatInode::regular_file_page_waiter(
+        ExfatInode::submit_regular_file_page_io(
             &page_cache_context.block_device,
             &page_cache_context.boot_region,
-            frame,
+            locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
             file_offset,
             initialized_sector_len,
-            BioType::Read,
+            io_batch,
+            true,
         )
     }
 
-    fn write_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter> {
+    fn write_page_async(
+        &self,
+        idx: usize,
+        locked_page: LockedCachePage,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
         let (_inode, page_cache_context) = self.page_cache_context()?;
         if page_cache_context.flags.clear_to_zero || page_cache_context.flags.media_failure {
             return_errno!(Errno::EIO);
@@ -152,28 +205,25 @@ impl PageCacheBackend for ExfatFilePageBackend {
             .checked_mul(page_cache_context.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
-            return Ok(BioWaiter::new());
+            locked_page.set_up_to_date();
+            return Ok(());
         }
 
-        ExfatInode::regular_file_page_waiter(
+        locked_page.wait_until_finish_writing_back();
+        locked_page.set_writing_back();
+        locked_page.set_up_to_date();
+
+        ExfatInode::submit_regular_file_page_io(
             &page_cache_context.block_device,
             &page_cache_context.boot_region,
-            frame,
+            locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
             file_offset,
             initialized_sector_len,
-            BioType::Write,
+            io_batch,
+            false,
         )
-    }
-
-    fn npages(&self) -> usize {
-        self.inode.upgrade().map_or(0, |inode| {
-            inode.active_page_cache_context().map_or_else(
-                || inode.metadata_projection().size.div_ceil(PAGE_SIZE),
-                |page_cache_context| page_cache_context.data_length.div_ceil(PAGE_SIZE),
-            )
-        })
     }
 }
 
@@ -206,13 +256,8 @@ impl ExfatInode {
             .call_once(|| {
                 let backend: Arc<dyn PageCacheBackend> = self.page_backend.clone();
                 let capacity = self.metadata.read().size;
-                PageCache::with_capacity(capacity, Arc::downgrade(&backend)).ok()
+                PageCache::new_with_backend(capacity, Arc::downgrade(&backend)).ok()
             })
             .as_ref()
-    }
-
-    pub(super) fn page_cache_vmo(&self) -> Option<Arc<Vmo>> {
-        self.page_cache_handle()
-            .map(|page_cache| page_cache.pages().clone())
     }
 }

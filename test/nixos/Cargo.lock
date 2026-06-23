@@ -237,6 +237,7 @@ name = "nixos-test-framework"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "nix",
  "nixos-test-macro",
  "rexpect",
  "strip-ansi-escapes",
@@ -581,6 +582,13 @@ dependencies = [
 
 [[package]]
 name = "test-web-servers-and-proxies"
+version = "0.1.0"
+dependencies = [
+ "nixos-test-framework",
+]
+
+[[package]]
+name = "test-xfstests"
 version = "0.1.0"
 dependencies = [
  "nixos-test-framework",

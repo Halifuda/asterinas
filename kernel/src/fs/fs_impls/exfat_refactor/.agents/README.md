@@ -49,6 +49,7 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `linux-exFAT-implementation-summary.md`: Linux-side implementation map. 
 - *Note on Priors*: We use an **Information Funnel**. Heavy priors (Microsoft specs, Linux source) are internalized by the Architect. Designers internalize Architect outputs + Linux references. Creators only see the Designer's contract, the main-agent-selected pass coverage, and Code Quality priors. Checkers see the Designer validation contract plus the relevant Creator pass receipts.
 - `TESTING_GUIDE.md`: Legacy testing note retained only for historical context; new exFAT refactor validation must use upstream-approved external/system-level methods, currently expected to be NixOS xfstests.
+- `XFSTEST_GUIDELINES.md`: Current main-agent guide for migrating `exfat_refactor` validation onto upstream's initramfs xfstests conformance lane.
 - `PROTOCOL.md`: Main-agent-owned normative workflow.
 - `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).

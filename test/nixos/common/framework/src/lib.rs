@@ -23,15 +23,32 @@
 
 #![deny(unsafe_code)]
 
-use std::{env, fmt, time::Duration};
+use std::{
+    collections::HashMap,
+    env, fmt, fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 #[doc(hidden)]
 pub use inventory;
 pub use nixos_test_macro::nixos_test;
 pub use rexpect::reader::Regex;
-pub use session::{BackgroundProcess, CommandCheck, Session, SessionDesc};
+use rexpect::{ReadUntil, session::PtySession};
+pub use session::{BackgroundProcess, CommandCheck, Session, SessionDesc, ShutdownStrategy};
 
 mod session;
+
+const DEFAULT_BOOT_READY_MARKERS: [&str; 2] = [
+    "[kernel] rootfs is ready",
+    "<<< Asterinas NixOS Stage 2 >>>",
+];
+const DEFAULT_ROOT_SHELL_PROMPT: &str = "root@asterinas:";
+const DEFAULT_SHUTDOWN_COMMAND: &str = "poweroff";
+const DEFAULT_SHUTDOWN_STRATEGY: ShutdownStrategy = ShutdownStrategy::GuestCommand;
+const MATCH_READ_SIZE: usize = 1;
+const FAILURE_OUTPUT_TAIL_CHARS: usize = 4096;
+const BOOT_MANIFEST_ENV: &str = "NIXOS_TEST_BOOT_MANIFEST";
 
 /// An error returned by the NixOS test framework.
 #[derive(Debug)]
@@ -211,13 +228,49 @@ pub fn __nixos_test_main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
+    let prompt_wait_start = Instant::now();
     let mut session = rexpect::spawn(&qemu_cmd, Some(timeout_ms)).map_err(Error::from)?;
+    let boot_contract = load_boot_contract(&qemu_cmd)?;
 
-    println!("--> Waiting for login prompt...");
-    let init_prompt = "root@asterinas:";
-    session.exp_string(init_prompt).map_err(Error::from)?;
+    println!("--> Waiting for boot-ready marker...");
+    let boot_marker = match wait_for_clean_marker(&mut session, &boot_contract.boot_ready_markers) {
+        Ok(matched_marker) => matched_marker,
+        Err(error) => {
+            println!(
+                "--> Boot-ready marker acquisition failed after {:?}",
+                prompt_wait_start.elapsed()
+            );
+            return Err(Box::new(error));
+        }
+    };
+    println!(
+        "--> Boot-ready marker acquired after {:?}: {}",
+        prompt_wait_start.elapsed(),
+        boot_marker
+    );
 
-    let desc = SessionDesc::new(init_prompt, "", "poweroff");
+    println!("--> Waiting for interactive prompt...");
+    let init_prompt = match wait_for_clean_marker(
+        &mut session,
+        std::slice::from_ref(&boot_contract.interactive_prompt),
+    ) {
+        Ok(matched_marker) => matched_marker,
+        Err(error) => {
+            println!(
+                "--> Interactive prompt acquisition failed after {:?}",
+                prompt_wait_start.elapsed()
+            );
+            return Err(Box::new(error));
+        }
+    };
+    println!(
+        "--> Interactive prompt acquired after {:?}: {}",
+        prompt_wait_start.elapsed(),
+        init_prompt
+    );
+
+    let desc = SessionDesc::new(init_prompt, "", boot_contract.shutdown_command)
+        .shutdown_strategy(boot_contract.shutdown_strategy);
     let mut session = Session::new(desc, session);
 
     let mut passed = 0;
@@ -347,6 +400,172 @@ ENVIRONMENT VARIABLES:
 
 "
     );
+}
+
+struct BootContract {
+    boot_ready_markers: Vec<String>,
+    interactive_prompt: String,
+    shutdown_command: String,
+    shutdown_strategy: ShutdownStrategy,
+}
+
+impl Default for BootContract {
+    fn default() -> Self {
+        Self {
+            boot_ready_markers: DEFAULT_BOOT_READY_MARKERS
+                .iter()
+                .map(|marker| marker.to_string())
+                .collect(),
+            interactive_prompt: DEFAULT_ROOT_SHELL_PROMPT.to_string(),
+            shutdown_command: DEFAULT_SHUTDOWN_COMMAND.to_string(),
+            shutdown_strategy: DEFAULT_SHUTDOWN_STRATEGY,
+        }
+    }
+}
+
+fn load_boot_contract(qemu_cmd: &str) -> Result<BootContract, Box<dyn std::error::Error>> {
+    let Some(manifest_path) = boot_manifest_path(qemu_cmd) else {
+        return Ok(BootContract::default());
+    };
+
+    if !manifest_path.is_file() {
+        return Ok(BootContract::default());
+    }
+
+    let manifest = fs::read_to_string(&manifest_path)?;
+    let mut entries = HashMap::new();
+
+    for line in manifest.lines() {
+        let trimmed_line = line.trim();
+        if trimmed_line.is_empty() || trimmed_line.starts_with('[') || trimmed_line.starts_with('#')
+        {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed_line.split_once('=') else {
+            continue;
+        };
+        entries.insert(key.trim().to_string(), value.trim().to_string());
+    }
+
+    let mut contract = BootContract::default();
+
+    if let Some(markers) = entries.get("boot_ready_markers") {
+        let parsed_markers: Vec<String> = markers
+            .split('|')
+            .map(str::trim)
+            .filter(|marker| !marker.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if !parsed_markers.is_empty() {
+            contract.boot_ready_markers = parsed_markers;
+        }
+    }
+
+    if let Some(prompt) = entries.get("interactive_prompt") {
+        if !prompt.is_empty() {
+            contract.interactive_prompt = prompt.clone();
+        }
+    }
+
+    if let Some(shutdown_command) = entries.get("shutdown_command") {
+        contract.shutdown_command = shutdown_command.clone();
+    }
+
+    if let Some(shutdown_strategy) = entries.get("shutdown_strategy") {
+        contract.shutdown_strategy = parse_shutdown_strategy(shutdown_strategy)?;
+    }
+
+    Ok(contract)
+}
+
+fn boot_manifest_path(qemu_cmd: &str) -> Option<PathBuf> {
+    if let Ok(path) = env::var(BOOT_MANIFEST_ENV) {
+        let trimmed_path = path.trim();
+        if !trimmed_path.is_empty() {
+            return Some(PathBuf::from(trimmed_path));
+        }
+    }
+
+    let qemu_cmd_path = Path::new(qemu_cmd.trim());
+    if !qemu_cmd_path.is_absolute() && qemu_cmd_path.components().count() == 0 {
+        return None;
+    }
+
+    qemu_cmd_path
+        .parent()
+        .map(|parent| parent.join("manifest.txt"))
+}
+
+fn parse_shutdown_strategy(
+    shutdown_strategy: &str,
+) -> Result<ShutdownStrategy, Box<dyn std::error::Error>> {
+    match shutdown_strategy {
+        "guest-command" => Ok(ShutdownStrategy::GuestCommand),
+        "host-terminate" => Ok(ShutdownStrategy::HostTerminate),
+        _ => Err(format!("Unknown shutdown strategy '{}'.", shutdown_strategy).into()),
+    }
+}
+
+fn sanitize_terminal_output(raw_output: &[u8]) -> String {
+    let stripped_output = strip_ansi_escapes::strip(raw_output);
+    let text = String::from_utf8_lossy(&stripped_output);
+
+    text.chars()
+        .filter(|ch| !matches!(ch, '\u{07}' | '\u{08}' | '\r'))
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect()
+}
+
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+
+    let tail_start = text
+        .char_indices()
+        .nth(char_count - max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    text[tail_start..].to_string()
+}
+
+fn wait_for_clean_marker(session: &mut PtySession, markers: &[String]) -> Result<String, Error> {
+    let mut raw_output = Vec::new();
+
+    loop {
+        match session
+            .reader
+            .read_until(&ReadUntil::NBytes(MATCH_READ_SIZE))
+        {
+            Ok((_, chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                raw_output.extend_from_slice(chunk.as_bytes());
+                let cleaned_output = sanitize_terminal_output(&raw_output);
+
+                if let Some(marker) = markers
+                    .iter()
+                    .find(|marker| cleaned_output.contains(marker.as_str()))
+                {
+                    return Ok(marker.clone());
+                }
+            }
+            Err(error) => {
+                let cleaned_output = sanitize_terminal_output(&raw_output);
+                if !cleaned_output.trim().is_empty() {
+                    println!(
+                        "--> Sanitized output before failure (tail):\n{}",
+                        tail_chars(&cleaned_output, FAILURE_OUTPUT_TAIL_CHARS)
+                    );
+                }
+                return Err(Error::from(error));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

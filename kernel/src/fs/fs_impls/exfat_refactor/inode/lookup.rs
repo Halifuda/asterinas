@@ -128,11 +128,18 @@ impl ExfatInode {
 
         let mut next_offset = offset;
         if next_offset == 0 {
-            visitor.visit(".", self.ino(), self.type_(), next_offset)?;
+            if let Err(error) = visitor.visit(".", self.ino(), self.type_(), next_offset) {
+                return Err(error);
+            }
             next_offset += 1;
         }
         if next_offset == 1 {
-            visitor.visit("..", self.ino(), self.type_(), next_offset)?;
+            if let Err(error) = visitor.visit("..", self.ino(), self.type_(), next_offset) {
+                if next_offset == offset {
+                    return Err(error);
+                }
+                return Ok(next_offset.saturating_sub(offset));
+            }
             next_offset += 1;
         }
 
@@ -160,7 +167,14 @@ impl ExfatInode {
                                 u32::try_from(entry_view.slot_range().first_entry_index())
                                     .map_err(|_| invalid_on_disk_layout())?,
                             );
-                        visitor.visit(&entry_name, entry_ino, inode_type, visible_offset)?;
+                        if let Err(error) =
+                            visitor.visit(&entry_name, entry_ino, inode_type, visible_offset)
+                        {
+                            if next_offset == offset {
+                                return Err(error);
+                            }
+                            return Ok(next_offset.saturating_sub(offset));
+                        }
                         next_offset = visible_offset
                             .checked_add(1)
                             .ok_or(invalid_on_disk_layout())?;

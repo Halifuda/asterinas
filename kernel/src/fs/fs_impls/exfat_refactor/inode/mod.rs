@@ -35,19 +35,19 @@ use super::{
 };
 use crate::{
     fs::{
-        file::{AccessMode, FileIo, InodeMode, InodeType, StatusFlags, mkmod},
+        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, mkmod},
         utils::DirentVisitor,
         vfs::{
             file_system::FileSystem,
             inode::{
-                Extension, FallocMode, Inode, Metadata, MknodType, RevalidationPolicy, SymbolicLink,
+                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RevalidationPolicy,
+                SymbolicLink,
             },
-            page_cache::PageCache,
         },
     },
     prelude::*,
     process::{Gid, Uid},
-    vm::vmo::Vmo,
+    vm::page_cache::PageCache,
 };
 
 pub(super) struct ExfatInode {
@@ -183,7 +183,7 @@ impl ExfatInode {
     }
 }
 
-impl crate::fs::vfs::inode::InodeIo for ExfatInode {
+impl FileOps for ExfatInode {
     fn read_at(
         &self,
         offset: usize,
@@ -200,6 +200,10 @@ impl crate::fs::vfs::inode::InodeIo for ExfatInode {
         status_flags: StatusFlags,
     ) -> Result<usize> {
         self.write_at_impl(offset, reader, status_flags)
+    }
+
+    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+        self.readdir_at_impl(offset, visitor)
     }
 }
 
@@ -272,8 +276,8 @@ impl Inode for ExfatInode {
         self.set_ctime_impl(time);
     }
 
-    fn page_cache(&self) -> Option<Arc<Vmo>> {
-        self.page_cache_vmo()
+    fn page_cache(&self) -> Option<PageCache> {
+        self.page_cache_handle().cloned()
     }
 
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {
@@ -288,12 +292,8 @@ impl Inode for ExfatInode {
         &self,
         _access_mode: AccessMode,
         _status_flags: StatusFlags,
-    ) -> Option<Result<Box<dyn FileIo>>> {
+    ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
         None
-    }
-
-    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
-        self.readdir_at_impl(offset, visitor)
     }
 
     fn link(&self, _old: &Arc<dyn Inode>, _name: &str) -> Result<()> {
