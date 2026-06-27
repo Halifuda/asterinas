@@ -12,38 +12,21 @@ use io_util::batch::IoBatch;
 use ostd::mm::io::util::HasVmReaderWriter;
 
 use super::{
-    super::{boot::BootRegion, fs::VolumeFlags},
+    super::{boot::BootRegion, fs::MountRuntimeState},
     ClusterMap, ExfatInode,
     state::InodeStateWriteGuard,
 };
 use crate::{
-    fs::{
-        file::InodeType,
-        vfs::file_system::FsFlags,
-    },
+    fs::file::InodeType,
     prelude::*,
     vm::page_cache::{CachePageExt, LockedCachePage, PageCache, PageCacheBackend},
 };
 
 #[derive(Clone)]
 pub(super) struct PageCacheContext {
-    pub(super) flags: VolumeFlags,
-    pub(super) block_device: Arc<dyn BlockDevice>,
-    pub(super) boot_region: BootRegion,
     pub(super) cluster_map: Arc<ClusterMap>,
     pub(super) data_length: usize,
-    pub(super) read_only: bool,
     pub(super) valid_data_length: usize,
-}
-
-pub(super) struct PageCacheContextGuard<'a> {
-    inode: &'a ExfatInode,
-}
-
-impl Drop for PageCacheContextGuard<'_> {
-    fn drop(&mut self) {
-        *self.inode.page_cache_context.write() = None;
-    }
 }
 
 pub(super) struct ExfatFilePageBackend {
@@ -65,31 +48,40 @@ impl ExfatFilePageBackend {
         self.inode.clone()
     }
 
-    fn page_cache_context(&self) -> Result<(Arc<ExfatInode>, PageCacheContext)> {
+    fn page_cache_context(
+        &self,
+    ) -> Result<(
+        Arc<ExfatInode>,
+        PageCacheContext,
+        Arc<dyn BlockDevice>,
+        BootRegion,
+        MountRuntimeState,
+    )> {
         let inode = self.upgrade_inode()?;
-        if let Some(page_cache_context) = inode.active_page_cache_context() {
-            return Ok((inode, page_cache_context));
-        }
-
         let fs = inode
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_state = fs.mount_state_read_guard()?;
+        let mount_runtime = *fs.mount_runtime.read();
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let (cluster_map, data_length, valid_data_length) = inode.cluster_map_snapshot()?;
-        Ok((
-            inode,
+        let page_cache_context = if let Some(page_cache_context) = inode.active_page_cache_context()
+        {
+            page_cache_context
+        } else {
+            let (cluster_map, data_length, valid_data_length) = inode.cluster_map_snapshot()?;
             PageCacheContext {
-                flags: mount_state.flags,
-                block_device,
-                boot_region,
                 cluster_map,
                 data_length,
-                read_only: mount_state.options.fs_flags.contains(FsFlags::RDONLY),
                 valid_data_length,
-            },
+            }
+        };
+        Ok((
+            inode,
+            page_cache_context,
+            block_device,
+            boot_region,
+            mount_runtime,
         ))
     }
 }
@@ -145,8 +137,12 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page: LockedCachePage,
         io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let (_inode, page_cache_context) = self.page_cache_context()?;
-        if page_cache_context.flags.clear_to_zero || page_cache_context.flags.media_failure {
+        let (_inode, page_cache_context, block_device, boot_region, mount_runtime) =
+            self.page_cache_context()?;
+        if mount_runtime.forced_shutdown
+            || mount_runtime.clear_to_zero
+            || mount_runtime.media_failure
+        {
             return_errno!(Errno::EIO);
         }
         let (file_offset, initialized_len) = ExfatInode::regular_file_page_range(
@@ -155,8 +151,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.valid_data_length,
         )?;
         let initialized_sector_len = initialized_len
-            .div_ceil(page_cache_context.boot_region.sector_size)
-            .checked_mul(page_cache_context.boot_region.sector_size)
+            .div_ceil(boot_region.sector_size)
+            .checked_mul(boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len < PAGE_SIZE {
             locked_page
@@ -170,8 +166,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
         }
 
         ExfatInode::submit_regular_file_page_io(
-            &page_cache_context.block_device,
-            &page_cache_context.boot_region,
+            &block_device,
+            &boot_region,
             locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
@@ -188,11 +184,15 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page: LockedCachePage,
         io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let (_inode, page_cache_context) = self.page_cache_context()?;
-        if page_cache_context.flags.clear_to_zero || page_cache_context.flags.media_failure {
+        let (_inode, page_cache_context, block_device, boot_region, mount_runtime) =
+            self.page_cache_context()?;
+        if mount_runtime.forced_shutdown
+            || mount_runtime.clear_to_zero
+            || mount_runtime.media_failure
+        {
             return_errno!(Errno::EIO);
         }
-        if page_cache_context.read_only {
+        if mount_runtime.read_only {
             return_errno!(Errno::EROFS);
         }
         let (file_offset, initialized_len) = ExfatInode::regular_file_page_range(
@@ -201,8 +201,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.valid_data_length,
         )?;
         let initialized_sector_len = initialized_len
-            .div_ceil(page_cache_context.boot_region.sector_size)
-            .checked_mul(page_cache_context.boot_region.sector_size)
+            .div_ceil(boot_region.sector_size)
+            .checked_mul(boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             locked_page.set_up_to_date();
@@ -214,8 +214,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page.set_up_to_date();
 
         ExfatInode::submit_regular_file_page_io(
-            &page_cache_context.block_device,
-            &page_cache_context.boot_region,
+            &block_device,
+            &boot_region,
             locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
@@ -232,14 +232,11 @@ impl ExfatInode {
         &self,
         _inode_state_guard: &InodeStateWriteGuard<'_>,
         page_cache_context: PageCacheContext,
-    ) -> PageCacheContextGuard<'_> {
-        let mut active_page_cache_context = self.page_cache_context.write();
-        debug_assert!(active_page_cache_context.is_none());
-        *active_page_cache_context = Some(page_cache_context);
-        PageCacheContextGuard { inode: self }
+    ) -> Option<PageCacheContext> {
+        self.page_cache_context.write().replace(page_cache_context)
     }
 
-    fn active_page_cache_context(&self) -> Option<PageCacheContext> {
+    pub(super) fn active_page_cache_context(&self) -> Option<PageCacheContext> {
         self.page_cache_context.read().clone()
     }
 

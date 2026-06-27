@@ -95,33 +95,12 @@ impl ExfatInode {
             let new_data_length = data_length.max(write_end);
             let new_valid_data_length = valid_data_length.max(write_end);
             let timestamp = RealTimeCoarseClock::get().read_time();
-            let _page_cache_context = self.install_page_cache_context(
-                &inode_state_guard,
-                PageCacheContext {
-                    flags: admission.flags,
-                    block_device: block_device.clone(),
-                    boot_region,
-                    cluster_map: cluster_map_generation.clone(),
-                    data_length,
-                    read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
-                    valid_data_length,
-                },
-            );
             let write_result = (|| {
                 if !cache_mutation_range.is_empty()
                     && page_cache.has_dirty_pages(cache_mutation_range.clone())
                 {
-                    page_cache.evict_range(cache_mutation_range.clone())?;
+                    page_cache.flush_range(cache_mutation_range.clone())?;
                 }
-                if new_data_length > data_length {
-                    page_cache.resize(new_data_length, data_length)?;
-                }
-                Self::prepare_regular_file_page_cache_range(
-                    page_cache,
-                    data_length,
-                    cache_mutation_range.clone(),
-                )?;
-
                 let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                 self.grow_and_commit_regular_file(
                     &inode_state_guard,
@@ -135,10 +114,20 @@ impl ExfatInode {
                     new_valid_data_length,
                     timestamp,
                     |_cluster_map, zero_fill_range| {
+                        if new_data_length > data_length {
+                            page_cache.resize(new_data_length, data_length)?;
+                        }
+                        Self::prepare_regular_file_page_cache_range(
+                            page_cache,
+                            data_length,
+                            cache_mutation_range.clone(),
+                        )?;
                         if !zero_fill_range.is_empty() {
                             page_cache.fill_zeros(zero_fill_range)?;
                         }
-                        page_cache.write(effective_offset, reader).map_err(Error::from)?;
+                        page_cache
+                            .write(effective_offset, reader)
+                            .map_err(Error::from)?;
                         Ok(())
                     },
                     || {
@@ -200,18 +189,6 @@ impl ExfatInode {
 
         if new_size > data_length {
             let page_cache_result = if let Some(page_cache) = page_cache {
-                let _page_cache_context = self.install_page_cache_context(
-                    &inode_state_guard,
-                    PageCacheContext {
-                        flags: admission.flags,
-                        block_device: block_device.clone(),
-                        boot_region,
-                        cluster_map: cluster_map_generation.clone(),
-                        data_length,
-                        read_only: admission.options.fs_flags.contains(FsFlags::RDONLY),
-                        valid_data_length,
-                    },
-                );
                 let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                 self.grow_and_commit_regular_file(
                     &inode_state_guard,
@@ -349,6 +326,15 @@ impl ExfatInode {
             valid_data_length: Some(valid_data_length.min(new_size)),
             no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
         };
+        let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
+        let previous_page_cache_context = self.install_page_cache_context(
+            &inode_state_guard,
+            PageCacheContext {
+                cluster_map: next_cluster_map_generation,
+                data_length: new_size,
+                valid_data_length: valid_data_length.min(new_size),
+            },
+        );
         if let Some(page_cache) = page_cache {
             page_cache.resize(new_size, data_length)?;
         }
@@ -358,6 +344,7 @@ impl ExfatInode {
             next_cluster_map,
             timestamp,
         ) {
+            *self.page_cache_context.write() = previous_page_cache_context;
             if let Some(page_cache) = page_cache {
                 let _ = page_cache.resize(data_length, new_size);
             }
@@ -413,7 +400,10 @@ impl ExfatInode {
             }
             if page_offset + PAGE_SIZE > current_data_length {
                 let tail_offset = current_data_length - page_offset;
-                frame.writer().skip(tail_offset).fill_zeros(PAGE_SIZE - tail_offset);
+                frame
+                    .writer()
+                    .skip(tail_offset)
+                    .fill_zeros(PAGE_SIZE - tail_offset);
             }
         }
         Ok(())
@@ -434,6 +424,7 @@ impl ExfatInode {
         apply_growth_fn: impl FnOnce(&StreamExtensionDirEntry, Range<usize>) -> Result<()>,
         rollback_growth_fn: impl FnOnce(),
     ) -> Result<()> {
+        let mut previous_page_cache_context = None;
         let result = (|| {
             let Some(current_data_length) = cluster_map.data_length else {
                 return_errno!(Errno::EINVAL);
@@ -472,17 +463,35 @@ impl ExfatInode {
                 .as_ref()
                 .map_or(&[][..], ClusterAllocGuard::ranges);
 
-            let mut next_cluster_map = Self::grow_cluster_map(
+            let next_cluster_map = Self::grow_cluster_map(
                 block_device,
                 boot_region,
                 cluster_map,
                 new_data_length,
                 allocated_ranges,
             )?;
+            let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
+            previous_page_cache_context = self.install_page_cache_context(
+                inode_state_guard,
+                PageCacheContext {
+                    cluster_map: next_cluster_map_generation.clone(),
+                    data_length: new_data_length,
+                    valid_data_length: current_valid_data_length,
+                },
+            );
             apply_growth_fn(&next_cluster_map, zero_fill_range)?;
-
-            next_cluster_map.data_length = Some(new_data_length);
-            next_cluster_map.valid_data_length = Some(new_valid_data_length);
+            let next_cluster_map = StreamExtensionDirEntry {
+                valid_data_length: Some(new_valid_data_length),
+                ..next_cluster_map
+            };
+            let _ = self.install_page_cache_context(
+                inode_state_guard,
+                PageCacheContext {
+                    cluster_map: next_cluster_map_generation,
+                    data_length: new_data_length,
+                    valid_data_length: new_valid_data_length,
+                },
+            );
             self.write_back_regular_file_entry_set(
                 block_device,
                 boot_region,
@@ -513,6 +522,7 @@ impl ExfatInode {
             Ok(())
         })();
         if result.is_err() {
+            *self.page_cache_context.write() = previous_page_cache_context;
             rollback_growth_fn();
         }
         result

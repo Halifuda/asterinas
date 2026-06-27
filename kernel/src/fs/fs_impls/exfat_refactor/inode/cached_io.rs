@@ -93,8 +93,11 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_state = fs.mount_state_read_guard()?;
-        if mount_state.flags.clear_to_zero || mount_state.flags.media_failure {
+        let mount_runtime = *fs.mount_runtime.read();
+        if mount_runtime.forced_shutdown
+            || mount_runtime.clear_to_zero
+            || mount_runtime.media_failure
+        {
             return_errno!(Errno::EIO);
         }
 
@@ -220,7 +223,11 @@ impl ExfatInode {
             file_offset,
             initialized_len,
         )?;
-        let bio_type = if is_read { BioType::Read } else { BioType::Write };
+        let bio_type = if is_read {
+            BioType::Read
+        } else {
+            BioType::Write
+        };
         let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
         let page_io = FragmentedPageIo::new(locked_page, page_ranges.len(), is_read);
 
@@ -268,10 +275,10 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_state = fs.mount_state_read_guard()?;
-        if mount_state.forced_shutdown
-            || mount_state.flags.clear_to_zero
-            || mount_state.flags.media_failure
+        let mount_runtime = *fs.mount_runtime.read();
+        if mount_runtime.forced_shutdown
+            || mount_runtime.clear_to_zero
+            || mount_runtime.media_failure
         {
             return_errno!(Errno::EIO);
         }

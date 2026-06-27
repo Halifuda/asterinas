@@ -38,6 +38,7 @@ pub(super) struct ExfatFs {
     boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     inode_cache: RwLock<BTreeMap<u64, Weak<ExfatInode>>>,
+    pub(in crate::fs::fs_impls::exfat_refactor) mount_runtime: RwLock<MountRuntimeState>,
     pub(super) root_inode: RwMutex<Option<Arc<ExfatInode>>>,
     source: Option<String>,
     pub(super) mount_state: RwMutex<Option<MountedVolumeState>>,
@@ -212,6 +213,7 @@ impl ExfatFs {
             boot_region,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             inode_cache: RwLock::new(BTreeMap::new()),
+            mount_runtime: RwLock::new(MountRuntimeState::default()),
             root_inode: RwMutex::new(None),
             source,
             mount_state: RwMutex::new(None),
@@ -252,10 +254,17 @@ impl ExfatFs {
         upcase_table: Arc<UpcaseTable>,
         mount_state: MountedVolumeState,
     ) {
+        let mount_runtime = MountRuntimeState {
+            forced_shutdown: mount_state.forced_shutdown,
+            clear_to_zero: mount_state.volume_flags.clear_to_zero,
+            media_failure: mount_state.volume_flags.media_failure,
+            read_only: mount_state.options.fs_flags.contains(FsFlags::RDONLY),
+        };
         *self.allocator.write() = Some(bitmap);
         *self.root_inode.write() = Some(root_inode);
         *self.upcase_table.write() = Some(upcase_table);
         *self.mount_state.write() = Some(mount_state);
+        *self.mount_runtime.write() = mount_runtime;
     }
 
     fn remount_active(&self, next_flags: FsFlags, next_options: &MountOptions) -> Result<FsFlags> {
@@ -282,6 +291,12 @@ impl ExfatFs {
         }
         mount_state.flags = next_flags;
         mount_state.options = next_options.with_flags(next_flags);
+        *self.mount_runtime.write() = MountRuntimeState {
+            forced_shutdown: mount_state.forced_shutdown,
+            clear_to_zero: mount_state.volume_flags.clear_to_zero,
+            media_failure: mount_state.volume_flags.media_failure,
+            read_only: mount_state.options.fs_flags.contains(FsFlags::RDONLY),
+        };
         Ok(next_flags)
     }
 }
@@ -569,6 +584,14 @@ pub(super) struct MountedVolumeState {
     pub(super) flags: FsFlags,
     pub(super) options: MountOptions,
     pub(super) forced_shutdown: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(in crate::fs::fs_impls::exfat_refactor) struct MountRuntimeState {
+    pub(in crate::fs::fs_impls::exfat_refactor) forced_shutdown: bool,
+    pub(in crate::fs::fs_impls::exfat_refactor) clear_to_zero: bool,
+    pub(in crate::fs::fs_impls::exfat_refactor) media_failure: bool,
+    pub(in crate::fs::fs_impls::exfat_refactor) read_only: bool,
 }
 
 #[derive(Clone, Copy)]

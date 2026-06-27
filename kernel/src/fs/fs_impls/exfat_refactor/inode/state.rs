@@ -398,7 +398,10 @@ impl ExfatInode {
         })
     }
 
-    fn cluster_map_for(&self, cluster_map: StreamExtensionDirEntry) -> Result<Arc<ClusterMap>> {
+    pub(super) fn cluster_map_for(
+        &self,
+        cluster_map: StreamExtensionDirEntry,
+    ) -> Result<Arc<ClusterMap>> {
         if let Some(generation) = self
             .cluster_map
             .read()
@@ -438,8 +441,18 @@ impl ExfatInode {
         if self.metadata.read().type_ != InodeType::File {
             return_errno!(Errno::EOPNOTSUPP);
         }
+        if let Some(page_cache_context) = self.active_page_cache_context() {
+            return Ok(page_cache_context.cluster_map);
+        }
         let cluster_map = *self.dir_entry_stream.read();
-        self.cluster_map_for(cluster_map)
+        let generation = self.cluster_map_for(cluster_map)?;
+        let (data_length, valid_data_length) = generation.validated_lengths()?;
+        *self.page_cache_context.write() = Some(super::page_backend::PageCacheContext {
+            cluster_map: generation.clone(),
+            data_length,
+            valid_data_length,
+        });
+        Ok(generation)
     }
 
     pub(super) fn cluster_map_snapshot(&self) -> Result<(Arc<ClusterMap>, usize, usize)> {
@@ -450,9 +463,25 @@ impl ExfatInode {
         }
 
         let _inode_state_guard = self.inode_state.read();
+        if let Some(page_cache_context) = self.active_page_cache_context() {
+            if page_cache_context.valid_data_length > page_cache_context.data_length {
+                return_errno!(Errno::EINVAL);
+            }
+            return Ok((
+                page_cache_context.cluster_map,
+                page_cache_context.data_length,
+                page_cache_context.valid_data_length,
+            ));
+        }
+
         let cluster_map = *self.dir_entry_stream.read();
         let generation = self.cluster_map_for(cluster_map)?;
         let (data_length, valid_data_length) = generation.validated_lengths()?;
+        *self.page_cache_context.write() = Some(super::page_backend::PageCacheContext {
+            cluster_map: generation.clone(),
+            data_length,
+            valid_data_length,
+        });
         Ok((generation, data_length, valid_data_length))
     }
 
@@ -461,10 +490,16 @@ impl ExfatInode {
         _inode_state_guard: &InodeStateWriteGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
-        let previous_generation = self.current_cluster_map(_inode_state_guard)?;
+        let previous_generation = self.cluster_map_for(*self.dir_entry_stream.read())?;
         let next_generation = self.cluster_map_for(cluster_map)?;
+        let (data_length, valid_data_length) = next_generation.validated_lengths()?;
         *self.dir_entry_stream.write() = cluster_map;
-        *self.cluster_map.write() = Some(next_generation);
+        *self.cluster_map.write() = Some(next_generation.clone());
+        *self.page_cache_context.write() = Some(super::page_backend::PageCacheContext {
+            cluster_map: next_generation,
+            data_length,
+            valid_data_length,
+        });
         Ok(previous_generation)
     }
 
