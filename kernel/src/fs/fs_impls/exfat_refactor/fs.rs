@@ -61,6 +61,7 @@ impl FileSystem for ExfatFs {
                 if let Err(error) = inode.sync_all() {
                     if let Some(mount_state) = self.mount_state.write().as_mut() {
                         mount_state.volume_flags.volume_dirty = true;
+                        mount_state.dirty_bracket_opened_by_mount = false;
                     }
                     return Err(error);
                 }
@@ -71,9 +72,6 @@ impl FileSystem for ExfatFs {
                 let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
                 if mount_state.forced_shutdown {
                     return_errno!(Errno::EIO);
-                }
-                if mount_state.flags.contains(FsFlags::RDONLY) {
-                    return Err(read_only_conflict());
                 }
             }
 
@@ -94,6 +92,10 @@ impl FileSystem for ExfatFs {
                         .ok_or_else(not_mounted)?
                         .volume_flags
                         .volume_dirty = true;
+                    mount_state
+                        .as_mut()
+                        .ok_or_else(not_mounted)?
+                        .dirty_bracket_opened_by_mount = false;
                     return_errno!(Errno::EIO);
                 }
             };
@@ -103,12 +105,19 @@ impl FileSystem for ExfatFs {
                     .ok_or_else(not_mounted)?
                     .volume_flags
                     .volume_dirty = true;
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .dirty_bracket_opened_by_mount = false;
                 return_errno!(Errno::EIO);
             }
 
             let clean_flags = {
                 let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
-                if !mount_state.volume_flags.volume_dirty {
+                if mount_state.flags.contains(FsFlags::RDONLY)
+                    || !mount_state.volume_flags.volume_dirty
+                    || !mount_state.dirty_bracket_opened_by_mount
+                {
                     return Ok(());
                 }
                 VolumeFlags {
@@ -125,6 +134,10 @@ impl FileSystem for ExfatFs {
                     .ok_or_else(not_mounted)?
                     .volume_flags
                     .volume_dirty = true;
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .dirty_bracket_opened_by_mount = false;
                 return Err(error);
             }
 
@@ -136,6 +149,10 @@ impl FileSystem for ExfatFs {
                         .ok_or_else(not_mounted)?
                         .volume_flags
                         .volume_dirty = true;
+                    mount_state
+                        .as_mut()
+                        .ok_or_else(not_mounted)?
+                        .dirty_bracket_opened_by_mount = false;
                     return Err(Error::new(Errno::EIO));
                 }
             };
@@ -145,10 +162,16 @@ impl FileSystem for ExfatFs {
                     .ok_or_else(not_mounted)?
                     .volume_flags
                     .volume_dirty = true;
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .dirty_bracket_opened_by_mount = false;
                 return_errno!(Errno::EIO);
             }
 
-            mount_state.as_mut().ok_or_else(not_mounted)?.volume_flags = clean_flags;
+            let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
+            mount_state.volume_flags = clean_flags;
+            mount_state.dirty_bracket_opened_by_mount = false;
             return Ok(());
         }
     }
@@ -237,6 +260,7 @@ impl ExfatFs {
             ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
         let mount_state = MountedVolumeState {
             volume_flags: flags,
+            dirty_bracket_opened_by_mount: false,
             flags: options.fs_flags,
             options: options.clone(),
             forced_shutdown: false,
@@ -288,6 +312,9 @@ impl ExfatFs {
             || mount_state.options.zero_size_dir != next_options.zero_size_dir
         {
             return Err(unsupported_remount_delta());
+        }
+        if !mount_state.flags.contains(FsFlags::RDONLY) && next_flags.contains(FsFlags::RDONLY) {
+            mount_state.dirty_bracket_opened_by_mount = false;
         }
         mount_state.flags = next_flags;
         mount_state.options = next_options.with_flags(next_flags);
@@ -352,6 +379,46 @@ impl ExfatFs {
 
 // ---- Superblock ----
 impl ExfatFs {
+    pub(super) fn publish_dirty_admission(
+        &self,
+        mount_state: &mut MountedVolumeState,
+    ) -> Result<()> {
+        if mount_state.volume_flags.volume_dirty {
+            return Ok(());
+        }
+
+        let dirty_flags = VolumeFlags {
+            volume_dirty: true,
+            ..mount_state.volume_flags
+        };
+        if let Err(error) = self
+            .boot_region
+            .write_volume_flags(self.block_device.as_ref(), dirty_flags)
+        {
+            mount_state.volume_flags.volume_dirty = true;
+            mount_state.dirty_bracket_opened_by_mount = false;
+            return Err(error);
+        }
+
+        let flush_status = match self.block_device.sync() {
+            Ok(status) => status,
+            Err(_) => {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+                return_errno!(Errno::EIO);
+            }
+        };
+        if flush_status != BioStatus::Complete {
+            mount_state.volume_flags.volume_dirty = true;
+            mount_state.dirty_bracket_opened_by_mount = false;
+            return_errno!(Errno::EIO);
+        }
+
+        mount_state.volume_flags = dirty_flags;
+        mount_state.dirty_bracket_opened_by_mount = true;
+        Ok(())
+    }
+
     fn build_super_block(
         &self,
         mount_state: &MountedVolumeState,
@@ -596,6 +663,7 @@ pub(super) struct MountStateWriteGuard<'a> {
 #[derive(Clone)]
 pub(super) struct MountedVolumeState {
     pub(super) volume_flags: VolumeFlags,
+    pub(super) dirty_bracket_opened_by_mount: bool,
     pub(super) flags: FsFlags,
     pub(super) options: MountOptions,
     pub(super) forced_shutdown: bool,

@@ -71,78 +71,90 @@ impl ExfatInode {
                 return_errno!(Errno::EROFS);
             }
 
-            let inode_state_guard = self.inode_state.write();
-            let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
-            let cluster_map = cluster_map_generation.stream_extension();
-            let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
-
-            let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
-                data_length
-            } else {
-                offset
-            };
-            let write_end = effective_offset
-                .checked_add(write_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            if status_flags.contains(StatusFlags::O_DIRECT)
-                && (!effective_offset.is_multiple_of(boot_region.sector_size)
-                    || !write_len.is_multiple_of(boot_region.sector_size))
-            {
-                return_errno!(Errno::EINVAL);
-            }
-
-            let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
-            let new_data_length = data_length.max(write_end);
-            let new_valid_data_length = valid_data_length.max(write_end);
-            let timestamp = RealTimeCoarseClock::get().read_time();
             let write_result = (|| {
-                if !cache_mutation_range.is_empty()
-                    && page_cache.has_dirty_pages(cache_mutation_range.clone())
+                let inode_state_guard = self.inode_state.write();
+                let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
+                let cluster_map = cluster_map_generation.stream_extension();
+                let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
+
+                let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
+                    data_length
+                } else {
+                    offset
+                };
+                let write_end = effective_offset
+                    .checked_add(write_len)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                if status_flags.contains(StatusFlags::O_DIRECT)
+                    && (!effective_offset.is_multiple_of(boot_region.sector_size)
+                        || !write_len.is_multiple_of(boot_region.sector_size))
                 {
-                    page_cache.flush_range(cache_mutation_range.clone())?;
+                    return_errno!(Errno::EINVAL);
                 }
-                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-                self.grow_and_commit_regular_file(
-                    &inode_state_guard,
-                    &fs,
-                    mount_state,
-                    &block_device,
-                    &boot_region,
-                    cluster_map,
-                    effective_offset,
-                    new_data_length,
-                    new_valid_data_length,
-                    timestamp,
-                    |_cluster_map, zero_fill_range| {
-                        if new_data_length > data_length {
-                            page_cache.resize(new_data_length, data_length)?;
-                        }
-                        Self::prepare_regular_file_page_cache_range(
-                            page_cache,
-                            data_length,
-                            cache_mutation_range.clone(),
-                        )?;
-                        if !zero_fill_range.is_empty() {
-                            page_cache.fill_zeros(zero_fill_range)?;
-                        }
-                        page_cache
-                            .write(effective_offset, reader)
-                            .map_err(Error::from)?;
-                        Ok(())
-                    },
-                    || {
-                        if new_data_length > data_length {
-                            let _ = page_cache.resize(data_length, new_data_length);
-                        }
-                    },
-                )
+
+                let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
+                let new_data_length = data_length.max(write_end);
+                let new_valid_data_length = valid_data_length.max(write_end);
+                let timestamp = RealTimeCoarseClock::get().read_time();
+                let write_result = (|| {
+                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                    fs.publish_dirty_admission(mount_state)?;
+                    if !cache_mutation_range.is_empty()
+                        && page_cache.has_dirty_pages(cache_mutation_range.clone())
+                    {
+                        page_cache.flush_range(cache_mutation_range.clone())?;
+                    }
+                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                    self.grow_and_commit_regular_file(
+                        &inode_state_guard,
+                        &fs,
+                        mount_state,
+                        &block_device,
+                        &boot_region,
+                        cluster_map,
+                        effective_offset,
+                        new_data_length,
+                        new_valid_data_length,
+                        timestamp,
+                        |_cluster_map, zero_fill_range| {
+                            if new_data_length > data_length {
+                                page_cache.resize(new_data_length, data_length)?;
+                            }
+                            Self::prepare_regular_file_page_cache_range(
+                                page_cache,
+                                data_length,
+                                cache_mutation_range.clone(),
+                            )?;
+                            if !zero_fill_range.is_empty() {
+                                page_cache.fill_zeros(zero_fill_range)?;
+                            }
+                            page_cache
+                                .write(effective_offset, reader)
+                                .map_err(Error::from)?;
+                            Ok(())
+                        },
+                        || {
+                            if new_data_length > data_length {
+                                let _ = page_cache.resize(data_length, new_data_length);
+                            }
+                        },
+                    )
+                })();
+                if let Err(error) = write_result {
+                    if new_data_length > data_length {
+                        let _ = page_cache.resize(data_length, new_data_length);
+                    }
+                    return Err(error);
+                }
+                Ok(())
             })();
-            if let Err(error) = write_result {
-                if new_data_length > data_length {
-                    let _ = page_cache.resize(data_length, new_data_length);
+            if write_result.is_err() {
+                if let Some(mount_state) = admission.state_guard.as_mut() {
+                    mount_state.volume_flags.volume_dirty = true;
+                    mount_state.dirty_bracket_opened_by_mount = false;
                 }
-                return Err(error);
             }
+            write_result?;
         }
         if status_flags.contains(StatusFlags::O_SYNC) {
             self.sync_all()?;
@@ -186,195 +198,208 @@ impl ExfatInode {
         }
         let page_cache = self.page_cache_handle();
         let timestamp = RealTimeCoarseClock::get().read_time();
+        let resize_result = (|| {
+            let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+            fs.publish_dirty_admission(mount_state)?;
 
-        if new_size > data_length {
-            let page_cache_result = if let Some(page_cache) = page_cache {
-                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-                self.grow_and_commit_regular_file(
-                    &inode_state_guard,
-                    &fs,
-                    mount_state,
-                    &block_device,
-                    &boot_region,
-                    cluster_map,
-                    new_size,
-                    new_size,
-                    new_size,
-                    timestamp,
-                    |_cluster_map, zero_fill_range| {
-                        if new_size > data_length {
-                            page_cache.resize(new_size, data_length)?;
-                        }
-                        Self::prepare_regular_file_page_cache_range(
-                            page_cache,
-                            data_length,
-                            zero_fill_range.clone(),
-                        )?;
-                        if !zero_fill_range.is_empty() {
-                            page_cache.fill_zeros(zero_fill_range)?;
-                        }
-                        Ok(())
-                    },
-                    || {},
-                )
+            if new_size > data_length {
+                let page_cache_result = if let Some(page_cache) = page_cache {
+                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                    self.grow_and_commit_regular_file(
+                        &inode_state_guard,
+                        &fs,
+                        mount_state,
+                        &block_device,
+                        &boot_region,
+                        cluster_map,
+                        new_size,
+                        new_size,
+                        new_size,
+                        timestamp,
+                        |_cluster_map, zero_fill_range| {
+                            if new_size > data_length {
+                                page_cache.resize(new_size, data_length)?;
+                            }
+                            Self::prepare_regular_file_page_cache_range(
+                                page_cache,
+                                data_length,
+                                zero_fill_range.clone(),
+                            )?;
+                            if !zero_fill_range.is_empty() {
+                                page_cache.fill_zeros(zero_fill_range)?;
+                            }
+                            Ok(())
+                        },
+                        || {},
+                    )
+                } else {
+                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                    self.grow_and_commit_regular_file(
+                        &inode_state_guard,
+                        &fs,
+                        mount_state,
+                        &block_device,
+                        &boot_region,
+                        cluster_map,
+                        new_size,
+                        new_size,
+                        new_size,
+                        timestamp,
+                        |cluster_map, zero_fill_range| {
+                            if zero_fill_range.is_empty() {
+                                return Ok(());
+                            }
+
+                            Self::mutate_regular_file_range(
+                                &block_device,
+                                &boot_region,
+                                cluster_map,
+                                new_size,
+                                zero_fill_range.start,
+                                zero_fill_range
+                                    .end
+                                    .checked_sub(zero_fill_range.start)
+                                    .ok_or_else(|| Error::new(Errno::EINVAL))?,
+                                |chunk| {
+                                    chunk.fill(0);
+                                    Ok(())
+                                },
+                            )
+                        },
+                        || {},
+                    )
+                };
+                if let Err(error) = page_cache_result {
+                    if let Some(page_cache) = page_cache {
+                        let _ = page_cache.resize(data_length, new_size);
+                    }
+                    return Err(error);
+                }
+                return Ok(());
+            }
+
+            let current_ranges = cluster_map_generation.cluster_ranges();
+            let retained_clusters = if new_size == 0 {
+                0
             } else {
-                let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-                self.grow_and_commit_regular_file(
-                    &inode_state_guard,
-                    &fs,
-                    mount_state,
-                    &block_device,
-                    &boot_region,
-                    cluster_map,
-                    new_size,
-                    new_size,
-                    new_size,
-                    timestamp,
-                    |cluster_map, zero_fill_range| {
-                        if zero_fill_range.is_empty() {
-                            return Ok(());
-                        }
-
-                        Self::mutate_regular_file_range(
-                            &block_device,
-                            &boot_region,
-                            cluster_map,
-                            new_size,
-                            zero_fill_range.start,
-                            zero_fill_range
-                                .end
-                                .checked_sub(zero_fill_range.start)
-                                .ok_or_else(|| Error::new(Errno::EINVAL))?,
-                            |chunk| {
-                                chunk.fill(0);
-                                Ok(())
-                            },
-                        )
-                    },
-                    || {},
-                )
+                new_size.div_ceil(boot_region.cluster_size)
             };
-            if let Err(error) = page_cache_result {
+            let mut retained_clusters_remaining = retained_clusters;
+            let mut retained_is_contiguous = true;
+            let mut previous_retained_cluster: Option<u32> = None;
+            let mut first_retained_cluster = 0u32;
+            let mut released_ranges = Vec::new();
+            for range in current_ranges {
+                if retained_clusters_remaining == 0 {
+                    released_ranges.push(*range);
+                    continue;
+                }
+
+                let retained_in_range = retained_clusters_remaining.min(range.cluster_count);
+                if retained_in_range != 0 {
+                    let retained_last_cluster = range
+                        .start_cluster
+                        .checked_add(
+                            u32::try_from(retained_in_range - 1)
+                                .map_err(|_| invalid_on_disk_layout())?,
+                        )
+                        .ok_or_else(invalid_on_disk_layout)?;
+                    if let Some(previous_retained_cluster) = previous_retained_cluster {
+                        if previous_retained_cluster.checked_add(1) != Some(range.start_cluster) {
+                            retained_is_contiguous = false;
+                        }
+                    } else {
+                        first_retained_cluster = range.start_cluster;
+                    }
+                    previous_retained_cluster = Some(retained_last_cluster);
+                }
+                if retained_in_range < range.cluster_count {
+                    let released_start_cluster = range
+                        .start_cluster
+                        .checked_add(
+                            u32::try_from(retained_in_range)
+                                .map_err(|_| invalid_on_disk_layout())?,
+                        )
+                        .ok_or_else(invalid_on_disk_layout)?;
+                    released_ranges.push(ClusterRange {
+                        start_cluster: released_start_cluster,
+                        cluster_count: range.cluster_count - retained_in_range,
+                    });
+                }
+                retained_clusters_remaining -= retained_in_range;
+            }
+            if retained_clusters_remaining != 0 {
+                return Err(invalid_on_disk_layout());
+            }
+
+            let next_cluster_map = StreamExtensionDirEntry {
+                data_length: Some(new_size),
+                first_cluster: if retained_clusters == 0 {
+                    0
+                } else {
+                    first_retained_cluster
+                },
+                valid_data_length: Some(valid_data_length.min(new_size)),
+                no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
+            };
+            let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
+            let previous_page_cache_context = self.install_page_cache_context(
+                &inode_state_guard,
+                PageCacheContext {
+                    cluster_map: next_cluster_map_generation,
+                    data_length: new_size,
+                    valid_data_length: valid_data_length.min(new_size),
+                },
+            );
+            if let Some(page_cache) = page_cache {
+                page_cache.resize(new_size, data_length)?;
+            }
+            if let Err(error) = self.write_back_regular_file_entry_set(
+                &block_device,
+                &boot_region,
+                next_cluster_map,
+                timestamp,
+            ) {
+                *self.page_cache_context.write() = previous_page_cache_context;
                 if let Some(page_cache) = page_cache {
                     let _ = page_cache.resize(data_length, new_size);
                 }
                 return Err(error);
             }
-            return Ok(());
-        }
 
-        let current_ranges = cluster_map_generation.cluster_ranges();
-        let retained_clusters = if new_size == 0 {
-            0
-        } else {
-            new_size.div_ceil(boot_region.cluster_size)
-        };
-        let mut retained_clusters_remaining = retained_clusters;
-        let mut retained_is_contiguous = true;
-        let mut previous_retained_cluster: Option<u32> = None;
-        let mut first_retained_cluster = 0u32;
-        let mut released_ranges = Vec::new();
-        for range in current_ranges {
-            if retained_clusters_remaining == 0 {
-                released_ranges.push(*range);
-                continue;
+            let allocated_sectors = retained_clusters
+                .checked_mul(boot_region.sectors_per_cluster)
+                .ok_or_else(|| Error::new(Errno::EINVAL))?;
+            {
+                let mut metadata = self.metadata.write();
+                metadata.last_meta_change_at = timestamp;
+                metadata.last_modify_at = timestamp;
+                metadata.nr_sectors_allocated = allocated_sectors;
+                metadata.size = new_size;
+            }
+            let retired_generation =
+                self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
+            self.mark_content_dirty(&inode_state_guard);
+            if !cluster_map.no_fat_chain && retained_clusters != 0 {
+                let retained_last_cluster =
+                    previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
+                FatReader::new(block_device.as_ref(), &boot_region)
+                    .terminate_cluster_chain(retained_last_cluster)
+                    .map_err(Error::from)?;
             }
 
-            let retained_in_range = retained_clusters_remaining.min(range.cluster_count);
-            if retained_in_range != 0 {
-                let retained_last_cluster = range
-                    .start_cluster
-                    .checked_add(
-                        u32::try_from(retained_in_range - 1)
-                            .map_err(|_| invalid_on_disk_layout())?,
-                    )
-                    .ok_or_else(invalid_on_disk_layout)?;
-                if let Some(previous_retained_cluster) = previous_retained_cluster {
-                    if previous_retained_cluster.checked_add(1) != Some(range.start_cluster) {
-                        retained_is_contiguous = false;
-                    }
-                } else {
-                    first_retained_cluster = range.start_cluster;
-                }
-                previous_retained_cluster = Some(retained_last_cluster);
+            if !released_ranges.is_empty() {
+                fs.lazy_reclaim_clusters(retired_generation, released_ranges)?;
             }
-            if retained_in_range < range.cluster_count {
-                let released_start_cluster = range
-                    .start_cluster
-                    .checked_add(
-                        u32::try_from(retained_in_range).map_err(|_| invalid_on_disk_layout())?,
-                    )
-                    .ok_or_else(invalid_on_disk_layout)?;
-                released_ranges.push(ClusterRange {
-                    start_cluster: released_start_cluster,
-                    cluster_count: range.cluster_count - retained_in_range,
-                });
+            Ok(())
+        })();
+        if resize_result.is_err() {
+            if let Some(mount_state) = admission.state_guard.as_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
             }
-            retained_clusters_remaining -= retained_in_range;
         }
-        if retained_clusters_remaining != 0 {
-            return Err(invalid_on_disk_layout());
-        }
-
-        let next_cluster_map = StreamExtensionDirEntry {
-            data_length: Some(new_size),
-            first_cluster: if retained_clusters == 0 {
-                0
-            } else {
-                first_retained_cluster
-            },
-            valid_data_length: Some(valid_data_length.min(new_size)),
-            no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
-        };
-        let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
-        let previous_page_cache_context = self.install_page_cache_context(
-            &inode_state_guard,
-            PageCacheContext {
-                cluster_map: next_cluster_map_generation,
-                data_length: new_size,
-                valid_data_length: valid_data_length.min(new_size),
-            },
-        );
-        if let Some(page_cache) = page_cache {
-            page_cache.resize(new_size, data_length)?;
-        }
-        if let Err(error) = self.write_back_regular_file_entry_set(
-            &block_device,
-            &boot_region,
-            next_cluster_map,
-            timestamp,
-        ) {
-            *self.page_cache_context.write() = previous_page_cache_context;
-            if let Some(page_cache) = page_cache {
-                let _ = page_cache.resize(data_length, new_size);
-            }
-            return Err(error);
-        }
-
-        let allocated_sectors = retained_clusters
-            .checked_mul(boot_region.sectors_per_cluster)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        {
-            let mut metadata = self.metadata.write();
-            metadata.last_meta_change_at = timestamp;
-            metadata.last_modify_at = timestamp;
-            metadata.nr_sectors_allocated = allocated_sectors;
-            metadata.size = new_size;
-        }
-        let retired_generation = self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
-        self.mark_content_dirty(&inode_state_guard);
-        if !cluster_map.no_fat_chain && retained_clusters != 0 {
-            let retained_last_cluster =
-                previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
-            FatReader::new(block_device.as_ref(), &boot_region)
-                .terminate_cluster_chain(retained_last_cluster)
-                .map_err(Error::from)?;
-        }
-
-        if !released_ranges.is_empty() {
-            fs.lazy_reclaim_clusters(retired_generation, released_ranges)?;
-        }
-        Ok(())
+        resize_result
     }
 
     fn prepare_regular_file_page_cache_range(

@@ -13,7 +13,7 @@ use super::{
     super::{
         boot::BootRegion,
         direntry::{self, FileEntrySetView, FileEntryTimestamp, ScannedDirEntry},
-        invalid_on_disk_layout,
+        invalid_on_disk_layout, not_mounted,
     },
     ExfatInode, InodeTimestampField,
 };
@@ -127,7 +127,7 @@ impl ExfatInode {
             let fs = self.fs.upgrade().ok_or_else(|| {
                 Error::with_message(Errno::EIO, "exFAT filesystem is not mounted")
             })?;
-            let mutation_mount_state = fs.mount_state_write_guard()?;
+            let mut mutation_mount_state = fs.mount_state_write_guard()?;
             let block_device = fs.immutable_block_device();
             let boot_region = fs.immutable_boot_region();
             if mutation_mount_state.forced_shutdown
@@ -152,36 +152,55 @@ impl ExfatInode {
                 }
                 return_errno!(Errno::EOPNOTSUPP);
             }
+            let current_writable = self.metadata.read().mode.intersects(mkmod!(a+w));
+            if requested_writable == current_writable {
+                return Ok(());
+            }
 
-            let durable_updated = self.rewrite_inode_entry_set(
-                &block_device,
-                &boot_region,
-                |entry_view| {
-                    let current_attributes = entry_view.file_attributes();
-                    let current_writable = !entry_view.is_read_only();
-                    if requested_writable == current_writable {
-                        return Ok(None);
-                    }
+            let update_result = (|| {
+                let mount_state = mutation_mount_state
+                    .state_guard
+                    .as_mut()
+                    .ok_or_else(not_mounted)?;
+                fs.publish_dirty_admission(mount_state)?;
 
-                    let mut file_attributes =
-                        current_attributes | direntry::FILE_ATTRIBUTE_DIRECTORY;
-                    if requested_writable {
-                        file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
-                    } else {
-                        file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
-                    }
-                    let mut mutable_entry_set = entry_view.to_mutable();
-                    mutable_entry_set.set_file_attributes(file_attributes);
-                    Ok(Some(mutable_entry_set.into_bytes()))
-                },
-                |metadata| {
-                    let writable_bits = metadata.mode & mkmod!(a+w);
-                    metadata.mode = chmod!(metadata.mode, a-w);
-                    if requested_writable {
-                        metadata.mode |= writable_bits;
-                    }
-                },
-            )?;
+                self.rewrite_inode_entry_set(
+                    &block_device,
+                    &boot_region,
+                    |entry_view| {
+                        let current_attributes = entry_view.file_attributes();
+                        let current_writable = !entry_view.is_read_only();
+                        if requested_writable == current_writable {
+                            return Ok(None);
+                        }
+
+                        let mut file_attributes =
+                            current_attributes | direntry::FILE_ATTRIBUTE_DIRECTORY;
+                        if requested_writable {
+                            file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
+                        } else {
+                            file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
+                        }
+                        let mut mutable_entry_set = entry_view.to_mutable();
+                        mutable_entry_set.set_file_attributes(file_attributes);
+                        Ok(Some(mutable_entry_set.into_bytes()))
+                    },
+                    |metadata| {
+                        let writable_bits = metadata.mode & mkmod!(a+w);
+                        metadata.mode = chmod!(metadata.mode, a-w);
+                        if requested_writable {
+                            metadata.mode |= writable_bits;
+                        }
+                    },
+                )
+            })();
+            if update_result.is_err() {
+                if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
+                    mount_state.volume_flags.volume_dirty = true;
+                    mount_state.dirty_bracket_opened_by_mount = false;
+                }
+            }
+            let durable_updated = update_result?;
             if durable_updated {
                 let inode_state_guard = self.inode_state.write();
                 self.mark_metadata_dirty(&inode_state_guard);
@@ -198,7 +217,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mutation_mount_state = fs.mount_state_write_guard()?;
+        let mut mutation_mount_state = fs.mount_state_write_guard()?;
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
         if mutation_mount_state.forced_shutdown
@@ -216,25 +235,44 @@ impl ExfatInode {
         }
 
         let requested_writable = mode.intersects(mkmod!(a+w));
-        let durable_updated = self.rewrite_inode_entry_set(
-            &block_device,
-            &boot_region,
-            |entry_view| {
-                if requested_writable == entry_view.is_read_only() {
-                    let mut file_attributes = entry_view.file_attributes();
-                    if requested_writable {
-                        file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
-                    } else {
-                        file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
+        let current_writable = self.metadata.read().mode.intersects(mkmod!(a+w));
+        if requested_writable == current_writable {
+            return Ok(());
+        }
+        let update_result = (|| {
+            let mount_state = mutation_mount_state
+                .state_guard
+                .as_mut()
+                .ok_or_else(not_mounted)?;
+            fs.publish_dirty_admission(mount_state)?;
+
+            self.rewrite_inode_entry_set(
+                &block_device,
+                &boot_region,
+                |entry_view| {
+                    if requested_writable == entry_view.is_read_only() {
+                        let mut file_attributes = entry_view.file_attributes();
+                        if requested_writable {
+                            file_attributes &= !direntry::FILE_ATTRIBUTE_READ_ONLY;
+                        } else {
+                            file_attributes |= direntry::FILE_ATTRIBUTE_READ_ONLY;
+                        }
+                        let mut mutable_entry_set = entry_view.to_mutable();
+                        mutable_entry_set.set_file_attributes(file_attributes);
+                        return Ok(Some(mutable_entry_set.into_bytes()));
                     }
-                    let mut mutable_entry_set = entry_view.to_mutable();
-                    mutable_entry_set.set_file_attributes(file_attributes);
-                    return Ok(Some(mutable_entry_set.into_bytes()));
-                }
-                Ok(None)
-            },
-            |_| {},
-        )?;
+                    Ok(None)
+                },
+                |_| {},
+            )
+        })();
+        if update_result.is_err() {
+            if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
+        }
+        let durable_updated = update_result?;
 
         let mut metadata = self.metadata.write();
         metadata.mode = chmod!(chmod!(metadata.mode, a-w), u+w);
@@ -393,7 +431,7 @@ impl ExfatInode {
         // yet own explicit `allow_utime` / timezone policy. Once the later `meso_09`
         // mount-policy follow-up exposes that owner-local policy under `ExfatFs`, remove this
         // seam and route timestamp admission plus UTC-offset selection through that dedicated path.
-        let Ok(mutation_mount_state) = fs.mount_state_write_guard() else {
+        let Ok(mut mutation_mount_state) = fs.mount_state_write_guard() else {
             return;
         };
         let block_device = fs.immutable_block_device();
@@ -418,8 +456,14 @@ impl ExfatInode {
             return;
         }
 
-        if self
-            .rewrite_inode_entry_set(
+        let rewrite_result = (|| {
+            let mount_state = mutation_mount_state
+                .state_guard
+                .as_mut()
+                .ok_or_else(not_mounted)?;
+            fs.publish_dirty_admission(mount_state)?;
+
+            self.rewrite_inode_entry_set(
                 &block_device,
                 &boot_region,
                 |entry_view| {
@@ -460,8 +504,14 @@ impl ExfatInode {
                     }
                 },
             )
-            .is_ok_and(|updated| updated)
-        {
+        })();
+        if rewrite_result.is_err() {
+            if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
+        }
+        if rewrite_result.is_ok_and(|updated| updated) {
             let inode_state_guard = self.inode_state.write();
             self.mark_metadata_dirty(&inode_state_guard);
         }

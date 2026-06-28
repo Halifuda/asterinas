@@ -80,7 +80,7 @@ pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<
             Some(label)
         }
     };
-    let mutation_mount_state = fs.mount_state_write_guard()?;
+    let mut mutation_mount_state = fs.mount_state_write_guard()?;
     let block_device = fs.immutable_block_device();
     let boot_region = fs.immutable_boot_region();
     if mutation_mount_state.forced_shutdown {
@@ -99,10 +99,28 @@ pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<
         .as_ref()
         .ok_or_else(not_mounted)?
         .clone();
-    let mut directory_bytes = root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
-    encode_volume_label_entry(&mut directory_bytes, label.as_deref())?;
-    root_inode.rewrite_root_directory_bytes(&block_device, &boot_region, &directory_bytes)?;
-    Ok(())
+    let write_result = (|| {
+        let mut directory_bytes =
+            root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
+        let original_directory_bytes = directory_bytes.clone();
+        encode_volume_label_entry(&mut directory_bytes, label.as_deref())?;
+        if directory_bytes == original_directory_bytes {
+            return Ok(());
+        }
+        let mount_state = mutation_mount_state
+            .state_guard
+            .as_mut()
+            .ok_or_else(not_mounted)?;
+        fs.publish_dirty_admission(mount_state)?;
+        root_inode.rewrite_root_directory_bytes(&block_device, &boot_region, &directory_bytes)
+    })();
+    if write_result.is_err() {
+        if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
+            mount_state.volume_flags.volume_dirty = true;
+            mount_state.dirty_bracket_opened_by_mount = false;
+        }
+    }
+    write_result
 }
 
 pub(super) fn set_forced_shutdown(fs: &ExfatFs) -> Result<()> {

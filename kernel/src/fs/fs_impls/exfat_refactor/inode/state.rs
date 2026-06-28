@@ -679,6 +679,9 @@ impl ExfatInode {
     }
 
     pub(super) fn mark_metadata_dirty(&self, _inode_state_guard: &InodeStateWriteGuard<'_>) {
+        if self.metadata.read().type_ == InodeType::Dir {
+            return;
+        }
         self.dirty_state.write().mark_metadata_dirty();
     }
 

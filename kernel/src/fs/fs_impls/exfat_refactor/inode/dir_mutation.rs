@@ -63,7 +63,8 @@ impl ExfatInode {
         let name_hash = upcase_table.name_hash(&name);
         let required_entry_count =
             direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
-        let child_inode = {
+        let create_result = (|| {
+            let child_inode = {
             let parent_directory = self.parent.read().upgrade();
             let mut guarded_directories = vec![self];
             if let Some(parent_directory) = parent_directory.as_ref() {
@@ -91,6 +92,7 @@ impl ExfatInode {
             }
 
             let mount_state = mount_guard.mount_state_mut()?;
+            fs.publish_dirty_admission(mount_state)?;
             let (cluster_map, mut directory_bytes, slot_range) = self
                 .reserve_directory_entry_slots(
                     cluster_map,
@@ -175,13 +177,21 @@ impl ExfatInode {
             child_inode.metadata.write().mode = mode;
             let child_inode: Arc<dyn Inode> = child_inode;
             child_inode
-        };
-        self.refresh_directory_metadata_after_namespace_mutation(
-            &block_device,
-            &boot_region,
-            RealTimeCoarseClock::get().read_time(),
-        )?;
-        Ok(child_inode)
+            };
+            self.refresh_directory_metadata_after_namespace_mutation(
+                &block_device,
+                &boot_region,
+                RealTimeCoarseClock::get().read_time(),
+            )?;
+            Ok(child_inode)
+        })();
+        if create_result.is_err() {
+            if let Ok(mount_state) = mount_guard.mount_state_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
+        }
+        create_result
     }
 
     pub(super) fn unlink_impl(&self, name: &str) -> Result<()> {
@@ -203,8 +213,8 @@ impl ExfatInode {
 
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
-
-        let allocated_cluster_ranges = {
+        let unlink_result = (|| {
+            let allocated_cluster_ranges = {
             let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
             let cluster_map = *self.dir_entry_stream.read();
             let is_root_directory = cluster_map.data_length.is_none();
@@ -242,6 +252,8 @@ impl ExfatInode {
             )
             .map_err(Error::from)?;
 
+            let mount_state = mount_guard.mount_state_mut()?;
+            fs.publish_dirty_admission(mount_state)?;
             let mut invalidated_directory_bytes = directory_bytes;
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
             let removed_entry_set = invalidated_directory_bytes
@@ -259,18 +271,26 @@ impl ExfatInode {
             )
             .map_err(Error::from)?;
             allocated_cluster_ranges
-        };
+            };
 
-        if !allocated_cluster_ranges.is_empty() {
-            let mount_state = mount_guard.mount_state_mut()?;
-            let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
+            if !allocated_cluster_ranges.is_empty() {
+                let mount_state = mount_guard.mount_state_mut()?;
+                let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
+            }
+            self.refresh_directory_metadata_after_namespace_mutation(
+                &block_device,
+                &boot_region,
+                RealTimeCoarseClock::get().read_time(),
+            )?;
+            Ok(())
+        })();
+        if unlink_result.is_err() {
+            if let Ok(mount_state) = mount_guard.mount_state_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
         }
-        self.refresh_directory_metadata_after_namespace_mutation(
-            &block_device,
-            &boot_region,
-            RealTimeCoarseClock::get().read_time(),
-        )?;
-        Ok(())
+        unlink_result
     }
 
     pub(super) fn rmdir_impl(&self, name: &str) -> Result<()> {
@@ -292,8 +312,8 @@ impl ExfatInode {
 
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
-
-        let allocated_cluster_ranges = {
+        let rmdir_result = (|| {
+            let allocated_cluster_ranges = {
             let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
             let cluster_map = *self.dir_entry_stream.read();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
@@ -345,6 +365,8 @@ impl ExfatInode {
             )
             .map_err(Error::from)?;
 
+            let mount_state = mount_guard.mount_state_mut()?;
+            fs.publish_dirty_admission(mount_state)?;
             let mut invalidated_directory_bytes = directory_bytes;
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
             let removed_entry_set = invalidated_directory_bytes
@@ -362,18 +384,26 @@ impl ExfatInode {
             )
             .map_err(Error::from)?;
             allocated_cluster_ranges
-        };
+            };
 
-        if !allocated_cluster_ranges.is_empty() {
-            let mount_state = mount_guard.mount_state_mut()?;
-            let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
+            if !allocated_cluster_ranges.is_empty() {
+                let mount_state = mount_guard.mount_state_mut()?;
+                let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
+            }
+            self.refresh_directory_metadata_after_namespace_mutation(
+                &block_device,
+                &boot_region,
+                RealTimeCoarseClock::get().read_time(),
+            )?;
+            Ok(())
+        })();
+        if rmdir_result.is_err() {
+            if let Ok(mount_state) = mount_guard.mount_state_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
         }
-        self.refresh_directory_metadata_after_namespace_mutation(
-            &block_device,
-            &boot_region,
-            RealTimeCoarseClock::get().read_time(),
-        )?;
-        Ok(())
+        rmdir_result
     }
 
     pub(super) fn rename_impl(
@@ -416,8 +446,9 @@ impl ExfatInode {
         let new_name = Self::validate_name(new_name, &options)?;
         let old_name_hash = upcase_table.name_hash(&old_name);
         let new_name_hash = upcase_table.name_hash(&new_name);
-        if self.metadata.read().ino == target_directory.metadata.read().ino {
-            let renamed = {
+        let rename_result = (|| {
+            if self.metadata.read().ino == target_directory.metadata.read().ino {
+                let renamed = {
                 let parent_directory = self.parent.read().upgrade();
                 let mut guarded_directories = vec![self];
                 if let Some(parent_directory) = parent_directory.as_ref() {
@@ -516,18 +547,17 @@ impl ExfatInode {
                     &new_name,
                     new_name_hash,
                 )?
-            };
-            if renamed {
-                self.refresh_directory_metadata_after_namespace_mutation(
-                    &block_device,
-                    &boot_region,
-                    RealTimeCoarseClock::get().read_time(),
-                )?;
+                };
+                if renamed {
+                    self.refresh_directory_metadata_after_namespace_mutation(
+                        &block_device,
+                        &boot_region,
+                        RealTimeCoarseClock::get().read_time(),
+                    )?;
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
 
-        {
             let target_parent_directory = target_directory.parent.read().upgrade();
             let mut guarded_directories = vec![self, target_directory];
             if let Some(target_parent_directory) = target_parent_directory.as_ref() {
@@ -632,18 +662,25 @@ impl ExfatInode {
                 &new_name,
                 new_name_hash,
             )?;
+            let timestamp = RealTimeCoarseClock::get().read_time();
+            self.refresh_directory_metadata_after_namespace_mutation(
+                &block_device,
+                &boot_region,
+                timestamp,
+            )?;
+            target_directory.refresh_directory_metadata_after_namespace_mutation(
+                &block_device,
+                &boot_region,
+                timestamp,
+            )
+        })();
+        if rename_result.is_err() {
+            if let Ok(mount_state) = mount_guard.mount_state_mut() {
+                mount_state.volume_flags.volume_dirty = true;
+                mount_state.dirty_bracket_opened_by_mount = false;
+            }
         }
-        let timestamp = RealTimeCoarseClock::get().read_time();
-        self.refresh_directory_metadata_after_namespace_mutation(
-            &block_device,
-            &boot_region,
-            timestamp,
-        )?;
-        target_directory.refresh_directory_metadata_after_namespace_mutation(
-            &block_device,
-            &boot_region,
-            timestamp,
-        )
+        rename_result
     }
 
     // Cross-directory rename helpers
@@ -686,6 +723,7 @@ impl ExfatInode {
         if current_target_view.is_none() && source_name == new_name {
             return Ok(false);
         }
+        fs.publish_dirty_admission(mount_state)?;
         let current_renamed_entry_set =
             direntry::renamed_entry_set(current_source_view, new_name, new_name_hash)
                 .map_err(Error::from)?;
@@ -842,6 +880,7 @@ impl ExfatInode {
                 Some((slot_range, ranges)) => (Some(slot_range), ranges),
                 None => (None, Vec::new()),
             };
+        fs.publish_dirty_admission(mount_state)?;
         let (
             updated_target_cluster_map,
             target_directory_bytes,
