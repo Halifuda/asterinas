@@ -128,19 +128,27 @@ impl ExfatInode {
 
         let mut next_offset = offset;
         if next_offset == 0 {
-            if let Err(error) = visitor.visit(".", self.ino(), self.type_(), next_offset) {
+            let dot_next_offset = next_offset
+                .checked_add(1)
+                .ok_or_else(invalid_on_disk_layout)?;
+            if let Err(error) = visitor.visit(".", self.ino(), self.type_(), dot_next_offset) {
                 return Err(error);
             }
-            next_offset += 1;
+            next_offset = dot_next_offset;
         }
         if next_offset == 1 {
-            if let Err(error) = visitor.visit("..", self.ino(), self.type_(), next_offset) {
+            let dotdot_next_offset = next_offset
+                .checked_add(1)
+                .ok_or_else(invalid_on_disk_layout)?;
+            if let Err(error) =
+                visitor.visit("..", self.ino(), self.type_(), dotdot_next_offset)
+            {
                 if next_offset == offset {
                     return Err(error);
                 }
                 return Ok(next_offset.saturating_sub(offset));
             }
-            next_offset += 1;
+            next_offset = dotdot_next_offset;
         }
 
         let mut visible_offset = 2usize;
@@ -158,6 +166,9 @@ impl ExfatInode {
                 ScannedDirEntry::File(entry_view) => {
                     let candidate_name = entry_view.name()?;
                     let (inode_type, _, _, _) = entry_view.child_metadata(&boot_region)?;
+                    let resume_offset = visible_offset
+                        .checked_add(1)
+                        .ok_or_else(invalid_on_disk_layout)?;
 
                     if visible_offset >= offset {
                         let entry_name = String::from_utf16(&candidate_name)
@@ -167,21 +178,20 @@ impl ExfatInode {
                                 u32::try_from(entry_view.slot_range().first_entry_index())
                                     .map_err(|_| invalid_on_disk_layout())?,
                             );
-                        if let Err(error) =
-                            visitor.visit(&entry_name, entry_ino, inode_type, visible_offset)
-                        {
+                        if let Err(error) = visitor.visit(
+                            &entry_name,
+                            entry_ino,
+                            inode_type,
+                            resume_offset,
+                        ) {
                             if next_offset == offset {
                                 return Err(error);
                             }
                             return Ok(next_offset.saturating_sub(offset));
                         }
-                        next_offset = visible_offset
-                            .checked_add(1)
-                            .ok_or(invalid_on_disk_layout())?;
+                        next_offset = resume_offset;
                     }
-                    visible_offset = visible_offset
-                        .checked_add(1)
-                        .ok_or(invalid_on_disk_layout())?;
+                    visible_offset = resume_offset;
                     entry_index = entry_view.slot_range().next_entry_index()?;
                 }
                 ScannedDirEntry::Issue { kind, slot_range } => {
