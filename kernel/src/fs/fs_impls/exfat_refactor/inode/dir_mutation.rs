@@ -64,7 +64,7 @@ impl ExfatInode {
         let required_entry_count =
             direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
         let child_inode = {
-            let parent_directory = self.parent.upgrade();
+            let parent_directory = self.parent.read().upgrade();
             let mut guarded_directories = vec![self];
             if let Some(parent_directory) = parent_directory.as_ref() {
                 guarded_directories.push(parent_directory.as_ref());
@@ -418,7 +418,7 @@ impl ExfatInode {
         let new_name_hash = upcase_table.name_hash(&new_name);
         if self.metadata.read().ino == target_directory.metadata.read().ino {
             let renamed = {
-                let parent_directory = self.parent.upgrade();
+                let parent_directory = self.parent.read().upgrade();
                 let mut guarded_directories = vec![self];
                 if let Some(parent_directory) = parent_directory.as_ref() {
                     guarded_directories.push(parent_directory.as_ref());
@@ -442,6 +442,31 @@ impl ExfatInode {
                 else {
                     return_errno!(Errno::ENOENT);
                 };
+                let (
+                    source_inode_type,
+                    source_first_cluster,
+                    source_data_length,
+                    source_no_fat_chain,
+                ) = source_view.child_metadata(&boot_region).map_err(Error::from)?;
+                let source_valid_data_length = source_view
+                    .cluster_map()
+                    .map_err(Error::from)?
+                    .valid_data_length
+                    .ok_or_else(invalid_on_disk_layout)
+                    .map_err(Error::from)?;
+                let source_child_inode = Self::child_inode_from_directory_entry(
+                    self,
+                    &fs,
+                    &boot_region,
+                    cluster_map.first_cluster,
+                    source_view.slot_range(),
+                    source_inode_type,
+                    source_first_cluster,
+                    source_data_length,
+                    source_valid_data_length,
+                    source_no_fat_chain,
+                )
+                .map_err(Error::from)?;
                 let target_child_inode = Self::locate_named_child_view(
                     &directory_bytes,
                     cluster_map.data_length.is_none(),
@@ -454,9 +479,10 @@ impl ExfatInode {
                 .map(|target_view| {
                     let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                         target_view.child_metadata(&boot_region)?;
-                    if target_inode_type != InodeType::Dir {
-                        return Ok(None);
-                    }
+                    let valid_data_length = target_view
+                        .cluster_map()?
+                        .valid_data_length
+                        .ok_or_else(invalid_on_disk_layout)?;
                     Self::child_inode_from_directory_entry(
                         self,
                         &fs,
@@ -466,7 +492,7 @@ impl ExfatInode {
                         target_inode_type,
                         first_cluster,
                         data_length,
-                        data_length,
+                        valid_data_length,
                         no_fat_chain,
                     )
                     .map(Some)
@@ -478,6 +504,7 @@ impl ExfatInode {
                 let cluster_map = *self.dir_entry_stream.read();
                 self.rename_within_directory(
                     cluster_map,
+                    &source_child_inode,
                     target_child_inode.as_ref(),
                     mount_state,
                     &fs,
@@ -501,12 +528,53 @@ impl ExfatInode {
         }
 
         {
-            let target_parent_directory = target_directory.parent.upgrade();
+            let target_parent_directory = target_directory.parent.read().upgrade();
             let mut guarded_directories = vec![self, target_directory];
             if let Some(target_parent_directory) = target_parent_directory.as_ref() {
                 guarded_directories.push(target_parent_directory.as_ref());
             }
             let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let source_cluster_map = *self.dir_entry_stream.read();
+            let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                &block_device,
+                &boot_region,
+                source_cluster_map,
+            )
+            .map_err(Error::from)?;
+            let source_view = Self::locate_named_child_view(
+                &source_directory_bytes,
+                source_cluster_map.data_length.is_none(),
+                &upcase_table,
+                &old_name,
+                old_name_hash,
+            )
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            let (
+                source_inode_type,
+                source_first_cluster,
+                source_data_length,
+                source_no_fat_chain,
+            ) = source_view.child_metadata(&boot_region).map_err(Error::from)?;
+            let source_valid_data_length = source_view
+                .cluster_map()
+                .map_err(Error::from)?
+                .valid_data_length
+                .ok_or_else(invalid_on_disk_layout)
+                .map_err(Error::from)?;
+            let source_child_inode = Self::child_inode_from_directory_entry(
+                self,
+                &fs,
+                &boot_region,
+                source_cluster_map.first_cluster,
+                source_view.slot_range(),
+                source_inode_type,
+                source_first_cluster,
+                source_data_length,
+                source_valid_data_length,
+                source_no_fat_chain,
+            )
+            .map_err(Error::from)?;
             let target_cluster_map = *target_directory.dir_entry_stream.read();
             let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -525,9 +593,10 @@ impl ExfatInode {
             .map(|target_view| {
                 let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                     target_view.child_metadata(&boot_region)?;
-                if target_inode_type != InodeType::Dir {
-                    return Ok(None);
-                }
+                let valid_data_length = target_view
+                    .cluster_map()?
+                    .valid_data_length
+                    .ok_or_else(invalid_on_disk_layout)?;
                 Self::child_inode_from_directory_entry(
                     target_directory,
                     &fs,
@@ -537,7 +606,7 @@ impl ExfatInode {
                     target_inode_type,
                     first_cluster,
                     data_length,
-                    data_length,
+                    valid_data_length,
                     no_fat_chain,
                 )
                 .map(Some)
@@ -546,10 +615,10 @@ impl ExfatInode {
             .map_err(Error::from)?
             .flatten();
             let mount_state = mount_guard.mount_state_mut()?;
-            let source_cluster_map = *self.dir_entry_stream.read();
             let target_cluster_map = *target_directory.dir_entry_stream.read();
             self.rename_across_directories(
                 source_cluster_map,
+                &source_child_inode,
                 target_directory,
                 target_cluster_map,
                 target_child_inode.as_ref(),
@@ -582,6 +651,7 @@ impl ExfatInode {
     pub(super) fn rename_within_directory(
         &self,
         mut cluster_map: StreamExtensionDirEntry,
+        source_child_inode: &Arc<Self>,
         target_child_inode: Option<&Arc<Self>>,
         mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
@@ -689,6 +759,23 @@ impl ExfatInode {
             replaced_target_slot_range,
             (final_slot_range != source_slot_range).then_some(source_slot_range),
         )?;
+        let old_source_ino = source_child_inode.metadata.read().ino;
+        let new_source_ino = self
+            .entry_location_ino(final_slot_range.first_entry_index())
+            .map_err(Error::from)?;
+        let replaced_target_ino =
+            target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
+        *source_child_inode.parent.write() = self.weak_self();
+        source_child_inode.metadata.write().ino = new_source_ino;
+        if let Some(target_child_inode) = target_child_inode {
+            Self::finalize_detached_overwritten_target_inode(target_child_inode);
+        }
+        fs.rebind_rename_inode_cache(
+            old_source_ino,
+            new_source_ino,
+            source_child_inode,
+            replaced_target_ino,
+        );
         Self::cleanup_replaced_target_ranges(fs, mount_state, &replaced_target_ranges);
         Ok(true)
     }
@@ -696,6 +783,7 @@ impl ExfatInode {
     pub(super) fn rename_across_directories(
         &self,
         source_cluster_map: StreamExtensionDirEntry,
+        source_child_inode: &Arc<Self>,
         target_directory: &ExfatInode,
         mut target_cluster_map: StreamExtensionDirEntry,
         target_child_inode: Option<&Arc<Self>>,
@@ -788,6 +876,23 @@ impl ExfatInode {
             Some(source_slot_range),
             None,
         )?;
+        let old_source_ino = source_child_inode.metadata.read().ino;
+        let new_source_ino = target_directory
+            .entry_location_ino(target_slot_range.first_entry_index())
+            .map_err(Error::from)?;
+        let replaced_target_ino =
+            target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
+        *source_child_inode.parent.write() = target_directory.weak_self();
+        source_child_inode.metadata.write().ino = new_source_ino;
+        if let Some(target_child_inode) = target_child_inode {
+            Self::finalize_detached_overwritten_target_inode(target_child_inode);
+        }
+        fs.rebind_rename_inode_cache(
+            old_source_ino,
+            new_source_ino,
+            source_child_inode,
+            replaced_target_ino,
+        );
         Self::cleanup_replaced_target_ranges(fs, mount_state, &replaced_target_ranges);
         Ok(())
     }
@@ -991,7 +1096,7 @@ impl ExfatInode {
             return Err(invalid_on_disk_layout());
         }
 
-        let parent = self.parent.upgrade().ok_or_else(|| {
+        let parent = self.parent.read().upgrade().ok_or_else(|| {
             Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
         })?;
         let parent_cluster_map = *parent.dir_entry_stream.read();
@@ -1335,5 +1440,12 @@ impl ExfatInode {
             return;
         }
         let _ = fs.free_clusters(mount_state, replaced_target_ranges);
+    }
+
+    fn finalize_detached_overwritten_target_inode(target_child_inode: &Arc<Self>) {
+        *target_child_inode.parent.write() = Weak::new();
+        let mut metadata = target_child_inode.metadata.write();
+        metadata.nr_hard_links = 0;
+        metadata.ino = u64::MAX;
     }
 }

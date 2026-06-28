@@ -548,6 +548,21 @@ impl ExfatFs {
         inode
     }
 
+    pub(super) fn rebind_rename_inode_cache(
+        &self,
+        old_source_ino: u64,
+        new_source_ino: u64,
+        source_inode: &Arc<ExfatInode>,
+        replaced_target_ino: Option<u64>,
+    ) {
+        let mut inode_cache = self.inode_cache.write();
+        inode_cache.remove(&old_source_ino);
+        if let Some(replaced_target_ino) = replaced_target_ino {
+            inode_cache.remove(&replaced_target_ino);
+        }
+        inode_cache.insert(new_source_ino, Arc::downgrade(source_inode));
+    }
+
     fn live_cached_inodes(&self) -> Vec<Arc<ExfatInode>> {
         let mut inode_cache = self.inode_cache.write();
         let mut live_inodes = Vec::with_capacity(inode_cache.len());

@@ -523,7 +523,7 @@ impl ExfatInode {
         rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
         update_metadata_fn: impl FnOnce(&mut Metadata),
     ) -> Result<bool> {
-        let parent = self.parent.upgrade().ok_or_else(|| {
+        let parent = self.parent.read().upgrade().ok_or_else(|| {
             Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
         })?;
         let is_dir = self.metadata.read().type_ == InodeType::Dir;
