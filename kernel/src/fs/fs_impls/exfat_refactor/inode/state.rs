@@ -781,28 +781,30 @@ impl ExfatInode {
         let month = Month::try_from(encoded_month).map_err(|_| invalid_on_disk_layout())?;
         let date = Date::from_calendar_date(encoded_year, month, encoded_day)
             .map_err(|_| invalid_on_disk_layout())?;
+        let encoded_time = u16::from_le_bytes([timestamp_bytes[0], timestamp_bytes[1]]);
+        let hour =
+            u8::try_from((encoded_time >> 11) & 0x1f).map_err(|_| invalid_on_disk_layout())?;
+        let minute =
+            u8::try_from((encoded_time >> 5) & 0x3f).map_err(|_| invalid_on_disk_layout())?;
+        let mut seconds = u8::try_from(encoded_time & 0x1f)
+            .map_err(|_| invalid_on_disk_layout())?
+            .checked_mul(2)
+            .ok_or_else(invalid_on_disk_layout)?;
+        let mut milliseconds = 0u16;
 
-        let time = if let Some(ten_ms_increment) = ten_ms_increment {
+        if let Some(ten_ms_increment) = ten_ms_increment {
             if ten_ms_increment >= 200 {
                 return Err(invalid_on_disk_layout());
             }
 
-            let encoded_time = u16::from_le_bytes([timestamp_bytes[0], timestamp_bytes[1]]);
-            let seconds = u8::try_from(encoded_time & 0x1f)
-                .map_err(|_| invalid_on_disk_layout())?
-                .checked_mul(2)
-                .and_then(|seconds| seconds.checked_add(ten_ms_increment / 100))
+            seconds = seconds
+                .checked_add(ten_ms_increment / 100)
                 .ok_or(invalid_on_disk_layout())?;
-            let milliseconds = u16::from(ten_ms_increment % 100) * 10;
-            let hour =
-                u8::try_from((encoded_time >> 11) & 0x1f).map_err(|_| invalid_on_disk_layout())?;
-            let minute =
-                u8::try_from((encoded_time >> 5) & 0x3f).map_err(|_| invalid_on_disk_layout())?;
-            Time::from_hms_milli(hour, minute, seconds, milliseconds)
-                .map_err(|_| invalid_on_disk_layout())?
-        } else {
-            Time::MIDNIGHT
-        };
+            milliseconds = u16::from(ten_ms_increment % 100) * 10;
+        }
+
+        let time = Time::from_hms_milli(hour, minute, seconds, milliseconds)
+            .map_err(|_| invalid_on_disk_layout())?;
 
         let utc_offset = Self::exfat_utc_offset(utc_offset_byte)?;
         let date_time = PrimitiveDateTime::new(date, time).assume_offset(utc_offset);

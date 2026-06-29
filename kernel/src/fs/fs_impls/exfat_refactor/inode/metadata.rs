@@ -476,7 +476,7 @@ impl ExfatInode {
                                     entry_view.last_accessed_timestamp().utc_offset_byte(),
                                 )?;
                             mutable_entry_set.set_last_accessed_timestamp(FileEntryTimestamp::new(
-                                [0, 0, timestamp_bytes[2], timestamp_bytes[3]],
+                                timestamp_bytes,
                                 None,
                                 encoded_utc_offset_byte,
                             ));
