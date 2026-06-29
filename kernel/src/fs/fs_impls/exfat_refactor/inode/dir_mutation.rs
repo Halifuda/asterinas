@@ -64,13 +64,31 @@ impl ExfatInode {
         let required_entry_count =
             direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
         let create_result = (|| {
-            let child_inode = {
             let parent_directory = self.parent.read().upgrade();
             let mut guarded_directories = vec![self];
             if let Some(parent_directory) = parent_directory.as_ref() {
                 guarded_directories.push(parent_directory.as_ref());
             }
-            let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let mut guarded_directory_inos = guarded_directories
+                .iter()
+                .map(|directory| directory.metadata.read().ino)
+                .collect::<Vec<_>>();
+            guarded_directory_inos.sort_unstable();
+            guarded_directory_inos.dedup();
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let self_guard_index = guarded_directory_inos
+                .binary_search(&self.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            let self_inode_state_guard = &directory_guards[self_guard_index];
+            let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
+            {
+                let parent_guard_index = guarded_directory_inos
+                    .binary_search(&parent_directory.metadata.read().ino)
+                    .map_err(|_| Error::new(Errno::EINVAL))?;
+                Some(&directory_guards[parent_guard_index])
+            } else {
+                None
+            };
             let cluster_map = *self.dir_entry_stream.read();
             let current_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -176,12 +194,12 @@ impl ExfatInode {
             );
             child_inode.metadata.write().mode = mode;
             let child_inode: Arc<dyn Inode> = child_inode;
-            child_inode
-            };
-            self.refresh_directory_metadata_after_namespace_mutation(
+            self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
                 &boot_region,
                 RealTimeCoarseClock::get().read_time(),
+                self_inode_state_guard,
+                parent_inode_state_guard,
             )?;
             Ok(child_inode)
         })();
@@ -214,8 +232,31 @@ impl ExfatInode {
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
         let unlink_result = (|| {
-            let allocated_cluster_ranges = {
-            let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+            let parent_directory = self.parent.read().upgrade();
+            let mut guarded_directories = vec![self];
+            if let Some(parent_directory) = parent_directory.as_ref() {
+                guarded_directories.push(parent_directory.as_ref());
+            }
+            let mut guarded_directory_inos = guarded_directories
+                .iter()
+                .map(|directory| directory.metadata.read().ino)
+                .collect::<Vec<_>>();
+            guarded_directory_inos.sort_unstable();
+            guarded_directory_inos.dedup();
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let self_guard_index = guarded_directory_inos
+                .binary_search(&self.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            let self_inode_state_guard = &directory_guards[self_guard_index];
+            let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
+            {
+                let parent_guard_index = guarded_directory_inos
+                    .binary_search(&parent_directory.metadata.read().ino)
+                    .map_err(|_| Error::new(Errno::EINVAL))?;
+                Some(&directory_guards[parent_guard_index])
+            } else {
+                None
+            };
             let cluster_map = *self.dir_entry_stream.read();
             let is_root_directory = cluster_map.data_length.is_none();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
@@ -270,17 +311,16 @@ impl ExfatInode {
                 cluster_map,
             )
             .map_err(Error::from)?;
-            allocated_cluster_ranges
-            };
-
             if !allocated_cluster_ranges.is_empty() {
                 let mount_state = mount_guard.mount_state_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
             }
-            self.refresh_directory_metadata_after_namespace_mutation(
+            self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
                 &boot_region,
                 RealTimeCoarseClock::get().read_time(),
+                self_inode_state_guard,
+                parent_inode_state_guard,
             )?;
             Ok(())
         })();
@@ -313,8 +353,31 @@ impl ExfatInode {
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
         let rmdir_result = (|| {
-            let allocated_cluster_ranges = {
-            let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+            let parent_directory = self.parent.read().upgrade();
+            let mut guarded_directories = vec![self];
+            if let Some(parent_directory) = parent_directory.as_ref() {
+                guarded_directories.push(parent_directory.as_ref());
+            }
+            let mut guarded_directory_inos = guarded_directories
+                .iter()
+                .map(|directory| directory.metadata.read().ino)
+                .collect::<Vec<_>>();
+            guarded_directory_inos.sort_unstable();
+            guarded_directory_inos.dedup();
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let self_guard_index = guarded_directory_inos
+                .binary_search(&self.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            let self_inode_state_guard = &directory_guards[self_guard_index];
+            let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
+            {
+                let parent_guard_index = guarded_directory_inos
+                    .binary_search(&parent_directory.metadata.read().ino)
+                    .map_err(|_| Error::new(Errno::EINVAL))?;
+                Some(&directory_guards[parent_guard_index])
+            } else {
+                None
+            };
             let cluster_map = *self.dir_entry_stream.read();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -383,17 +446,16 @@ impl ExfatInode {
                 cluster_map,
             )
             .map_err(Error::from)?;
-            allocated_cluster_ranges
-            };
-
             if !allocated_cluster_ranges.is_empty() {
                 let mount_state = mount_guard.mount_state_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
             }
-            self.refresh_directory_metadata_after_namespace_mutation(
+            self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
                 &boot_region,
                 RealTimeCoarseClock::get().read_time(),
+                self_inode_state_guard,
+                parent_inode_state_guard,
             )?;
             Ok(())
         })();
@@ -448,13 +510,31 @@ impl ExfatInode {
         let new_name_hash = upcase_table.name_hash(&new_name);
         let rename_result = (|| {
             if self.metadata.read().ino == target_directory.metadata.read().ino {
-                let renamed = {
                 let parent_directory = self.parent.read().upgrade();
                 let mut guarded_directories = vec![self];
                 if let Some(parent_directory) = parent_directory.as_ref() {
                     guarded_directories.push(parent_directory.as_ref());
                 }
-                let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+                let mut guarded_directory_inos = guarded_directories
+                    .iter()
+                    .map(|directory| directory.metadata.read().ino)
+                    .collect::<Vec<_>>();
+                guarded_directory_inos.sort_unstable();
+                guarded_directory_inos.dedup();
+                let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+                let self_guard_index = guarded_directory_inos
+                    .binary_search(&self.metadata.read().ino)
+                    .map_err(|_| Error::new(Errno::EINVAL))?;
+                let self_inode_state_guard = &directory_guards[self_guard_index];
+                let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
+                {
+                    let parent_guard_index = guarded_directory_inos
+                        .binary_search(&parent_directory.metadata.read().ino)
+                        .map_err(|_| Error::new(Errno::EINVAL))?;
+                    Some(&directory_guards[parent_guard_index])
+                } else {
+                    None
+                };
                 let cluster_map = *self.dir_entry_stream.read();
                 let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                     &block_device,
@@ -533,7 +613,7 @@ impl ExfatInode {
                 .flatten();
                 let mount_state = mount_guard.mount_state_mut()?;
                 let cluster_map = *self.dir_entry_stream.read();
-                self.rename_within_directory(
+                let renamed = self.rename_within_directory(
                     cluster_map,
                     &source_child_inode,
                     target_child_inode.as_ref(),
@@ -546,24 +626,61 @@ impl ExfatInode {
                     old_name_hash,
                     &new_name,
                     new_name_hash,
-                )?
-                };
+                )?;
                 if renamed {
-                    self.refresh_directory_metadata_after_namespace_mutation(
+                    self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                         &block_device,
                         &boot_region,
                         RealTimeCoarseClock::get().read_time(),
+                        self_inode_state_guard,
+                        parent_inode_state_guard,
                     )?;
                 }
                 return Ok(());
             }
 
+            let source_parent_directory = self.parent.read().upgrade();
             let target_parent_directory = target_directory.parent.read().upgrade();
             let mut guarded_directories = vec![self, target_directory];
+            if let Some(source_parent_directory) = source_parent_directory.as_ref() {
+                guarded_directories.push(source_parent_directory.as_ref());
+            }
             if let Some(target_parent_directory) = target_parent_directory.as_ref() {
                 guarded_directories.push(target_parent_directory.as_ref());
             }
-            let _directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let mut guarded_directory_inos = guarded_directories
+                .iter()
+                .map(|directory| directory.metadata.read().ino)
+                .collect::<Vec<_>>();
+            guarded_directory_inos.sort_unstable();
+            guarded_directory_inos.dedup();
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let source_guard_index = guarded_directory_inos
+                .binary_search(&self.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            let source_inode_state_guard = &directory_guards[source_guard_index];
+            let target_guard_index = guarded_directory_inos
+                .binary_search(&target_directory.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            let target_inode_state_guard = &directory_guards[target_guard_index];
+            let source_parent_inode_state_guard =
+                if let Some(source_parent_directory) = source_parent_directory.as_ref() {
+                    let parent_guard_index = guarded_directory_inos
+                        .binary_search(&source_parent_directory.metadata.read().ino)
+                        .map_err(|_| Error::new(Errno::EINVAL))?;
+                    Some(&directory_guards[parent_guard_index])
+                } else {
+                    None
+                };
+            let target_parent_inode_state_guard =
+                if let Some(target_parent_directory) = target_parent_directory.as_ref() {
+                    let parent_guard_index = guarded_directory_inos
+                        .binary_search(&target_parent_directory.metadata.read().ino)
+                        .map_err(|_| Error::new(Errno::EINVAL))?;
+                    Some(&directory_guards[parent_guard_index])
+                } else {
+                    None
+                };
             let source_cluster_map = *self.dir_entry_stream.read();
             let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -663,16 +780,21 @@ impl ExfatInode {
                 new_name_hash,
             )?;
             let timestamp = RealTimeCoarseClock::get().read_time();
-            self.refresh_directory_metadata_after_namespace_mutation(
+            self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
                 &boot_region,
                 timestamp,
+                source_inode_state_guard,
+                source_parent_inode_state_guard,
             )?;
-            target_directory.refresh_directory_metadata_after_namespace_mutation(
-                &block_device,
-                &boot_region,
-                timestamp,
-            )
+            target_directory
+                .refresh_directory_metadata_after_namespace_mutation_with_guards(
+                    &block_device,
+                    &boot_region,
+                    timestamp,
+                    target_inode_state_guard,
+                    target_parent_inode_state_guard,
+                )
         })();
         if rename_result.is_err() {
             if let Ok(mount_state) = mount_guard.mount_state_mut() {

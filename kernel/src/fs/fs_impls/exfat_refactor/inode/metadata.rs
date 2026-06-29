@@ -15,7 +15,7 @@ use super::{
         direntry::{self, FileEntrySetView, FileEntryTimestamp, ScannedDirEntry},
         invalid_on_disk_layout, not_mounted,
     },
-    ExfatInode, InodeTimestampField,
+    state::InodeStateWriteGuard, ExfatInode, InodeTimestampField,
 };
 use crate::{
     fs::{
@@ -527,17 +527,68 @@ impl ExfatInode {
             return_errno!(Errno::ENOTDIR);
         }
 
+        let parent_directory = self.parent.read().upgrade();
+        let mut guarded_directories = vec![self];
+        if let Some(parent_directory) = parent_directory.as_ref() {
+            guarded_directories.push(parent_directory.as_ref());
+        }
+        let mut guarded_directory_inos = guarded_directories
+            .iter()
+            .map(|directory| directory.metadata.read().ino)
+            .collect::<Vec<_>>();
+        guarded_directory_inos.sort_unstable();
+        guarded_directory_inos.dedup();
+        let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+        let self_guard_index = guarded_directory_inos
+            .binary_search(&self.metadata.read().ino)
+            .map_err(|_| Error::new(Errno::EINVAL))?;
+        let self_inode_state_guard = &directory_guards[self_guard_index];
+        let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref() {
+            let parent_guard_index = guarded_directory_inos
+                .binary_search(&parent_directory.metadata.read().ino)
+                .map_err(|_| Error::new(Errno::EINVAL))?;
+            Some(&directory_guards[parent_guard_index])
+        } else {
+            None
+        };
+        self.refresh_directory_metadata_after_namespace_mutation_with_guards(
+            block_device,
+            boot_region,
+            timestamp,
+            self_inode_state_guard,
+            parent_inode_state_guard,
+        )
+    }
+
+    pub(super) fn refresh_directory_metadata_after_namespace_mutation_with_guards(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        timestamp: Duration,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
+        parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+    ) -> Result<()> {
+        if self.metadata.read().type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+
         if self.dir_entry_stream.read().data_length.is_none() {
             let mut metadata = self.metadata.write();
             metadata.last_meta_change_at = timestamp;
             metadata.last_modify_at = timestamp;
             drop(metadata);
-            let inode_state_guard = self.inode_state.write();
-            self.mark_metadata_dirty(&inode_state_guard);
+            self.mark_metadata_dirty(self_inode_state_guard);
             return Ok(());
         }
 
-        let durable_updated = self.rewrite_inode_entry_set(
+        let parent_inode_state_guard = parent_inode_state_guard.ok_or_else(|| {
+            Error::with_message(
+                Errno::EINVAL,
+                "ordinary exFAT directory refresh requires parent write-guard proof",
+            )
+        })?;
+        let durable_updated = self.rewrite_inode_entry_set_with_guards(
+            parent_inode_state_guard,
             block_device,
             boot_region,
             |entry_view| {
@@ -560,8 +611,7 @@ impl ExfatInode {
             },
         )?;
         if durable_updated {
-            let inode_state_guard = self.inode_state.write();
-            self.mark_metadata_dirty(&inode_state_guard);
+            self.mark_metadata_dirty(self_inode_state_guard);
         }
         Ok(())
     }
@@ -573,23 +623,51 @@ impl ExfatInode {
         rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
         update_metadata_fn: impl FnOnce(&mut Metadata),
     ) -> Result<bool> {
+        if self.metadata.read().type_ == InodeType::Dir {
+            let parent = self.parent.read().upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+            })?;
+            let self_ino = self.metadata.read().ino;
+            let parent_ino = parent.metadata.read().ino;
+            let directory_guards = Self::directory_write_guards_by_ino(vec![self, parent.as_ref()]);
+            let parent_inode_state_guard = if parent_ino < self_ino {
+                &directory_guards[0]
+            } else {
+                &directory_guards[1]
+            };
+            return self.rewrite_inode_entry_set_with_guards(
+                parent_inode_state_guard,
+                block_device,
+                boot_region,
+                rewrite_entry_set_fn,
+                update_metadata_fn,
+            );
+        }
+
         let parent = self.parent.read().upgrade().ok_or_else(|| {
             Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
         })?;
-        let is_dir = self.metadata.read().type_ == InodeType::Dir;
-        let _directory_guards = if is_dir {
-            Some(Self::directory_write_guards_by_ino(vec![
-                self,
-                parent.as_ref(),
-            ]))
-        } else {
-            None
-        };
-        let _parent_guard = if is_dir {
-            None
-        } else {
-            Some(parent.inode_state.write())
-        };
+        let parent_inode_state_guard = parent.inode_state.write();
+        self.rewrite_inode_entry_set_with_guards(
+            &parent_inode_state_guard,
+            block_device,
+            boot_region,
+            rewrite_entry_set_fn,
+            update_metadata_fn,
+        )
+    }
+
+    fn rewrite_inode_entry_set_with_guards(
+        &self,
+        _parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
+        update_metadata_fn: impl FnOnce(&mut Metadata),
+    ) -> Result<bool> {
+        let parent = self.parent.read().upgrade().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+        })?;
         let parent_cluster_map = *parent.dir_entry_stream.read();
         let mut directory_bytes = Self::read_directory_bytes_for_cluster_map(
             block_device,
