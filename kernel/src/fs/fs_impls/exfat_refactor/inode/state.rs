@@ -6,7 +6,7 @@
 //! directory byte I/O, timestamp conversion, child construction, and ordered write guards.
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
-use core::time::Duration;
+use core::{ops::Range, time::Duration};
 
 use aster_block::BlockDevice;
 use ostd::{
@@ -508,6 +508,80 @@ impl ExfatInode {
 
 // ---- Directory byte I/O ----
 impl ExfatInode {
+    pub(super) fn visit_directory_byte_range_for_cluster_map(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: StreamExtensionDirEntry,
+        byte_range: Range<usize>,
+        mut visit_chunk_fn: impl FnMut(usize, Range<usize>) -> Result<()>,
+    ) -> Result<()> {
+        let range_length = byte_range
+            .end
+            .checked_sub(byte_range.start)
+            .ok_or_else(invalid_operation_input)?;
+        if range_length == 0 {
+            return Ok(());
+        }
+
+        match cluster_map.data_length {
+            Some(data_length) => {
+                if data_length == 0 {
+                    if cluster_map.first_cluster != 0 {
+                        return Err(invalid_on_disk_layout());
+                    }
+                    return Err(invalid_on_disk_layout());
+                }
+                if data_length % DIRECTORY_ENTRY_SIZE != 0 || byte_range.end > data_length {
+                    return Err(invalid_on_disk_layout());
+                }
+
+                let data_length_u64 =
+                    u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
+                boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64)?;
+            }
+            None if cluster_map.first_cluster == 0 => return Err(invalid_on_disk_layout()),
+            None => {}
+        }
+
+        let clusters_to_skip = byte_range.start / boot_region.cluster_size;
+        let mut current_cluster = cluster_map.first_cluster;
+        let mut fat_reader = (cluster_map.data_length.is_none() || !cluster_map.no_fat_chain)
+            .then(|| FatReader::new(block_device.as_ref(), boot_region));
+        for _ in 0..clusters_to_skip {
+            current_cluster = Self::advance_cluster(current_cluster, fat_reader.as_mut())?
+                .ok_or_else(invalid_on_disk_layout)?;
+        }
+
+        let mut remaining = range_length;
+        let mut request_offset = 0usize;
+        let mut intra_cluster_offset = byte_range.start % boot_region.cluster_size;
+        while remaining != 0 {
+            let bytes_in_cluster = boot_region
+                .cluster_size
+                .checked_sub(intra_cluster_offset)
+                .ok_or_else(invalid_on_disk_layout)?;
+            let bytes_to_visit = remaining.min(bytes_in_cluster);
+            let chunk_end = request_offset
+                .checked_add(bytes_to_visit)
+                .ok_or_else(invalid_on_disk_layout)?;
+            let cluster_offset = boot_region.cluster_offset(current_cluster)?;
+            let byte_offset = cluster_offset
+                .checked_add(intra_cluster_offset)
+                .ok_or_else(invalid_on_disk_layout)?;
+            visit_chunk_fn(byte_offset, request_offset..chunk_end)?;
+            remaining -= bytes_to_visit;
+            request_offset = chunk_end;
+            if remaining == 0 {
+                return Ok(());
+            }
+
+            current_cluster = Self::advance_cluster(current_cluster, fat_reader.as_mut())?
+                .ok_or_else(invalid_on_disk_layout)?;
+            intra_cluster_offset = 0;
+        }
+        Ok(())
+    }
+
     pub(super) fn read_directory_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -537,17 +611,20 @@ impl ExfatInode {
         boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64)?;
         if cluster_map.no_fat_chain {
             let mut remaining = data_length;
-            let mut directory_bytes = Vec::with_capacity(data_length);
+            let mut write_offset = 0usize;
+            let mut directory_bytes = vec![0; data_length];
             let mut current_cluster = cluster_map.first_cluster;
             while remaining != 0 {
                 let cluster_start = boot_region.cluster_offset(current_cluster)?;
-                let mut cluster_bytes = vec![0; boot_region.cluster_size];
+                let bytes_to_read = remaining.min(boot_region.cluster_size);
+                let write_end = write_offset
+                    .checked_add(bytes_to_read)
+                    .ok_or_else(invalid_on_disk_layout)?;
                 block_device
-                    .read_bytes(cluster_start, &mut cluster_bytes)
+                    .read_bytes(cluster_start, &mut directory_bytes[write_offset..write_end])
                     .map_err(|_| device_io())?;
-                let bytes_to_copy = remaining.min(cluster_bytes.len());
-                directory_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
-                remaining -= bytes_to_copy;
+                remaining -= bytes_to_read;
+                write_offset = write_end;
                 if remaining == 0 {
                     return Ok(directory_bytes);
                 }
