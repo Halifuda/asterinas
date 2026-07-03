@@ -790,7 +790,7 @@ impl ExfatInode {
                 u32::try_from(slot_range.first_entry_index())
                     .map_err(|_| invalid_on_disk_layout())?,
             );
-        Ok(Self::new_child(
+        let child_inode = Self::new_child(
             fs,
             parent.weak_self(),
             child_ino,
@@ -801,7 +801,11 @@ impl ExfatInode {
             data_length,
             valid_data_length,
             no_fat_chain,
-        ))
+        );
+        if inode_type == InodeType::File {
+            child_inode.store_regular_file_entry_set_location_hint(slot_range)?;
+        }
+        Ok(child_inode)
     }
 
     // Input validation

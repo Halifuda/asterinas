@@ -73,6 +73,9 @@ impl ExfatInode {
             no_fat_chain,
         );
         child_inode.refresh_cached_metadata_from_entry_view(entry_view, boot_region)?;
+        if inode_type == InodeType::File {
+            child_inode.store_regular_file_entry_set_location_hint(slot_range)?;
+        }
         Ok(Some(child_inode))
     }
 

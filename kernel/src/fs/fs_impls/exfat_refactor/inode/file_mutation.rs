@@ -31,6 +31,147 @@ use crate::{
 };
 
 impl ExfatInode {
+    pub(super) fn read_regular_file_entry_set_with_hint(
+        &self,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<(direntry::DirEntrySlotRange, Vec<u8>)> {
+        let parent = self.parent.read().upgrade().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+        })?;
+        let parent_cluster_map = *parent.dir_entry_stream.read();
+        let current_cluster_map = *self.dir_entry_stream.read();
+        let fallback_entry_index =
+            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+
+        if let Some(hinted_slot_range) = self.regular_file_entry_set_location_hint()? {
+            match Self::read_regular_file_entry_set_at_with_mode(
+                block_device,
+                boot_region,
+                parent_cluster_map,
+                hinted_slot_range,
+                true,
+                current_cluster_map,
+            ) {
+                Ok(Some((validated_slot_range, entry_set_bytes))) => {
+                    self.store_regular_file_entry_set_location_hint(validated_slot_range)?;
+                    return Ok((validated_slot_range, entry_set_bytes));
+                }
+                Ok(None) => {
+                    self.clear_regular_file_entry_set_location_hint();
+                }
+                Err(error) if error.error() == Errno::EUCLEAN => {
+                    self.clear_regular_file_entry_set_location_hint();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let primary_slot_range = direntry::DirEntrySlotRange::new(fallback_entry_index, 1)?;
+        let primary_entry_bytes = Self::read_directory_entry_slots_for_cluster_map(
+            block_device,
+            boot_region,
+            parent_cluster_map,
+            primary_slot_range,
+        )?;
+        let entry_count = usize::from(primary_entry_bytes[1])
+            .checked_add(1)
+            .ok_or_else(invalid_on_disk_layout)?;
+        let fallback_slot_range = direntry::DirEntrySlotRange::new(fallback_entry_index, entry_count)?;
+        let (validated_slot_range, entry_set_bytes) =
+            Self::read_regular_file_entry_set_at_with_mode(
+                block_device,
+                boot_region,
+                parent_cluster_map,
+                fallback_slot_range,
+                false,
+                current_cluster_map,
+            )?
+            .ok_or_else(invalid_on_disk_layout)?;
+        self.store_regular_file_entry_set_location_hint(validated_slot_range)?;
+        Ok((validated_slot_range, entry_set_bytes))
+    }
+
+    fn read_directory_entry_slots_for_cluster_map(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: StreamExtensionDirEntry,
+        slot_range: direntry::DirEntrySlotRange,
+    ) -> Result<Vec<u8>> {
+        let entry_set_range = direntry::slot_range_bytes(slot_range)?;
+        let entry_set_length = entry_set_range
+            .end
+            .checked_sub(entry_set_range.start)
+            .ok_or_else(invalid_on_disk_layout)?;
+        let mut entry_set_bytes = vec![0; entry_set_length];
+        Self::visit_directory_byte_range_for_cluster_map(
+            block_device,
+            boot_region,
+            cluster_map,
+            entry_set_range,
+            |byte_offset, request_range| {
+                block_device
+                    .read_bytes(byte_offset, &mut entry_set_bytes[request_range])
+                    .map_err(|_| device_io())
+            },
+        )?;
+        Ok(entry_set_bytes)
+    }
+
+    fn read_regular_file_entry_set_at_with_mode(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        cluster_map: StreamExtensionDirEntry,
+        slot_range: direntry::DirEntrySlotRange,
+        tolerate_validation_mismatch: bool,
+        current_cluster_map: StreamExtensionDirEntry,
+    ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>)>> {
+        let entry_set_bytes = Self::read_directory_entry_slots_for_cluster_map(
+            block_device,
+            boot_region,
+            cluster_map,
+            slot_range,
+        )?;
+        let zero_based_slot_range = direntry::DirEntrySlotRange::new(0, slot_range.entry_count())?;
+        let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0) {
+            Ok(direntry::ScannedDirEntry::File(entry_view))
+                if entry_view.slot_range() == zero_based_slot_range =>
+            {
+                entry_view
+            }
+            Ok(_) if tolerate_validation_mismatch => return Ok(None),
+            Ok(_) => return Err(Error::from(invalid_on_disk_layout())),
+            Err(error) if error.error() == Errno::EUCLEAN => return Err(error),
+            Err(error) => return Err(error),
+        };
+        let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+            entry_view.child_metadata(boot_region)?;
+        if inode_type != InodeType::File || entry_view.is_directory() {
+            if tolerate_validation_mismatch {
+                return Ok(None);
+            }
+            return Err(Error::from(invalid_on_disk_layout()));
+        }
+        let hinted_cluster_map = entry_view.cluster_map()?;
+        if hinted_cluster_map != current_cluster_map {
+            if tolerate_validation_mismatch {
+                return Ok(None);
+            }
+            return Err(Error::from(invalid_on_disk_layout()));
+        }
+        let validated_slot_range = direntry::DirEntrySlotRange::new(
+            slot_range.first_entry_index(),
+            entry_view.slot_range().entry_count(),
+        )?;
+        if validated_slot_range != slot_range {
+            if tolerate_validation_mismatch {
+                return Ok(None);
+            }
+            return Err(Error::from(invalid_on_disk_layout()));
+        }
+        Ok(Some((validated_slot_range, entry_set_bytes)))
+    }
+
     // VFS entry points
 
     pub(super) fn write_at_impl(
@@ -600,61 +741,8 @@ impl ExfatInode {
         })?;
         let _parent_inode_state_guard = parent.inode_state.write();
         let parent_cluster_map = *parent.dir_entry_stream.read();
-        let entry_index =
-            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
-        let primary_entry_offset = entry_index
-            .checked_mul(direntry::DIRECTORY_ENTRY_SIZE)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let primary_entry_end = primary_entry_offset
-            .checked_add(direntry::DIRECTORY_ENTRY_SIZE)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let mut primary_entry_bytes = [0u8; direntry::DIRECTORY_ENTRY_SIZE];
-        Self::visit_directory_byte_range_for_cluster_map(
-            block_device,
-            boot_region,
-            parent_cluster_map,
-            primary_entry_offset..primary_entry_end,
-            |byte_offset, request_range| {
-                block_device
-                    .read_bytes(byte_offset, &mut primary_entry_bytes[request_range])
-                    .map_err(|_| device_io())
-            },
-        )?;
-
-        let entry_set_entry_count = usize::from(primary_entry_bytes[1])
-            .checked_add(1)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let entry_set_length = entry_set_entry_count
-            .checked_mul(direntry::DIRECTORY_ENTRY_SIZE)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let entry_set_end = primary_entry_offset
-            .checked_add(entry_set_length)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let mut entry_set_bytes = primary_entry_bytes.to_vec();
-        entry_set_bytes.resize(entry_set_length, 0);
-        if entry_set_length > direntry::DIRECTORY_ENTRY_SIZE {
-            Self::visit_directory_byte_range_for_cluster_map(
-                block_device,
-                boot_region,
-                parent_cluster_map,
-                primary_entry_end..entry_set_end,
-                |byte_offset, request_range| {
-                    let destination_range = request_range
-                        .start
-                        .checked_add(direntry::DIRECTORY_ENTRY_SIZE)
-                        .and_then(|range_start| {
-                            request_range
-                                .end
-                                .checked_add(direntry::DIRECTORY_ENTRY_SIZE)
-                                .map(|range_end| range_start..range_end)
-                        })
-                        .ok_or_else(invalid_on_disk_layout)?;
-                    block_device
-                        .read_bytes(byte_offset, &mut entry_set_bytes[destination_range])
-                        .map_err(|_| device_io())
-                },
-            )?;
-        }
+        let (slot_range, entry_set_bytes) =
+            self.read_regular_file_entry_set_with_hint(block_device, boot_region)?;
 
         let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
             direntry::ScannedDirEntry::File(entry_view) => entry_view,
@@ -665,6 +753,10 @@ impl ExfatInode {
         if inode_type != InodeType::File || entry_view.is_directory() {
             return Err(Error::from(invalid_on_disk_layout()));
         }
+        let entry_set_entry_count = entry_view.slot_range().entry_count();
+        let entry_set_length = entry_set_entry_count
+            .checked_mul(direntry::DIRECTORY_ENTRY_SIZE)
+            .ok_or_else(invalid_on_disk_layout)?;
 
         let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
             Self::encoded_exfat_timestamp_fields(
@@ -682,18 +774,20 @@ impl ExfatInode {
         if updated_entry_set_bytes.len() != entry_set_length {
             return Err(Error::from(invalid_on_disk_layout()));
         }
+        let entry_set_range = direntry::slot_range_bytes(slot_range)?;
 
         Self::visit_directory_byte_range_for_cluster_map(
             block_device,
             boot_region,
             parent_cluster_map,
-            primary_entry_offset..entry_set_end,
+            entry_set_range,
             |byte_offset, request_range| {
                 block_device
                     .write_bytes(byte_offset, &updated_entry_set_bytes[request_range])
                     .map_err(|_| device_io())
             },
         )?;
+        self.store_regular_file_entry_set_location_hint(slot_range)?;
         Ok(())
     }
 

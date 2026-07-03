@@ -8,6 +8,7 @@
 use core::time::Duration;
 
 use aster_block::BlockDevice;
+use ostd::mm::VmIo;
 
 use super::{
     super::{
@@ -669,6 +670,41 @@ impl ExfatInode {
             Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
         })?;
         let parent_cluster_map = *parent.dir_entry_stream.read();
+        if self.metadata.read().type_ == InodeType::File {
+            let (slot_range, mut entry_set_bytes) =
+                self.read_regular_file_entry_set_with_hint(block_device, boot_region)?;
+            let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
+                ScannedDirEntry::File(entry_view) => entry_view,
+                _ => return Err(Error::from(invalid_on_disk_layout())),
+            };
+            if entry_view.slot_range().entry_count() != slot_range.entry_count() {
+                return Err(Error::from(invalid_on_disk_layout()));
+            }
+
+            let Some(updated_entry_set_bytes) = rewrite_entry_set_fn(entry_view)? else {
+                return Ok(false);
+            };
+            if updated_entry_set_bytes.len() != entry_set_bytes.len() {
+                return Err(Error::from(invalid_on_disk_layout()));
+            }
+            entry_set_bytes.copy_from_slice(&updated_entry_set_bytes);
+            Self::visit_directory_byte_range_for_cluster_map(
+                block_device,
+                boot_region,
+                parent_cluster_map,
+                direntry::slot_range_bytes(slot_range)?,
+                |byte_offset, request_range| {
+                    block_device
+                        .write_bytes(byte_offset, &entry_set_bytes[request_range])
+                        .map_err(|_| super::super::device_io())
+                },
+            )?;
+            self.store_regular_file_entry_set_location_hint(slot_range)?;
+            let mut metadata = self.metadata.write();
+            update_metadata_fn(&mut metadata);
+            return Ok(true);
+        }
+
         let mut directory_bytes = Self::read_directory_bytes_for_cluster_map(
             block_device,
             boot_region,

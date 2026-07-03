@@ -192,6 +192,11 @@ impl ExfatInode {
                 data_length,
                 no_fat_chain,
             );
+            if type_ == InodeType::File {
+                child_inode
+                    .store_regular_file_entry_set_location_hint(slot_range)
+                    .map_err(Error::from)?;
+            }
             child_inode.metadata.write().mode = mode;
             let child_inode: Arc<dyn Inode> = child_inode;
             self.refresh_directory_metadata_after_namespace_mutation_with_guards(
@@ -927,6 +932,11 @@ impl ExfatInode {
             target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
         *source_child_inode.parent.write() = self.weak_self();
         source_child_inode.metadata.write().ino = new_source_ino;
+        if source_child_inode.metadata.read().type_ == InodeType::File {
+            source_child_inode
+                .store_regular_file_entry_set_location_hint(final_slot_range)
+                .map_err(Error::from)?;
+        }
         if let Some(target_child_inode) = target_child_inode {
             Self::finalize_detached_overwritten_target_inode(target_child_inode);
         }
@@ -1045,6 +1055,11 @@ impl ExfatInode {
             target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
         *source_child_inode.parent.write() = target_directory.weak_self();
         source_child_inode.metadata.write().ino = new_source_ino;
+        if source_child_inode.metadata.read().type_ == InodeType::File {
+            source_child_inode
+                .store_regular_file_entry_set_location_hint(target_slot_range)
+                .map_err(Error::from)?;
+        }
         if let Some(target_child_inode) = target_child_inode {
             Self::finalize_detached_overwritten_target_inode(target_child_inode);
         }
@@ -1605,6 +1620,7 @@ impl ExfatInode {
 
     fn finalize_detached_overwritten_target_inode(target_child_inode: &Arc<Self>) {
         *target_child_inode.parent.write() = Weak::new();
+        target_child_inode.clear_regular_file_entry_set_location_hint();
         let mut metadata = target_child_inode.metadata.write();
         metadata.nr_hard_links = 0;
         metadata.ino = u64::MAX;
