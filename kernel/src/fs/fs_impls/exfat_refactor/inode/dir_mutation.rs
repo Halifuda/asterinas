@@ -125,7 +125,8 @@ impl ExfatInode {
             let (first_cluster, data_length, no_fat_chain) =
                 if type_ == InodeType::Dir && !options.zero_size_dir {
                     let allocated_directory_cluster =
-                        ClusterAllocGuard::allocate(&fs, mount_state, 1).map_err(Error::from)?;
+                        ClusterAllocGuard::allocate(&fs, mount_state, 1, None)
+                            .map_err(Error::from)?;
                     let allocated_cluster = allocated_directory_cluster
                         .single_cluster()
                         .map_err(Error::from)?;
@@ -1182,7 +1183,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<StreamExtensionDirEntry> {
-        let allocated_directory_cluster = ClusterAllocGuard::allocate(fs, mount_state, 1)?;
+        let allocated_directory_cluster = ClusterAllocGuard::allocate(fs, mount_state, 1, None)?;
         let allocated_cluster = allocated_directory_cluster.single_cluster()?;
         Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)?;
         let updated_cluster_map = self.attach_directory_cluster(

@@ -16,7 +16,7 @@ use super::{
         device_io, inconsistent_bitmap_accounting, invalid_on_disk_layout,
         invalid_operation_input, not_mounted,
     },
-    ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
+    ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
     page_backend::PageCacheContext,
     state::InodeStateWriteGuard,
 };
@@ -252,6 +252,7 @@ impl ExfatInode {
                         mount_state,
                         &block_device,
                         &boot_region,
+                        &cluster_map_generation,
                         cluster_map,
                         effective_offset,
                         new_data_length,
@@ -357,6 +358,7 @@ impl ExfatInode {
                         mount_state,
                         &block_device,
                         &boot_region,
+                        &cluster_map_generation,
                         cluster_map,
                         new_size,
                         new_size,
@@ -386,6 +388,7 @@ impl ExfatInode {
                         mount_state,
                         &block_device,
                         &boot_region,
+                        &cluster_map_generation,
                         cluster_map,
                         new_size,
                         new_size,
@@ -593,6 +596,7 @@ impl ExfatInode {
         mount_state: &mut MountedVolumeState,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
+        cluster_map_generation: &Arc<ClusterMap>,
         cluster_map: StreamExtensionDirEntry,
         zero_fill_end: usize,
         new_data_length: usize,
@@ -630,10 +634,23 @@ impl ExfatInode {
             let cluster_alloc_guard = if additional_clusters == 0 {
                 None
             } else {
+                let preferred_start_cluster = if current_allocated_clusters == 0 {
+                    None
+                } else {
+                    Some(
+                        cluster_map_generation.mapped_cluster(
+                            boot_region,
+                            current_allocated_clusters - 1,
+                        )?,
+                    )
+                    .and_then(|last_cluster| last_cluster.checked_add(1))
+                    .filter(|cluster| boot_region.is_valid_cluster(*cluster))
+                };
                 Some(ClusterAllocGuard::allocate(
                     fs,
                     mount_state,
                     additional_clusters,
+                    preferred_start_cluster,
                 )?)
             };
             let allocated_ranges = cluster_alloc_guard

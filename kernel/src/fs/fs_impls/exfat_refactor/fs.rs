@@ -466,8 +466,10 @@ impl<'a> ClusterAllocGuard<'a> {
         fs: &'a Arc<ExfatFs>,
         mount_state: &'a mut MountedVolumeState,
         requested_clusters: usize,
+        preferred_start_cluster: Option<u32>,
     ) -> Result<Self> {
-        let allocated_ranges = fs.allocate_clusters(mount_state, requested_clusters)?;
+        let allocated_ranges =
+            fs.allocate_clusters(mount_state, requested_clusters, preferred_start_cluster)?;
         Ok(Self {
             fs,
             mount_state,
@@ -508,6 +510,7 @@ impl ExfatFs {
         &self,
         mount_state: &MountedVolumeState,
         requested_clusters: usize,
+        preferred_start_cluster: Option<u32>,
     ) -> Result<Vec<ClusterRange>> {
         if mount_state.flags.contains(FsFlags::RDONLY) {
             return Err(read_only_conflict());
@@ -523,16 +526,16 @@ impl ExfatFs {
 
         let mut fat_reader = FatReader::new(self.block_device.as_ref(), &self.boot_region);
         let allocated_ranges = allocation_bitmap.find_free_ranges(
+            self.block_device.as_ref(),
             &self.boot_region,
             &mut fat_reader,
             requested_clusters,
+            preferred_start_cluster,
         )?;
-        let normalized_ranges = allocation_bitmap
-            .validate_and_normalize_ranges(&self.boot_region, &allocated_ranges)?;
-        let allocated_clusters = allocation_bitmap.apply_normalized_ranges(
+        let allocated_clusters = allocation_bitmap.apply_cluster_ranges(
             self.block_device.as_ref(),
             &self.boot_region,
-            &normalized_ranges,
+            &allocated_ranges,
             BitmapOp::Allocate,
         )?;
         if allocated_clusters != requested_clusters {
@@ -553,12 +556,10 @@ impl ExfatFs {
 
         let mut allocator = self.allocator.write();
         let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
-        let normalized_ranges =
-            allocation_bitmap.validate_and_normalize_ranges(&self.boot_region, ranges)?;
-        let released_clusters = allocation_bitmap.apply_normalized_ranges(
+        let released_clusters = allocation_bitmap.apply_cluster_ranges(
             self.block_device.as_ref(),
             &self.boot_region,
-            &normalized_ranges,
+            ranges,
             BitmapOp::Free,
         )?;
         allocation_bitmap.record_released_clusters(released_clusters)?;
