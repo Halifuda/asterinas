@@ -23,6 +23,11 @@ DIRECT_WORKDIR=${XFSTESTS_DIRECT_WORKDIR:-$XFSTESTS_DIR/test}
 export TEST_DEV SCRATCH_DEV
 export FSTYP MKFS_OPTIONS
 
+if [ "$TEST_DEV" = "$SCRATCH_DEV" ]; then
+    echo "TEST_DEV and SCRATCH_DEV must be distinct for xfstests: $TEST_DEV" >&2
+    exit 1
+fi
+
 WRAPPER_DIR="$XFSTESTS_DIR/bin"
 mkdir -p "$WRAPPER_DIR"
 export PATH="$WRAPPER_DIR:$PATH"
@@ -86,6 +91,7 @@ echo "xfstests FSTYP=$FSTYP TEST_DEV=$TEST_DEV SCRATCH_DEV=$SCRATCH_DEV"
 echo "xfstests TEST_DIR=$XFSTESTS_DIR/test SCRATCH_MNT=$XFSTESTS_DIR/scratch MOUNT_OPTIONS=$MOUNT_OPTIONS"
 echo "xfstests mkfs wrapper: $(command -v "mkfs.$FSTYP") -> $MKFS"
 echo "xfstests fsck wrapper: $(command -v "fsck.$FSTYP") -> $FSCK"
+echo "xfstests local.config SCRATCH_DEV=$SCRATCH_DEV"
 
 mount_xfstests_device()
 {

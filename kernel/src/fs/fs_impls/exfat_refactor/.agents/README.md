@@ -53,6 +53,7 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `PROTOCOL.md`: Main-agent-owned normative workflow.
 - `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).
+- `protocol/XFSTESTS_LIGHTWEIGHT_TRIAGE.md`: Temporary low-cost xfstests triage layer. It produces evidence receipts only and does not replace formal Checker acceptance.
 - `subagent-tasks/`: Task packets grouped by `<component-id>`. Packets are lightweight **Dispatch Stubs** rather than heavy prose, avoiding context bloat and preventing Creator overreach.
 - `components/`: Subagent artifact outputs. Specs, evaluations, constraints are placed under exact `<component-id>` folders.
 - `checker-runs/`: Checker execution receipts grouped by parent meso-component (`checker-runs/<meso-component>/...`).
