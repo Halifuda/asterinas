@@ -5,18 +5,18 @@
 //! Method groups: cached projection, VFS metadata getters, metadata setters, timestamp rewrite,
 //! entry-set rewrite, and directory metadata refresh.
 
-use core::time::Duration;
+use core::{cell::Cell, time::Duration};
 
 use aster_block::BlockDevice;
-use ostd::mm::VmIo;
 
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, FileEntrySetView, FileEntryTimestamp, ScannedDirEntry},
+        direntry::{self, FileEntrySetView, FileEntryTimestamp},
         invalid_on_disk_layout, not_mounted,
     },
-    state::InodeStateWriteGuard, ExfatInode, InodeTimestampField,
+    ExfatInode, InodeTimestampField,
+    state::InodeStateWriteGuard,
 };
 use crate::{
     fs::{
@@ -457,6 +457,7 @@ impl ExfatInode {
             return;
         }
 
+        let normalized_time = Cell::new(None);
         let rewrite_result = (|| {
             let mount_state = mutation_mount_state
                 .state_guard
@@ -476,6 +477,12 @@ impl ExfatInode {
                                     time,
                                     entry_view.last_accessed_timestamp().utc_offset_byte(),
                                 )?;
+                            let normalized_timestamp = Self::decoded_exfat_timestamp(
+                                timestamp_bytes,
+                                None,
+                                encoded_utc_offset_byte,
+                            )?;
+                            normalized_time.set(Some(normalized_timestamp));
                             mutable_entry_set.set_last_accessed_timestamp(FileEntryTimestamp::new(
                                 timestamp_bytes,
                                 None,
@@ -488,6 +495,12 @@ impl ExfatInode {
                                     time,
                                     entry_view.last_modified_timestamp().utc_offset_byte(),
                                 )?;
+                            let normalized_timestamp = Self::decoded_exfat_timestamp(
+                                timestamp_bytes,
+                                Some(ten_ms_increment),
+                                encoded_utc_offset_byte,
+                            )?;
+                            normalized_time.set(Some(normalized_timestamp));
                             mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
                                 timestamp_bytes,
                                 Some(ten_ms_increment),
@@ -498,10 +511,12 @@ impl ExfatInode {
                     Ok(Some(mutable_entry_set.into_bytes()))
                 },
                 |metadata| match field_kind {
-                    InodeTimestampField::Accessed => metadata.last_access_at = time,
+                    InodeTimestampField::Accessed => {
+                        metadata.last_access_at = normalized_time.get().unwrap_or(time);
+                    }
                     InodeTimestampField::Modified => {
                         metadata.last_meta_change_at = time;
-                        metadata.last_modify_at = time;
+                        metadata.last_modify_at = normalized_time.get().unwrap_or(time);
                     }
                 },
             )
@@ -660,98 +675,22 @@ impl ExfatInode {
 
     fn rewrite_inode_entry_set_with_guards(
         &self,
-        _parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
         update_metadata_fn: impl FnOnce(&mut Metadata),
     ) -> Result<bool> {
-        let parent = self.parent.read().upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-        })?;
-        let parent_cluster_map = *parent.dir_entry_stream.read();
-        if self.metadata.read().type_ == InodeType::File {
-            let (slot_range, mut entry_set_bytes) =
-                self.read_regular_file_entry_set_with_hint(block_device, boot_region)?;
-            let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
-                ScannedDirEntry::File(entry_view) => entry_view,
-                _ => return Err(Error::from(invalid_on_disk_layout())),
-            };
-            if entry_view.slot_range().entry_count() != slot_range.entry_count() {
-                return Err(Error::from(invalid_on_disk_layout()));
-            }
-
-            let Some(updated_entry_set_bytes) = rewrite_entry_set_fn(entry_view)? else {
-                return Ok(false);
-            };
-            if updated_entry_set_bytes.len() != entry_set_bytes.len() {
-                return Err(Error::from(invalid_on_disk_layout()));
-            }
-            entry_set_bytes.copy_from_slice(&updated_entry_set_bytes);
-            Self::visit_directory_byte_range_for_cluster_map(
-                block_device,
-                boot_region,
-                parent_cluster_map,
-                direntry::slot_range_bytes(slot_range)?,
-                |byte_offset, request_range| {
-                    block_device
-                        .write_bytes(byte_offset, &entry_set_bytes[request_range])
-                        .map_err(|_| super::super::device_io())
-                },
-            )?;
-            self.store_regular_file_entry_set_location_hint(slot_range)?;
+        let durable_updated = self.rewrite_validated_entry_set_with_guard(
+            parent_inode_state_guard,
+            block_device,
+            boot_region,
+            rewrite_entry_set_fn,
+        )?;
+        if durable_updated {
             let mut metadata = self.metadata.write();
             update_metadata_fn(&mut metadata);
-            return Ok(true);
         }
-
-        let mut directory_bytes = Self::read_directory_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            parent_cluster_map,
-        )?;
-        let entry_index =
-            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
-        let entry_view = match direntry::scan_dir_entry(
-            parent_cluster_map.data_length.is_none(),
-            &directory_bytes,
-            entry_index,
-        )? {
-            ScannedDirEntry::File(entry_view) => entry_view,
-            _ => return Err(Error::from(invalid_on_disk_layout())),
-        };
-        let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-            entry_view.child_metadata(boot_region)?;
-        match inode_type {
-            InodeType::Dir => {
-                if !entry_view.is_directory() {
-                    return Err(Error::from(invalid_on_disk_layout()));
-                }
-            }
-            InodeType::File => {
-                if entry_view.is_directory() {
-                    return Err(Error::from(invalid_on_disk_layout()));
-                }
-            }
-            _ => return Err(Error::from(invalid_on_disk_layout())),
-        }
-
-        let slot_range_bytes = direntry::slot_range_bytes(entry_view.slot_range())?;
-        let Some(updated_entry_set_bytes) = rewrite_entry_set_fn(entry_view)? else {
-            return Ok(false);
-        };
-        let destination_entry_set = directory_bytes
-            .get_mut(slot_range_bytes)
-            .ok_or(invalid_on_disk_layout())?;
-        destination_entry_set.copy_from_slice(&updated_entry_set_bytes);
-        Self::write_directory_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            &directory_bytes,
-            parent_cluster_map,
-        )?;
-        let mut metadata = self.metadata.write();
-        update_metadata_fn(&mut metadata);
-        Ok(true)
+        Ok(durable_updated)
     }
 }

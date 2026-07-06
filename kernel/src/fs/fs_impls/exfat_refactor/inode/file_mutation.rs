@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Implements regular-file writes, resizes, entry-set write-back, and cluster-map growth.
+//! Implements regular-file writes, resizes, shared entry-set rewrite, and cluster-map growth.
 //!
-//! Method groups: write/resize entry points, shared growth commit, entry-set write-back,
+//! Method groups: write/resize entry points, shared growth commit, entry-set rewrite,
 //! growth topology helpers, and cluster-level mutation.
 
 use core::{ops::Range, time::Duration};
@@ -12,8 +12,8 @@ use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
-        bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader, fs::ClusterAllocGuard,
-        device_io, inconsistent_bitmap_accounting, invalid_on_disk_layout,
+        bitmap::ClusterRange, boot::BootRegion, device_io, direntry, fat::FatReader,
+        fs::ClusterAllocGuard, inconsistent_bitmap_accounting, invalid_on_disk_layout,
         invalid_operation_input, not_mounted,
     },
     ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
@@ -31,7 +31,7 @@ use crate::{
 };
 
 impl ExfatInode {
-    pub(super) fn read_regular_file_entry_set_with_hint(
+    pub(super) fn read_validated_entry_set(
         &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -40,35 +40,32 @@ impl ExfatInode {
             Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
         })?;
         let parent_cluster_map = *parent.dir_entry_stream.read();
-        let current_cluster_map = *self.dir_entry_stream.read();
         let fallback_entry_index =
             usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
 
-        if let Some(hinted_slot_range) = self.regular_file_entry_set_location_hint()? {
-            match Self::read_regular_file_entry_set_at_with_mode(
+        if let Some(hinted_slot_range) = self.entry_set_location_hint()? {
+            match self.try_read_validated_entry_set_at(
                 block_device,
                 boot_region,
                 parent_cluster_map,
                 hinted_slot_range,
-                true,
-                current_cluster_map,
             ) {
                 Ok(Some((validated_slot_range, entry_set_bytes))) => {
-                    self.store_regular_file_entry_set_location_hint(validated_slot_range)?;
+                    self.store_entry_set_location_hint(validated_slot_range)?;
                     return Ok((validated_slot_range, entry_set_bytes));
                 }
                 Ok(None) => {
-                    self.clear_regular_file_entry_set_location_hint();
+                    self.clear_entry_set_location_hint();
                 }
                 Err(error) if error.error() == Errno::EUCLEAN => {
-                    self.clear_regular_file_entry_set_location_hint();
+                    self.clear_entry_set_location_hint();
                 }
                 Err(error) => return Err(error),
             }
         }
 
         let primary_slot_range = direntry::DirEntrySlotRange::new(fallback_entry_index, 1)?;
-        let primary_entry_bytes = Self::read_directory_entry_slots_for_cluster_map(
+        let primary_entry_bytes = Self::read_entry_set_bytes_for_cluster_map(
             block_device,
             boot_region,
             parent_cluster_map,
@@ -77,22 +74,21 @@ impl ExfatInode {
         let entry_count = usize::from(primary_entry_bytes[1])
             .checked_add(1)
             .ok_or_else(invalid_on_disk_layout)?;
-        let fallback_slot_range = direntry::DirEntrySlotRange::new(fallback_entry_index, entry_count)?;
-        let (validated_slot_range, entry_set_bytes) =
-            Self::read_regular_file_entry_set_at_with_mode(
+        let fallback_slot_range =
+            direntry::DirEntrySlotRange::new(fallback_entry_index, entry_count)?;
+        let (validated_slot_range, entry_set_bytes) = self
+            .try_read_validated_entry_set_at(
                 block_device,
                 boot_region,
                 parent_cluster_map,
                 fallback_slot_range,
-                false,
-                current_cluster_map,
             )?
             .ok_or_else(invalid_on_disk_layout)?;
-        self.store_regular_file_entry_set_location_hint(validated_slot_range)?;
+        self.store_entry_set_location_hint(validated_slot_range)?;
         Ok((validated_slot_range, entry_set_bytes))
     }
 
-    fn read_directory_entry_slots_for_cluster_map(
+    fn read_entry_set_bytes_for_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map: StreamExtensionDirEntry,
@@ -118,15 +114,16 @@ impl ExfatInode {
         Ok(entry_set_bytes)
     }
 
-    fn read_regular_file_entry_set_at_with_mode(
+    fn try_read_validated_entry_set_at(
+        &self,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map: StreamExtensionDirEntry,
         slot_range: direntry::DirEntrySlotRange,
-        tolerate_validation_mismatch: bool,
-        current_cluster_map: StreamExtensionDirEntry,
     ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>)>> {
-        let entry_set_bytes = Self::read_directory_entry_slots_for_cluster_map(
+        let current_cluster_map = *self.dir_entry_stream.read();
+        let expected_inode_type = self.metadata.read().type_;
+        let entry_set_bytes = Self::read_entry_set_bytes_for_cluster_map(
             block_device,
             boot_region,
             cluster_map,
@@ -139,37 +136,82 @@ impl ExfatInode {
             {
                 entry_view
             }
-            Ok(_) if tolerate_validation_mismatch => return Ok(None),
-            Ok(_) => return Err(Error::from(invalid_on_disk_layout())),
+            Ok(_) => return Ok(None),
             Err(error) if error.error() == Errno::EUCLEAN => return Err(error),
             Err(error) => return Err(error),
         };
         let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
             entry_view.child_metadata(boot_region)?;
-        if inode_type != InodeType::File || entry_view.is_directory() {
-            if tolerate_validation_mismatch {
-                return Ok(None);
+        match expected_inode_type {
+            InodeType::Dir => {
+                if inode_type != InodeType::Dir || !entry_view.is_directory() {
+                    return Ok(None);
+                }
             }
-            return Err(Error::from(invalid_on_disk_layout()));
+            InodeType::File => {
+                if inode_type != InodeType::File || entry_view.is_directory() {
+                    return Ok(None);
+                }
+            }
+            _ => {
+                return Err(Error::from(invalid_on_disk_layout()));
+            }
         }
-        let hinted_cluster_map = entry_view.cluster_map()?;
-        if hinted_cluster_map != current_cluster_map {
-            if tolerate_validation_mismatch {
-                return Ok(None);
-            }
-            return Err(Error::from(invalid_on_disk_layout()));
+        let validated_cluster_map = entry_view.cluster_map()?;
+        if validated_cluster_map != current_cluster_map {
+            return Ok(None);
         }
         let validated_slot_range = direntry::DirEntrySlotRange::new(
             slot_range.first_entry_index(),
             entry_view.slot_range().entry_count(),
         )?;
         if validated_slot_range != slot_range {
-            if tolerate_validation_mismatch {
-                return Ok(None);
-            }
-            return Err(Error::from(invalid_on_disk_layout()));
+            return Ok(None);
         }
         Ok(Some((validated_slot_range, entry_set_bytes)))
+    }
+
+    pub(super) fn rewrite_validated_entry_set_with_guard(
+        &self,
+        _parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
+    ) -> Result<bool> {
+        let parent = self.parent.read().upgrade().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+        })?;
+        let parent_cluster_map = *parent.dir_entry_stream.read();
+        let (slot_range, mut entry_set_bytes) =
+            self.read_validated_entry_set(block_device, boot_region)?;
+        let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
+            direntry::ScannedDirEntry::File(entry_view) => entry_view,
+            _ => return Err(Error::from(invalid_on_disk_layout())),
+        };
+        if entry_view.slot_range().entry_count() != slot_range.entry_count() {
+            return Err(Error::from(invalid_on_disk_layout()));
+        }
+
+        let Some(updated_entry_set_bytes) = rewrite_entry_set_fn(entry_view)? else {
+            return Ok(false);
+        };
+        if updated_entry_set_bytes.len() != entry_set_bytes.len() {
+            return Err(Error::from(invalid_on_disk_layout()));
+        }
+        entry_set_bytes.copy_from_slice(&updated_entry_set_bytes);
+        Self::visit_directory_byte_range_for_cluster_map(
+            block_device,
+            boot_region,
+            parent_cluster_map,
+            direntry::slot_range_bytes(slot_range)?,
+            |byte_offset, request_range| {
+                block_device
+                    .write_bytes(byte_offset, &entry_set_bytes[request_range])
+                    .map_err(|_| device_io())
+            },
+        )?;
+        self.store_entry_set_location_hint(slot_range)?;
+        Ok(true)
     }
 
     // VFS entry points
@@ -216,7 +258,8 @@ impl ExfatInode {
                 let inode_state_guard = self.inode_state.write();
                 let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
                 let cluster_map = cluster_map_generation.stream_extension();
-                let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
+                let (data_length, valid_data_length) =
+                    cluster_map_generation.validated_lengths()?;
 
                 let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
                     data_length
@@ -503,11 +546,55 @@ impl ExfatInode {
             if let Some(page_cache) = page_cache {
                 page_cache.resize(new_size, data_length)?;
             }
-            if let Err(error) = self.write_back_regular_file_entry_set(
+            let Some(next_valid_data_length) = next_cluster_map.valid_data_length else {
+                return_errno!(Errno::EINVAL);
+            };
+            if next_valid_data_length > new_size {
+                return_errno!(Errno::EINVAL);
+            }
+            if new_size == 0 {
+                if next_cluster_map.first_cluster != 0 || next_valid_data_length != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+            } else {
+                boot_region
+                    .validate_stream_data(
+                        next_cluster_map.first_cluster,
+                        u64::try_from(new_size).map_err(|_| Error::new(Errno::EINVAL))?,
+                    )
+                    .map_err(Error::from)?;
+            }
+            let parent = self.parent.read().upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+            })?;
+            let parent_inode_state_guard = parent.inode_state.write();
+            if let Err(error) = self.rewrite_validated_entry_set_with_guard(
+                &parent_inode_state_guard,
                 &block_device,
                 &boot_region,
-                next_cluster_map,
-                timestamp,
+                |entry_view| {
+                    let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+                        entry_view.child_metadata(&boot_region)?;
+                    if inode_type != InodeType::File || entry_view.is_directory() {
+                        return Err(Error::from(invalid_on_disk_layout()));
+                    }
+
+                    let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
+                        Self::encoded_exfat_timestamp_fields(
+                            timestamp,
+                            entry_view.last_modified_timestamp().utc_offset_byte(),
+                        )?;
+                    let mut mutable_entry_set = entry_view.to_mutable();
+                    mutable_entry_set.set_cluster_map(&next_cluster_map)?;
+                    mutable_entry_set.set_last_modified_timestamp(
+                        direntry::FileEntryTimestamp::new(
+                            timestamp_bytes,
+                            Some(hundredths_increment),
+                            encoded_utc_offset_byte,
+                        ),
+                    );
+                    Ok(Some(mutable_entry_set.into_bytes()))
+                },
             ) {
                 *self.page_cache_context.write() = previous_page_cache_context;
                 if let Some(page_cache) = page_cache {
@@ -638,10 +725,8 @@ impl ExfatInode {
                     None
                 } else {
                     Some(
-                        cluster_map_generation.mapped_cluster(
-                            boot_region,
-                            current_allocated_clusters - 1,
-                        )?,
+                        cluster_map_generation
+                            .mapped_cluster(boot_region, current_allocated_clusters - 1)?,
                     )
                     .and_then(|last_cluster| last_cluster.checked_add(1))
                     .filter(|cluster| boot_region.is_valid_cluster(*cluster))
@@ -686,11 +771,52 @@ impl ExfatInode {
                     valid_data_length: new_valid_data_length,
                 },
             );
-            self.write_back_regular_file_entry_set(
+            if new_valid_data_length > new_data_length {
+                return_errno!(Errno::EINVAL);
+            }
+            if new_data_length == 0 {
+                if next_cluster_map.first_cluster != 0 || new_valid_data_length != 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+            } else {
+                boot_region
+                    .validate_stream_data(
+                        next_cluster_map.first_cluster,
+                        u64::try_from(new_data_length).map_err(|_| Error::new(Errno::EINVAL))?,
+                    )
+                    .map_err(Error::from)?;
+            }
+            let parent = self.parent.read().upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+            })?;
+            let parent_inode_state_guard = parent.inode_state.write();
+            self.rewrite_validated_entry_set_with_guard(
+                &parent_inode_state_guard,
                 block_device,
                 boot_region,
-                next_cluster_map,
-                timestamp,
+                |entry_view| {
+                    let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+                        entry_view.child_metadata(boot_region)?;
+                    if inode_type != InodeType::File || entry_view.is_directory() {
+                        return Err(Error::from(invalid_on_disk_layout()));
+                    }
+
+                    let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
+                        Self::encoded_exfat_timestamp_fields(
+                            timestamp,
+                            entry_view.last_modified_timestamp().utc_offset_byte(),
+                        )?;
+                    let mut mutable_entry_set = entry_view.to_mutable();
+                    mutable_entry_set.set_cluster_map(&next_cluster_map)?;
+                    mutable_entry_set.set_last_modified_timestamp(
+                        direntry::FileEntryTimestamp::new(
+                            timestamp_bytes,
+                            Some(hundredths_increment),
+                            encoded_utc_offset_byte,
+                        ),
+                    );
+                    Ok(Some(mutable_entry_set.into_bytes()))
+                },
             )?;
 
             let allocated_clusters = if new_data_length == 0 {
@@ -720,92 +846,6 @@ impl ExfatInode {
             rollback_growth_fn();
         }
         result
-    }
-
-    // Entry-set write-back
-
-    pub(super) fn write_back_regular_file_entry_set(
-        &self,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        cluster_map: StreamExtensionDirEntry,
-        timestamp: Duration,
-    ) -> Result<()> {
-        let Some(data_length) = cluster_map.data_length else {
-            return_errno!(Errno::EINVAL);
-        };
-        let Some(valid_data_length) = cluster_map.valid_data_length else {
-            return_errno!(Errno::EINVAL);
-        };
-        if valid_data_length > data_length {
-            return_errno!(Errno::EINVAL);
-        }
-        if data_length == 0 {
-            if cluster_map.first_cluster != 0 || valid_data_length != 0 {
-                return_errno!(Errno::EINVAL);
-            }
-        } else {
-            boot_region
-                .validate_stream_data(
-                    cluster_map.first_cluster,
-                    u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?,
-                )
-                .map_err(Error::from)?;
-        }
-
-        let parent = self.parent.read().upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-        })?;
-        let _parent_inode_state_guard = parent.inode_state.write();
-        let parent_cluster_map = *parent.dir_entry_stream.read();
-        let (slot_range, entry_set_bytes) =
-            self.read_regular_file_entry_set_with_hint(block_device, boot_region)?;
-
-        let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
-            direntry::ScannedDirEntry::File(entry_view) => entry_view,
-            _ => return Err(Error::from(invalid_on_disk_layout())),
-        };
-        let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-            entry_view.child_metadata(boot_region)?;
-        if inode_type != InodeType::File || entry_view.is_directory() {
-            return Err(Error::from(invalid_on_disk_layout()));
-        }
-        let entry_set_entry_count = entry_view.slot_range().entry_count();
-        let entry_set_length = entry_set_entry_count
-            .checked_mul(direntry::DIRECTORY_ENTRY_SIZE)
-            .ok_or_else(invalid_on_disk_layout)?;
-
-        let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
-            Self::encoded_exfat_timestamp_fields(
-                timestamp,
-                entry_view.last_modified_timestamp().utc_offset_byte(),
-            )?;
-        let mut mutable_entry_set = entry_view.to_mutable();
-        mutable_entry_set.set_cluster_map(&cluster_map)?;
-        mutable_entry_set.set_last_modified_timestamp(direntry::FileEntryTimestamp::new(
-            timestamp_bytes,
-            Some(hundredths_increment),
-            encoded_utc_offset_byte,
-        ));
-        let updated_entry_set_bytes = mutable_entry_set.into_bytes();
-        if updated_entry_set_bytes.len() != entry_set_length {
-            return Err(Error::from(invalid_on_disk_layout()));
-        }
-        let entry_set_range = direntry::slot_range_bytes(slot_range)?;
-
-        Self::visit_directory_byte_range_for_cluster_map(
-            block_device,
-            boot_region,
-            parent_cluster_map,
-            entry_set_range,
-            |byte_offset, request_range| {
-                block_device
-                    .write_bytes(byte_offset, &updated_entry_set_bytes[request_range])
-                    .map_err(|_| device_io())
-            },
-        )?;
-        self.store_regular_file_entry_set_location_hint(slot_range)?;
-        Ok(())
     }
 
     // Cluster-map topology

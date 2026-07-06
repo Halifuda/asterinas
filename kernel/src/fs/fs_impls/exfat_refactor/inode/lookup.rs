@@ -74,7 +74,7 @@ impl ExfatInode {
         );
         child_inode.refresh_cached_metadata_from_entry_view(entry_view, boot_region)?;
         if inode_type == InodeType::File {
-            child_inode.store_regular_file_entry_set_location_hint(slot_range)?;
+            child_inode.store_entry_set_location_hint(slot_range)?;
         }
         Ok(Some(child_inode))
     }
@@ -143,9 +143,7 @@ impl ExfatInode {
             let dotdot_next_offset = next_offset
                 .checked_add(1)
                 .ok_or_else(invalid_on_disk_layout)?;
-            if let Err(error) =
-                visitor.visit("..", self.ino(), self.type_(), dotdot_next_offset)
-            {
+            if let Err(error) = visitor.visit("..", self.ino(), self.type_(), dotdot_next_offset) {
                 if next_offset == offset {
                     return Err(error);
                 }
@@ -181,12 +179,9 @@ impl ExfatInode {
                                 u32::try_from(entry_view.slot_range().first_entry_index())
                                     .map_err(|_| invalid_on_disk_layout())?,
                             );
-                        if let Err(error) = visitor.visit(
-                            &entry_name,
-                            entry_ino,
-                            inode_type,
-                            resume_offset,
-                        ) {
+                        if let Err(error) =
+                            visitor.visit(&entry_name, entry_ino, inode_type, resume_offset)
+                        {
                             if next_offset == offset {
                                 return Err(error);
                             }

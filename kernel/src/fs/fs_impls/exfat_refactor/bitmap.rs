@@ -475,9 +475,9 @@ impl AllocationBitmap {
             let next_allocation_search_cluster = cluster_ranges
                 .last()
                 .and_then(|cluster_range| {
-                    cluster_range.start_cluster.checked_add(
-                        u32::try_from(cluster_range.cluster_count).ok()?,
-                    )
+                    cluster_range
+                        .start_cluster
+                        .checked_add(u32::try_from(cluster_range.cluster_count).ok()?)
                 })
                 .filter(|cluster| boot_region.is_valid_cluster(*cluster))
                 .unwrap_or_else(|| {

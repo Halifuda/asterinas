@@ -34,8 +34,7 @@ use super::{
     boot::BootRegion,
     direntry::DirEntrySlotRange,
     fs::{ExfatFs, MountedVolumeState},
-    invalid_on_disk_layout,
-    invalid_operation_input,
+    invalid_on_disk_layout, invalid_operation_input,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -62,7 +61,7 @@ pub(super) struct ExfatInode {
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
     parent: RwLock<Weak<Self>>,
-    regular_file_entry_set_location_hint: AtomicU64,
+    entry_set_location_hint: AtomicU64,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
     page_cache_context: RwLock<Option<page_backend::PageCacheContext>>,
@@ -121,7 +120,7 @@ impl ExfatInode {
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),
             parent: RwLock::new(parent),
-            regular_file_entry_set_location_hint: AtomicU64::new(0),
+            entry_set_location_hint: AtomicU64::new(0),
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
             page_cache_context: RwLock::new(None),
@@ -189,8 +188,8 @@ impl ExfatInode {
         })
     }
 
-    pub(super) fn regular_file_entry_set_location_hint(&self) -> Result<Option<DirEntrySlotRange>> {
-        let packed_hint = self.regular_file_entry_set_location_hint.load(Ordering::Relaxed);
+    pub(super) fn entry_set_location_hint(&self) -> Result<Option<DirEntrySlotRange>> {
+        let packed_hint = self.entry_set_location_hint.load(Ordering::Relaxed);
         if packed_hint == 0 {
             return Ok(None);
         }
@@ -204,14 +203,13 @@ impl ExfatInode {
         }
 
         DirEntrySlotRange::new(
-            usize::try_from(encoded_first_entry_index - 1)
-                .map_err(|_| invalid_on_disk_layout())?,
+            usize::try_from(encoded_first_entry_index - 1).map_err(|_| invalid_on_disk_layout())?,
             usize::try_from(entry_count).map_err(|_| invalid_on_disk_layout())?,
         )
         .map(Some)
     }
 
-    pub(super) fn store_regular_file_entry_set_location_hint(
+    pub(super) fn store_entry_set_location_hint(
         &self,
         slot_range: DirEntrySlotRange,
     ) -> Result<()> {
@@ -224,14 +222,13 @@ impl ExfatInode {
             u32::try_from(slot_range.entry_count()).map_err(|_| invalid_on_disk_layout())?,
         );
         let packed_hint = (encoded_first_entry_index << 32) | entry_count;
-        self.regular_file_entry_set_location_hint
+        self.entry_set_location_hint
             .store(packed_hint, Ordering::Relaxed);
         Ok(())
     }
 
-    pub(super) fn clear_regular_file_entry_set_location_hint(&self) {
-        self.regular_file_entry_set_location_hint
-            .store(0, Ordering::Relaxed);
+    pub(super) fn clear_entry_set_location_hint(&self) {
+        self.entry_set_location_hint.store(0, Ordering::Relaxed);
     }
 }
 

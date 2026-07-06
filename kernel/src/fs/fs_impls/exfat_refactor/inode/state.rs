@@ -803,7 +803,7 @@ impl ExfatInode {
             no_fat_chain,
         );
         if inode_type == InodeType::File {
-            child_inode.store_regular_file_entry_set_location_hint(slot_range)?;
+            child_inode.store_entry_set_location_hint(slot_range)?;
         }
         Ok(child_inode)
     }
