@@ -364,6 +364,9 @@ pub(super) fn encode_file_entry_set(
     first_cluster: u32,
     data_length: usize,
     no_fat_chain: bool,
+    create_timestamp: FileEntryTimestamp,
+    last_accessed_timestamp: FileEntryTimestamp,
+    last_modified_timestamp: FileEntryTimestamp,
 ) -> Result<Vec<u8>> {
     let entry_count = file_entry_set_entry_count(name.len())?;
     let secondary_count = entry_count
@@ -383,6 +386,18 @@ pub(super) fn encode_file_entry_set(
         _ => return Err(invalid_operation_input()),
     };
     entry_set[4..6].copy_from_slice(&file_attributes.to_le_bytes());
+    entry_set[CREATE_TIMESTAMP_OFFSET..CREATE_TIMESTAMP_OFFSET + 4]
+        .copy_from_slice(&create_timestamp.timestamp_bytes());
+    entry_set[CREATE_10MS_INCREMENT_OFFSET] = create_timestamp.ten_ms_increment().unwrap_or(0);
+    entry_set[CREATE_UTC_OFFSET_OFFSET] = create_timestamp.utc_offset_byte();
+    entry_set[LAST_ACCESSED_TIMESTAMP_OFFSET..LAST_ACCESSED_TIMESTAMP_OFFSET + 4]
+        .copy_from_slice(&last_accessed_timestamp.timestamp_bytes());
+    entry_set[LAST_ACCESSED_UTC_OFFSET_OFFSET] = last_accessed_timestamp.utc_offset_byte();
+    entry_set[LAST_MODIFIED_TIMESTAMP_OFFSET..LAST_MODIFIED_TIMESTAMP_OFFSET + 4]
+        .copy_from_slice(&last_modified_timestamp.timestamp_bytes());
+    entry_set[LAST_MODIFIED_10MS_INCREMENT_OFFSET] =
+        last_modified_timestamp.ten_ms_increment().unwrap_or(0);
+    entry_set[LAST_MODIFIED_UTC_OFFSET_OFFSET] = last_modified_timestamp.utc_offset_byte();
 
     let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
     entry_set[stream_entry_offset] = STREAM_EXTENSION_ENTRY_TYPE;

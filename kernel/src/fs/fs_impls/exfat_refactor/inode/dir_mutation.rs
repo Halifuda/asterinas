@@ -112,6 +112,36 @@ impl ExfatInode {
 
             let mount_state = mount_guard.mount_state_mut()?;
             fs.publish_dirty_admission(mount_state)?;
+            let now = RealTimeCoarseClock::get().read_time();
+            let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                Self::encoded_exfat_timestamp_fields(now, 0).map_err(Error::from)?;
+            let normalized_access_timestamp = Self::decoded_exfat_timestamp(
+                timestamp_bytes,
+                None,
+                encoded_utc_offset_byte,
+            )
+            .map_err(Error::from)?;
+            let normalized_modify_timestamp = Self::decoded_exfat_timestamp(
+                timestamp_bytes,
+                Some(ten_ms_increment),
+                encoded_utc_offset_byte,
+            )
+            .map_err(Error::from)?;
+            let create_timestamp = direntry::FileEntryTimestamp::new(
+                timestamp_bytes,
+                Some(ten_ms_increment),
+                encoded_utc_offset_byte,
+            );
+            let last_accessed_timestamp = direntry::FileEntryTimestamp::new(
+                timestamp_bytes,
+                None,
+                encoded_utc_offset_byte,
+            );
+            let last_modified_timestamp = direntry::FileEntryTimestamp::new(
+                timestamp_bytes,
+                Some(ten_ms_increment),
+                encoded_utc_offset_byte,
+            );
             let (cluster_map, mut directory_bytes, slot_range) = self
                 .reserve_directory_entry_slots(
                     cluster_map,
@@ -146,6 +176,9 @@ impl ExfatInode {
                     allocated_cluster,
                     boot_region.cluster_size,
                     true,
+                    create_timestamp,
+                    last_accessed_timestamp,
+                    last_modified_timestamp,
                 )
                 .map_err(Error::from)?;
                 let slot_range_bytes =
@@ -162,8 +195,18 @@ impl ExfatInode {
                 (allocated_cluster, boot_region.cluster_size, true)
             } else {
                 let entry_set =
-                    direntry::encode_file_entry_set(&name, name_hash, type_, 0, 0, false)
-                        .map_err(Error::from)?;
+                    direntry::encode_file_entry_set(
+                        &name,
+                        name_hash,
+                        type_,
+                        0,
+                        0,
+                        false,
+                        create_timestamp,
+                        last_accessed_timestamp,
+                        last_modified_timestamp,
+                    )
+                    .map_err(Error::from)?;
                 let slot_range_bytes =
                     direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
                 directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
@@ -200,7 +243,13 @@ impl ExfatInode {
                     .store_entry_set_location_hint(slot_range)
                     .map_err(Error::from)?;
             }
-            child_inode.metadata.write().mode = mode;
+            {
+                let mut child_metadata = child_inode.metadata.write();
+                child_metadata.mode = mode;
+                child_metadata.last_access_at = normalized_access_timestamp;
+                child_metadata.last_modify_at = normalized_modify_timestamp;
+                child_metadata.last_meta_change_at = normalized_modify_timestamp;
+            }
             let child_inode: Arc<dyn Inode> = child_inode;
             self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
