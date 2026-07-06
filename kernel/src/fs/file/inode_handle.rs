@@ -7,8 +7,8 @@ use core::{fmt::Display, sync::atomic::Ordering};
 use aster_rights::Rights;
 
 use super::{
-    file_table::FdFlags, flock::FlockItem, AccessMode, AtomicStatusFlags, CreationFlags, FileLike,
-    InodeType, Mappable, StatusFlags,
+    AccessMode, AtomicStatusFlags, CreationFlags, FileLike, InodeType, Mappable, StatusFlags,
+    file_table::FdFlags, flock::FlockItem,
 };
 use crate::{
     events::IoEvents,
@@ -19,11 +19,12 @@ use crate::{
             inode::{FallocMode, FileOps},
             inode_ext::InodeExt,
             path::Path,
-            range_lock::{FileRange, RangeLockItem, RangeLockType, OFFSET_MAX},
+            range_lock::{FileRange, OFFSET_MAX, RangeLockItem, RangeLockType},
         },
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
+    time::clocks::RealTimeCoarseClock,
     util::ioctl::RawIoctl,
 };
 
@@ -118,6 +119,25 @@ impl InodeHandle {
         Ok(inode.as_ref())
     }
 
+    fn update_atime_after_read(&self, read_len: usize, status_flags: StatusFlags) {
+        if read_len == 0 {
+            return;
+        }
+
+        let now = RealTimeCoarseClock::get().read_time();
+        let metadata = self.path.metadata();
+        if !self.path.mount_node().should_update_atime(
+            metadata.type_,
+            &metadata,
+            status_flags,
+            now,
+        ) {
+            return;
+        }
+
+        self.path.set_atime(now);
+    }
+
     pub fn readdir(&self, visitor: &mut dyn DirentVisitor) -> Result<usize> {
         if !self.rights.contains(Rights::READ) {
             return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
@@ -130,6 +150,7 @@ impl InodeHandle {
         };
         let mut offset = self.offset.lock();
         let read_cnt = file_ops.readdir_at(*offset, visitor)?;
+        self.update_atime_after_read(read_cnt, self.status_flags());
         *offset += read_cnt;
         Ok(read_cnt)
     }
@@ -264,12 +285,15 @@ impl FileLike for InodeHandle {
         let status_flags = self.status_flags();
 
         if !is_offset_aware {
-            return file_ops.read_at(0, writer, status_flags);
+            let len = file_ops.read_at(0, writer, status_flags)?;
+            self.update_atime_after_read(len, status_flags);
+            return Ok(len);
         }
 
         let mut offset = self.offset.lock();
 
         let len = file_ops.read_at(*offset, writer, status_flags)?;
+        self.update_atime_after_read(len, status_flags);
         *offset += len;
 
         Ok(len)
@@ -310,7 +334,9 @@ impl FileLike for InodeHandle {
 
         let status_flags = self.status_flags();
 
-        file_ops.read_at(offset, writer, status_flags)
+        let len = file_ops.read_at(offset, writer, status_flags)?;
+        self.update_atime_after_read(len, status_flags);
+        Ok(len)
     }
 
     fn write_at(&self, mut offset: usize, reader: &mut VmReader) -> Result<usize> {
