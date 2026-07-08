@@ -123,6 +123,11 @@ impl ExfatInode {
     ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>)>> {
         let current_cluster_map = *self.dir_entry_stream.read();
         let expected_inode_type = self.metadata.read().type_;
+        let allow_stale_regular_file_cluster_map = expected_inode_type == InodeType::File
+            && self
+                .dirty_state
+                .read()
+                .has_deferred_regular_file_publish();
         let entry_set_bytes = Self::read_entry_set_bytes_for_cluster_map(
             block_device,
             boot_region,
@@ -158,7 +163,7 @@ impl ExfatInode {
             }
         }
         let validated_cluster_map = entry_view.cluster_map()?;
-        if validated_cluster_map != current_cluster_map {
+        if !allow_stale_regular_file_cluster_map && validated_cluster_map != current_cluster_map {
             return Ok(None);
         }
         let validated_slot_range = direntry::DirEntrySlotRange::new(
@@ -311,7 +316,7 @@ impl ExfatInode {
                                 zero_fill_range.clone(),
                             )?;
                             if !zero_fill_range.is_empty() {
-                                page_cache.fill_zeros(zero_fill_range)?;
+                                page_cache.fill_zeros(zero_fill_range.clone())?;
                             }
                             Self::prepare_regular_file_page_cache_range(
                                 page_cache,
@@ -564,45 +569,6 @@ impl ExfatInode {
                     )
                     .map_err(Error::from)?;
             }
-            let parent = self.parent.read().upgrade().ok_or_else(|| {
-                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-            })?;
-            let parent_inode_state_guard = parent.inode_state.write();
-            if let Err(error) = self.rewrite_validated_entry_set_with_guard(
-                &parent_inode_state_guard,
-                &block_device,
-                &boot_region,
-                |entry_view| {
-                    let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-                        entry_view.child_metadata(&boot_region)?;
-                    if inode_type != InodeType::File || entry_view.is_directory() {
-                        return Err(Error::from(invalid_on_disk_layout()));
-                    }
-
-                    let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
-                        Self::encoded_exfat_timestamp_fields(
-                            timestamp,
-                            entry_view.last_modified_timestamp().utc_offset_byte(),
-                        )?;
-                    let mut mutable_entry_set = entry_view.to_mutable();
-                    mutable_entry_set.set_cluster_map(&next_cluster_map)?;
-                    mutable_entry_set.set_last_modified_timestamp(
-                        direntry::FileEntryTimestamp::new(
-                            timestamp_bytes,
-                            Some(hundredths_increment),
-                            encoded_utc_offset_byte,
-                        ),
-                    );
-                    Ok(Some(mutable_entry_set.into_bytes()))
-                },
-            ) {
-                *self.page_cache_context.write() = previous_page_cache_context;
-                if let Some(page_cache) = page_cache {
-                    let _ = page_cache.resize(data_length, new_size);
-                }
-                return Err(error);
-            }
-
             let allocated_sectors = retained_clusters
                 .checked_mul(boot_region.sectors_per_cluster)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
@@ -728,15 +694,16 @@ impl ExfatInode {
                         cluster_map_generation
                             .mapped_cluster(boot_region, current_allocated_clusters - 1)?,
                     )
-                    .and_then(|last_cluster| last_cluster.checked_add(1))
-                    .filter(|cluster| boot_region.is_valid_cluster(*cluster))
+                            .and_then(|last_cluster| last_cluster.checked_add(1))
+                            .filter(|cluster| boot_region.is_valid_cluster(*cluster))
                 };
-                Some(ClusterAllocGuard::allocate(
+                let allocation_guard = ClusterAllocGuard::allocate(
                     fs,
                     mount_state,
                     additional_clusters,
                     preferred_start_cluster,
-                )?)
+                )?;
+                Some(allocation_guard)
             };
             let allocated_ranges = cluster_alloc_guard
                 .as_ref()
@@ -786,39 +753,6 @@ impl ExfatInode {
                     )
                     .map_err(Error::from)?;
             }
-            let parent = self.parent.read().upgrade().ok_or_else(|| {
-                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-            })?;
-            let parent_inode_state_guard = parent.inode_state.write();
-            self.rewrite_validated_entry_set_with_guard(
-                &parent_inode_state_guard,
-                block_device,
-                boot_region,
-                |entry_view| {
-                    let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-                        entry_view.child_metadata(boot_region)?;
-                    if inode_type != InodeType::File || entry_view.is_directory() {
-                        return Err(Error::from(invalid_on_disk_layout()));
-                    }
-
-                    let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
-                        Self::encoded_exfat_timestamp_fields(
-                            timestamp,
-                            entry_view.last_modified_timestamp().utc_offset_byte(),
-                        )?;
-                    let mut mutable_entry_set = entry_view.to_mutable();
-                    mutable_entry_set.set_cluster_map(&next_cluster_map)?;
-                    mutable_entry_set.set_last_modified_timestamp(
-                        direntry::FileEntryTimestamp::new(
-                            timestamp_bytes,
-                            Some(hundredths_increment),
-                            encoded_utc_offset_byte,
-                        ),
-                    );
-                    Ok(Some(mutable_entry_set.into_bytes()))
-                },
-            )?;
-
             let allocated_clusters = if new_data_length == 0 {
                 0
             } else {

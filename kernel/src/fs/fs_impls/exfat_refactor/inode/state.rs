@@ -25,8 +25,7 @@ use super::{
         fs::{
             ExfatFs, MountOptions, MountStateReadGuard, MountStateWriteGuard, MountedVolumeState,
         },
-        invalid_on_disk_layout, invalid_operation_input, not_mounted,
-        upcase::UpcaseTable,
+        invalid_on_disk_layout, invalid_operation_input, not_mounted, upcase::UpcaseTable,
     },
     ExfatInode,
 };
@@ -182,6 +181,10 @@ impl InodeDirtyState {
 
     pub(super) fn needs_sync_all(self) -> bool {
         self.dirty_level() != DirtyLevel::Clean
+    }
+
+    pub(super) fn has_deferred_regular_file_publish(self) -> bool {
+        self.content_generation.is_some()
     }
 
     fn clear_committed_content(&mut self, synced_state: Self) {
@@ -753,6 +756,13 @@ impl ExfatInode {
 impl ExfatInode {
     pub(super) fn mark_content_dirty(&self, _inode_state_guard: &InodeStateWriteGuard<'_>) {
         self.dirty_state.write().mark_content_dirty();
+        if self.metadata.read().type_ != InodeType::File {
+            return;
+        }
+        let mut dirty_file_retention = self.dirty_file_retention.write();
+        if dirty_file_retention.is_none() {
+            *dirty_file_retention = self.weak_self().upgrade();
+        }
     }
 
     pub(super) fn mark_metadata_dirty(&self, _inode_state_guard: &InodeStateWriteGuard<'_>) {
@@ -760,6 +770,17 @@ impl ExfatInode {
             return;
         }
         self.dirty_state.write().mark_metadata_dirty();
+    }
+
+    pub(super) fn clear_dirty_file_retention_if_not_needed(&self, dirty_state: InodeDirtyState) {
+        if dirty_state.has_deferred_regular_file_publish() {
+            return;
+        }
+        self.clear_dirty_file_retention();
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn clear_dirty_file_retention(&self) {
+        self.dirty_file_retention.write().take();
     }
 
     // Identity

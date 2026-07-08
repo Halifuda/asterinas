@@ -18,8 +18,7 @@ use super::{
     inconsistent_bitmap_accounting,
     inode::{ClusterMap, ExfatInode},
     invalid_mount_input, invalid_operation_input, not_mounted, read_only_conflict,
-    unsupported_remount_delta,
-    upcase::UpcaseTable,
+    unsupported_remount_delta, upcase::UpcaseTable,
 };
 use crate::{
     fs::vfs::{
@@ -75,13 +74,26 @@ impl FileSystem for ExfatFs {
                 }
             }
 
-            if self
+            let has_pending_regular_file_sync = self
                 .live_cached_inodes()
                 .into_iter()
-                .any(|inode| inode.has_pending_regular_file_sync())
-            {
+                .any(|inode| inode.has_pending_regular_file_sync());
+            if has_pending_regular_file_sync {
                 drop(mount_state);
                 continue;
+            }
+
+            if let Err(error) = self.flush_dirty_allocation_bitmap() {
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .volume_flags
+                    .volume_dirty = true;
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .dirty_bracket_opened_by_mount = false;
+                return Err(error);
             }
 
             let flush_status = match self.block_device.sync() {
@@ -110,6 +122,9 @@ impl FileSystem for ExfatFs {
                     .ok_or_else(not_mounted)?
                     .dirty_bracket_opened_by_mount = false;
                 return_errno!(Errno::EIO);
+            }
+            if let Err(error) = self.commit_published_allocation_bitmap() {
+                return Err(error);
             }
 
             let clean_flags = {
@@ -140,7 +155,6 @@ impl FileSystem for ExfatFs {
                     .dirty_bracket_opened_by_mount = false;
                 return Err(error);
             }
-
             let flush_status = match self.block_device.sync() {
                 Ok(status) => status,
                 Err(_) => {
@@ -244,6 +258,7 @@ impl ExfatFs {
         })
     }
 
+
     fn mount_candidate(
         block_device: &Arc<dyn BlockDevice>,
         source: Option<&str>,
@@ -251,6 +266,8 @@ impl ExfatFs {
     ) -> Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags)> {
         let (boot_region, flags, bitmap, upcase_table) =
             BootRegion::load_mount_state(block_device.as_ref())?;
+        let mut bitmap = bitmap;
+        bitmap.load_resident_bitmap(block_device.as_ref(), &boot_region)?;
         let fs = Self::new(
             block_device.clone(),
             boot_region,
@@ -506,6 +523,18 @@ impl Drop for ClusterAllocGuard<'_> {
 }
 
 impl ExfatFs {
+    pub(super) fn flush_dirty_allocation_bitmap(&self) -> Result<()> {
+        let mut allocator = self.allocator.write();
+        let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
+        allocation_bitmap.publish_dirty_ranges(self.block_device.as_ref(), &self.boot_region)
+    }
+
+    pub(super) fn commit_published_allocation_bitmap(&self) -> Result<()> {
+        let mut allocator = self.allocator.write();
+        let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
+        allocation_bitmap.commit_published_ranges()
+    }
+
     pub(super) fn allocate_clusters(
         &self,
         mount_state: &MountedVolumeState,
@@ -592,6 +621,14 @@ impl ExfatFs {
 
     pub(super) fn container_device_id(&self) -> device_id::DeviceId {
         self.block_device.id()
+    }
+}
+
+impl Drop for ExfatFs {
+    fn drop(&mut self) {
+        for inode in self.live_cached_inodes() {
+            inode.clear_dirty_file_retention();
+        }
     }
 }
 

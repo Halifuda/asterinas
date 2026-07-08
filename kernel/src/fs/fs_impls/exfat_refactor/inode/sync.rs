@@ -78,6 +78,7 @@ impl ExfatInode {
 
         let dirty_state_snapshot = *self.dirty_state.read();
         let needs_device_sync = scope.needs_device_sync(dirty_state_snapshot);
+        let needs_regular_file_publish = dirty_state_snapshot.has_deferred_regular_file_publish();
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
             data_length != 0 && page_cache.has_dirty_pages(0..data_length)
         });
@@ -91,15 +92,30 @@ impl ExfatInode {
             }
         }
 
+        if needs_regular_file_publish {
+            fs.flush_dirty_allocation_bitmap()?;
+            let parent = self.parent.read().upgrade().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
+            })?;
+            let parent_inode_state_guard = parent.inode_state.write();
+            self.publish_live_regular_file_entry_set(
+                &parent_inode_state_guard,
+                &block_device,
+                &fs.immutable_boot_region(),
+            )?;
+        }
+
         if block_device.sync()? != BioStatus::Complete {
             return_errno!(Errno::EIO);
         }
+        fs.commit_published_allocation_bitmap()?;
 
         let mut dirty_state = self.dirty_state.write();
         match scope {
             InodeSyncScope::Data => dirty_state.commit_data(dirty_state_snapshot),
             InodeSyncScope::All => dirty_state.commit_all(dirty_state_snapshot),
         }
+        self.clear_dirty_file_retention_if_not_needed(*dirty_state);
         Ok(())
     }
 }

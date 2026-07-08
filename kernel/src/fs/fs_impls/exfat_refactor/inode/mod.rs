@@ -57,6 +57,7 @@ use crate::{
 pub(super) struct ExfatInode {
     inode_state: RwMutex<()>,
     dirty_state: RwLock<InodeDirtyState>,
+    dirty_file_retention: RwLock<Option<Arc<Self>>>,
     extension: Extension,
     fs: Weak<ExfatFs>,
     metadata: RwLock<Metadata>,
@@ -116,6 +117,7 @@ impl ExfatInode {
         Arc::new_cyclic(|weak_self| Self {
             inode_state: RwMutex::new(()),
             dirty_state: RwLock::new(InodeDirtyState::default()),
+            dirty_file_retention: RwLock::new(None),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
             metadata: RwLock::new(metadata),

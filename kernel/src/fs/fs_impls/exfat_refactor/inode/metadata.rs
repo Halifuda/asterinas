@@ -34,11 +34,6 @@ impl ExfatInode {
     // ---- meta_read (projection + VFS getters) ----
 
     pub(super) fn metadata_projection(&self) -> Metadata {
-        let metadata = *self.metadata.read();
-        if metadata.type_ != InodeType::File {
-            return metadata;
-        }
-
         *self.metadata.read()
     }
 
@@ -691,6 +686,51 @@ impl ExfatInode {
             let mut metadata = self.metadata.write();
             update_metadata_fn(&mut metadata);
         }
+        Ok(durable_updated)
+    }
+
+    pub(super) fn publish_live_regular_file_entry_set(
+        &self,
+        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<bool> {
+        if self.metadata.read().type_ != InodeType::File {
+            return_errno!(Errno::EOPNOTSUPP);
+        }
+
+        let cluster_map = *self.dir_entry_stream.read();
+        let last_modify_at = self.metadata.read().last_modify_at;
+        let durable_updated = match self.rewrite_inode_entry_set_with_guards(
+            parent_inode_state_guard,
+            block_device,
+            boot_region,
+            |entry_view| {
+                let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+                    entry_view.child_metadata(boot_region)?;
+                if inode_type != InodeType::File || entry_view.is_directory() {
+                    return Err(Error::from(invalid_on_disk_layout()));
+                }
+
+                let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
+                    Self::encoded_exfat_timestamp_fields(
+                        last_modify_at,
+                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                    )?;
+                let mut mutable_entry_set = entry_view.to_mutable();
+                mutable_entry_set.set_cluster_map(&cluster_map)?;
+                mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
+                    timestamp_bytes,
+                    Some(hundredths_increment),
+                    encoded_utc_offset_byte,
+                ));
+                Ok(Some(mutable_entry_set.into_bytes()))
+            },
+            |_| {},
+        ) {
+            Ok(durable_updated) => durable_updated,
+            Err(error) => return Err(error),
+        };
         Ok(durable_updated)
     }
 }
