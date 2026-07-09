@@ -281,18 +281,12 @@ impl ExfatInode {
                     return_errno!(Errno::EINVAL);
                 }
 
-                let cache_mutation_range = valid_data_length.min(effective_offset)..write_end;
                 let new_data_length = data_length.max(write_end);
                 let new_valid_data_length = valid_data_length.max(write_end);
                 let timestamp = RealTimeCoarseClock::get().read_time();
                 let write_result = (|| {
                     let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                     fs.publish_dirty_admission(mount_state)?;
-                    if !cache_mutation_range.is_empty()
-                        && page_cache.has_dirty_pages(cache_mutation_range.clone())
-                    {
-                        page_cache.flush_range(cache_mutation_range.clone())?;
-                    }
                     let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,

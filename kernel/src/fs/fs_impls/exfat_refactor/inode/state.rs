@@ -187,6 +187,11 @@ impl InodeDirtyState {
         self.content_generation.is_some()
     }
 
+    pub(super) fn clear_detached_regular_file_publish_debt(&mut self) {
+        self.content_generation = None;
+        self.metadata_generation = None;
+    }
+
     fn clear_committed_content(&mut self, synced_state: Self) {
         if synced_state
             .content_generation
@@ -770,6 +775,13 @@ impl ExfatInode {
             return;
         }
         self.dirty_state.write().mark_metadata_dirty();
+    }
+
+    pub(super) fn clear_detached_regular_file_publish_debt(&self) {
+        self.dirty_state
+            .write()
+            .clear_detached_regular_file_publish_debt();
+        self.clear_dirty_file_retention();
     }
 
     pub(super) fn clear_dirty_file_retention_if_not_needed(&self, dirty_state: InodeDirtyState) {

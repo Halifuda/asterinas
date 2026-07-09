@@ -14,7 +14,7 @@ repo_dir="/root/asterinas"
 component="xfstests_linux_baseline_20260624"
 phase=""
 tag=""
-disk_size="2G"
+disk_size="8G"
 mem_size="12G"
 timeout=""
 release="1"
@@ -401,13 +401,11 @@ write_runlist() {
 
 build_make_command() {
     local quoted_repo
-    local opt_prefix=""
+    local command_body
     local direct_b64=""
+    local timeout_shell_command=""
 
     quoted_repo=$(shell_quote "$repo_dir")
-    if [ -n "$timeout" ]; then
-        opt_prefix="timeout $(shell_quote "$timeout") "
-    fi
 
     if [ "$subcommand" = "direct" ]; then
         if [ -n "$direct_command_file" ]; then
@@ -417,8 +415,7 @@ build_make_command() {
         direct_b64=$(printf '%s' "$direct_command" | base64 -w0)
     fi
 
-    printf '%scd %s && make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests RELEASE=%s MEM=%s XFSTESTS_DISK_SIZE=%s XFSTESTS_FSTYP=%s XFSTESTS_MKFS=%s XFSTESTS_MKFS_OPTIONS=%s XFSTESTS_FSCK=%s XFSTESTS_MOUNT_OPTIONS=%s XFSTESTS_TEST_DEV=%s XFSTESTS_SCRATCH_DEV=%s' \
-        "$opt_prefix" \
+    command_body=$(printf 'cd %s && : > qemu.log && : > qemu-serial.log && make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests RELEASE=%s MEM=%s XFSTESTS_DISK_SIZE=%s XFSTESTS_FSTYP=%s XFSTESTS_MKFS=%s XFSTESTS_MKFS_OPTIONS=%s XFSTESTS_FSCK=%s XFSTESTS_MOUNT_OPTIONS=%s XFSTESTS_TEST_DEV=%s XFSTESTS_SCRATCH_DEV=%s' \
         "$quoted_repo" \
         "$(shell_quote "$release")" \
         "$(shell_quote "$mem_size")" \
@@ -429,14 +426,26 @@ build_make_command() {
         "$(shell_quote "$fsck_prog")" \
         "$(shell_quote "$mount_options")" \
         "$(shell_quote "$test_dev")" \
-        "$(shell_quote "$scratch_dev")"
+        "$(shell_quote "$scratch_dev")")
 
     if [ "$subcommand" = "direct" ]; then
-        printf ' XFSTESTS_DIRECT_COMMAND_B64=%s XFSTESTS_DIRECT_WORKDIR=%s' \
+        command_body+=$(printf ' XFSTESTS_DIRECT_COMMAND_B64=%s XFSTESTS_DIRECT_WORKDIR=%s' \
             "$(shell_quote "$direct_b64")" \
-            "$(shell_quote "$direct_workdir")"
+            "$(shell_quote "$direct_workdir")")
     else
-        printf ' XFSTESTS_RUNLIST=/opt/xfstests/%s' "$(shell_quote "$runlist_name")"
+        command_body+=$(printf ' XFSTESTS_RUNLIST=/opt/xfstests/%s' "$(shell_quote "$runlist_name")")
+    fi
+
+    if [ -n "$timeout" ]; then
+        # When timeout terminates the wrapper shell, kill the whole foreground
+        # process group so `make run_kernel` cannot leave orphaned QEMU/image
+        # lock holders behind for the next suffix-continuation batch.
+        timeout_shell_command=$(printf 'trap '\''kill 0'\'' TERM INT; %s' "$command_body")
+        printf 'timeout --kill-after=30s %s bash -lc %s' \
+            "$(shell_quote "$timeout")" \
+            "$(shell_quote "$timeout_shell_command")"
+    else
+        printf '%s' "$command_body"
     fi
 }
 

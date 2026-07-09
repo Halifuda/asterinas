@@ -36,8 +36,8 @@ pub(super) struct ExfatFs {
     block_device: Arc<dyn BlockDevice>,
     boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
-    inode_cache: RwLock<BTreeMap<u64, Weak<ExfatInode>>>,
-    pub(in crate::fs::fs_impls::exfat_refactor) mount_runtime: RwLock<MountRuntimeState>,
+    inode_cache: RwMutex<BTreeMap<u64, Weak<ExfatInode>>>,
+    pub(in crate::fs::fs_impls::exfat_refactor) mount_runtime: RwMutex<MountRuntimeState>,
     pub(super) root_inode: RwMutex<Option<Arc<ExfatInode>>>,
     source: Option<String>,
     pub(super) mount_state: RwMutex<Option<MountedVolumeState>>,
@@ -81,6 +81,19 @@ impl FileSystem for ExfatFs {
             if has_pending_regular_file_sync {
                 drop(mount_state);
                 continue;
+            }
+
+            if let Err(error) = self.release_lazy_reclaimed_clusters() {
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .volume_flags
+                    .volume_dirty = true;
+                mount_state
+                    .as_mut()
+                    .ok_or_else(not_mounted)?
+                    .dirty_bracket_opened_by_mount = false;
+                return Err(error);
             }
 
             if let Err(error) = self.flush_dirty_allocation_bitmap() {
@@ -249,8 +262,8 @@ impl ExfatFs {
             block_device,
             boot_region,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
-            inode_cache: RwLock::new(BTreeMap::new()),
-            mount_runtime: RwLock::new(MountRuntimeState::default()),
+            inode_cache: RwMutex::new(BTreeMap::new()),
+            mount_runtime: RwMutex::new(MountRuntimeState::default()),
             root_inode: RwMutex::new(None),
             source,
             mount_state: RwMutex::new(None),
@@ -545,13 +558,13 @@ impl ExfatFs {
             return Err(read_only_conflict());
         }
 
-        let mut allocator = self.allocator.write();
-        let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
         if requested_clusters == 0 {
             return Err(invalid_operation_input());
         }
-        allocation_bitmap
-            .release_lazy_reclaimed_clusters(self.block_device.as_ref(), &self.boot_region)?;
+        self.release_lazy_reclaimed_clusters()?;
+
+        let mut allocator = self.allocator.write();
+        let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
 
         let mut fat_reader = FatReader::new(self.block_device.as_ref(), &self.boot_region);
         let allocated_ranges = allocation_bitmap.find_free_ranges(
@@ -611,6 +624,13 @@ impl ExfatFs {
         Ok(())
     }
 
+    pub(super) fn release_lazy_reclaimed_clusters(&self) -> Result<()> {
+        let mut allocator = self.allocator.write();
+        let allocation_bitmap = allocator.as_mut().ok_or_else(not_mounted)?;
+        allocation_bitmap
+            .release_lazy_reclaimed_clusters(self.block_device.as_ref(), &self.boot_region)
+    }
+
     pub(super) fn immutable_block_device(&self) -> Arc<dyn BlockDevice> {
         self.block_device.clone()
     }
@@ -634,23 +654,36 @@ impl Drop for ExfatFs {
 
 // ---- Inode cache ----
 impl ExfatFs {
+    pub(super) fn peek_cached_inode(&self, ino: u64) -> Option<Arc<ExfatInode>> {
+        self.inode_cache.read().get(&ino).and_then(Weak::upgrade)
+    }
+
     pub(super) fn get_or_create_cached_inode(
         &self,
         ino: u64,
         create_inode_fn: impl FnOnce() -> Arc<ExfatInode>,
     ) -> Arc<ExfatInode> {
         if let Some(cached_inode) = self.inode_cache.read().get(&ino).and_then(Weak::upgrade) {
-            return cached_inode;
+            if !cached_inode.is_detached_regular_file() {
+                return cached_inode;
+            }
         }
 
         let mut inode_cache = self.inode_cache.write();
         if let Some(cached_inode) = inode_cache.get(&ino).and_then(Weak::upgrade) {
-            return cached_inode;
+            if !cached_inode.is_detached_regular_file() {
+                return cached_inode;
+            }
+            inode_cache.remove(&ino);
         }
 
         let inode = create_inode_fn();
         inode_cache.insert(ino, Arc::downgrade(&inode));
         inode
+    }
+
+    pub(super) fn remove_cached_inode(&self, ino: u64) {
+        self.inode_cache.write().remove(&ino);
     }
 
     pub(super) fn rebind_rename_inode_cache(

@@ -56,21 +56,33 @@ use crate::{
 
 pub(super) struct ExfatInode {
     inode_state: RwMutex<()>,
-    dirty_state: RwLock<InodeDirtyState>,
-    dirty_file_retention: RwLock<Option<Arc<Self>>>,
+    dirty_state: RwMutex<InodeDirtyState>,
+    dirty_file_retention: RwMutex<Option<Arc<Self>>>,
     extension: Extension,
     fs: Weak<ExfatFs>,
-    metadata: RwLock<Metadata>,
-    parent: RwLock<Weak<Self>>,
+    metadata: RwMutex<Metadata>,
+    parent: RwMutex<Weak<Self>>,
     entry_set_location_hint: AtomicU64,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
-    page_cache_context: RwLock<Option<page_backend::PageCacheContext>>,
-    cluster_map: RwLock<Option<Arc<ClusterMap>>>,
-    dir_entry_stream: RwLock<StreamExtensionDirEntry>,
+    page_cache_context: RwMutex<Option<page_backend::PageCacheContext>>,
+    cluster_map: RwMutex<Option<Arc<ClusterMap>>>,
+    dir_entry_stream: RwMutex<StreamExtensionDirEntry>,
 }
 
 impl ExfatInode {
+    pub(super) fn is_detached_regular_file(&self) -> bool {
+        let metadata = self.metadata.read();
+        if metadata.type_ != InodeType::File || metadata.nr_hard_links != 0 {
+            return false;
+        }
+        drop(metadata);
+        if self.parent.read().upgrade().is_some() {
+            return false;
+        }
+        self.entry_set_location_hint.load(Ordering::Relaxed) == 0
+    }
+
     pub(super) fn read_root_directory_bytes(
         &self,
         block_device: &Arc<dyn BlockDevice>,
@@ -116,18 +128,18 @@ impl ExfatInode {
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             inode_state: RwMutex::new(()),
-            dirty_state: RwLock::new(InodeDirtyState::default()),
-            dirty_file_retention: RwLock::new(None),
+            dirty_state: RwMutex::new(InodeDirtyState::default()),
+            dirty_file_retention: RwMutex::new(None),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
-            metadata: RwLock::new(metadata),
-            parent: RwLock::new(parent),
+            metadata: RwMutex::new(metadata),
+            parent: RwMutex::new(parent),
             entry_set_location_hint: AtomicU64::new(0),
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
-            page_cache_context: RwLock::new(None),
-            cluster_map: RwLock::new(None),
-            dir_entry_stream: RwLock::new(StreamExtensionDirEntry {
+            page_cache_context: RwMutex::new(None),
+            cluster_map: RwMutex::new(None),
+            dir_entry_stream: RwMutex::new(StreamExtensionDirEntry {
                 data_length,
                 first_cluster,
                 valid_data_length,

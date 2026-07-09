@@ -19,7 +19,7 @@ use super::{
         fs::ClusterAllocGuard,
         invalid_on_disk_layout, invalid_operation_input,
     },
-    ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry, UpcaseTable,
+    ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry, UpcaseTable,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -334,21 +334,46 @@ impl ExfatInode {
                 return_errno!(Errno::ENOENT);
             };
             let slot_range = entry_view.slot_range();
+            let child_ino = self
+                .entry_location_ino(slot_range.first_entry_index())
+                .map_err(Error::from)?;
             let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
                 .child_metadata(&boot_region)
                 .map_err(Error::from)?;
             if inode_type == InodeType::Dir {
                 return_errno!(Errno::EISDIR);
             }
-
-            let allocated_cluster_ranges = Self::allocated_cluster_ranges(
-                &block_device,
-                &boot_region,
-                first_cluster,
-                data_length,
-                no_fat_chain,
-            )
-            .map_err(Error::from)?;
+            let cached_child_inode = fs.peek_cached_inode(child_ino);
+            let cached_child_inode_state_guard =
+                if let Some(cached_child_inode) = cached_child_inode.as_ref() {
+                    Some(cached_child_inode.inode_state.write())
+                } else {
+                    None
+                };
+            let detached_regular_file_reclaim =
+                if let (Some(cached_child_inode), Some(cached_child_inode_state_guard)) = (
+                    cached_child_inode.as_ref(),
+                    cached_child_inode_state_guard.as_ref(),
+                ) {
+                    Some(Self::capture_cached_regular_file_retirement(
+                        cached_child_inode,
+                        cached_child_inode_state_guard,
+                    )?)
+                } else {
+                    None
+                };
+            let allocated_cluster_ranges = if cached_child_inode.is_none() {
+                Self::allocated_cluster_ranges(
+                    &block_device,
+                    &boot_region,
+                    first_cluster,
+                    data_length,
+                    no_fat_chain,
+                )
+                .map_err(Error::from)?
+            } else {
+                Vec::new()
+            };
 
             let mount_state = mount_guard.mount_state_mut()?;
             fs.publish_dirty_admission(mount_state)?;
@@ -368,7 +393,19 @@ impl ExfatInode {
                 cluster_map,
             )
             .map_err(Error::from)?;
-            if !allocated_cluster_ranges.is_empty() {
+            if let (Some(cached_child_inode), Some(cached_child_inode_state_guard)) = (
+                cached_child_inode.as_ref(),
+                cached_child_inode_state_guard.as_ref(),
+            )
+            {
+                Self::detach_namespace_removed_inode(
+                    &fs,
+                    child_ino,
+                    cached_child_inode,
+                    cached_child_inode_state_guard,
+                    detached_regular_file_reclaim,
+                )?;
+            } else if !allocated_cluster_ranges.is_empty() {
                 let mount_state = mount_guard.mount_state_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
             }
@@ -649,6 +686,14 @@ impl ExfatInode {
                 .map(|target_view| {
                     let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                         target_view.child_metadata(&boot_region)?;
+                    let target_ino = self
+                        .entry_location_ino(target_view.slot_range().first_entry_index())
+                        .map_err(Error::from)?;
+                    if target_inode_type != InodeType::Dir
+                        && fs.peek_cached_inode(target_ino).is_none()
+                    {
+                        return Ok(None);
+                    }
                     let valid_data_length = target_view
                         .cluster_map()?
                         .valid_data_length
@@ -798,6 +843,14 @@ impl ExfatInode {
             .map(|target_view| {
                 let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                     target_view.child_metadata(&boot_region)?;
+                let target_ino = target_directory
+                    .entry_location_ino(target_view.slot_range().first_entry_index())
+                    .map_err(Error::from)?;
+                if target_inode_type != InodeType::Dir
+                    && fs.peek_cached_inode(target_ino).is_none()
+                {
+                    return Ok(None);
+                }
                 let valid_data_length = target_view
                     .cluster_map()?
                     .valid_data_length
@@ -914,16 +967,26 @@ impl ExfatInode {
         let (source_inode_type, _, _, _) = current_source_view
             .child_metadata(boot_region)
             .map_err(Error::from)?;
-        let (replaced_target_slot_range, replaced_target_ranges) =
-            match Self::collect_replaced_target_ranges(
+        let target_child_inode_state_guard =
+            target_child_inode.map(|target_child_inode| target_child_inode.inode_state.write());
+        let (
+            replaced_target_slot_range,
+            replaced_target_ranges,
+            detached_regular_file_reclaim,
+        ) = match Self::collect_replaced_target_cleanup(
                 current_target_view,
                 target_child_inode,
+                target_child_inode_state_guard.as_ref(),
                 source_inode_type,
                 block_device,
                 boot_region,
             )? {
-                Some((slot_range, ranges)) => (Some(slot_range), ranges),
-                None => (None, Vec::new()),
+                Some((slot_range, ranges, detached_regular_file_reclaim)) => (
+                    Some(slot_range),
+                    ranges,
+                    detached_regular_file_reclaim,
+                ),
+                None => (None, Vec::new(), None),
             };
         let reusable_slot_range = if current_source_slot_range.entry_count() >= required_entry_count
         {
@@ -993,8 +1056,17 @@ impl ExfatInode {
                 .store_entry_set_location_hint(final_slot_range)
                 .map_err(Error::from)?;
         }
-        if let Some(target_child_inode) = target_child_inode {
-            Self::finalize_detached_overwritten_target_inode(target_child_inode);
+        if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
+            (target_child_inode, target_child_inode_state_guard.as_ref())
+        {
+            let detached_target_ino = target_child_inode.metadata.read().ino;
+            Self::detach_namespace_removed_inode(
+                fs,
+                detached_target_ino,
+                target_child_inode,
+                target_child_inode_state_guard,
+                detached_regular_file_reclaim,
+            )?;
         }
         fs.rebind_rename_inode_cache(
             old_source_ino,
@@ -1059,16 +1131,26 @@ impl ExfatInode {
             new_name_hash,
             None,
         )?;
-        let (replaced_target_slot_range, replaced_target_ranges) =
-            match Self::collect_replaced_target_ranges(
+        let target_child_inode_state_guard =
+            target_child_inode.map(|target_child_inode| target_child_inode.inode_state.write());
+        let (
+            replaced_target_slot_range,
+            replaced_target_ranges,
+            detached_regular_file_reclaim,
+        ) = match Self::collect_replaced_target_cleanup(
                 target_view,
                 target_child_inode,
+                target_child_inode_state_guard.as_ref(),
                 source_inode_type,
                 block_device,
                 boot_region,
             )? {
-                Some((slot_range, ranges)) => (Some(slot_range), ranges),
-                None => (None, Vec::new()),
+                Some((slot_range, ranges, detached_regular_file_reclaim)) => (
+                    Some(slot_range),
+                    ranges,
+                    detached_regular_file_reclaim,
+                ),
+                None => (None, Vec::new(), None),
             };
         fs.publish_dirty_admission(mount_state)?;
         let (
@@ -1119,8 +1201,17 @@ impl ExfatInode {
                 .store_entry_set_location_hint(target_slot_range)
                 .map_err(Error::from)?;
         }
-        if let Some(target_child_inode) = target_child_inode {
-            Self::finalize_detached_overwritten_target_inode(target_child_inode);
+        if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
+            (target_child_inode, target_child_inode_state_guard.as_ref())
+        {
+            let detached_target_ino = target_child_inode.metadata.read().ino;
+            Self::detach_namespace_removed_inode(
+                fs,
+                detached_target_ino,
+                target_child_inode,
+                target_child_inode_state_guard,
+                detached_regular_file_reclaim,
+            )?;
         }
         fs.rebind_rename_inode_cache(
             old_source_ino,
@@ -1519,13 +1610,18 @@ impl ExfatInode {
         .filter(|entry_view| Some(entry_view.slot_range()) != excluded_slot_range))
     }
 
-    fn collect_replaced_target_ranges(
+    fn collect_replaced_target_cleanup(
         target_view: Option<FileEntrySetView<'_>>,
         target_child_inode: Option<&Arc<Self>>,
+        target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         source_inode_type: InodeType,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> Result<Option<(DirEntrySlotRange, Vec<ClusterRange>)>> {
+    ) -> Result<Option<(
+        DirEntrySlotRange,
+        Vec<ClusterRange>,
+        Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
+    )>> {
         let Some(target_view) = target_view else {
             return Ok(None);
         };
@@ -1545,6 +1641,19 @@ impl ExfatInode {
             };
             Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
         }
+        if target_inode_type == InodeType::File {
+            if let (Some(child_inode), Some(child_inode_state_guard)) =
+                (target_child_inode, target_child_inode_state_guard)
+            {
+                let detached_regular_file_reclaim =
+                    Self::capture_cached_regular_file_retirement(child_inode, child_inode_state_guard)?;
+                return Ok(Some((
+                    target_slot_range,
+                    Vec::new(),
+                    Some(detached_regular_file_reclaim),
+                )));
+            }
+        }
         let replaced_target_ranges = Self::allocated_cluster_ranges(
             block_device,
             boot_region,
@@ -1553,7 +1662,7 @@ impl ExfatInode {
             no_fat_chain,
         )
         .map_err(Error::from)?;
-        Ok(Some((target_slot_range, replaced_target_ranges)))
+        Ok(Some((target_slot_range, replaced_target_ranges, None)))
     }
 
     fn reserve_rename_destination_slot(
@@ -1656,11 +1765,30 @@ impl ExfatInode {
         let _ = fs.free_clusters(mount_state, replaced_target_ranges);
     }
 
-    fn finalize_detached_overwritten_target_inode(target_child_inode: &Arc<Self>) {
-        *target_child_inode.parent.write() = Weak::new();
-        target_child_inode.clear_entry_set_location_hint();
-        let mut metadata = target_child_inode.metadata.write();
-        metadata.nr_hard_links = 0;
-        metadata.ino = u64::MAX;
+    fn capture_cached_regular_file_retirement(
+        child_inode: &Arc<Self>,
+        child_inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) -> Result<(Arc<ClusterMap>, Vec<ClusterRange>)> {
+        let retired_generation = child_inode.current_cluster_map(child_inode_state_guard)?;
+        let retired_ranges = retired_generation.cluster_ranges().to_vec();
+        Ok((retired_generation, retired_ranges))
+    }
+
+    fn detach_namespace_removed_inode(
+        fs: &Arc<ExfatFs>,
+        child_ino: u64,
+        child_inode: &Arc<Self>,
+        _child_inode_state_guard: &InodeStateWriteGuard<'_>,
+        detached_regular_file_reclaim: Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
+    ) -> Result<()> {
+        *child_inode.parent.write() = Weak::new();
+        child_inode.clear_entry_set_location_hint();
+        child_inode.metadata.write().nr_hard_links = 0;
+        if let Some((retired_generation, retired_ranges)) = detached_regular_file_reclaim {
+            child_inode.clear_detached_regular_file_publish_debt();
+            fs.remove_cached_inode(child_ino);
+            fs.lazy_reclaim_clusters(retired_generation, retired_ranges)?;
+        }
+        Ok(())
     }
 }

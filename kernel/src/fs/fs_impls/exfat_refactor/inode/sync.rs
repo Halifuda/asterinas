@@ -77,11 +77,21 @@ impl ExfatInode {
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
         let dirty_state_snapshot = *self.dirty_state.read();
-        let needs_device_sync = scope.needs_device_sync(dirty_state_snapshot);
-        let needs_regular_file_publish = dirty_state_snapshot.has_deferred_regular_file_publish();
+        let is_detached_regular_file = self.is_detached_regular_file();
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
             data_length != 0 && page_cache.has_dirty_pages(0..data_length)
         });
+        if is_detached_regular_file {
+            if dirty_state_snapshot.needs_sync_all() {
+                self.clear_detached_regular_file_publish_debt();
+            }
+            if !needs_page_writeback {
+                return Ok(());
+            }
+        }
+
+        let needs_device_sync = scope.needs_device_sync(dirty_state_snapshot);
+        let needs_regular_file_publish = dirty_state_snapshot.has_deferred_regular_file_publish();
         if !needs_page_writeback && !needs_device_sync {
             return Ok(());
         }
@@ -92,7 +102,7 @@ impl ExfatInode {
             }
         }
 
-        if needs_regular_file_publish {
+        if needs_regular_file_publish && !is_detached_regular_file {
             fs.flush_dirty_allocation_bitmap()?;
             let parent = self.parent.read().upgrade().ok_or_else(|| {
                 Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
