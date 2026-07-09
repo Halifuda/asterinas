@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{
-    sync::atomic::{AtomicU32, Ordering},
-    time::Duration,
-};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
 use hashbrown::HashMap;
@@ -13,10 +10,9 @@ use spin::Once;
 use super::try_get_mnt_ns_inode;
 use crate::{
     fs::{
-        file::{InodeType, StatusFlags},
+        file::InodeType,
         vfs::{
             file_system::{FileSystem, FsFlags},
-            inode::Metadata,
             path::{
                 Path,
                 dentry::{Dentry, DentryKey},
@@ -211,39 +207,6 @@ pub struct Mount {
 }
 
 impl Mount {
-    /// Returns whether a successful access should refresh the inode `atime`.
-    pub(in crate::fs) fn should_update_atime(
-        &self,
-        inode_type: InodeType,
-        metadata: &Metadata,
-        status_flags: StatusFlags,
-        now: Duration,
-    ) -> bool {
-        const RELATIME_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-
-        if status_flags.contains(StatusFlags::O_NOATIME) {
-            return false;
-        }
-
-        let flags = self.flags();
-        if flags.contains(PerMountFlags::RDONLY) {
-            return false;
-        }
-        if inode_type == InodeType::Dir && flags.contains(PerMountFlags::NODIRATIME) {
-            return false;
-        }
-
-        match flags.atime_policy() {
-            AtimePolicy::Noatime => false,
-            AtimePolicy::Strictatime => true,
-            AtimePolicy::Relatime => {
-                metadata.last_access_at <= metadata.last_modify_at
-                    || metadata.last_access_at <= metadata.last_meta_change_at
-                    || now.saturating_sub(metadata.last_access_at) >= RELATIME_INTERVAL
-            }
-        }
-    }
-
     /// Creates a root mount node with an associated FS.
     ///
     /// The root mount node is not mounted on other mount nodes (which means it has no
