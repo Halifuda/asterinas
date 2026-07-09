@@ -1485,6 +1485,14 @@ impl ExfatInode {
         boot_region: &BootRegion,
     ) -> Result<()> {
         let (_owner_guard, cluster_map) = child_inode.directory_snapshot().map_err(Error::from)?;
+        Self::ensure_directory_snapshot_is_empty(cluster_map, block_device, boot_region)
+    }
+
+    fn ensure_directory_snapshot_is_empty(
+        cluster_map: StreamExtensionDirEntry,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<()> {
         let child_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
                 .map_err(Error::from)?;
@@ -1636,10 +1644,22 @@ impl ExfatInode {
             return_errno!(Errno::EISDIR);
         }
         if target_inode_type == InodeType::Dir {
-            let Some(child_inode) = target_child_inode else {
+            let (Some(child_inode), Some(child_inode_state_guard)) =
+                (target_child_inode, target_child_inode_state_guard)
+            else {
                 return Err(Error::from(invalid_on_disk_layout()));
             };
-            Self::ensure_directory_entry_is_empty(child_inode, block_device, boot_region)?;
+            // The rename caller already owns child inode admission here, so only consume a
+            // caller-captured snapshot and avoid the wrapper-owned reentry path.
+            let child_directory_snapshot = {
+                let _rename_owned_child_guard = child_inode_state_guard;
+                *child_inode.dir_entry_stream.read()
+            };
+            Self::ensure_directory_snapshot_is_empty(
+                child_directory_snapshot,
+                block_device,
+                boot_region,
+            )?;
         }
         if target_inode_type == InodeType::File {
             if let (Some(child_inode), Some(child_inode_state_guard)) =
