@@ -26,11 +26,12 @@ impl InodeSyncScope {
 
 impl ExfatInode {
     pub(in crate::fs::fs_impls::exfat_refactor) fn has_pending_regular_file_sync(&self) -> bool {
-        if self.metadata.read().type_ != crate::fs::file::InodeType::File {
+        let inode_state_guard = self.inode_state_read_guard();
+        if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
             return false;
         }
 
-        let dirty_state = *self.dirty_state.read();
+        let dirty_state = inode_state_guard.dirty_state();
         if dirty_state.needs_sync_all() {
             return true;
         }
@@ -38,7 +39,7 @@ impl ExfatInode {
         let data_length = if let Some(page_cache_context) = self.active_page_cache_context() {
             page_cache_context.data_length
         } else {
-            let Some(data_length) = self.dir_entry_stream.read().data_length else {
+            let Some(data_length) = inode_state_guard.dir_entry_stream().data_length else {
                 return false;
             };
             data_length
@@ -69,21 +70,40 @@ impl ExfatInode {
             .page_cache
             .get()
             .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
-        let inode_state = self.inode_state.write();
-        let _ = self.current_cluster_map(&inode_state)?;
+        let parent = {
+            let inode_state = self.inode_state_read_guard();
+            inode_state.parent()
+        };
+        let mut guarded_inodes = vec![self];
+        if let Some(parent) = parent.as_ref() {
+            guarded_inodes.push(parent.as_ref());
+        }
+        let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+        let guard_for_inode = |inode: &ExfatInode| {
+            inode_guards
+                .iter()
+                .find(|guard| guard.guards_inode(inode))
+                .ok_or_else(|| Error::new(Errno::EINVAL))
+        };
+        let inode_state = guard_for_inode(self)?;
+        let parent_inode_state = match parent.as_ref() {
+            Some(parent) => Some(guard_for_inode(parent.as_ref())?),
+            None => None,
+        };
+        let _ = self.current_cluster_map(inode_state)?;
         let data_length = self
             .active_page_cache_context()
             .map(|page_cache_context| page_cache_context.data_length)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
-        let dirty_state_snapshot = *self.dirty_state.read();
-        let is_detached_regular_file = self.is_detached_regular_file();
+        let dirty_state_snapshot = inode_state.dirty_state();
+        let is_detached_regular_file = inode_state.parent().is_none();
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
             data_length != 0 && page_cache.has_dirty_pages(0..data_length)
         });
         if is_detached_regular_file {
             if dirty_state_snapshot.needs_sync_all() {
-                self.clear_detached_regular_file_publish_debt();
+                self.clear_detached_regular_file_publish_debt_with_guard(inode_state);
             }
             if !needs_page_writeback {
                 return Ok(());
@@ -104,15 +124,32 @@ impl ExfatInode {
 
         if needs_regular_file_publish && !is_detached_regular_file {
             fs.flush_dirty_allocation_bitmap()?;
-            let parent = self.parent.read().upgrade().ok_or_else(|| {
+            let parent_inode_state_guard = parent_inode_state.ok_or_else(|| {
                 Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
             })?;
-            let parent_inode_state_guard = parent.inode_state.write();
             self.publish_live_regular_file_entry_set(
-                &parent_inode_state_guard,
+                inode_state,
+                parent_inode_state_guard,
                 &block_device,
                 &fs.immutable_boot_region(),
             )?;
+            if block_device.sync()? != BioStatus::Complete {
+                return_errno!(Errno::EIO);
+            }
+            fs.commit_published_allocation_bitmap()?;
+
+            let current_dirty_state = inode_state.with_dirty_state_mut(|dirty_state| {
+                match scope {
+                    InodeSyncScope::Data => dirty_state.commit_data(dirty_state_snapshot),
+                    InodeSyncScope::All => dirty_state.commit_all(dirty_state_snapshot),
+                }
+                *dirty_state
+            });
+            self.clear_dirty_file_retention_if_not_needed_with_guard(
+                inode_state,
+                current_dirty_state,
+            );
+            return Ok(());
         }
 
         if block_device.sync()? != BioStatus::Complete {
@@ -120,12 +157,14 @@ impl ExfatInode {
         }
         fs.commit_published_allocation_bitmap()?;
 
-        let mut dirty_state = self.dirty_state.write();
-        match scope {
-            InodeSyncScope::Data => dirty_state.commit_data(dirty_state_snapshot),
-            InodeSyncScope::All => dirty_state.commit_all(dirty_state_snapshot),
-        }
-        self.clear_dirty_file_retention_if_not_needed(*dirty_state);
+        let current_dirty_state = inode_state.with_dirty_state_mut(|dirty_state| {
+            match scope {
+                InodeSyncScope::Data => dirty_state.commit_data(dirty_state_snapshot),
+                InodeSyncScope::All => dirty_state.commit_all(dirty_state_snapshot),
+            }
+            *dirty_state
+        });
+        self.clear_dirty_file_retention_if_not_needed_with_guard(inode_state, current_dirty_state);
         Ok(())
     }
 }

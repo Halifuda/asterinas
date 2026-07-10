@@ -12,12 +12,15 @@ use io_util::batch::IoBatch;
 use ostd::mm::io::util::HasVmReaderWriter;
 
 use super::{
-    super::{boot::BootRegion, fs::MountRuntimeState},
+    super::{
+        boot::BootRegion,
+        fs::{MountRuntimeProjection, MountRuntimeState},
+    },
     ClusterMap, ExfatInode,
     state::InodeStateWriteGuard,
 };
 use crate::{
-    fs::file::InodeType,
+    fs::{file::InodeType, vfs::inode::Metadata},
     prelude::*,
     vm::page_cache::{CachePageExt, LockedCachePage, PageCache, PageCacheBackend},
 };
@@ -26,6 +29,7 @@ use crate::{
 pub(super) struct PageCacheContext {
     pub(super) cluster_map: Arc<ClusterMap>,
     pub(super) data_length: usize,
+    pub(super) mount_runtime: Arc<MountRuntimeProjection>,
     pub(super) valid_data_length: usize,
 }
 
@@ -62,20 +66,15 @@ impl ExfatFilePageBackend {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_runtime = *fs.mount_runtime.read();
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let page_cache_context = if let Some(page_cache_context) = inode.active_page_cache_context()
-        {
-            page_cache_context
-        } else {
-            let (cluster_map, data_length, valid_data_length) = inode.cluster_map_snapshot()?;
-            PageCacheContext {
-                cluster_map,
-                data_length,
-                valid_data_length,
-            }
-        };
+        let page_cache_context = inode.active_page_cache_context().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "regular exFAT file page-cache context is not published",
+            )
+        })?;
+        let mount_runtime = page_cache_context.mount_runtime.snapshot();
         Ok((
             inode,
             page_cache_context,
@@ -228,12 +227,30 @@ impl PageCacheBackend for ExfatFilePageBackend {
 }
 
 impl ExfatInode {
+    pub(super) fn page_cache_context_for_mapping(
+        &self,
+        cluster_map: Arc<ClusterMap>,
+        data_length: usize,
+        valid_data_length: usize,
+    ) -> Result<PageCacheContext> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        Ok(PageCacheContext {
+            cluster_map,
+            data_length,
+            mount_runtime: fs.mount_runtime_projection(),
+            valid_data_length,
+        })
+    }
+
     pub(super) fn install_page_cache_context(
         &self,
-        _inode_state_guard: &InodeStateWriteGuard<'_>,
+        inode_state_guard: &InodeStateWriteGuard<'_>,
         page_cache_context: PageCacheContext,
     ) -> Option<PageCacheContext> {
-        self.page_cache_context.write().replace(page_cache_context)
+        inode_state_guard.replace_page_cache_context(page_cache_context)
     }
 
     pub(super) fn active_page_cache_context(&self) -> Option<PageCacheContext> {
@@ -245,14 +262,19 @@ impl ExfatInode {
     }
 
     pub(super) fn page_cache_handle(&self) -> Option<&PageCache> {
-        if self.metadata.read().type_ != InodeType::File {
+        let metadata = self.inode_state_read_guard().metadata();
+        self.page_cache_handle_for_metadata(metadata)
+    }
+
+    pub(super) fn page_cache_handle_for_metadata(&self, metadata: Metadata) -> Option<&PageCache> {
+        if metadata.type_ != InodeType::File {
             return None;
         }
 
         self.page_cache
             .call_once(|| {
                 let backend: Arc<dyn PageCacheBackend> = self.page_backend.clone();
-                let capacity = self.metadata.read().size;
+                let capacity = metadata.size;
                 PageCache::new_with_backend(capacity, Arc::downgrade(&backend)).ok()
             })
             .as_ref()

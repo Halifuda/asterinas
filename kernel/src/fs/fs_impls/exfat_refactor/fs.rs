@@ -3,6 +3,7 @@
 //! Implements the exFAT filesystem owner, mount admission, allocation, and VFS registration.
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use aster_block::{BlockDevice, bio::BioStatus};
 use ostd::{
@@ -18,7 +19,8 @@ use super::{
     inconsistent_bitmap_accounting,
     inode::{ClusterMap, ExfatInode},
     invalid_mount_input, invalid_operation_input, not_mounted, read_only_conflict,
-    unsupported_remount_delta, upcase::UpcaseTable,
+    unsupported_remount_delta,
+    upcase::UpcaseTable,
 };
 use crate::{
     fs::vfs::{
@@ -37,6 +39,7 @@ pub(super) struct ExfatFs {
     boot_region: BootRegion,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     inode_cache: RwMutex<BTreeMap<u64, Weak<ExfatInode>>>,
+    mount_runtime_projection: Arc<MountRuntimeProjection>,
     pub(in crate::fs::fs_impls::exfat_refactor) mount_runtime: RwMutex<MountRuntimeState>,
     pub(super) root_inode: RwMutex<Option<Arc<ExfatInode>>>,
     source: Option<String>,
@@ -263,6 +266,9 @@ impl ExfatFs {
             boot_region,
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             inode_cache: RwMutex::new(BTreeMap::new()),
+            mount_runtime_projection: Arc::new(MountRuntimeProjection::new(
+                MountRuntimeState::default(),
+            )),
             mount_runtime: RwMutex::new(MountRuntimeState::default()),
             root_inode: RwMutex::new(None),
             source,
@@ -270,7 +276,6 @@ impl ExfatFs {
             upcase_table: RwMutex::new(None),
         })
     }
-
 
     fn mount_candidate(
         block_device: &Arc<dyn BlockDevice>,
@@ -318,7 +323,7 @@ impl ExfatFs {
         *self.root_inode.write() = Some(root_inode);
         *self.upcase_table.write() = Some(upcase_table);
         *self.mount_state.write() = Some(mount_state);
-        *self.mount_runtime.write() = mount_runtime;
+        self.publish_mount_runtime(mount_runtime);
     }
 
     fn remount_active(&self, next_flags: FsFlags, next_options: &MountOptions) -> Result<FsFlags> {
@@ -348,13 +353,33 @@ impl ExfatFs {
         }
         mount_state.flags = next_flags;
         mount_state.options = next_options.with_flags(next_flags);
-        *self.mount_runtime.write() = MountRuntimeState {
+        self.publish_mount_runtime(MountRuntimeState {
             forced_shutdown: mount_state.forced_shutdown,
             clear_to_zero: mount_state.volume_flags.clear_to_zero,
             media_failure: mount_state.volume_flags.media_failure,
             read_only: mount_state.options.fs_flags.contains(FsFlags::RDONLY),
-        };
+        });
         Ok(next_flags)
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn mount_runtime_projection(
+        &self,
+    ) -> Arc<MountRuntimeProjection> {
+        self.mount_runtime_projection.clone()
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn publish_mount_runtime(
+        &self,
+        mount_runtime: MountRuntimeState,
+    ) {
+        *self.mount_runtime.write() = mount_runtime;
+        self.mount_runtime_projection.publish(mount_runtime);
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn publish_forced_shutdown_runtime(&self) {
+        let mut mount_runtime = self.mount_runtime.write();
+        mount_runtime.forced_shutdown = true;
+        self.mount_runtime_projection.publish(*mount_runtime);
     }
 }
 
@@ -746,6 +771,61 @@ pub(in crate::fs::fs_impls::exfat_refactor) struct MountRuntimeState {
     pub(in crate::fs::fs_impls::exfat_refactor) clear_to_zero: bool,
     pub(in crate::fs::fs_impls::exfat_refactor) media_failure: bool,
     pub(in crate::fs::fs_impls::exfat_refactor) read_only: bool,
+}
+
+pub(in crate::fs::fs_impls::exfat_refactor) struct MountRuntimeProjection {
+    bits: AtomicU8,
+}
+
+impl MountRuntimeProjection {
+    const CLEAR_TO_ZERO: u8 = 1 << 1;
+    const FORCED_SHUTDOWN: u8 = 1 << 0;
+    const MEDIA_FAILURE: u8 = 1 << 2;
+    const READ_ONLY: u8 = 1 << 3;
+
+    fn new(mount_runtime: MountRuntimeState) -> Self {
+        Self {
+            bits: AtomicU8::new(Self::encode(mount_runtime)),
+        }
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn publish(
+        &self,
+        mount_runtime: MountRuntimeState,
+    ) {
+        self.bits
+            .store(Self::encode(mount_runtime), Ordering::Release);
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn snapshot(&self) -> MountRuntimeState {
+        Self::decode(self.bits.load(Ordering::Acquire))
+    }
+
+    fn encode(mount_runtime: MountRuntimeState) -> u8 {
+        let mut bits = 0;
+        if mount_runtime.forced_shutdown {
+            bits |= Self::FORCED_SHUTDOWN;
+        }
+        if mount_runtime.clear_to_zero {
+            bits |= Self::CLEAR_TO_ZERO;
+        }
+        if mount_runtime.media_failure {
+            bits |= Self::MEDIA_FAILURE;
+        }
+        if mount_runtime.read_only {
+            bits |= Self::READ_ONLY;
+        }
+        bits
+    }
+
+    fn decode(bits: u8) -> MountRuntimeState {
+        MountRuntimeState {
+            forced_shutdown: bits & Self::FORCED_SHUTDOWN != 0,
+            clear_to_zero: bits & Self::CLEAR_TO_ZERO != 0,
+            media_failure: bits & Self::MEDIA_FAILURE != 0,
+            read_only: bits & Self::READ_ONLY != 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -65,32 +65,29 @@ impl ExfatInode {
         let required_entry_count =
             direntry::file_entry_set_entry_count(name.len()).map_err(Error::from)?;
         let create_result = (|| {
-            let parent_directory = self.parent.read().upgrade();
+            let parent_directory = {
+                let inode_state_guard = self.inode_state_read_guard();
+                inode_state_guard.parent()
+            };
             let mut guarded_directories = vec![self];
             if let Some(parent_directory) = parent_directory.as_ref() {
                 guarded_directories.push(parent_directory.as_ref());
             }
-            let mut guarded_directory_inos = guarded_directories
-                .iter()
-                .map(|directory| directory.metadata.read().ino)
-                .collect::<Vec<_>>();
-            guarded_directory_inos.sort_unstable();
-            guarded_directory_inos.dedup();
             let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
-            let self_guard_index = guarded_directory_inos
-                .binary_search(&self.metadata.read().ino)
-                .map_err(|_| Error::new(Errno::EINVAL))?;
-            let self_inode_state_guard = &directory_guards[self_guard_index];
+            let guard_for_inode = |inode: &ExfatInode| {
+                directory_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(inode))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            };
+            let self_inode_state_guard = guard_for_inode(self)?;
             let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
             {
-                let parent_guard_index = guarded_directory_inos
-                    .binary_search(&parent_directory.metadata.read().ino)
-                    .map_err(|_| Error::new(Errno::EINVAL))?;
-                Some(&directory_guards[parent_guard_index])
+                Some(guard_for_inode(parent_directory.as_ref())?)
             } else {
                 None
             };
-            let cluster_map = *self.dir_entry_stream.read();
+            let cluster_map = self_inode_state_guard.dir_entry_stream();
             let current_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -115,12 +112,9 @@ impl ExfatInode {
             let now = RealTimeCoarseClock::get().read_time();
             let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
                 Self::encoded_exfat_timestamp_fields(now, 0).map_err(Error::from)?;
-            let normalized_access_timestamp = Self::decoded_exfat_timestamp(
-                timestamp_bytes,
-                None,
-                encoded_utc_offset_byte,
-            )
-            .map_err(Error::from)?;
+            let normalized_access_timestamp =
+                Self::decoded_exfat_timestamp(timestamp_bytes, None, encoded_utc_offset_byte)
+                    .map_err(Error::from)?;
             let normalized_modify_timestamp = Self::decoded_exfat_timestamp(
                 timestamp_bytes,
                 Some(ten_ms_increment),
@@ -132,11 +126,8 @@ impl ExfatInode {
                 Some(ten_ms_increment),
                 encoded_utc_offset_byte,
             );
-            let last_accessed_timestamp = direntry::FileEntryTimestamp::new(
-                timestamp_bytes,
-                None,
-                encoded_utc_offset_byte,
-            );
+            let last_accessed_timestamp =
+                direntry::FileEntryTimestamp::new(timestamp_bytes, None, encoded_utc_offset_byte);
             let last_modified_timestamp = direntry::FileEntryTimestamp::new(
                 timestamp_bytes,
                 Some(ten_ms_increment),
@@ -150,6 +141,7 @@ impl ExfatInode {
                     &block_device,
                     &boot_region,
                     parent_inode_state_guard,
+                    self_inode_state_guard,
                     required_entry_count,
                 )
                 .map_err(Error::from)?;
@@ -194,19 +186,18 @@ impl ExfatInode {
                 allocated_directory_cluster.commit();
                 (allocated_cluster, boot_region.cluster_size, true)
             } else {
-                let entry_set =
-                    direntry::encode_file_entry_set(
-                        &name,
-                        name_hash,
-                        type_,
-                        0,
-                        0,
-                        false,
-                        create_timestamp,
-                        last_accessed_timestamp,
-                        last_modified_timestamp,
-                    )
-                    .map_err(Error::from)?;
+                let entry_set = direntry::encode_file_entry_set(
+                    &name,
+                    name_hash,
+                    type_,
+                    0,
+                    0,
+                    false,
+                    create_timestamp,
+                    last_accessed_timestamp,
+                    last_modified_timestamp,
+                )
+                .map_err(Error::from)?;
                 let slot_range_bytes =
                     direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
                 directory_bytes[slot_range_bytes.clone()].copy_from_slice(&entry_set);
@@ -228,7 +219,7 @@ impl ExfatInode {
             let child_inode = Self::new_child(
                 &fs,
                 self.weak_self(),
-                self.entry_location_ino(slot_range.first_entry_index())
+                self.entry_location_ino(cluster_map, slot_range.first_entry_index())
                     .map_err(Error::from)?,
                 type_,
                 boot_region.cluster_size,
@@ -243,13 +234,14 @@ impl ExfatInode {
                     .store_entry_set_location_hint(slot_range)
                     .map_err(Error::from)?;
             }
-            {
-                let mut child_metadata = child_inode.metadata.write();
-                child_metadata.mode = mode;
-                child_metadata.last_access_at = normalized_access_timestamp;
-                child_metadata.last_modify_at = normalized_modify_timestamp;
-                child_metadata.last_meta_change_at = normalized_modify_timestamp;
-            }
+            child_inode
+                .inode_state_write_guard()
+                .with_metadata_mut(|child_metadata| {
+                    child_metadata.mode = mode;
+                    child_metadata.last_access_at = normalized_access_timestamp;
+                    child_metadata.last_modify_at = normalized_modify_timestamp;
+                    child_metadata.last_meta_change_at = normalized_modify_timestamp;
+                });
             let child_inode: Arc<dyn Inode> = child_inode;
             self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                 &block_device,
@@ -289,32 +281,13 @@ impl ExfatInode {
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
         let unlink_result = (|| {
-            let parent_directory = self.parent.read().upgrade();
-            let mut guarded_directories = vec![self];
-            if let Some(parent_directory) = parent_directory.as_ref() {
-                guarded_directories.push(parent_directory.as_ref());
-            }
-            let mut guarded_directory_inos = guarded_directories
-                .iter()
-                .map(|directory| directory.metadata.read().ino)
-                .collect::<Vec<_>>();
-            guarded_directory_inos.sort_unstable();
-            guarded_directory_inos.dedup();
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
-            let self_guard_index = guarded_directory_inos
-                .binary_search(&self.metadata.read().ino)
-                .map_err(|_| Error::new(Errno::EINVAL))?;
-            let self_inode_state_guard = &directory_guards[self_guard_index];
-            let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
-            {
-                let parent_guard_index = guarded_directory_inos
-                    .binary_search(&parent_directory.metadata.read().ino)
-                    .map_err(|_| Error::new(Errno::EINVAL))?;
-                Some(&directory_guards[parent_guard_index])
-            } else {
-                None
+            let (parent_directory, cluster_map) = {
+                let inode_state_guard = self.inode_state_read_guard();
+                (
+                    inode_state_guard.parent(),
+                    inode_state_guard.dir_entry_stream(),
+                )
             };
-            let cluster_map = *self.dir_entry_stream.read();
             let is_root_directory = cluster_map.data_length.is_none();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
@@ -335,7 +308,7 @@ impl ExfatInode {
             };
             let slot_range = entry_view.slot_range();
             let child_ino = self
-                .entry_location_ino(slot_range.first_entry_index())
+                .entry_location_ino(cluster_map, slot_range.first_entry_index())
                 .map_err(Error::from)?;
             let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
                 .child_metadata(&boot_region)
@@ -344,12 +317,55 @@ impl ExfatInode {
                 return_errno!(Errno::EISDIR);
             }
             let cached_child_inode = fs.peek_cached_inode(child_ino);
-            let cached_child_inode_state_guard =
-                if let Some(cached_child_inode) = cached_child_inode.as_ref() {
-                    Some(cached_child_inode.inode_state.write())
-                } else {
-                    None
-                };
+            let mut guarded_inodes = vec![self];
+            if let Some(parent_directory) = parent_directory.as_ref() {
+                guarded_inodes.push(parent_directory.as_ref());
+            }
+            if let Some(cached_child_inode) = cached_child_inode.as_ref() {
+                guarded_inodes.push(cached_child_inode.as_ref());
+            }
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+            let guard_for_inode = |inode: &ExfatInode| {
+                directory_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(inode))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            };
+            let self_inode_state_guard = guard_for_inode(self)?;
+            let parent_inode_state_guard = match parent_directory.as_ref() {
+                Some(parent_directory) => Some(guard_for_inode(parent_directory.as_ref())?),
+                None => None,
+            };
+            let cached_child_inode_state_guard = match cached_child_inode.as_ref() {
+                Some(cached_child_inode) => Some(guard_for_inode(cached_child_inode.as_ref())?),
+                None => None,
+            };
+            let cluster_map = self_inode_state_guard.dir_entry_stream();
+            let is_root_directory = cluster_map.data_length.is_none();
+            let directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                &block_device,
+                &boot_region,
+                cluster_map,
+            )
+            .map_err(Error::from)?;
+            let Some(entry_view) = Self::locate_named_child_view(
+                &directory_bytes,
+                is_root_directory,
+                &upcase_table,
+                &name,
+                lookup_name_hash,
+            )
+            .map_err(Error::from)?
+            else {
+                return_errno!(Errno::ENOENT);
+            };
+            let slot_range = entry_view.slot_range();
+            let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
+                .child_metadata(&boot_region)
+                .map_err(Error::from)?;
+            if inode_type == InodeType::Dir {
+                return_errno!(Errno::EISDIR);
+            }
             let detached_regular_file_reclaim =
                 if let (Some(cached_child_inode), Some(cached_child_inode_state_guard)) = (
                     cached_child_inode.as_ref(),
@@ -396,8 +412,7 @@ impl ExfatInode {
             if let (Some(cached_child_inode), Some(cached_child_inode_state_guard)) = (
                 cached_child_inode.as_ref(),
                 cached_child_inode_state_guard.as_ref(),
-            )
-            {
+            ) {
                 Self::detach_namespace_removed_inode(
                     &fs,
                     child_ino,
@@ -447,32 +462,13 @@ impl ExfatInode {
         let name = Self::validate_name(name, &options)?;
         let lookup_name_hash = upcase_table.name_hash(&name);
         let rmdir_result = (|| {
-            let parent_directory = self.parent.read().upgrade();
-            let mut guarded_directories = vec![self];
-            if let Some(parent_directory) = parent_directory.as_ref() {
-                guarded_directories.push(parent_directory.as_ref());
-            }
-            let mut guarded_directory_inos = guarded_directories
-                .iter()
-                .map(|directory| directory.metadata.read().ino)
-                .collect::<Vec<_>>();
-            guarded_directory_inos.sort_unstable();
-            guarded_directory_inos.dedup();
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
-            let self_guard_index = guarded_directory_inos
-                .binary_search(&self.metadata.read().ino)
-                .map_err(|_| Error::new(Errno::EINVAL))?;
-            let self_inode_state_guard = &directory_guards[self_guard_index];
-            let parent_inode_state_guard = if let Some(parent_directory) = parent_directory.as_ref()
-            {
-                let parent_guard_index = guarded_directory_inos
-                    .binary_search(&parent_directory.metadata.read().ino)
-                    .map_err(|_| Error::new(Errno::EINVAL))?;
-                Some(&directory_guards[parent_guard_index])
-            } else {
-                None
+            let (parent_directory, cluster_map) = {
+                let inode_state_guard = self.inode_state_read_guard();
+                (
+                    inode_state_guard.parent(),
+                    inode_state_guard.dir_entry_stream(),
+                )
             };
-            let cluster_map = *self.dir_entry_stream.read();
             let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -511,14 +507,65 @@ impl ExfatInode {
                 no_fat_chain,
             )
             .map_err(Error::from)?;
-            Self::ensure_directory_entry_is_empty(&child_inode, &block_device, &boot_region)?;
+            let child_ino = child_inode.inode_state_read_guard().metadata().ino;
+            let mut guarded_inodes = vec![self, child_inode.as_ref()];
+            if let Some(parent_directory) = parent_directory.as_ref() {
+                guarded_inodes.push(parent_directory.as_ref());
+            }
+            let directory_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+            let guard_for_inode = |inode: &ExfatInode| {
+                directory_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(inode))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            };
+            let self_inode_state_guard = guard_for_inode(self)?;
+            let parent_inode_state_guard = match parent_directory.as_ref() {
+                Some(parent_directory) => Some(guard_for_inode(parent_directory.as_ref())?),
+                None => None,
+            };
+            let child_inode_state_guard = guard_for_inode(child_inode.as_ref())?;
+            let cluster_map = self_inode_state_guard.dir_entry_stream();
+            let directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                &block_device,
+                &boot_region,
+                cluster_map,
+            )
+            .map_err(Error::from)?;
+            let Some(entry_view) = Self::locate_named_child_view(
+                &directory_bytes,
+                cluster_map.data_length.is_none(),
+                &upcase_table,
+                &name,
+                lookup_name_hash,
+            )
+            .map_err(Error::from)?
+            else {
+                return_errno!(Errno::ENOENT);
+            };
+            let slot_range = entry_view.slot_range();
+            let (inode_type, _first_cluster, _data_length, _no_fat_chain) = entry_view
+                .child_metadata(&boot_region)
+                .map_err(Error::from)?;
+            if inode_type != InodeType::Dir {
+                return_errno!(Errno::ENOTDIR);
+            }
+            let child_cluster_map = child_inode_state_guard.dir_entry_stream();
+            Self::ensure_directory_snapshot_is_empty(
+                child_cluster_map,
+                &block_device,
+                &boot_region,
+            )?;
 
+            let Some(child_data_length) = child_cluster_map.data_length else {
+                return Err(Error::from(invalid_on_disk_layout()));
+            };
             let allocated_cluster_ranges = Self::allocated_cluster_ranges(
                 &block_device,
                 &boot_region,
-                first_cluster,
-                data_length,
-                no_fat_chain,
+                child_cluster_map.first_cluster,
+                child_data_length,
+                child_cluster_map.no_fat_chain,
             )
             .map_err(Error::from)?;
 
@@ -540,6 +587,13 @@ impl ExfatInode {
                 cluster_map,
             )
             .map_err(Error::from)?;
+            Self::detach_namespace_removed_inode(
+                &fs,
+                child_ino,
+                &child_inode,
+                child_inode_state_guard,
+                None,
+            )?;
             if !allocated_cluster_ranges.is_empty() {
                 let mount_state = mount_guard.mount_state_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
@@ -603,33 +657,19 @@ impl ExfatInode {
         let old_name_hash = upcase_table.name_hash(&old_name);
         let new_name_hash = upcase_table.name_hash(&new_name);
         let rename_result = (|| {
-            if self.metadata.read().ino == target_directory.metadata.read().ino {
-                let parent_directory = self.parent.read().upgrade();
-                let mut guarded_directories = vec![self];
-                if let Some(parent_directory) = parent_directory.as_ref() {
-                    guarded_directories.push(parent_directory.as_ref());
-                }
-                let mut guarded_directory_inos = guarded_directories
-                    .iter()
-                    .map(|directory| directory.metadata.read().ino)
-                    .collect::<Vec<_>>();
-                guarded_directory_inos.sort_unstable();
-                guarded_directory_inos.dedup();
-                let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
-                let self_guard_index = guarded_directory_inos
-                    .binary_search(&self.metadata.read().ino)
-                    .map_err(|_| Error::new(Errno::EINVAL))?;
-                let self_inode_state_guard = &directory_guards[self_guard_index];
-                let parent_inode_state_guard =
-                    if let Some(parent_directory) = parent_directory.as_ref() {
-                        let parent_guard_index = guarded_directory_inos
-                            .binary_search(&parent_directory.metadata.read().ino)
-                            .map_err(|_| Error::new(Errno::EINVAL))?;
-                        Some(&directory_guards[parent_guard_index])
-                    } else {
-                        None
-                    };
-                let cluster_map = *self.dir_entry_stream.read();
+            let (self_ino, source_parent_directory, target_directory_ino, target_parent_directory) = {
+                let self_snapshot = self.inode_state_read_guard();
+                let target_snapshot = target_directory.inode_state_read_guard();
+                (
+                    self_snapshot.metadata().ino,
+                    self_snapshot.parent(),
+                    target_snapshot.metadata().ino,
+                    target_snapshot.parent(),
+                )
+            };
+            if self_ino == target_directory_ino {
+                let parent_directory = source_parent_directory;
+                let cluster_map = self.directory_snapshot().map_err(Error::from)?.1;
                 let directory_bytes = Self::read_directory_bytes_for_cluster_map(
                     &block_device,
                     &boot_region,
@@ -687,7 +727,10 @@ impl ExfatInode {
                     let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                         target_view.child_metadata(&boot_region)?;
                     let target_ino = self
-                        .entry_location_ino(target_view.slot_range().first_entry_index())
+                        .entry_location_ino(
+                            cluster_map,
+                            target_view.slot_range().first_entry_index(),
+                        )
                         .map_err(Error::from)?;
                     if target_inode_type != InodeType::Dir
                         && fs.peek_cached_inode(target_ino).is_none()
@@ -715,12 +758,40 @@ impl ExfatInode {
                 .transpose()
                 .map_err(Error::from)?
                 .flatten();
+                let mut guarded_inodes = vec![self, source_child_inode.as_ref()];
+                if let Some(parent_directory) = parent_directory.as_ref() {
+                    guarded_inodes.push(parent_directory.as_ref());
+                }
+                if let Some(target_child_inode) = target_child_inode.as_ref() {
+                    guarded_inodes.push(target_child_inode.as_ref());
+                }
+                let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+                let guard_for_inode = |inode: &ExfatInode| {
+                    inode_guards
+                        .iter()
+                        .find(|guard| guard.guards_inode(inode))
+                        .ok_or_else(|| Error::new(Errno::EINVAL))
+                };
+                let self_inode_state_guard = guard_for_inode(self)?;
+                let parent_inode_state_guard = match parent_directory.as_ref() {
+                    Some(parent_directory) => Some(guard_for_inode(parent_directory.as_ref())?),
+                    None => None,
+                };
+                let source_child_inode_state_guard = guard_for_inode(source_child_inode.as_ref())?;
+                let target_child_inode = target_child_inode.as_ref();
+                let target_child_inode_state_guard = match target_child_inode {
+                    Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
+                    None => None,
+                };
                 let mount_state = mount_guard.mount_state_mut()?;
-                let cluster_map = *self.dir_entry_stream.read();
+                let cluster_map = self_inode_state_guard.dir_entry_stream();
                 let renamed = self.rename_within_directory(
                     cluster_map,
+                    self_inode_state_guard,
                     &source_child_inode,
-                    target_child_inode.as_ref(),
+                    source_child_inode_state_guard,
+                    target_child_inode,
+                    target_child_inode_state_guard,
                     mount_state,
                     &fs,
                     &block_device,
@@ -744,49 +815,7 @@ impl ExfatInode {
                 return Ok(());
             }
 
-            let source_parent_directory = self.parent.read().upgrade();
-            let target_parent_directory = target_directory.parent.read().upgrade();
-            let mut guarded_directories = vec![self, target_directory];
-            if let Some(source_parent_directory) = source_parent_directory.as_ref() {
-                guarded_directories.push(source_parent_directory.as_ref());
-            }
-            if let Some(target_parent_directory) = target_parent_directory.as_ref() {
-                guarded_directories.push(target_parent_directory.as_ref());
-            }
-            let mut guarded_directory_inos = guarded_directories
-                .iter()
-                .map(|directory| directory.metadata.read().ino)
-                .collect::<Vec<_>>();
-            guarded_directory_inos.sort_unstable();
-            guarded_directory_inos.dedup();
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
-            let source_guard_index = guarded_directory_inos
-                .binary_search(&self.metadata.read().ino)
-                .map_err(|_| Error::new(Errno::EINVAL))?;
-            let source_inode_state_guard = &directory_guards[source_guard_index];
-            let target_guard_index = guarded_directory_inos
-                .binary_search(&target_directory.metadata.read().ino)
-                .map_err(|_| Error::new(Errno::EINVAL))?;
-            let target_inode_state_guard = &directory_guards[target_guard_index];
-            let source_parent_inode_state_guard =
-                if let Some(source_parent_directory) = source_parent_directory.as_ref() {
-                    let parent_guard_index = guarded_directory_inos
-                        .binary_search(&source_parent_directory.metadata.read().ino)
-                        .map_err(|_| Error::new(Errno::EINVAL))?;
-                    Some(&directory_guards[parent_guard_index])
-                } else {
-                    None
-                };
-            let target_parent_inode_state_guard =
-                if let Some(target_parent_directory) = target_parent_directory.as_ref() {
-                    let parent_guard_index = guarded_directory_inos
-                        .binary_search(&target_parent_directory.metadata.read().ino)
-                        .map_err(|_| Error::new(Errno::EINVAL))?;
-                    Some(&directory_guards[parent_guard_index])
-                } else {
-                    None
-                };
-            let source_cluster_map = *self.dir_entry_stream.read();
+            let source_cluster_map = self.directory_snapshot().map_err(Error::from)?.1;
             let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -825,7 +854,10 @@ impl ExfatInode {
                 source_no_fat_chain,
             )
             .map_err(Error::from)?;
-            let target_cluster_map = *target_directory.dir_entry_stream.read();
+            let target_cluster_map = target_directory
+                .directory_snapshot()
+                .map_err(Error::from)?
+                .1;
             let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
                 &block_device,
                 &boot_region,
@@ -844,10 +876,12 @@ impl ExfatInode {
                 let (target_inode_type, first_cluster, data_length, no_fat_chain) =
                     target_view.child_metadata(&boot_region)?;
                 let target_ino = target_directory
-                    .entry_location_ino(target_view.slot_range().first_entry_index())
+                    .entry_location_ino(
+                        target_cluster_map,
+                        target_view.slot_range().first_entry_index(),
+                    )
                     .map_err(Error::from)?;
-                if target_inode_type != InodeType::Dir
-                    && fs.peek_cached_inode(target_ino).is_none()
+                if target_inode_type != InodeType::Dir && fs.peek_cached_inode(target_ino).is_none()
                 {
                     return Ok(None);
                 }
@@ -872,14 +906,54 @@ impl ExfatInode {
             .transpose()
             .map_err(Error::from)?
             .flatten();
+            let mut guarded_inodes = vec![self, target_directory, source_child_inode.as_ref()];
+            if let Some(source_parent_directory) = source_parent_directory.as_ref() {
+                guarded_inodes.push(source_parent_directory.as_ref());
+            }
+            if let Some(target_parent_directory) = target_parent_directory.as_ref() {
+                guarded_inodes.push(target_parent_directory.as_ref());
+            }
+            if let Some(target_child_inode) = target_child_inode.as_ref() {
+                guarded_inodes.push(target_child_inode.as_ref());
+            }
+            let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+            let guard_for_inode = |inode: &ExfatInode| {
+                inode_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(inode))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            };
+            let source_inode_state_guard = guard_for_inode(self)?;
+            let target_inode_state_guard = guard_for_inode(target_directory)?;
+            let source_parent_inode_state_guard = match source_parent_directory.as_ref() {
+                Some(source_parent_directory) => {
+                    Some(guard_for_inode(source_parent_directory.as_ref())?)
+                }
+                None => None,
+            };
+            let target_parent_inode_state_guard = match target_parent_directory.as_ref() {
+                Some(target_parent_directory) => {
+                    Some(guard_for_inode(target_parent_directory.as_ref())?)
+                }
+                None => None,
+            };
+            let source_child_inode_state_guard = guard_for_inode(source_child_inode.as_ref())?;
+            let target_child_inode = target_child_inode.as_ref();
+            let target_child_inode_state_guard = match target_child_inode {
+                Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
+                None => None,
+            };
             let mount_state = mount_guard.mount_state_mut()?;
-            let target_cluster_map = *target_directory.dir_entry_stream.read();
+            let target_cluster_map = target_inode_state_guard.dir_entry_stream();
             self.rename_across_directories(
                 source_cluster_map,
                 &source_child_inode,
+                source_child_inode_state_guard,
                 target_directory,
+                target_inode_state_guard,
                 target_cluster_map,
-                target_child_inode.as_ref(),
+                target_child_inode,
+                target_child_inode_state_guard,
                 mount_state,
                 &fs,
                 &block_device,
@@ -889,7 +963,6 @@ impl ExfatInode {
                 old_name_hash,
                 &new_name,
                 new_name_hash,
-                source_parent_inode_state_guard,
                 target_parent_inode_state_guard,
             )?;
             let timestamp = RealTimeCoarseClock::get().read_time();
@@ -922,8 +995,11 @@ impl ExfatInode {
     pub(super) fn rename_within_directory(
         &self,
         mut cluster_map: StreamExtensionDirEntry,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         source_child_inode: &Arc<Self>,
+        source_child_inode_state_guard: &InodeStateWriteGuard<'_>,
         target_child_inode: Option<&Arc<Self>>,
+        target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
@@ -967,25 +1043,18 @@ impl ExfatInode {
         let (source_inode_type, _, _, _) = current_source_view
             .child_metadata(boot_region)
             .map_err(Error::from)?;
-        let target_child_inode_state_guard =
-            target_child_inode.map(|target_child_inode| target_child_inode.inode_state.write());
-        let (
-            replaced_target_slot_range,
-            replaced_target_ranges,
-            detached_regular_file_reclaim,
-        ) = match Self::collect_replaced_target_cleanup(
+        let (replaced_target_slot_range, replaced_target_ranges, detached_regular_file_reclaim) =
+            match Self::collect_replaced_target_cleanup(
                 current_target_view,
                 target_child_inode,
-                target_child_inode_state_guard.as_ref(),
+                target_child_inode_state_guard,
                 source_inode_type,
                 block_device,
                 boot_region,
             )? {
-                Some((slot_range, ranges, detached_regular_file_reclaim)) => (
-                    Some(slot_range),
-                    ranges,
-                    detached_regular_file_reclaim,
-                ),
+                Some((slot_range, ranges, detached_regular_file_reclaim)) => {
+                    (Some(slot_range), ranges, detached_regular_file_reclaim)
+                }
                 None => (None, Vec::new(), None),
             };
         let reusable_slot_range = if current_source_slot_range.entry_count() >= required_entry_count
@@ -1005,6 +1074,7 @@ impl ExfatInode {
                 block_device,
                 boot_region,
                 parent_inode_state_guard,
+                self_inode_state_guard,
                 required_entry_count,
             )?;
         cluster_map = updated_cluster_map;
@@ -1043,23 +1113,23 @@ impl ExfatInode {
             replaced_target_slot_range,
             (final_slot_range != source_slot_range).then_some(source_slot_range),
         )?;
-        let old_source_ino = source_child_inode.metadata.read().ino;
+        let old_source_ino = source_child_inode_state_guard.metadata().ino;
         let new_source_ino = self
-            .entry_location_ino(final_slot_range.first_entry_index())
+            .entry_location_ino(cluster_map, final_slot_range.first_entry_index())
             .map_err(Error::from)?;
         let replaced_target_ino =
-            target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
-        *source_child_inode.parent.write() = self.weak_self();
-        source_child_inode.metadata.write().ino = new_source_ino;
-        if source_child_inode.metadata.read().type_ == InodeType::File {
+            target_child_inode_state_guard.map(|target_guard| target_guard.metadata().ino);
+        source_child_inode_state_guard.set_parent(self.weak_self());
+        source_child_inode_state_guard.with_metadata_mut(|metadata| metadata.ino = new_source_ino);
+        if source_child_inode_state_guard.metadata().type_ == InodeType::File {
             source_child_inode
                 .store_entry_set_location_hint(final_slot_range)
                 .map_err(Error::from)?;
         }
         if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
-            (target_child_inode, target_child_inode_state_guard.as_ref())
+            (target_child_inode, target_child_inode_state_guard)
         {
-            let detached_target_ino = target_child_inode.metadata.read().ino;
+            let detached_target_ino = target_child_inode_state_guard.metadata().ino;
             Self::detach_namespace_removed_inode(
                 fs,
                 detached_target_ino,
@@ -1082,9 +1152,12 @@ impl ExfatInode {
         &self,
         source_cluster_map: StreamExtensionDirEntry,
         source_child_inode: &Arc<Self>,
+        source_child_inode_state_guard: &InodeStateWriteGuard<'_>,
         target_directory: &ExfatInode,
+        target_inode_state_guard: &InodeStateWriteGuard<'_>,
         mut target_cluster_map: StreamExtensionDirEntry,
         target_child_inode: Option<&Arc<Self>>,
+        target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         mount_state: &mut MountedVolumeState,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
@@ -1094,7 +1167,6 @@ impl ExfatInode {
         old_name_hash: u16,
         new_name: &[u16],
         new_name_hash: u16,
-        source_parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         target_parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
     ) -> Result<()> {
         let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
@@ -1131,25 +1203,18 @@ impl ExfatInode {
             new_name_hash,
             None,
         )?;
-        let target_child_inode_state_guard =
-            target_child_inode.map(|target_child_inode| target_child_inode.inode_state.write());
-        let (
-            replaced_target_slot_range,
-            replaced_target_ranges,
-            detached_regular_file_reclaim,
-        ) = match Self::collect_replaced_target_cleanup(
+        let (replaced_target_slot_range, replaced_target_ranges, detached_regular_file_reclaim) =
+            match Self::collect_replaced_target_cleanup(
                 target_view,
                 target_child_inode,
-                target_child_inode_state_guard.as_ref(),
+                target_child_inode_state_guard,
                 source_inode_type,
                 block_device,
                 boot_region,
             )? {
-                Some((slot_range, ranges, detached_regular_file_reclaim)) => (
-                    Some(slot_range),
-                    ranges,
-                    detached_regular_file_reclaim,
-                ),
+                Some((slot_range, ranges, detached_regular_file_reclaim)) => {
+                    (Some(slot_range), ranges, detached_regular_file_reclaim)
+                }
                 None => (None, Vec::new(), None),
             };
         fs.publish_dirty_admission(mount_state)?;
@@ -1167,6 +1232,7 @@ impl ExfatInode {
             block_device,
             boot_region,
             target_parent_inode_state_guard,
+            target_inode_state_guard,
             required_entry_count,
         )?;
         target_cluster_map = updated_target_cluster_map;
@@ -1188,23 +1254,23 @@ impl ExfatInode {
             Some(source_slot_range),
             None,
         )?;
-        let old_source_ino = source_child_inode.metadata.read().ino;
+        let old_source_ino = source_child_inode_state_guard.metadata().ino;
         let new_source_ino = target_directory
-            .entry_location_ino(target_slot_range.first_entry_index())
+            .entry_location_ino(target_cluster_map, target_slot_range.first_entry_index())
             .map_err(Error::from)?;
         let replaced_target_ino =
-            target_child_inode.map(|target_child_inode| target_child_inode.metadata.read().ino);
-        *source_child_inode.parent.write() = target_directory.weak_self();
-        source_child_inode.metadata.write().ino = new_source_ino;
-        if source_child_inode.metadata.read().type_ == InodeType::File {
+            target_child_inode_state_guard.map(|target_guard| target_guard.metadata().ino);
+        source_child_inode_state_guard.set_parent(target_directory.weak_self());
+        source_child_inode_state_guard.with_metadata_mut(|metadata| metadata.ino = new_source_ino);
+        if source_child_inode_state_guard.metadata().type_ == InodeType::File {
             source_child_inode
                 .store_entry_set_location_hint(target_slot_range)
                 .map_err(Error::from)?;
         }
         if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
-            (target_child_inode, target_child_inode_state_guard.as_ref())
+            (target_child_inode, target_child_inode_state_guard)
         {
-            let detached_target_ino = target_child_inode.metadata.read().ino;
+            let detached_target_ino = target_child_inode_state_guard.metadata().ino;
             Self::detach_namespace_removed_inode(
                 fs,
                 detached_target_ino,
@@ -1301,6 +1367,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         required_entry_count: usize,
     ) -> Result<(StreamExtensionDirEntry, Vec<u8>, DirEntrySlotRange)> {
         loop {
@@ -1320,6 +1387,7 @@ impl ExfatInode {
                 block_device,
                 boot_region,
                 parent_inode_state_guard,
+                self_inode_state_guard,
             )?;
         }
     }
@@ -1334,6 +1402,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
     ) -> Result<StreamExtensionDirEntry> {
         let allocated_directory_cluster = ClusterAllocGuard::allocate(fs, mount_state, 1, None)?;
         let allocated_cluster = allocated_directory_cluster.single_cluster()?;
@@ -1352,6 +1421,7 @@ impl ExfatInode {
                 )
             })?;
             self.rewrite_validated_entry_set_with_guard(
+                self_inode_state_guard,
                 parent_inode_state_guard,
                 block_device,
                 boot_region,
@@ -1368,7 +1438,12 @@ impl ExfatInode {
                 },
             )?;
         }
-        self.commit_directory_cluster_map(updated_cluster_map, cluster_map, boot_region)?;
+        self.commit_directory_cluster_map(
+            self_inode_state_guard,
+            updated_cluster_map,
+            cluster_map,
+            boot_region,
+        )?;
         allocated_directory_cluster.commit();
         Ok(updated_cluster_map)
     }
@@ -1437,22 +1512,22 @@ impl ExfatInode {
 
     fn commit_directory_cluster_map(
         &self,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         updated_cluster_map: StreamExtensionDirEntry,
         previous_cluster_map: StreamExtensionDirEntry,
         boot_region: &BootRegion,
     ) -> Result<()> {
-        {
-            let mut current_cluster_map = self.dir_entry_stream.write();
-            if *current_cluster_map != previous_cluster_map {
-                return Err(invalid_on_disk_layout());
-            }
-            *current_cluster_map = updated_cluster_map;
+        if self_inode_state_guard.dir_entry_stream() != previous_cluster_map {
+            return Err(invalid_on_disk_layout());
         }
-        let mut metadata = self.metadata.write();
-        metadata.size = metadata
-            .size
-            .checked_add(boot_region.cluster_size)
-            .ok_or(invalid_on_disk_layout())?;
+        let _ = self_inode_state_guard.replace_dir_entry_stream(updated_cluster_map);
+        self_inode_state_guard.with_metadata_mut(|metadata| {
+            metadata.size = metadata
+                .size
+                .checked_add(boot_region.cluster_size)
+                .ok_or_else(invalid_on_disk_layout)?;
+            Ok::<(), Error>(())
+        })?;
         Ok(())
     }
 
@@ -1477,15 +1552,6 @@ impl ExfatInode {
                 }
             }
         }
-    }
-
-    pub(super) fn ensure_directory_entry_is_empty(
-        child_inode: &Arc<Self>,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-    ) -> Result<()> {
-        let (_owner_guard, cluster_map) = child_inode.directory_snapshot().map_err(Error::from)?;
-        Self::ensure_directory_snapshot_is_empty(cluster_map, block_device, boot_region)
     }
 
     fn ensure_directory_snapshot_is_empty(
@@ -1625,11 +1691,13 @@ impl ExfatInode {
         source_inode_type: InodeType,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-    ) -> Result<Option<(
-        DirEntrySlotRange,
-        Vec<ClusterRange>,
-        Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
-    )>> {
+    ) -> Result<
+        Option<(
+            DirEntrySlotRange,
+            Vec<ClusterRange>,
+            Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
+        )>,
+    > {
         let Some(target_view) = target_view else {
             return Ok(None);
         };
@@ -1644,7 +1712,7 @@ impl ExfatInode {
             return_errno!(Errno::EISDIR);
         }
         if target_inode_type == InodeType::Dir {
-            let (Some(child_inode), Some(child_inode_state_guard)) =
+            let (Some(_child_inode), Some(child_inode_state_guard)) =
                 (target_child_inode, target_child_inode_state_guard)
             else {
                 return Err(Error::from(invalid_on_disk_layout()));
@@ -1653,7 +1721,7 @@ impl ExfatInode {
             // caller-captured snapshot and avoid the wrapper-owned reentry path.
             let child_directory_snapshot = {
                 let _rename_owned_child_guard = child_inode_state_guard;
-                *child_inode.dir_entry_stream.read()
+                child_inode_state_guard.dir_entry_stream()
             };
             Self::ensure_directory_snapshot_is_empty(
                 child_directory_snapshot,
@@ -1665,8 +1733,10 @@ impl ExfatInode {
             if let (Some(child_inode), Some(child_inode_state_guard)) =
                 (target_child_inode, target_child_inode_state_guard)
             {
-                let detached_regular_file_reclaim =
-                    Self::capture_cached_regular_file_retirement(child_inode, child_inode_state_guard)?;
+                let detached_regular_file_reclaim = Self::capture_cached_regular_file_retirement(
+                    child_inode,
+                    child_inode_state_guard,
+                )?;
                 return Ok(Some((
                     target_slot_range,
                     Vec::new(),
@@ -1695,6 +1765,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         required_entry_count: usize,
     ) -> Result<(StreamExtensionDirEntry, Vec<u8>, DirEntrySlotRange, bool)> {
         if let Some(slot_range) = reusable_slot_range
@@ -1710,6 +1781,7 @@ impl ExfatInode {
                 block_device,
                 boot_region,
                 parent_inode_state_guard,
+                self_inode_state_guard,
                 required_entry_count,
             )
             .map_err(Error::from)?;
@@ -1798,14 +1870,15 @@ impl ExfatInode {
         fs: &Arc<ExfatFs>,
         child_ino: u64,
         child_inode: &Arc<Self>,
-        _child_inode_state_guard: &InodeStateWriteGuard<'_>,
+        child_inode_state_guard: &InodeStateWriteGuard<'_>,
         detached_regular_file_reclaim: Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
     ) -> Result<()> {
-        *child_inode.parent.write() = Weak::new();
+        child_inode_state_guard.set_parent(Weak::new());
         child_inode.clear_entry_set_location_hint();
-        child_inode.metadata.write().nr_hard_links = 0;
+        child_inode_state_guard.with_metadata_mut(|metadata| metadata.nr_hard_links = 0);
         if let Some((retired_generation, retired_ranges)) = detached_regular_file_reclaim {
-            child_inode.clear_detached_regular_file_publish_debt();
+            child_inode
+                .clear_detached_regular_file_publish_debt_with_guard(child_inode_state_guard);
             fs.remove_cached_inode(child_ino);
             fs.lazy_reclaim_clusters(retired_generation, retired_ranges)?;
         }

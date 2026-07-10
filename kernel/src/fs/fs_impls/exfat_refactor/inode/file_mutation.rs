@@ -17,7 +17,6 @@ use super::{
         invalid_operation_input, not_mounted,
     },
     ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
-    page_backend::PageCacheContext,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -33,18 +32,18 @@ use crate::{
 impl ExfatInode {
     pub(super) fn read_validated_entry_set(
         &self,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
+        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<(direntry::DirEntrySlotRange, Vec<u8>)> {
-        let parent = self.parent.read().upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-        })?;
-        let parent_cluster_map = *parent.dir_entry_stream.read();
-        let fallback_entry_index =
-            usize::try_from(self.metadata.read().ino as u32).map_err(|_| Error::new(Errno::EIO))?;
+        let parent_cluster_map = parent_inode_state_guard.dir_entry_stream();
+        let fallback_entry_index = usize::try_from(self_inode_state_guard.metadata().ino as u32)
+            .map_err(|_| Error::new(Errno::EIO))?;
 
         if let Some(hinted_slot_range) = self.entry_set_location_hint()? {
             match self.try_read_validated_entry_set_at(
+                self_inode_state_guard,
                 block_device,
                 boot_region,
                 parent_cluster_map,
@@ -78,6 +77,7 @@ impl ExfatInode {
             direntry::DirEntrySlotRange::new(fallback_entry_index, entry_count)?;
         let (validated_slot_range, entry_set_bytes) = self
             .try_read_validated_entry_set_at(
+                self_inode_state_guard,
                 block_device,
                 boot_region,
                 parent_cluster_map,
@@ -116,17 +116,17 @@ impl ExfatInode {
 
     fn try_read_validated_entry_set_at(
         &self,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map: StreamExtensionDirEntry,
         slot_range: direntry::DirEntrySlotRange,
     ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>)>> {
-        let current_cluster_map = *self.dir_entry_stream.read();
-        let expected_inode_type = self.metadata.read().type_;
+        let current_cluster_map = self_inode_state_guard.dir_entry_stream();
+        let expected_inode_type = self_inode_state_guard.metadata().type_;
         let allow_stale_regular_file_cluster_map = expected_inode_type == InodeType::File
-            && self
-                .dirty_state
-                .read()
+            && self_inode_state_guard
+                .dirty_state()
                 .has_deferred_regular_file_publish();
         let entry_set_bytes = Self::read_entry_set_bytes_for_cluster_map(
             block_device,
@@ -178,17 +178,20 @@ impl ExfatInode {
 
     pub(super) fn rewrite_validated_entry_set_with_guard(
         &self,
-        _parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
+        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
     ) -> Result<bool> {
-        let parent = self.parent.read().upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
-        })?;
-        let parent_cluster_map = *parent.dir_entry_stream.read();
-        let (slot_range, mut entry_set_bytes) =
-            self.read_validated_entry_set(block_device, boot_region)?;
+        let _self_guard = self_inode_state_guard;
+        let parent_cluster_map = parent_inode_state_guard.dir_entry_stream();
+        let (slot_range, mut entry_set_bytes) = self.read_validated_entry_set(
+            self_inode_state_guard,
+            parent_inode_state_guard,
+            block_device,
+            boot_region,
+        )?;
         let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
             direntry::ScannedDirEntry::File(entry_view) => entry_view,
             _ => return Err(Error::from(invalid_on_disk_layout())),
@@ -260,7 +263,7 @@ impl ExfatInode {
             }
 
             let write_result = (|| {
-                let inode_state_guard = self.inode_state.write();
+                let inode_state_guard = self.inode_state_write_guard();
                 let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
                 let cluster_map = cluster_map_generation.stream_extension();
                 let (data_length, valid_data_length) =
@@ -378,14 +381,14 @@ impl ExfatInode {
             return_errno!(Errno::EROFS);
         }
 
-        let inode_state_guard = self.inode_state.write();
+        let inode_state_guard = self.inode_state_write_guard();
         let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
         let cluster_map = cluster_map_generation.stream_extension();
         let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
         if new_size == data_length {
             return Ok(());
         }
-        let page_cache = self.page_cache_handle();
+        let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata());
         let timestamp = RealTimeCoarseClock::get().read_time();
         let resize_result = (|| {
             let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
@@ -533,15 +536,14 @@ impl ExfatInode {
                 valid_data_length: Some(valid_data_length.min(new_size)),
                 no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
             };
-            let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
-            let previous_page_cache_context = self.install_page_cache_context(
-                &inode_state_guard,
-                PageCacheContext {
-                    cluster_map: next_cluster_map_generation,
-                    data_length: new_size,
-                    valid_data_length: valid_data_length.min(new_size),
-                },
-            );
+            let next_cluster_map_generation =
+                self.cluster_map_for_write_guard(&inode_state_guard, next_cluster_map)?;
+            let page_cache_context = self.page_cache_context_for_mapping(
+                next_cluster_map_generation,
+                new_size,
+                valid_data_length.min(new_size),
+            )?;
+            let _ = self.install_page_cache_context(&inode_state_guard, page_cache_context);
             if let Some(page_cache) = page_cache {
                 page_cache.resize(new_size, data_length)?;
             }
@@ -566,13 +568,12 @@ impl ExfatInode {
             let allocated_sectors = retained_clusters
                 .checked_mul(boot_region.sectors_per_cluster)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            {
-                let mut metadata = self.metadata.write();
+            inode_state_guard.with_metadata_mut(|metadata| {
                 metadata.last_meta_change_at = timestamp;
                 metadata.last_modify_at = timestamp;
                 metadata.nr_sectors_allocated = allocated_sectors;
                 metadata.size = new_size;
-            }
+            });
             let retired_generation =
                 self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
             self.mark_content_dirty(&inode_state_guard);
@@ -688,8 +689,8 @@ impl ExfatInode {
                         cluster_map_generation
                             .mapped_cluster(boot_region, current_allocated_clusters - 1)?,
                     )
-                            .and_then(|last_cluster| last_cluster.checked_add(1))
-                            .filter(|cluster| boot_region.is_valid_cluster(*cluster))
+                    .and_then(|last_cluster| last_cluster.checked_add(1))
+                    .filter(|cluster| boot_region.is_valid_cluster(*cluster))
                 };
                 let allocation_guard = ClusterAllocGuard::allocate(
                     fs,
@@ -710,14 +711,15 @@ impl ExfatInode {
                 new_data_length,
                 allocated_ranges,
             )?;
-            let next_cluster_map_generation = self.cluster_map_for(next_cluster_map)?;
+            let next_cluster_map_generation =
+                self.cluster_map_for_write_guard(inode_state_guard, next_cluster_map)?;
             previous_page_cache_context = self.install_page_cache_context(
                 inode_state_guard,
-                PageCacheContext {
-                    cluster_map: next_cluster_map_generation.clone(),
-                    data_length: new_data_length,
-                    valid_data_length: current_valid_data_length,
-                },
+                self.page_cache_context_for_mapping(
+                    next_cluster_map_generation.clone(),
+                    new_data_length,
+                    current_valid_data_length,
+                )?,
             );
             apply_growth_fn(&next_cluster_map, zero_fill_range)?;
             let next_cluster_map = StreamExtensionDirEntry {
@@ -726,11 +728,11 @@ impl ExfatInode {
             };
             let _ = self.install_page_cache_context(
                 inode_state_guard,
-                PageCacheContext {
-                    cluster_map: next_cluster_map_generation,
-                    data_length: new_data_length,
-                    valid_data_length: new_valid_data_length,
-                },
+                self.page_cache_context_for_mapping(
+                    next_cluster_map_generation,
+                    new_data_length,
+                    new_valid_data_length,
+                )?,
             );
             if new_valid_data_length > new_data_length {
                 return_errno!(Errno::EINVAL);
@@ -755,13 +757,12 @@ impl ExfatInode {
             let allocated_sectors = allocated_clusters
                 .checked_mul(boot_region.sectors_per_cluster)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            {
-                let mut metadata = self.metadata.write();
+            inode_state_guard.with_metadata_mut(|metadata| {
                 metadata.nr_sectors_allocated = allocated_sectors;
                 metadata.last_meta_change_at = timestamp;
                 metadata.last_modify_at = timestamp;
                 metadata.size = new_data_length;
-            }
+            });
             let _ = self.replace_cluster_map(inode_state_guard, next_cluster_map)?;
             self.mark_content_dirty(&inode_state_guard);
             if let Some(cluster_alloc_guard) = cluster_alloc_guard {
@@ -770,7 +771,7 @@ impl ExfatInode {
             Ok(())
         })();
         if result.is_err() {
-            *self.page_cache_context.write() = previous_page_cache_context;
+            inode_state_guard.restore_page_cache_context(previous_page_cache_context);
             rollback_growth_fn();
         }
         result

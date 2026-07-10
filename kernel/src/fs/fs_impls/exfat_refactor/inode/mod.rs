@@ -27,7 +27,7 @@ pub(in crate::fs::fs_impls::exfat_refactor) use self::state::{
     ClusterMap, StreamExtensionDirEntry,
 };
 use self::{
-    state::{InodeDirtyState, InodeTimestampField},
+    state::{InodeState, InodeTimestampField},
     sync::InodeSyncScope,
 };
 use super::{
@@ -55,29 +55,23 @@ use crate::{
 };
 
 pub(super) struct ExfatInode {
-    inode_state: RwMutex<()>,
-    dirty_state: RwMutex<InodeDirtyState>,
-    dirty_file_retention: RwMutex<Option<Arc<Self>>>,
+    inode_state: RwMutex<InodeState>,
     extension: Extension,
     fs: Weak<ExfatFs>,
-    metadata: RwMutex<Metadata>,
-    parent: RwMutex<Weak<Self>>,
     entry_set_location_hint: AtomicU64,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
     page_cache_context: RwMutex<Option<page_backend::PageCacheContext>>,
-    cluster_map: RwMutex<Option<Arc<ClusterMap>>>,
-    dir_entry_stream: RwMutex<StreamExtensionDirEntry>,
 }
 
 impl ExfatInode {
     pub(super) fn is_detached_regular_file(&self) -> bool {
-        let metadata = self.metadata.read();
+        let inode_state_guard = self.inode_state_read_guard();
+        let metadata = inode_state_guard.metadata();
         if metadata.type_ != InodeType::File || metadata.nr_hard_links != 0 {
             return false;
         }
-        drop(metadata);
-        if self.parent.read().upgrade().is_some() {
+        if inode_state_guard.parent().is_some() {
             return false;
         }
         self.entry_set_location_hint.load(Ordering::Relaxed) == 0
@@ -88,8 +82,8 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<Vec<u8>> {
-        let _directory_guard = self.inode_state.read();
-        let cluster_map = *self.dir_entry_stream.read();
+        let directory_guard = self.inode_state_read_guard();
+        let cluster_map = directory_guard.dir_entry_stream();
         if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
@@ -103,8 +97,8 @@ impl ExfatInode {
         boot_region: &BootRegion,
         directory_bytes: &[u8],
     ) -> Result<()> {
-        let _directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-        let cluster_map = *self.dir_entry_stream.read();
+        let directory_guards = Self::directory_write_guards_by_ino(vec![self]);
+        let cluster_map = directory_guards[0].dir_entry_stream();
         if cluster_map.data_length.is_some() {
             return Err(invalid_operation_input());
         }
@@ -127,24 +121,25 @@ impl ExfatInode {
         parent: Weak<Self>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
-            inode_state: RwMutex::new(()),
-            dirty_state: RwMutex::new(InodeDirtyState::default()),
-            dirty_file_retention: RwMutex::new(None),
+            inode_state: RwMutex::new(InodeState {
+                dirty_state: Default::default(),
+                dirty_file_retention: None,
+                metadata,
+                parent,
+                cluster_map: None,
+                dir_entry_stream: StreamExtensionDirEntry {
+                    data_length,
+                    first_cluster,
+                    valid_data_length,
+                    no_fat_chain,
+                },
+            }),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
-            metadata: RwMutex::new(metadata),
-            parent: RwMutex::new(parent),
             entry_set_location_hint: AtomicU64::new(0),
             page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
             page_cache: Once::new(),
             page_cache_context: RwMutex::new(None),
-            cluster_map: RwMutex::new(None),
-            dir_entry_stream: RwMutex::new(StreamExtensionDirEntry {
-                data_length,
-                first_cluster,
-                valid_data_length,
-                no_fat_chain,
-            }),
         })
     }
 

@@ -127,7 +127,7 @@ pub(super) fn set_forced_shutdown(fs: &ExfatFs) -> Result<()> {
     let mut mount_state = fs.mount_state.write();
     let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
     mount_state.forced_shutdown = true;
-    fs.mount_runtime.write().forced_shutdown = true;
+    fs.publish_forced_shutdown_runtime();
     Ok(())
 }
 
