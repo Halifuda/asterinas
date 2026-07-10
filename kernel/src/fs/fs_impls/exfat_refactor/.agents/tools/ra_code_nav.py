@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import queue
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -24,6 +26,11 @@ from urllib.request import pathname2url
 DEFAULT_EXCLUDE_GLOBS = [
     "kernel/src/fs/fs_impls/exfat/**",
 ]
+DEFAULT_CONTAINER_NAME = "codex-asterinas-dev"
+DEFAULT_CONTAINER_REPO_DIR = "/root/asterinas"
+DEFAULT_CONTAINER_RUST_ANALYZER_RELATIVE_PATH = Path(
+    "kernel/src/fs/fs_impls/exfat_refactor/.agents/tmp/ra_code_nav/bin/rust-analyzer"
+)
 
 SYMBOL_KIND_NAMES = {
     1: "File",
@@ -113,6 +120,191 @@ def location_to_record(
 def print_jsonl(items: list[dict[str, Any]]) -> None:
     for item in items:
         print(json.dumps(item, ensure_ascii=False, sort_keys=True))
+
+
+def active_toolchain_channel(root: Path) -> str | None:
+    toolchain_file = root / "rust-toolchain.toml"
+    if not toolchain_file.exists():
+        return None
+    for line in toolchain_file.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("channel"):
+            _, _, value = stripped.partition("=")
+            return value.strip().strip('"')
+    return None
+
+
+def rustup_which(binary: str) -> Path | None:
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        return None
+    result = subprocess.run(
+        [rustup, "which", binary],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    candidate = Path(result.stdout.strip())
+    if not candidate.is_file():
+        return None
+    return candidate.resolve()
+
+
+def fallback_rust_analyzer(root: Path) -> Path | None:
+    channel = active_toolchain_channel(root)
+    toolchains_dir = Path.home() / ".rustup" / "toolchains"
+    if channel:
+        preferred = toolchains_dir / f"{channel}-x86_64-unknown-linux-gnu" / "bin" / "rust-analyzer"
+        if preferred.is_file():
+            return preferred.resolve()
+    matches = sorted(toolchains_dir.glob("*/bin/rust-analyzer"))
+    if not matches:
+        return None
+    return matches[-1].resolve()
+
+
+def resolve_local_rust_analyzer(root: Path, requested: str) -> str:
+    requested_path = Path(requested).expanduser()
+    if requested_path.is_absolute() or "/" in requested:
+        if not requested_path.is_file():
+            raise RuntimeError(f"rust-analyzer binary not found: {requested}")
+        return str(requested_path.resolve())
+
+    if requested == "rust-analyzer":
+        rustup_candidate = rustup_which("rust-analyzer")
+        if rustup_candidate is not None:
+            return str(rustup_candidate)
+        fallback = fallback_rust_analyzer(root)
+        if fallback is not None:
+            return str(fallback)
+        raise RuntimeError("unable to locate a real rust-analyzer binary")
+
+    binary_path = shutil.which(requested)
+    if binary_path is None:
+        raise RuntimeError(f"rust-analyzer binary not found in PATH: {requested}")
+    return binary_path
+
+
+def container_is_available(name: str) -> bool:
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    result = subprocess.run(
+        [docker, "exec", name, "true"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def should_run_in_container(args: argparse.Namespace, root: Path) -> bool:
+    if args.container_mode == "never":
+        return False
+    if Path("/.dockerenv").exists() or root.as_posix().startswith(args.container_repo_dir):
+        return False
+    if args.container_mode == "always":
+        return True
+    return container_is_available(args.container_name)
+
+
+def container_repo_path(host_path: Path, host_root: Path, container_root: str) -> str:
+    relative = host_path.resolve().relative_to(host_root.resolve())
+    return str(Path(container_root) / relative)
+
+
+def container_rust_analyzer_ld_library_path(host_binary: Path) -> str | None:
+    try:
+        toolchains_index = host_binary.parts.index("toolchains")
+    except ValueError:
+        return None
+    if toolchains_index + 1 >= len(host_binary.parts):
+        return None
+    toolchain_name = host_binary.parts[toolchains_index + 1]
+    return str(Path("/root/.rustup/toolchains") / toolchain_name / "lib")
+
+
+def ensure_container_rust_analyzer(
+    host_root: Path,
+    container_root: str,
+    requested: str,
+) -> tuple[str, str | None]:
+    host_binary = Path(resolve_local_rust_analyzer(host_root, requested))
+    container_binary_path = host_root / DEFAULT_CONTAINER_RUST_ANALYZER_RELATIVE_PATH
+    container_binary_path.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        not container_binary_path.exists()
+        or host_binary.stat().st_size != container_binary_path.stat().st_size
+        or int(host_binary.stat().st_mtime) != int(container_binary_path.stat().st_mtime)
+    ):
+        shutil.copy2(host_binary, container_binary_path)
+        container_binary_path.chmod(0o755)
+    return (
+        container_repo_path(container_binary_path, host_root, container_root),
+        container_rust_analyzer_ld_library_path(host_binary),
+    )
+
+
+def filtered_forward_args(raw_args: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    flags_with_values = {
+        "--container-mode",
+        "--container-name",
+        "--container-repo-dir",
+        "--root",
+        "--rust-analyzer",
+    }
+    for arg in raw_args:
+        if skip_next:
+            skip_next = False
+            continue
+        matched_flag = next(
+            (flag for flag in flags_with_values if arg == flag or arg.startswith(f"{flag}=")),
+            None,
+        )
+        if matched_flag is None:
+            stripped.append(arg)
+            continue
+        if "=" not in arg:
+            skip_next = True
+    return stripped
+
+
+def rerun_in_container(args: argparse.Namespace, root: Path) -> int:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError("docker is not available for container-backed ra_code_nav")
+
+    container_rust_analyzer, container_ld_library_path = ensure_container_rust_analyzer(
+        root,
+        args.container_repo_dir,
+        args.rust_analyzer,
+    )
+    container_script = container_repo_path(Path(__file__), root, args.container_repo_dir)
+    forwarded_args = [
+        "--container-mode=never",
+        f"--root={args.container_repo_dir}",
+        f"--rust-analyzer={container_rust_analyzer}",
+        *filtered_forward_args(sys.argv[1:]),
+    ]
+    shell_command = "cd {repo} && ".format(repo=shlex.quote(args.container_repo_dir))
+    if container_ld_library_path is not None:
+        shell_command += "export LD_LIBRARY_PATH={ld}:$LD_LIBRARY_PATH && ".format(
+            ld=shlex.quote(container_ld_library_path),
+        )
+    shell_command += "exec python3 {script} {args}".format(
+        repo=shlex.quote(args.container_repo_dir),
+        script=shlex.quote(container_script),
+        args=" ".join(shlex.quote(arg) for arg in forwarded_args),
+    )
+    result = subprocess.run(
+        [docker, "exec", "-i", args.container_name, "bash", "-lc", shell_command],
+        check=False,
+    )
+    return result.returncode
 
 
 class LspClient:
@@ -416,6 +608,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="rust-analyzer binary path.",
     )
     parser.add_argument(
+        "--container-mode",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Run the LSP helper inside the dev container when available. Default: auto.",
+    )
+    parser.add_argument(
+        "--container-name",
+        default=DEFAULT_CONTAINER_NAME,
+        help=f"Docker container name. Default: {DEFAULT_CONTAINER_NAME}.",
+    )
+    parser.add_argument(
+        "--container-repo-dir",
+        default=DEFAULT_CONTAINER_REPO_DIR,
+        help=f"Repository path inside the container. Default: {DEFAULT_CONTAINER_REPO_DIR}.",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
@@ -485,7 +693,10 @@ def main() -> int:
     if not args.include_legacy_exfat:
         args.exclude_glob = [*DEFAULT_EXCLUDE_GLOBS, *args.exclude_glob]
 
-    client = LspClient(args.rust_analyzer, root, args.timeout)
+    if should_run_in_container(args, root):
+        return rerun_in_container(args, root)
+
+    client = LspClient(resolve_local_rust_analyzer(root, args.rust_analyzer), root, args.timeout)
     try:
         client.initialize()
         if args.command == "symbols":
