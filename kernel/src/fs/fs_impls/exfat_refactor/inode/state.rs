@@ -22,10 +22,8 @@ use super::{
         device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
-        fs::{
-            ExfatFs, MountOptions, MountStateReadGuard, MountStateWriteGuard, MountedVolumeState,
-        },
-        invalid_on_disk_layout, invalid_operation_input, not_mounted,
+        fs::{ExfatFs, MountOptions, MountStateReadGuard, MountStateWriteGuard},
+        invalid_on_disk_layout, invalid_operation_input,
         upcase::UpcaseTable,
     },
     ExfatInode,
@@ -386,7 +384,7 @@ enum MountStateAccessGuard<'a> {
     Write(MountStateWriteGuard<'a>),
 }
 
-impl MountAccessGuard<'_> {
+impl<'a> MountAccessGuard<'a> {
     pub(super) fn block_device(&self) -> Arc<dyn BlockDevice> {
         self.fs.immutable_block_device()
     }
@@ -409,14 +407,14 @@ impl MountAccessGuard<'_> {
         }
     }
 
-    pub(super) fn mount_state_mut(&mut self) -> Result<&mut MountedVolumeState> {
+    pub(super) fn write_guard_mut(&mut self) -> Result<&mut MountStateWriteGuard<'a>> {
         let MountStateAccessGuard::Write(mount_state) = &mut self.mount_state else {
             return_errno_with_message!(
                 Errno::EINVAL,
                 "lookup mount access has no mutable mount state"
             );
         };
-        mount_state.state_guard.as_mut().ok_or_else(not_mounted)
+        Ok(mount_state)
     }
 
     pub(super) fn upcase_table(&self) -> Arc<UpcaseTable> {

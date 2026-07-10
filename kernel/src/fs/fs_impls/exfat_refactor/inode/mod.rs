@@ -33,7 +33,7 @@ use self::{
 use super::{
     boot::BootRegion,
     direntry::DirEntrySlotRange,
-    fs::{ExfatFs, MountedVolumeState},
+    fs::ExfatFs,
     invalid_on_disk_layout, invalid_operation_input,
     upcase::UpcaseTable,
 };

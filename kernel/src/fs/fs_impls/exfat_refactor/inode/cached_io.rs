@@ -93,7 +93,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_runtime = *fs.mount_runtime.read();
+        let mount_runtime = fs.mount_runtime_snapshot();
         if mount_runtime.forced_shutdown
             || mount_runtime.clear_to_zero
             || mount_runtime.media_failure
@@ -275,7 +275,7 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_runtime = *fs.mount_runtime.read();
+        let mount_runtime = fs.mount_runtime_snapshot();
         if mount_runtime.forced_shutdown
             || mount_runtime.clear_to_zero
             || mount_runtime.media_failure

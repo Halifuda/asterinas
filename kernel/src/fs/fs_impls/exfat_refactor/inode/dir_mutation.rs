@@ -16,10 +16,10 @@ use super::{
             MutableDirEntrySlotSpan, ScannedDirEntry,
         },
         fat::{ChainVisitControl, FatReader},
-        fs::ClusterAllocGuard,
+        fs::{ClusterAllocGuard, MountStateWriteGuard},
         invalid_on_disk_layout, invalid_operation_input,
     },
-    ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry, UpcaseTable,
+    ClusterMap, ExfatFs, ExfatInode, StreamExtensionDirEntry, UpcaseTable,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -107,7 +107,7 @@ impl ExfatInode {
                 return_errno!(Errno::EEXIST);
             }
 
-            let mount_state = mount_guard.mount_state_mut()?;
+            let mount_state = mount_guard.write_guard_mut()?;
             fs.publish_dirty_admission(mount_state)?;
             let now = RealTimeCoarseClock::get().read_time();
             let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
@@ -253,9 +253,8 @@ impl ExfatInode {
             Ok(child_inode)
         })();
         if create_result.is_err() {
-            if let Ok(mount_state) = mount_guard.mount_state_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
+            if let Ok(mount_state) = mount_guard.write_guard_mut() {
+                mount_state.mark_mount_dirty_after_failure();
             }
         }
         create_result
@@ -391,7 +390,7 @@ impl ExfatInode {
                 Vec::new()
             };
 
-            let mount_state = mount_guard.mount_state_mut()?;
+            let mount_state = mount_guard.write_guard_mut()?;
             fs.publish_dirty_admission(mount_state)?;
             let mut invalidated_directory_bytes = directory_bytes;
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
@@ -421,7 +420,7 @@ impl ExfatInode {
                     detached_regular_file_reclaim,
                 )?;
             } else if !allocated_cluster_ranges.is_empty() {
-                let mount_state = mount_guard.mount_state_mut()?;
+                let mount_state = mount_guard.write_guard_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
             }
             self.refresh_directory_metadata_after_namespace_mutation_with_guards(
@@ -434,9 +433,8 @@ impl ExfatInode {
             Ok(())
         })();
         if unlink_result.is_err() {
-            if let Ok(mount_state) = mount_guard.mount_state_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
+            if let Ok(mount_state) = mount_guard.write_guard_mut() {
+                mount_state.mark_mount_dirty_after_failure();
             }
         }
         unlink_result
@@ -569,7 +567,7 @@ impl ExfatInode {
             )
             .map_err(Error::from)?;
 
-            let mount_state = mount_guard.mount_state_mut()?;
+            let mount_state = mount_guard.write_guard_mut()?;
             fs.publish_dirty_admission(mount_state)?;
             let mut invalidated_directory_bytes = directory_bytes;
             let slot_range_bytes = direntry::slot_range_bytes(slot_range).map_err(Error::from)?;
@@ -595,7 +593,7 @@ impl ExfatInode {
                 None,
             )?;
             if !allocated_cluster_ranges.is_empty() {
-                let mount_state = mount_guard.mount_state_mut()?;
+                let mount_state = mount_guard.write_guard_mut()?;
                 let _ = fs.free_clusters(mount_state, &allocated_cluster_ranges);
             }
             self.refresh_directory_metadata_after_namespace_mutation_with_guards(
@@ -608,9 +606,8 @@ impl ExfatInode {
             Ok(())
         })();
         if rmdir_result.is_err() {
-            if let Ok(mount_state) = mount_guard.mount_state_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
+            if let Ok(mount_state) = mount_guard.write_guard_mut() {
+                mount_state.mark_mount_dirty_after_failure();
             }
         }
         rmdir_result
@@ -783,7 +780,7 @@ impl ExfatInode {
                     Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
                     None => None,
                 };
-                let mount_state = mount_guard.mount_state_mut()?;
+                let mount_state = mount_guard.write_guard_mut()?;
                 let cluster_map = self_inode_state_guard.dir_entry_stream();
                 let renamed = self.rename_within_directory(
                     cluster_map,
@@ -943,7 +940,7 @@ impl ExfatInode {
                 Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
                 None => None,
             };
-            let mount_state = mount_guard.mount_state_mut()?;
+            let mount_state = mount_guard.write_guard_mut()?;
             let target_cluster_map = target_inode_state_guard.dir_entry_stream();
             self.rename_across_directories(
                 source_cluster_map,
@@ -982,9 +979,8 @@ impl ExfatInode {
             )
         })();
         if rename_result.is_err() {
-            if let Ok(mount_state) = mount_guard.mount_state_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
+            if let Ok(mount_state) = mount_guard.write_guard_mut() {
+                mount_state.mark_mount_dirty_after_failure();
             }
         }
         rename_result
@@ -1000,7 +996,7 @@ impl ExfatInode {
         source_child_inode_state_guard: &InodeStateWriteGuard<'_>,
         target_child_inode: Option<&Arc<Self>>,
         target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1158,7 +1154,7 @@ impl ExfatInode {
         mut target_cluster_map: StreamExtensionDirEntry,
         target_child_inode: Option<&Arc<Self>>,
         target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1362,7 +1358,7 @@ impl ExfatInode {
     pub(super) fn reserve_directory_entry_slots(
         &self,
         mut cluster_map: StreamExtensionDirEntry,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1397,7 +1393,7 @@ impl ExfatInode {
     pub(super) fn grow_directory_cluster_map(
         &self,
         cluster_map: StreamExtensionDirEntry,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1760,7 +1756,7 @@ impl ExfatInode {
         cluster_map: StreamExtensionDirEntry,
         current_directory_bytes: Vec<u8>,
         reusable_slot_range: Option<DirEntrySlotRange>,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1848,7 +1844,7 @@ impl ExfatInode {
 
     fn cleanup_replaced_target_ranges(
         fs: &Arc<ExfatFs>,
-        mount_state: &mut MountedVolumeState,
+        mount_state: &mut MountStateWriteGuard<'_>,
         replaced_target_ranges: &[ClusterRange],
     ) {
         if replaced_target_ranges.is_empty() {

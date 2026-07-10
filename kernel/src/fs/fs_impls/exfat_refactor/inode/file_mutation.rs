@@ -13,11 +13,10 @@ use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 use super::{
     super::{
         bitmap::ClusterRange, boot::BootRegion, device_io, direntry, fat::FatReader,
-        fs::ClusterAllocGuard, inconsistent_bitmap_accounting, invalid_on_disk_layout,
-        invalid_operation_input, not_mounted,
+        fs::{ClusterAllocGuard, MountStateWriteGuard},
+        inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
     },
-    ClusterMap, ExfatFs, ExfatInode, MountedVolumeState, StreamExtensionDirEntry,
-    state::InodeStateWriteGuard,
+    ClusterMap, ExfatFs, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard,
 };
 use crate::{
     fs::{
@@ -288,13 +287,11 @@ impl ExfatInode {
                 let new_valid_data_length = valid_data_length.max(write_end);
                 let timestamp = RealTimeCoarseClock::get().read_time();
                 let write_result = (|| {
-                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-                    fs.publish_dirty_admission(mount_state)?;
-                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
+                    fs.publish_dirty_admission(&mut admission)?;
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
                         &fs,
-                        mount_state,
+                        &mut admission,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -341,10 +338,7 @@ impl ExfatInode {
                 Ok(())
             })();
             if write_result.is_err() {
-                if let Some(mount_state) = admission.state_guard.as_mut() {
-                    mount_state.volume_flags.volume_dirty = true;
-                    mount_state.dirty_bracket_opened_by_mount = false;
-                }
+                admission.mark_mount_dirty_after_failure();
             }
             write_result?;
         }
@@ -391,16 +385,14 @@ impl ExfatInode {
         let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata());
         let timestamp = RealTimeCoarseClock::get().read_time();
         let resize_result = (|| {
-            let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
-            fs.publish_dirty_admission(mount_state)?;
+            fs.publish_dirty_admission(&mut admission)?;
 
             if new_size > data_length {
                 let page_cache_result = if let Some(page_cache) = page_cache {
-                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
                         &fs,
-                        mount_state,
+                        &mut admission,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -426,11 +418,10 @@ impl ExfatInode {
                         || {},
                     )
                 } else {
-                    let mount_state = admission.state_guard.as_mut().ok_or_else(not_mounted)?;
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
                         &fs,
-                        mount_state,
+                        &mut admission,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -591,10 +582,7 @@ impl ExfatInode {
             Ok(())
         })();
         if resize_result.is_err() {
-            if let Some(mount_state) = admission.state_guard.as_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
-            }
+            admission.mark_mount_dirty_after_failure();
         }
         resize_result
     }
@@ -641,7 +629,7 @@ impl ExfatInode {
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
         fs: &Arc<ExfatFs>,
-        mount_state: &mut MountedVolumeState,
+        mount_state_guard: &mut MountStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map_generation: &Arc<ClusterMap>,
@@ -694,7 +682,7 @@ impl ExfatInode {
                 };
                 let allocation_guard = ClusterAllocGuard::allocate(
                     fs,
-                    mount_state,
+                    mount_state_guard,
                     additional_clusters,
                     preferred_start_cluster,
                 )?;

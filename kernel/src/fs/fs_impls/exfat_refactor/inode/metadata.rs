@@ -13,7 +13,7 @@ use super::{
     super::{
         boot::BootRegion,
         direntry::{self, FileEntrySetView, FileEntryTimestamp},
-        invalid_on_disk_layout, not_mounted,
+        invalid_on_disk_layout,
     },
     ExfatInode, InodeTimestampField,
     state::InodeStateWriteGuard,
@@ -163,11 +163,7 @@ impl ExfatInode {
             }
 
             let update_result = (|| {
-                let mount_state = mutation_mount_state
-                    .state_guard
-                    .as_mut()
-                    .ok_or_else(not_mounted)?;
-                fs.publish_dirty_admission(mount_state)?;
+                fs.publish_dirty_admission(&mut mutation_mount_state)?;
 
                 self.rewrite_inode_entry_set(
                     &block_device,
@@ -200,10 +196,7 @@ impl ExfatInode {
                 )
             })();
             if update_result.is_err() {
-                if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
-                    mount_state.volume_flags.volume_dirty = true;
-                    mount_state.dirty_bracket_opened_by_mount = false;
-                }
+                mutation_mount_state.mark_mount_dirty_after_failure();
             }
             let durable_updated = update_result?;
             if durable_updated {
@@ -246,11 +239,7 @@ impl ExfatInode {
             return Ok(());
         }
         let update_result = (|| {
-            let mount_state = mutation_mount_state
-                .state_guard
-                .as_mut()
-                .ok_or_else(not_mounted)?;
-            fs.publish_dirty_admission(mount_state)?;
+            fs.publish_dirty_admission(&mut mutation_mount_state)?;
 
             self.rewrite_inode_entry_set(
                 &block_device,
@@ -273,10 +262,7 @@ impl ExfatInode {
             )
         })();
         if update_result.is_err() {
-            if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
-            }
+            mutation_mount_state.mark_mount_dirty_after_failure();
         }
         let durable_updated = update_result?;
 
@@ -473,11 +459,7 @@ impl ExfatInode {
 
         let normalized_time = Cell::new(None);
         let rewrite_result = (|| {
-            let mount_state = mutation_mount_state
-                .state_guard
-                .as_mut()
-                .ok_or_else(not_mounted)?;
-            fs.publish_dirty_admission(mount_state)?;
+            fs.publish_dirty_admission(&mut mutation_mount_state)?;
 
             self.rewrite_inode_entry_set(
                 &block_device,
@@ -536,10 +518,7 @@ impl ExfatInode {
             )
         })();
         if rewrite_result.is_err() {
-            if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
-                mount_state.volume_flags.volume_dirty = true;
-                mount_state.dirty_bracket_opened_by_mount = false;
-            }
+            mutation_mount_state.mark_mount_dirty_after_failure();
         }
         if rewrite_result.is_ok_and(|updated| updated) {
             let inode_state_guard = self.inode_state_write_guard();

@@ -6,7 +6,7 @@ use alloc::{string::String, vec::Vec};
 
 use super::{
     direntry::DIRECTORY_ENTRY_SIZE, fs::ExfatFs, invalid_on_disk_layout, invalid_operation_input,
-    not_mounted, read_only_conflict,
+    read_only_conflict,
 };
 use crate::{
     fs::vfs::file_system::FsFlags, prelude::*, process::credentials::capabilities::CapSet,
@@ -52,12 +52,8 @@ pub(super) fn handle_volume_admin_request(
 pub(super) fn read_volume_label(fs: &ExfatFs) -> Result<Option<String>> {
     let block_device = fs.immutable_block_device();
     let boot_region = fs.immutable_boot_region();
-    let root_inode = fs
-        .root_inode
-        .read()
-        .as_ref()
-        .ok_or_else(not_mounted)?
-        .clone();
+    let mount_state = fs.mount_state_read_guard()?;
+    let root_inode = mount_state.root_inode()?;
     let directory_bytes = root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
     let label = decode_volume_label_entry(&directory_bytes)?;
     match label {
@@ -93,12 +89,7 @@ pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<
     {
         return Err(read_only_conflict());
     }
-    let root_inode = fs
-        .root_inode
-        .read()
-        .as_ref()
-        .ok_or_else(not_mounted)?
-        .clone();
+    let root_inode = mutation_mount_state.root_inode()?;
     let write_result = (|| {
         let mut directory_bytes =
             root_inode.read_root_directory_bytes(&block_device, &boot_region)?;
@@ -107,26 +98,21 @@ pub(super) fn write_volume_label(fs: &ExfatFs, label: Option<String>) -> Result<
         if directory_bytes == original_directory_bytes {
             return Ok(());
         }
-        let mount_state = mutation_mount_state
-            .state_guard
-            .as_mut()
-            .ok_or_else(not_mounted)?;
-        fs.publish_dirty_admission(mount_state)?;
+        fs.publish_dirty_admission(&mut mutation_mount_state)?;
         root_inode.rewrite_root_directory_bytes(&block_device, &boot_region, &directory_bytes)
     })();
     if write_result.is_err() {
-        if let Some(mount_state) = mutation_mount_state.state_guard.as_mut() {
-            mount_state.volume_flags.volume_dirty = true;
-            mount_state.dirty_bracket_opened_by_mount = false;
-        }
+        mutation_mount_state.mark_mount_dirty_after_failure();
     }
     write_result
 }
 
 pub(super) fn set_forced_shutdown(fs: &ExfatFs) -> Result<()> {
-    let mut mount_state = fs.mount_state.write();
-    let mount_state = mount_state.as_mut().ok_or_else(not_mounted)?;
-    mount_state.forced_shutdown = true;
+    let mut mount_state = fs.mount_state_write_guard()?;
+    mount_state.with_mount_state_mut(|mount_state| {
+        mount_state.forced_shutdown = true;
+        Ok(())
+    })?;
     fs.publish_forced_shutdown_runtime();
     Ok(())
 }
