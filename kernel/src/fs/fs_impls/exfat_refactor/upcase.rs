@@ -13,9 +13,6 @@ pub(super) const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
 
 #[derive(Clone)]
 pub(super) struct UpcaseTable {
-    checksum: u32,
-    data_length: u64,
-    first_cluster: u32,
     mapping: Vec<u16>,
 }
 
@@ -76,9 +73,6 @@ impl UpcaseTable {
             return Err(invalid_on_disk_layout());
         }
         Ok(Self {
-            checksum,
-            data_length: u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
-            first_cluster,
             mapping: Self::decode_mapping(&table_bytes)?,
         })
     }

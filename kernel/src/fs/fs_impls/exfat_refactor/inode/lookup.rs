@@ -118,13 +118,15 @@ impl ExfatInode {
         offset: usize,
         visitor: &mut dyn DirentVisitor,
     ) -> Result<usize> {
+        if self.type_() != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_guard = self.mount_access_read_guard(&fs)?;
-        let block_device = mount_guard.block_device();
-        let boot_region = mount_guard.boot_region();
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
         let (_owner_guard, cluster_map) = self.directory_snapshot()?;
         let directory_bytes =
             Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)?;
@@ -220,11 +222,11 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_guard = self.mount_access_read_guard(&fs)?;
-        let block_device = mount_guard.block_device();
-        let boot_region = mount_guard.boot_region();
-        let upcase_table = mount_guard.upcase_table();
-        let lookup_name = Self::validate_name(name, &mount_guard.options())?;
+        let mount_state = fs.mount_state_read_guard()?;
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
+        let upcase_table = mount_state.upcase_table.clone();
+        let lookup_name = Self::validate_name(name, &mount_state.options)?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         let child_inode = self.lookup_child_by_name(
             &fs,

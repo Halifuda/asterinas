@@ -2,7 +2,7 @@
 
 //! Defines the exFAT inode owner and forwards VFS trait methods to focused submodules.
 //!
-//! Method groups: root-directory byte APIs, inode construction, and VFS trait dispatch.
+//! Method groups: inode construction and VFS trait dispatch.
 
 mod cached_io;
 mod dir_mutation;
@@ -13,13 +13,11 @@ mod page_backend;
 mod state;
 mod sync;
 
-use alloc::{vec, vec::Vec};
 use core::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
-use aster_block::BlockDevice;
 use ostd::{mm::VmReader, sync::RwMutex};
 use spin::Once;
 
@@ -31,10 +29,9 @@ use self::{
     sync::InodeSyncScope,
 };
 use super::{
-    boot::BootRegion,
     direntry::DirEntrySlotRange,
     fs::ExfatFs,
-    invalid_on_disk_layout, invalid_operation_input,
+    invalid_on_disk_layout,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -75,40 +72,6 @@ impl ExfatInode {
             return false;
         }
         self.entry_set_location_hint.load(Ordering::Relaxed) == 0
-    }
-
-    pub(super) fn read_root_directory_bytes(
-        &self,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-    ) -> Result<Vec<u8>> {
-        let directory_guard = self.inode_state_read_guard();
-        let cluster_map = directory_guard.dir_entry_stream();
-        if cluster_map.data_length.is_some() {
-            return Err(invalid_operation_input());
-        }
-
-        Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
-    }
-
-    pub(super) fn rewrite_root_directory_bytes(
-        &self,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        directory_bytes: &[u8],
-    ) -> Result<()> {
-        let directory_guards = Self::directory_write_guards_by_ino(vec![self]);
-        let cluster_map = directory_guards[0].dir_entry_stream();
-        if cluster_map.data_length.is_some() {
-            return Err(invalid_operation_input());
-        }
-
-        Self::write_directory_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            directory_bytes,
-            cluster_map,
-        )
     }
 
     fn new(
@@ -275,19 +238,19 @@ impl Inode for ExfatInode {
     }
 
     fn metadata(&self) -> Metadata {
-        self.metadata_impl()
+        self.metadata_projection()
     }
 
     fn ino(&self) -> u64 {
-        self.ino_impl()
+        self.metadata_projection().ino
     }
 
     fn type_(&self) -> InodeType {
-        self.type_impl()
+        self.metadata_projection().type_
     }
 
     fn mode(&self) -> Result<InodeMode> {
-        self.mode_impl()
+        Ok(self.metadata_projection().mode)
     }
 
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
@@ -295,7 +258,7 @@ impl Inode for ExfatInode {
     }
 
     fn owner(&self) -> Result<Uid> {
-        self.owner_impl()
+        Ok(self.metadata_projection().uid)
     }
 
     fn set_owner(&self, uid: Uid) -> Result<()> {
@@ -303,7 +266,7 @@ impl Inode for ExfatInode {
     }
 
     fn group(&self) -> Result<Gid> {
-        self.group_impl()
+        Ok(self.metadata_projection().gid)
     }
 
     fn set_group(&self, gid: Gid) -> Result<()> {
@@ -311,7 +274,7 @@ impl Inode for ExfatInode {
     }
 
     fn atime(&self) -> Duration {
-        self.atime_impl()
+        self.metadata_projection().last_access_at
     }
 
     fn set_atime(&self, time: Duration) {
@@ -319,7 +282,7 @@ impl Inode for ExfatInode {
     }
 
     fn mtime(&self) -> Duration {
-        self.mtime_impl()
+        self.metadata_projection().last_modify_at
     }
 
     fn set_mtime(&self, time: Duration) {
@@ -327,7 +290,7 @@ impl Inode for ExfatInode {
     }
 
     fn ctime(&self) -> Duration {
-        self.ctime_impl()
+        self.metadata_projection().last_meta_change_at
     }
 
     fn set_ctime(&self, time: Duration) {

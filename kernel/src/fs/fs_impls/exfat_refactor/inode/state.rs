@@ -22,7 +22,7 @@ use super::{
         device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
-        fs::{ExfatFs, MountOptions, MountStateReadGuard, MountStateWriteGuard},
+        fs::{ExfatFs, MountOptions},
         invalid_on_disk_layout, invalid_operation_input,
         upcase::UpcaseTable,
     },
@@ -374,57 +374,6 @@ pub(super) enum InodeTimestampField {
     Modified,
 }
 
-pub(super) struct MountAccessGuard<'a> {
-    fs: &'a ExfatFs,
-    mount_state: MountStateAccessGuard<'a>,
-}
-
-enum MountStateAccessGuard<'a> {
-    Read(MountStateReadGuard<'a>),
-    Write(MountStateWriteGuard<'a>),
-}
-
-impl<'a> MountAccessGuard<'a> {
-    pub(super) fn block_device(&self) -> Arc<dyn BlockDevice> {
-        self.fs.immutable_block_device()
-    }
-
-    pub(super) fn boot_region(&self) -> BootRegion {
-        self.fs.immutable_boot_region()
-    }
-
-    pub(super) fn forced_shutdown(&self) -> bool {
-        match &self.mount_state {
-            MountStateAccessGuard::Read(mount_state) => mount_state.forced_shutdown,
-            MountStateAccessGuard::Write(mount_state) => mount_state.forced_shutdown,
-        }
-    }
-
-    pub(super) fn options(&self) -> MountOptions {
-        match &self.mount_state {
-            MountStateAccessGuard::Read(mount_state) => mount_state.options.clone(),
-            MountStateAccessGuard::Write(mount_state) => mount_state.options.clone(),
-        }
-    }
-
-    pub(super) fn write_guard_mut(&mut self) -> Result<&mut MountStateWriteGuard<'a>> {
-        let MountStateAccessGuard::Write(mount_state) = &mut self.mount_state else {
-            return_errno_with_message!(
-                Errno::EINVAL,
-                "lookup mount access has no mutable mount state"
-            );
-        };
-        Ok(mount_state)
-    }
-
-    pub(super) fn upcase_table(&self) -> Arc<UpcaseTable> {
-        match &self.mount_state {
-            MountStateAccessGuard::Read(mount_state) => mount_state.upcase_table.clone(),
-            MountStateAccessGuard::Write(mount_state) => mount_state.upcase_table.clone(),
-        }
-    }
-}
-
 impl ExfatInode {
     pub(super) fn inode_state_read_guard(&self) -> InodeStateReadGuard<'_> {
         InodeStateReadGuard::new(self, self.inode_state.read())
@@ -435,32 +384,6 @@ impl ExfatInode {
     }
 
     // Directory access
-
-    pub(super) fn mount_access_read_guard<'a>(
-        &self,
-        fs: &'a Arc<ExfatFs>,
-    ) -> Result<MountAccessGuard<'a>> {
-        if self.inode_state_read_guard().metadata().type_ != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-        Ok(MountAccessGuard {
-            fs: fs.as_ref(),
-            mount_state: MountStateAccessGuard::Read(fs.mount_state_read_guard()?),
-        })
-    }
-
-    pub(super) fn mount_access_write_guard<'a>(
-        &self,
-        fs: &'a Arc<ExfatFs>,
-    ) -> Result<MountAccessGuard<'a>> {
-        if self.inode_state_read_guard().metadata().type_ != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
-        Ok(MountAccessGuard {
-            fs: fs.as_ref(),
-            mount_state: MountStateAccessGuard::Write(fs.mount_state_write_guard()?),
-        })
-    }
 
     pub(super) fn directory_snapshot(
         &self,
@@ -556,7 +479,7 @@ impl ExfatInode {
         })
     }
 
-    pub(super) fn cluster_map_for_read_guard(
+    fn cluster_map_for_read_guard(
         &self,
         inode_state_guard: &InodeStateReadGuard<'_>,
         cluster_map: StreamExtensionDirEntry,

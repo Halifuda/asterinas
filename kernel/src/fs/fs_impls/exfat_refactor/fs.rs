@@ -15,8 +15,7 @@ use super::{
     fat::FatReader,
     inconsistent_bitmap_accounting,
     inode::{ClusterMap, ExfatInode},
-    invalid_mount_input, invalid_operation_input, not_mounted, read_only_conflict,
-    unsupported_remount_delta,
+    invalid_operation_input, not_mounted,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -29,6 +28,18 @@ use crate::{
 };
 
 const EXFAT_SUPER_MAGIC: u64 = 0x2011_BAB0;
+
+fn invalid_mount_input() -> Error {
+    Error::new(Errno::EINVAL)
+}
+
+fn read_only_conflict() -> Error {
+    Error::new(Errno::EROFS)
+}
+
+fn unsupported_remount_delta() -> Error {
+    Error::with_message(Errno::EINVAL, "unsupported exFAT remount delta")
+}
 
 pub(super) struct ExfatFs {
     block_device: Arc<dyn BlockDevice>,
@@ -328,24 +339,11 @@ impl ExfatFs {
         self.mount_runtime_projection.clone()
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn publish_mount_runtime(
-        &self,
-        mount_runtime: MountRuntimeState,
-    ) {
-        self.fs_state.write().mount_runtime = mount_runtime;
-        self.mount_runtime_projection.publish(mount_runtime);
-    }
-
-    pub(in crate::fs::fs_impls::exfat_refactor) fn publish_forced_shutdown_runtime(&self) {
-        let mut fs_state = self.fs_state.write();
-        fs_state.mount_runtime.forced_shutdown = true;
-        self.mount_runtime_projection.publish(fs_state.mount_runtime);
-    }
 }
 
 // ---- Mount guards ----
 impl ExfatFs {
-    pub(super) fn mount_state_read_guard(&self) -> Result<MountStateReadGuard<'_>> {
+    pub(super) fn mount_state_read_guard(&self) -> Result<MountStateReadGuard> {
         let fs_state = self.fs_state.read();
         let upcase_table = fs_state.upcase_table.as_ref().ok_or_else(not_mounted)?.clone();
         let (flags, options, forced_shutdown, dirty_bracket_opened_by_mount) = {
@@ -358,7 +356,6 @@ impl ExfatFs {
             )
         };
         Ok(MountStateReadGuard {
-            fs: self,
             flags,
             dirty_bracket_opened_by_mount,
             upcase_table,
@@ -370,19 +367,17 @@ impl ExfatFs {
     pub(super) fn mount_state_write_guard(&self) -> Result<MountStateWriteGuard<'_>> {
         let fs_state = self.fs_state.read();
         let upcase_table = fs_state.upcase_table.as_ref().ok_or_else(not_mounted)?.clone();
-        let (flags, options, forced_shutdown, dirty_bracket_opened_by_mount) = {
+        let (flags, options, forced_shutdown) = {
             let mount_state = fs_state.mount_state.as_ref().ok_or_else(not_mounted)?;
             (
                 mount_state.volume_flags,
                 mount_state.options.clone(),
                 mount_state.forced_shutdown,
-                mount_state.dirty_bracket_opened_by_mount,
             )
         };
         Ok(MountStateWriteGuard {
             fs: self,
             flags,
-            dirty_bracket_opened_by_mount,
             upcase_table,
             options,
             forced_shutdown,
@@ -396,8 +391,7 @@ impl ExfatFs {
         &self,
         mount_state_guard: &mut MountStateWriteGuard<'_>,
     ) -> Result<()> {
-        let current_flags = mount_state_guard
-            .with_mount_state(|mount_state| Ok(mount_state.volume_flags))?;
+        let current_flags = mount_state_guard.flags;
         if current_flags.volume_dirty {
             return Ok(());
         }
@@ -714,8 +708,7 @@ impl ExfatFs {
     }
 }
 
-pub(super) struct MountStateReadGuard<'a> {
-    fs: &'a ExfatFs,
+pub(super) struct MountStateReadGuard {
     pub(super) flags: VolumeFlags,
     pub(super) dirty_bracket_opened_by_mount: bool,
     pub(super) upcase_table: Arc<UpcaseTable>,
@@ -726,46 +719,14 @@ pub(super) struct MountStateReadGuard<'a> {
 pub(super) struct MountStateWriteGuard<'a> {
     fs: &'a ExfatFs,
     pub(super) flags: VolumeFlags,
-    pub(super) dirty_bracket_opened_by_mount: bool,
     pub(super) upcase_table: Arc<UpcaseTable>,
     pub(super) options: MountOptions,
     pub(super) forced_shutdown: bool,
 }
 
-impl MountStateReadGuard<'_> {
-    pub(super) fn root_inode(&self) -> Result<Arc<ExfatInode>> {
-        self.fs
-            .fs_state
-            .read()
-            .root_inode
-            .as_ref()
-            .cloned()
-            .ok_or_else(not_mounted)
-    }
-}
-
 impl MountStateWriteGuard<'_> {
     pub(super) fn mark_mount_dirty_after_failure(&mut self) {
         self.fs.mark_mount_dirty_after_failure();
-    }
-
-    pub(super) fn root_inode(&self) -> Result<Arc<ExfatInode>> {
-        self.fs
-            .fs_state
-            .read()
-            .root_inode
-            .as_ref()
-            .cloned()
-            .ok_or_else(not_mounted)
-    }
-
-    pub(super) fn with_mount_state<R>(
-        &self,
-        with_mount_state_fn: impl FnOnce(&MountedVolumeState) -> Result<R>,
-    ) -> Result<R> {
-        let fs_state = self.fs.fs_state.read();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(not_mounted)?;
-        with_mount_state_fn(mount_state)
     }
 
     pub(super) fn with_mount_state_mut<R>(
@@ -776,6 +737,7 @@ impl MountStateWriteGuard<'_> {
         let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
         with_mount_state_fn(mount_state)
     }
+
 }
 
 #[derive(Clone)]
@@ -811,10 +773,7 @@ impl MountRuntimeProjection {
         }
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn publish(
-        &self,
-        mount_runtime: MountRuntimeState,
-    ) {
+    fn publish(&self, mount_runtime: MountRuntimeState) {
         self.bits
             .store(Self::encode(mount_runtime), Ordering::Release);
     }
@@ -934,7 +893,7 @@ pub(crate) fn init() {
     }
 }
 
-pub(super) struct ExfatFsType;
+struct ExfatFsType;
 
 impl FsType for ExfatFsType {
     fn name(&self) -> &'static str {

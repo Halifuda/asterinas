@@ -36,42 +36,6 @@ impl ExfatInode {
     pub(super) fn metadata_projection(&self) -> Metadata {
         self.inode_state_read_guard().metadata()
     }
-
-    pub(super) fn metadata_impl(&self) -> Metadata {
-        self.metadata_projection()
-    }
-
-    pub(super) fn ino_impl(&self) -> u64 {
-        self.metadata_projection().ino
-    }
-
-    pub(super) fn type_impl(&self) -> InodeType {
-        self.metadata_projection().type_
-    }
-
-    pub(super) fn mode_impl(&self) -> Result<InodeMode> {
-        Ok(self.metadata_projection().mode)
-    }
-
-    pub(super) fn owner_impl(&self) -> Result<Uid> {
-        Ok(self.metadata_projection().uid)
-    }
-
-    pub(super) fn group_impl(&self) -> Result<Gid> {
-        Ok(self.metadata_projection().gid)
-    }
-
-    pub(super) fn atime_impl(&self) -> Duration {
-        self.metadata_projection().last_access_at
-    }
-
-    pub(super) fn mtime_impl(&self) -> Duration {
-        self.metadata_projection().last_modify_at
-    }
-
-    pub(super) fn ctime_impl(&self) -> Duration {
-        self.metadata_projection().last_meta_change_at
-    }
 }
 
 // ---- meta_write (refresh + setters) ----
@@ -389,7 +353,7 @@ impl ExfatInode {
 
     // Metadata mutation helpers
 
-    pub(super) fn reject_identity_change(
+    fn reject_identity_change(
         &self,
         matches_requested_fn: impl FnOnce(&Metadata) -> bool,
     ) -> Result<()> {
@@ -422,7 +386,7 @@ impl ExfatInode {
 
 // ---- entry_rewrite (timestamp + directory metadata refresh) ----
 impl ExfatInode {
-    pub(super) fn rewrite_timestamp(&self, field_kind: InodeTimestampField, time: Duration) {
+    fn rewrite_timestamp(&self, field_kind: InodeTimestampField, time: Duration) {
         let Some(fs) = self.fs.upgrade() else {
             return;
         };

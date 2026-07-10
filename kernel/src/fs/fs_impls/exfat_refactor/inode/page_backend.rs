@@ -48,10 +48,6 @@ impl ExfatFilePageBackend {
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not mounted"))
     }
 
-    pub(super) fn inode_weak(&self) -> Weak<ExfatInode> {
-        self.inode.clone()
-    }
-
     fn page_cache_context(
         &self,
     ) -> Result<(
@@ -258,7 +254,7 @@ impl ExfatInode {
     }
 
     pub(super) fn weak_self(&self) -> Weak<Self> {
-        self.page_backend.inode_weak()
+        self.page_backend.inode.clone()
     }
 
     pub(super) fn page_cache_handle(&self) -> Option<&PageCache> {

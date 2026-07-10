@@ -83,46 +83,6 @@ impl ExfatInode {
         Ok(current_cluster)
     }
 
-    pub(super) fn map_regular_file_logical_offset(
-        &self,
-        _block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        offset: usize,
-    ) -> Result<Option<usize>> {
-        let fs = self
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_runtime = fs.mount_runtime_snapshot();
-        if mount_runtime.forced_shutdown
-            || mount_runtime.clear_to_zero
-            || mount_runtime.media_failure
-        {
-            return_errno!(Errno::EIO);
-        }
-
-        let (cluster_map, data_length, valid_data_length) = self.cluster_map_snapshot()?;
-        if data_length == 0 || offset >= data_length || offset >= valid_data_length {
-            return Ok(None);
-        }
-
-        Self::validate_regular_file_mapping_shape(
-            boot_region,
-            &cluster_map.stream_extension(),
-            data_length,
-        )?;
-        let cluster_size = boot_region.cluster_size;
-        let cluster_index = offset / cluster_size;
-        let cluster = cluster_map.mapped_cluster(boot_region, cluster_index)?;
-        let cluster_start = boot_region
-            .cluster_offset(cluster)
-            .map_err(|_| Error::new(Errno::EINVAL))?;
-        cluster_start
-            .checked_add(offset % cluster_size)
-            .map(Some)
-            .ok_or_else(|| Error::new(Errno::EINVAL))
-    }
-
     pub(super) fn regular_file_page_bio_ranges(
         boot_region: &BootRegion,
         cluster_map: &ClusterMap,

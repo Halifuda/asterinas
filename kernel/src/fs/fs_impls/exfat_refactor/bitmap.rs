@@ -14,11 +14,15 @@ use super::{
     fat::{ChainVisitControl, FatChainStep, FatReader},
     inconsistent_bitmap_accounting,
     inode::ClusterMap,
-    invalid_on_disk_layout, invalid_operation_input, no_space,
+    invalid_on_disk_layout, invalid_operation_input,
 };
 use crate::prelude::*;
 
 pub(super) const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
+
+fn no_space() -> Error {
+    Error::new(Errno::ENOSPC)
+}
 
 pub(super) struct AllocationBitmap {
     pub(super) data_length: u64,
@@ -286,7 +290,7 @@ impl AllocationBitmap {
         Err(no_space())
     }
 
-    pub(super) fn validate_and_normalize_ranges(
+    fn validate_and_normalize_ranges(
         &self,
         boot_region: &BootRegion,
         cluster_ranges: &[ClusterRange],
