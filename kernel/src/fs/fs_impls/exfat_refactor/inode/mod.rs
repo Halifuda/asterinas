@@ -42,7 +42,7 @@ use crate::{
             file_system::FileSystem,
             inode::{
                 Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RevalidationPolicy,
-                SymbolicLink,
+                RenameMode, SymbolicLink,
             },
         },
     },
@@ -329,8 +329,22 @@ impl Inode for ExfatInode {
         self.lookup_impl(name)
     }
 
-    fn rename(&self, old_name: &str, target: &Arc<dyn Inode>, new_name: &str) -> Result<()> {
-        self.rename_impl(old_name, target, new_name)
+    fn rename(
+        &self,
+        old_name: &str,
+        target: &Arc<dyn Inode>,
+        new_name: &str,
+        mode: RenameMode,
+    ) -> Result<()> {
+        match mode {
+            RenameMode::Replace | RenameMode::NoReplace => {
+                self.rename_impl(old_name, target, new_name)
+            }
+            RenameMode::Exchange => return_errno_with_message!(
+                Errno::EINVAL,
+                "RENAME_EXCHANGE is not supported on exfat_refactor"
+            ),
+        }
     }
 
     fn read_link(&self) -> Result<SymbolicLink> {
