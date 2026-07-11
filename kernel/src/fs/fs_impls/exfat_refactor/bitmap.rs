@@ -20,10 +20,6 @@ use crate::prelude::*;
 
 pub(super) const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 
-fn no_space() -> Error {
-    Error::new(Errno::ENOSPC)
-}
-
 pub(super) struct AllocationBitmap {
     pub(super) data_length: u64,
     pub(super) first_cluster: u32,
@@ -287,7 +283,7 @@ impl AllocationBitmap {
         if requested_clusters_remaining == 0 {
             return Ok(ranges);
         }
-        Err(no_space())
+        Err(Error::new(Errno::ENOSPC))
     }
 
     fn validate_and_normalize_ranges(

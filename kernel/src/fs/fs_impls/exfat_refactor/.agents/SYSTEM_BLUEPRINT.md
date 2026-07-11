@@ -40,14 +40,53 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_checker_dispatch.md`
   - **Planned Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_checker.md`
   - **Scope**: Remove backend weak-owner traversal and supply narrow mapping/refusal plus separate immutable terminal callback capabilities without broadening `PageCacheContext`.
-- [ ] **Creator B: Global Lock Boundary And AllocGuard Conversion** (`pass_131_global_lock_boundary_and_allocguard_conversion_creator`)
-  - **Status**: Creator structurally accepted after two main-agent repair batches; synchronized Checker pending
+- [x] **Creator B: Global Lock Boundary And AllocGuard Conversion** (`pass_131_global_lock_boundary_and_allocguard_conversion_creator`)
+  - **Status**: Accepted through synchronized Checker; isolated `generic/001` terminal PASS on debug baseline `67efb6437`
   - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_creator_dispatch.md`
   - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_creator.md`
   - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260711-141422-cross_meso_vfs_to_bio_topology-pass_131_global_lock_boundary_and_allocguard_conversion_creator/summary.tsv`
   - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_checker_dispatch.md`
-  - **Planned Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_checker.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_checker.md`
+  - **Runtime Receipt**: `.agents/tmp/pass_131_global_lock_boundary_and_allocguard_conversion_checker_generic_001/execution-proof.txt`
   - **Scope**: Implement the accepted continuous `FsLock -> ordered InodeLock set -> AllocLock / AllocGuard -> PageCache/ReentryLock` boundary switch, remove snapshot/reacquisition wrappers, and convert all covered lower helpers to guard-through cores.
+- [x] **52-Case VFS-to-BIO Integration Checker** (`pass_132_vfs_to_bio_52_case_integration_checker`)
+  - **Status**: Accepted under user-authorized main-agent follow-up; all 52 rows now have terminal PASS evidence across preserved batch/suffix/isolated receipts
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_132_vfs_to_bio_52_case_integration_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_132_vfs_to_bio_52_case_integration_checker.md`
+  - **Runlist**: `test/initramfs/src/conformance/xfstests/agent_batch52-rerun-full.list` (`52` cases; `generic/192` excluded)
+  - **Timing Baseline**: `.agents/tmp/test-exfat-linux-run.txt` plus the completed pass121 batch receipt
+  - **Original Batch Result**: `generic/133` timed out at `190s`; `generic/707` timed out at `260s`; all other `50` rows completed through preserved suffixes.
+  - **Isolated Follow-Up**: `generic/133` PASS in `0s`; `generic/707` PASS in `339s` with doubled threshold. Receipts: `.agents/tmp/main_agent_generic_133_double_pass121_threshold/` and `.agents/tmp/main_agent_generic_707_double_pass121_threshold/`.
+  - **Decision**: Treat `generic/133` as batch-run variance and `generic/707` as a high-variance slow case, not a confirmed deterministic stall. Do not route production diagnosis without a fresh failure under the widened threshold.
+- [x] **Explicit Dead-Code Cleanup Before Stall Diagnosis** (`pass_133_explicit_dead_code_cleanup_creator`)
+  - **Status**: Accepted through synchronized compile-only Checker
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_133_explicit_dead_code_cleanup_creator_dispatch.md`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_133_explicit_dead_code_cleanup_creator.md`
+  - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_133_explicit_dead_code_cleanup_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_133_explicit_dead_code_cleanup_checker.md`
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260711-183759-cross_meso_vfs_to_bio_topology-pass_133_explicit_dead_code_cleanup_checker/summary.tsv`
+  - **Result**: Removed only `BootRegion::percent_in_use` and its initializer entry; no `dead_code` remains under `exfat_refactor`.
+  - **Scope**: Remove lint suppression and compiler-reported `dead_code` under `exfat_refactor` only; do not perform general cleanup or debug `generic/133` / `generic/707`.
+- [x] **Current Above-Owner Failure Recensus** (`pass_134_current_above_owner_fail_recensus_checker`)
+  - **Status**: Accepted evidence census; matrix updated
+  - **Dispatch**: `.agents/subagent-tasks/xfstests_linux_baseline_20260624/pass_134_current_above_owner_fail_recensus_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/xfstests_linux_baseline_20260624/pass_134_current_above_owner_fail_recensus_checker.md`
+  - **Receipt**: `.agents/tmp/pass_134_current_above_owner_fail_recensus_checker_batch_full/`
+  - **Scope**: Count current PASS/direct FAIL/testcase not-run/stall outcomes for the 28 actual above-owner-fail rows; exclude the 63 matrix gap rows.
+  - **Result**: `4 PASS` (`generic/120`, `generic/418`, `generic/450`, `generic/647`), `24` direct FAIL, `0` not-run, `0` stall; historical above-owner-to-PASS total is now `8`.
+- [x] **Final Full-Surface Code Cleanup Reviewer Audit** (`pass_135_final_code_cleanup_reviewer_audit`)
+  - **Status**: Reviewer artifact accepted after one same-agent artifact repair; bounded Creator cleanup required
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_135_final_code_cleanup_reviewer_audit_dispatch.md`
+  - **Reviewer Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_135_final_code_cleanup_reviewer_audit.md`
+  - **Scope**: Re-audit every surviving production entity, obsolete helper/wrapper/carrier and snapshot/projection seam, with explicit dispositions for the six `pass_125` families formerly deferred until hang repair; produce a bounded Creator-ready checklist without production edits or commands.
+  - **Accepted Result**: Four immediate Creator cleanup objectives plus one separate Designer-bounded entry-hint identity-validation item. Keep the hint as independent `AtomicU64`; do not move it into `InodeState`. Preserve `MountRuntimeProjection`, `PageCacheContext`, inode/allocation guards, and immutable `Arc<ClusterMap>` generations.
+- [ ] **Final Code Cleanup Creator** (`pass_136_final_code_cleanup_creator`)
+  - **Status**: Creator code-side accepted after main-agent review; synchronized Checker/runtime regression pending
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_136_final_code_cleanup_creator_dispatch.md`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_136_final_code_cleanup_creator.md`
+  - **Scope**: Five exact objectives: typed fragmented-page I/O mode/direct page ownership; exclusive rename cleanup outcome; one-use error-wrapper inlining; unused boot extraction deletion; unique hinted-slot identity validation while retaining lock-independent `AtomicU64` placement.
+  - **Required Creator Gate**: `.agents/tools/checker_run.sh cargo-check --component cross_meso_vfs_to_bio_topology --phase pass_136_final_code_cleanup_creator` must pass inside the project container before submission.
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260711-202446-cross_meso_vfs_to_bio_topology-pass_136_final_code_cleanup_creator/summary.tsv` (`cargo-check=0`)
 
 ## 2. Meso-Component Pipeline Index
 <!-- Tracks the high-level end-to-end lifecycle of each Meso-Component. 

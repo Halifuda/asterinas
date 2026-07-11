@@ -36,10 +36,6 @@ fn invalid_mount_input() -> Error {
     Error::new(Errno::EINVAL)
 }
 
-fn read_only_conflict() -> Error {
-    Error::new(Errno::EROFS)
-}
-
 fn unsupported_remount_delta() -> Error {
     Error::with_message(Errno::EINVAL, "unsupported exFAT remount delta")
 }
@@ -319,7 +315,7 @@ impl ExfatFs {
             return Err(unsupported_remount_delta());
         }
         if mount_state.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
-            return Err(read_only_conflict());
+            return Err(Error::new(Errno::EROFS));
         }
         if mount_state.options.iocharset != next_options.iocharset
             || mount_state.options.keep_last_dots != next_options.keep_last_dots

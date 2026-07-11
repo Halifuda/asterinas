@@ -42,24 +42,32 @@ impl ExfatInode {
             .map_err(|_| Error::new(Errno::EIO))?;
 
         if let Some(hinted_slot_range) = self.entry_set_location_hint()? {
-            match self.try_read_validated_entry_set_at(
-                self_inode_state_guard,
-                block_device,
-                boot_region,
+            let hinted_ino = self.entry_location_ino(
                 parent_cluster_map,
-                hinted_slot_range,
-            ) {
-                Ok(Some((validated_slot_range, entry_set_bytes))) => {
-                    self.store_entry_set_location_hint(validated_slot_range)?;
-                    return Ok((validated_slot_range, entry_set_bytes));
+                hinted_slot_range.first_entry_index(),
+            )?;
+            if hinted_ino != self_inode_state_guard.metadata().ino {
+                self.clear_entry_set_location_hint();
+            } else {
+                match self.try_read_validated_entry_set_at(
+                    self_inode_state_guard,
+                    block_device,
+                    boot_region,
+                    parent_cluster_map,
+                    hinted_slot_range,
+                ) {
+                    Ok(Some((validated_slot_range, entry_set_bytes))) => {
+                        self.store_entry_set_location_hint(validated_slot_range)?;
+                        return Ok((validated_slot_range, entry_set_bytes));
+                    }
+                    Ok(None) => {
+                        self.clear_entry_set_location_hint();
+                    }
+                    Err(error) if error.error() == Errno::EUCLEAN => {
+                        self.clear_entry_set_location_hint();
+                    }
+                    Err(error) => return Err(error),
                 }
-                Ok(None) => {
-                    self.clear_entry_set_location_hint();
-                }
-                Err(error) if error.error() == Errno::EUCLEAN => {
-                    self.clear_entry_set_location_hint();
-                }
-                Err(error) => return Err(error),
             }
         }
 

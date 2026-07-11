@@ -31,6 +31,18 @@ use crate::{
     time::clocks::RealTimeCoarseClock,
 };
 
+enum ReplacedTargetCleanup {
+    Immediate {
+        slot_range: DirEntrySlotRange,
+        ranges: Vec<ClusterRange>,
+    },
+    CachedGeneration {
+        slot_range: DirEntrySlotRange,
+        cluster_map: Arc<ClusterMap>,
+        ranges: Vec<ClusterRange>,
+    },
+}
+
 impl ExfatInode {
     // VFS entry points
 
@@ -1122,9 +1134,14 @@ impl ExfatInode {
                 boot_region,
                 allocation_guard,
             )? {
-                Some((slot_range, ranges, detached_regular_file_reclaim)) => {
-                    (Some(slot_range), ranges, detached_regular_file_reclaim)
+                Some(ReplacedTargetCleanup::Immediate { slot_range, ranges }) => {
+                    (Some(slot_range), ranges, None)
                 }
+                Some(ReplacedTargetCleanup::CachedGeneration {
+                    slot_range,
+                    cluster_map,
+                    ranges,
+                }) => (Some(slot_range), Vec::new(), Some((cluster_map, ranges))),
                 None => (None, Vec::new(), None),
             };
         let reusable_slot_range = if current_source_slot_range.entry_count() >= required_entry_count
@@ -1291,9 +1308,14 @@ impl ExfatInode {
                 boot_region,
                 allocation_guard,
             )? {
-                Some((slot_range, ranges, detached_regular_file_reclaim)) => {
-                    (Some(slot_range), ranges, detached_regular_file_reclaim)
+                Some(ReplacedTargetCleanup::Immediate { slot_range, ranges }) => {
+                    (Some(slot_range), ranges, None)
                 }
+                Some(ReplacedTargetCleanup::CachedGeneration {
+                    slot_range,
+                    cluster_map,
+                    ranges,
+                }) => (Some(slot_range), Vec::new(), Some((cluster_map, ranges))),
                 None => (None, Vec::new(), None),
             };
         fs.publish_dirty_admission(fs_state)?;
@@ -1791,13 +1813,7 @@ impl ExfatInode {
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         allocation_guard: &AllocGuard<'_>,
-    ) -> Result<
-        Option<(
-            DirEntrySlotRange,
-            Vec<ClusterRange>,
-            Option<(Arc<ClusterMap>, Vec<ClusterRange>)>,
-        )>,
-    > {
+    ) -> Result<Option<ReplacedTargetCleanup>> {
         let Some(target_view) = target_view else {
             return Ok(None);
         };
@@ -1838,11 +1854,11 @@ impl ExfatInode {
                     child_inode_state_guard,
                     allocation_guard,
                 )?;
-                return Ok(Some((
-                    target_slot_range,
-                    Vec::new(),
-                    Some(detached_regular_file_reclaim),
-                )));
+                return Ok(Some(ReplacedTargetCleanup::CachedGeneration {
+                    slot_range: target_slot_range,
+                    cluster_map: detached_regular_file_reclaim.0,
+                    ranges: detached_regular_file_reclaim.1,
+                }));
             }
         }
         let replaced_target_ranges = Self::allocated_cluster_ranges(
@@ -1853,7 +1869,10 @@ impl ExfatInode {
             no_fat_chain,
         )
         .map_err(Error::from)?;
-        Ok(Some((target_slot_range, replaced_target_ranges, None)))
+        Ok(Some(ReplacedTargetCleanup::Immediate {
+            slot_range: target_slot_range,
+            ranges: replaced_target_ranges,
+        }))
     }
 
     fn reserve_rename_destination_slot(

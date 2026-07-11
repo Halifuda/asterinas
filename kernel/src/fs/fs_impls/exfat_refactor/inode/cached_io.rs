@@ -171,8 +171,13 @@ impl ExfatInode {
         file_offset: usize,
         initialized_len: usize,
         io_batch: &mut IoBatch,
-        is_read: bool,
+        bio_type: BioType,
     ) -> Result<()> {
+        let bio_direction = match bio_type {
+            BioType::Read => BioDirection::FromDevice,
+            BioType::Write => BioDirection::ToDevice,
+            BioType::Flush => return_errno!(Errno::EINVAL),
+        };
         let page_ranges = match Self::regular_file_page_bio_ranges(
             boot_region,
             cluster_map,
@@ -182,26 +187,21 @@ impl ExfatInode {
         ) {
             Ok(page_ranges) if !page_ranges.is_empty() => page_ranges,
             Ok(_) => {
-                if !is_read {
+                if matches!(bio_type, BioType::Write) {
                     locked_page.clear_writing_back();
                 }
                 return_errno!(Errno::EINVAL);
             }
             Err(error) => {
-                if !is_read {
+                if matches!(bio_type, BioType::Write) {
                     locked_page.clear_writing_back();
                 }
                 return Err(error);
             }
         };
-        let bio_type = if is_read {
-            BioType::Read
-        } else {
-            BioType::Write
-        };
         let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
         let pending_bios = page_ranges.len();
-        let page_io = FragmentedPageIo::new(locked_page, pending_bios, is_read);
+        let page_io = FragmentedPageIo::new(locked_page, pending_bios, bio_type);
 
         for (range_index, (page_offset, disk_offset, len)) in page_ranges.into_iter().enumerate() {
             let page_end = page_offset
@@ -210,11 +210,7 @@ impl ExfatInode {
             let bio_segment = BioSegment::new_from_segment_slice(
                 page_segment.clone(),
                 page_offset..page_end,
-                match bio_type {
-                    BioType::Read => BioDirection::FromDevice,
-                    BioType::Write => BioDirection::ToDevice,
-                    BioType::Flush => return_errno!(Errno::EINVAL),
-                },
+                bio_direction,
             );
             let completion_io = page_io.clone();
             let complete_fn: BioCompleteFn =

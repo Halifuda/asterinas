@@ -7,7 +7,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use aster_block::{BlockDevice, bio::BioStatus};
+use aster_block::{
+    BlockDevice,
+    bio::{BioStatus, BioType},
+};
 use io_util::batch::IoBatch;
 use ostd::{mm::io::util::HasVmReaderWriter, sync::RwMutex};
 
@@ -65,19 +68,19 @@ impl ExfatFilePageBackend {
 }
 
 pub(super) struct FragmentedPageIo {
-    page: Option<LockedCachePage>,
+    page: LockedCachePage,
     pending: AtomicUsize,
     failed: AtomicBool,
-    is_read: bool,
+    bio_type: BioType,
 }
 
 impl FragmentedPageIo {
-    pub(super) fn new(page: LockedCachePage, pending: usize, is_read: bool) -> Arc<Self> {
+    pub(super) fn new(page: LockedCachePage, pending: usize, bio_type: BioType) -> Arc<Self> {
         Arc::new(Self {
-            page: Some(page),
+            page,
             pending: AtomicUsize::new(pending),
             failed: AtomicBool::new(false),
-            is_read,
+            bio_type,
         })
     }
 
@@ -101,18 +104,14 @@ impl FragmentedPageIo {
             return;
         }
 
-        let page = self
-            .page
-            .as_ref()
-            .expect("fragmented page completion must still own the locked page");
-        if self.is_read {
+        if matches!(self.bio_type, BioType::Read) {
             if !self.failed.load(Ordering::Acquire) {
-                page.set_up_to_date();
+                self.page.set_up_to_date();
             }
             return;
         }
 
-        page.clear_writing_back();
+        self.page.clear_writing_back();
         if self.failed.load(Ordering::Acquire) {
             ostd::error!("exFAT writeback failed for a fragmented cached page; data may be lost");
         }
@@ -162,7 +161,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             file_offset,
             initialized_sector_len,
             io_batch,
-            true,
+            BioType::Read,
         )
     }
 
@@ -209,7 +208,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             file_offset,
             initialized_sector_len,
             io_batch,
-            false,
+            BioType::Write,
         )
     }
 }

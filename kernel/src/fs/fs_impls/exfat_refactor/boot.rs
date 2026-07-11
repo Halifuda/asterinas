@@ -28,7 +28,6 @@ pub(super) struct BootRegion {
     pub(super) cluster_size: usize,
     pub(super) fat_length_sectors: u32,
     pub(super) fat_offset_sectors: u32,
-    pub(super) percent_in_use: u8,
     pub(super) root_dir_cluster: u32,
     pub(super) sector_size: usize,
     pub(super) sectors_per_cluster: usize,
@@ -131,7 +130,6 @@ impl BootRegion {
             sector_header[103],
         ]);
         let number_of_fats = sector_header[110];
-        let percent_in_use = sector_header[112];
 
         if number_of_fats != 1
             || fat_offset_sectors == 0
@@ -147,7 +145,6 @@ impl BootRegion {
             cluster_size,
             fat_length_sectors,
             fat_offset_sectors,
-            percent_in_use,
             root_dir_cluster,
             sector_size,
             sectors_per_cluster,
