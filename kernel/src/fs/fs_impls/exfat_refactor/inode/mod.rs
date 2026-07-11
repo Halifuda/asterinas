@@ -11,7 +11,7 @@ mod lookup;
 mod metadata;
 mod page_backend;
 mod state;
-mod sync;
+pub(super) mod sync;
 
 use core::{
     sync::atomic::{AtomicU64, Ordering},
@@ -58,22 +58,10 @@ pub(super) struct ExfatInode {
     entry_set_location_hint: AtomicU64,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
-    page_cache_context: RwMutex<Option<page_backend::PageCacheContext>>,
+    weak_self: Weak<ExfatInode>,
 }
 
 impl ExfatInode {
-    pub(super) fn is_detached_regular_file(&self) -> bool {
-        let inode_state_guard = self.inode_state_read_guard();
-        let metadata = inode_state_guard.metadata();
-        if metadata.type_ != InodeType::File || metadata.nr_hard_links != 0 {
-            return false;
-        }
-        if inode_state_guard.parent().is_some() {
-            return false;
-        }
-        self.entry_set_location_hint.load(Ordering::Relaxed) == 0
-    }
-
     fn new(
         fs: &Arc<ExfatFs>,
         metadata: Metadata,
@@ -100,9 +88,12 @@ impl ExfatInode {
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
             entry_set_location_hint: AtomicU64::new(0),
-            page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(weak_self.clone())),
+            page_backend: Arc::new(page_backend::ExfatFilePageBackend::new(
+                fs.immutable_block_device(),
+                fs.immutable_boot_region(),
+            )),
             page_cache: Once::new(),
-            page_cache_context: RwMutex::new(None),
+            weak_self: weak_self.clone(),
         })
     }
 
@@ -115,9 +106,12 @@ impl ExfatInode {
             fs.container_device_id(),
         );
         metadata.size = cluster_size;
-        fs.get_or_create_cached_inode(root_ino, || {
-            Self::new(fs, metadata, root_cluster, None, None, false, Weak::new())
-        })
+        let root_inode = Self::new(fs, metadata, root_cluster, None, None, false, Weak::new());
+        fs.fs_state
+            .write()
+            .inode_cache
+            .insert(root_ino, Arc::downgrade(&root_inode));
+        root_inode
     }
 
     fn new_child(
@@ -132,8 +126,7 @@ impl ExfatInode {
         valid_data_length: usize,
         no_fat_chain: bool,
     ) -> Arc<Self> {
-        fs.get_or_create_cached_inode(ino, || {
-            let mut metadata = match inode_type {
+        let mut metadata = match inode_type {
                 InodeType::Dir => Metadata::new_dir(
                     ino,
                     mkmod!(u+rwx, g+rx, o+rx),
@@ -147,17 +140,16 @@ impl ExfatInode {
                     fs.container_device_id(),
                 ),
             };
-            metadata.size = size;
-            Self::new(
-                fs,
-                metadata,
-                first_cluster,
-                Some(data_length),
-                Some(valid_data_length),
-                no_fat_chain,
-                parent,
-            )
-        })
+        metadata.size = size;
+        Self::new(
+            fs,
+            metadata,
+            first_cluster,
+            Some(data_length),
+            Some(valid_data_length),
+            no_fat_chain,
+            parent,
+        )
     }
 
     pub(super) fn entry_set_location_hint(&self) -> Result<Option<DirEntrySlotRange>> {
@@ -202,6 +194,10 @@ impl ExfatInode {
     pub(super) fn clear_entry_set_location_hint(&self) {
         self.entry_set_location_hint.store(0, Ordering::Relaxed);
     }
+
+    pub(super) fn stable_lock_identity(&self) -> usize {
+        core::ptr::from_ref(self).addr()
+    }
 }
 
 impl FileOps for ExfatInode {
@@ -230,7 +226,7 @@ impl FileOps for ExfatInode {
 
 impl Inode for ExfatInode {
     fn size(&self) -> usize {
-        self.metadata_projection().size
+        self.inode_state_read_guard().metadata().size
     }
 
     fn resize(&self, new_size: usize) -> Result<()> {
@@ -238,19 +234,19 @@ impl Inode for ExfatInode {
     }
 
     fn metadata(&self) -> Metadata {
-        self.metadata_projection()
+        self.inode_state_read_guard().metadata()
     }
 
     fn ino(&self) -> u64 {
-        self.metadata_projection().ino
+        self.inode_state_read_guard().metadata().ino
     }
 
     fn type_(&self) -> InodeType {
-        self.metadata_projection().type_
+        self.inode_state_read_guard().metadata().type_
     }
 
     fn mode(&self) -> Result<InodeMode> {
-        Ok(self.metadata_projection().mode)
+        Ok(self.inode_state_read_guard().metadata().mode)
     }
 
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
@@ -258,7 +254,7 @@ impl Inode for ExfatInode {
     }
 
     fn owner(&self) -> Result<Uid> {
-        Ok(self.metadata_projection().uid)
+        Ok(self.inode_state_read_guard().metadata().uid)
     }
 
     fn set_owner(&self, uid: Uid) -> Result<()> {
@@ -266,7 +262,7 @@ impl Inode for ExfatInode {
     }
 
     fn group(&self) -> Result<Gid> {
-        Ok(self.metadata_projection().gid)
+        Ok(self.inode_state_read_guard().metadata().gid)
     }
 
     fn set_group(&self, gid: Gid) -> Result<()> {
@@ -274,7 +270,7 @@ impl Inode for ExfatInode {
     }
 
     fn atime(&self) -> Duration {
-        self.metadata_projection().last_access_at
+        self.inode_state_read_guard().metadata().last_access_at
     }
 
     fn set_atime(&self, time: Duration) {
@@ -282,7 +278,7 @@ impl Inode for ExfatInode {
     }
 
     fn mtime(&self) -> Duration {
-        self.metadata_projection().last_modify_at
+        self.inode_state_read_guard().metadata().last_modify_at
     }
 
     fn set_mtime(&self, time: Duration) {
@@ -290,7 +286,7 @@ impl Inode for ExfatInode {
     }
 
     fn ctime(&self) -> Duration {
-        self.metadata_projection().last_meta_change_at
+        self.inode_state_read_guard().metadata().last_meta_change_at
     }
 
     fn set_ctime(&self, time: Duration) {
@@ -352,23 +348,11 @@ impl Inode for ExfatInode {
     }
 
     fn sync_all(&self) -> Result<()> {
-        match self.type_() {
-            InodeType::File => self.sync_regular_file(InodeSyncScope::All),
-            // exFAT rewrites directory metadata through the parent entry during mutation, so
-            // directories do not retain a separate deferred writeback path for `sync_all()`.
-            InodeType::Dir => Ok(()),
-            _ => Ok(()),
-        }
+        self.sync_regular_file(InodeSyncScope::All)
     }
 
     fn sync_data(&self) -> Result<()> {
-        match self.type_() {
-            InodeType::File => self.sync_regular_file(InodeSyncScope::Data),
-            // `sync_data()` matches `sync_all()` for directories because namespace mutations
-            // already rewrite the owning parent entry eagerly.
-            InodeType::Dir => Ok(()),
-            _ => Ok(()),
-        }
+        self.sync_regular_file(InodeSyncScope::Data)
     }
 
     fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {

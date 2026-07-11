@@ -23,12 +23,9 @@ use super::{
     page_backend::FragmentedPageIo,
 };
 use crate::{
-    fs::{
-        file::{InodeType, StatusFlags},
-        vfs::inode::Inode,
-    },
+    fs::file::{InodeType, StatusFlags},
     prelude::*,
-    vm::page_cache::LockedCachePage,
+    vm::page_cache::{CachePageExt, LockedCachePage},
 };
 
 impl ExfatInode {
@@ -176,22 +173,37 @@ impl ExfatInode {
         io_batch: &mut IoBatch,
         is_read: bool,
     ) -> Result<()> {
-        let page_ranges = Self::regular_file_page_bio_ranges(
+        let page_ranges = match Self::regular_file_page_bio_ranges(
             boot_region,
             cluster_map,
             data_length,
             file_offset,
             initialized_len,
-        )?;
+        ) {
+            Ok(page_ranges) if !page_ranges.is_empty() => page_ranges,
+            Ok(_) => {
+                if !is_read {
+                    locked_page.clear_writing_back();
+                }
+                return_errno!(Errno::EINVAL);
+            }
+            Err(error) => {
+                if !is_read {
+                    locked_page.clear_writing_back();
+                }
+                return Err(error);
+            }
+        };
         let bio_type = if is_read {
             BioType::Read
         } else {
             BioType::Write
         };
         let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
-        let page_io = FragmentedPageIo::new(locked_page, page_ranges.len(), is_read);
+        let pending_bios = page_ranges.len();
+        let page_io = FragmentedPageIo::new(locked_page, pending_bios, is_read);
 
-        for (page_offset, disk_offset, len) in page_ranges {
+        for (range_index, (page_offset, disk_offset, len)) in page_ranges.into_iter().enumerate() {
             let page_end = page_offset
                 .checked_add(len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
@@ -204,16 +216,22 @@ impl ExfatInode {
                     BioType::Flush => return_errno!(Errno::EINVAL),
                 },
             );
-            let page_io = page_io.clone();
-            let complete_fn: BioCompleteFn = Box::new(move |status| page_io.complete(status));
+            let completion_io = page_io.clone();
+            let complete_fn: BioCompleteFn =
+                Box::new(move |status| completion_io.complete(status));
             let bio = Bio::new(
                 bio_type,
                 Sid::from_offset(disk_offset),
                 vec![bio_segment],
                 Some(complete_fn),
             );
-            bio.submit(block_device.as_ref(), io_batch)
-                .map_err(Error::from)?;
+            if let Err(error) = bio.submit(block_device.as_ref(), io_batch) {
+                let unsubmitted_bios = pending_bios
+                    .checked_sub(range_index)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                page_io.fail_unsubmitted(unsubmitted_bios);
+                return Err(Error::from(error));
+            }
         }
 
         Ok(())
@@ -225,30 +243,33 @@ impl ExfatInode {
         writer: &mut VmWriter,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
-        match self.type_() {
-            InodeType::Dir => return_errno!(Errno::EISDIR),
-            InodeType::File => {}
-            _ => return_errno!(Errno::EOPNOTSUPP),
-        }
-
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_runtime = fs.mount_runtime_snapshot();
-        if mount_runtime.forced_shutdown
-            || mount_runtime.clear_to_zero
-            || mount_runtime.media_failure
+        let fs_state = fs.fs_state.read();
+        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        if mount_state.forced_shutdown
+            || mount_state.volume_flags.clear_to_zero
+            || mount_state.volume_flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
+        let inode_state_guard = self.inode_state_read_guard();
+        match inode_state_guard.metadata().type_ {
+            InodeType::Dir => return_errno!(Errno::EISDIR),
+            InodeType::File => {}
+            _ => return_errno!(Errno::EOPNOTSUPP),
+        }
+        let allocation_guard = fs.allocation_read_guard()?;
 
-        let (_cluster_map, data_length, _valid_data_length) = self.cluster_map_snapshot()?;
+        let (_cluster_map, data_length, _valid_data_length) =
+            self.cluster_map_for_admitted_read(&inode_state_guard, &allocation_guard)?;
         if !writer.has_avail() || data_length == 0 {
             return Ok(0);
         }
 
-        let page_cache = self.page_cache_handle().ok_or_else(|| {
+        let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata()).ok_or_else(|| {
             Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
         })?;
         let read_start = offset.min(data_length);

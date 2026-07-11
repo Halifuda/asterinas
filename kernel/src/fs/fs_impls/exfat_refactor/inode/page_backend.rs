@@ -2,14 +2,14 @@
 
 //! Bridges the exFAT inode owner to the generic page-cache backend.
 //!
-//! Method groups: weak-inode backend ownership, owner-local callback snapshots, page read/write
-//! BIO callbacks, page count, and inode page-cache accessors.
+//! Method groups: callback context publication, page read/write BIO callbacks, page count, and
+//! inode page-cache accessors.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use aster_block::{BlockDevice, bio::BioStatus};
 use io_util::batch::IoBatch;
-use ostd::mm::io::util::HasVmReaderWriter;
+use ostd::{mm::io::util::HasVmReaderWriter, sync::RwMutex};
 
 use super::{
     super::{
@@ -34,50 +34,33 @@ pub(super) struct PageCacheContext {
 }
 
 pub(super) struct ExfatFilePageBackend {
-    inode: Weak<ExfatInode>,
+    block_device: Arc<dyn BlockDevice>,
+    boot_region: BootRegion,
+    pub(super) page_cache_context: RwMutex<Option<PageCacheContext>>,
 }
 
 impl ExfatFilePageBackend {
-    pub(super) fn new(inode: Weak<ExfatInode>) -> Self {
-        Self { inode }
-    }
-
-    fn upgrade_inode(&self) -> Result<Arc<ExfatInode>> {
-        self.inode
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not mounted"))
-    }
-
-    fn page_cache_context(
-        &self,
-    ) -> Result<(
-        Arc<ExfatInode>,
-        PageCacheContext,
-        Arc<dyn BlockDevice>,
-        BootRegion,
-        MountRuntimeState,
-    )> {
-        let inode = self.upgrade_inode()?;
-        let fs = inode
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let block_device = fs.immutable_block_device();
-        let boot_region = fs.immutable_boot_region();
-        let page_cache_context = inode.active_page_cache_context().ok_or_else(|| {
-            Error::with_message(
-                Errno::EIO,
-                "regular exFAT file page-cache context is not published",
-            )
-        })?;
-        let mount_runtime = page_cache_context.mount_runtime.snapshot();
-        Ok((
-            inode,
-            page_cache_context,
+    pub(super) fn new(block_device: Arc<dyn BlockDevice>, boot_region: BootRegion) -> Self {
+        Self {
             block_device,
             boot_region,
-            mount_runtime,
-        ))
+            page_cache_context: RwMutex::new(None),
+        }
+    }
+
+    fn active_page_cache_context(&self) -> Result<(PageCacheContext, MountRuntimeState)> {
+        let page_cache_context = self
+            .page_cache_context
+            .read()
+            .clone()
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EIO,
+                    "regular exFAT file page-cache context is not published",
+                )
+            })?;
+        let mount_runtime = page_cache_context.mount_runtime.snapshot();
+        Ok((page_cache_context, mount_runtime))
     }
 }
 
@@ -99,11 +82,22 @@ impl FragmentedPageIo {
     }
 
     pub(super) fn complete(self: Arc<Self>, status: BioStatus) {
-        if status != BioStatus::Complete && status != BioStatus::Zeros {
+        self.complete_pending(
+            1,
+            status != BioStatus::Complete && status != BioStatus::Zeros,
+        );
+    }
+
+    pub(super) fn fail_unsubmitted(&self, unsubmitted_bios: usize) {
+        self.complete_pending(unsubmitted_bios, true);
+    }
+
+    fn complete_pending(&self, completed_bios: usize, has_failed: bool) {
+        if has_failed {
             self.failed.store(true, Ordering::Release);
         }
 
-        if self.pending.fetch_sub(1, Ordering::AcqRel) != 1 {
+        if self.pending.fetch_sub(completed_bios, Ordering::AcqRel) != completed_bios {
             return;
         }
 
@@ -132,8 +126,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page: LockedCachePage,
         io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let (_inode, page_cache_context, block_device, boot_region, mount_runtime) =
-            self.page_cache_context()?;
+        let (page_cache_context, mount_runtime) = self.active_page_cache_context()?;
         if mount_runtime.forced_shutdown
             || mount_runtime.clear_to_zero
             || mount_runtime.media_failure
@@ -146,8 +139,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.valid_data_length,
         )?;
         let initialized_sector_len = initialized_len
-            .div_ceil(boot_region.sector_size)
-            .checked_mul(boot_region.sector_size)
+            .div_ceil(self.boot_region.sector_size)
+            .checked_mul(self.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len < PAGE_SIZE {
             locked_page
@@ -161,8 +154,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
         }
 
         ExfatInode::submit_regular_file_page_io(
-            &block_device,
-            &boot_region,
+            &self.block_device,
+            &self.boot_region,
             locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
@@ -179,8 +172,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page: LockedCachePage,
         io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let (_inode, page_cache_context, block_device, boot_region, mount_runtime) =
-            self.page_cache_context()?;
+        let (page_cache_context, mount_runtime) = self.active_page_cache_context()?;
         if mount_runtime.forced_shutdown
             || mount_runtime.clear_to_zero
             || mount_runtime.media_failure
@@ -196,8 +188,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.valid_data_length,
         )?;
         let initialized_sector_len = initialized_len
-            .div_ceil(boot_region.sector_size)
-            .checked_mul(boot_region.sector_size)
+            .div_ceil(self.boot_region.sector_size)
+            .checked_mul(self.boot_region.sector_size)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if initialized_sector_len == 0 {
             locked_page.set_up_to_date();
@@ -209,8 +201,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
         locked_page.set_up_to_date();
 
         ExfatInode::submit_regular_file_page_io(
-            &block_device,
-            &boot_region,
+            &self.block_device,
+            &self.boot_region,
             locked_page,
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
@@ -250,11 +242,11 @@ impl ExfatInode {
     }
 
     pub(super) fn active_page_cache_context(&self) -> Option<PageCacheContext> {
-        self.page_cache_context.read().clone()
+        self.page_backend.page_cache_context.read().clone()
     }
 
     pub(super) fn weak_self(&self) -> Weak<Self> {
-        self.page_backend.inode.clone()
+        self.weak_self.clone()
     }
 
     pub(super) fn page_cache_handle(&self) -> Option<&PageCache> {

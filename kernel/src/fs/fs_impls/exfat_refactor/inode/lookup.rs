@@ -15,6 +15,7 @@ use super::{
         invalid_on_disk_layout,
     },
     ExfatFs, ExfatInode, UpcaseTable,
+    state::InodeStateReadGuard,
 };
 use crate::{
     fs::{file::InodeType, utils::DirentVisitor, vfs::inode::Inode},
@@ -25,13 +26,15 @@ impl ExfatInode {
     pub(super) fn lookup_child_by_name(
         &self,
         fs: &Arc<ExfatFs>,
+        fs_state: &mut super::super::fs::FsState,
+        inode_state_guard: &InodeStateReadGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> Result<Option<Arc<dyn Inode>>> {
-        let (_owner_guard, cluster_map) = self.directory_snapshot()?;
+        let cluster_map = inode_state_guard.dir_entry_stream();
         let directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)?;
         let Some(entry_view) = Self::locate_named_child_view(
@@ -60,6 +63,11 @@ impl ExfatInode {
             return Err(invalid_on_disk_layout());
         }
 
+        if let Some(child_inode) = ExfatFs::peek_cached_inode(fs_state, ino) {
+            let child_inode: Arc<dyn Inode> = child_inode;
+            return Ok(Some(child_inode));
+        }
+
         let child_inode = Self::new_child(
             fs,
             self.weak_self(),
@@ -72,10 +80,20 @@ impl ExfatInode {
             valid_data_length,
             no_fat_chain,
         );
-        child_inode.refresh_cached_metadata_from_entry_view(entry_view, boot_region)?;
+        {
+            let unpublished_child_guard = child_inode.inode_state_write_guard();
+            child_inode.refresh_cached_metadata_from_entry_view(
+                &unpublished_child_guard,
+                entry_view,
+                boot_region,
+            )?;
+        }
         if inode_type == InodeType::File {
             child_inode.store_entry_set_location_hint(slot_range)?;
         }
+        fs_state
+            .inode_cache
+            .insert(ino, Arc::downgrade(&child_inode));
         Ok(Some(child_inode))
     }
 
@@ -118,16 +136,20 @@ impl ExfatInode {
         offset: usize,
         visitor: &mut dyn DirentVisitor,
     ) -> Result<usize> {
-        if self.type_() != InodeType::Dir {
-            return_errno!(Errno::ENOTDIR);
-        }
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let (_owner_guard, cluster_map) = self.directory_snapshot()?;
+        let _fs_state = fs.fs_state.read();
+        let inode_state_guard = self.inode_state_read_guard();
+        if inode_state_guard.metadata().type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+        let _allocation_guard = fs.allocation_read_guard()?;
+        let directory_ino = inode_state_guard.metadata().ino;
+        let cluster_map = inode_state_guard.dir_entry_stream();
         let directory_bytes =
             Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)?;
 
@@ -136,7 +158,7 @@ impl ExfatInode {
             let dot_next_offset = next_offset
                 .checked_add(1)
                 .ok_or_else(invalid_on_disk_layout)?;
-            if let Err(error) = visitor.visit(".", self.ino(), self.type_(), dot_next_offset) {
+            if let Err(error) = visitor.visit(".", directory_ino, InodeType::Dir, dot_next_offset) {
                 return Err(error);
             }
             next_offset = dot_next_offset;
@@ -145,7 +167,7 @@ impl ExfatInode {
             let dotdot_next_offset = next_offset
                 .checked_add(1)
                 .ok_or_else(invalid_on_disk_layout)?;
-            if let Err(error) = visitor.visit("..", self.ino(), self.type_(), dotdot_next_offset) {
+            if let Err(error) = visitor.visit("..", directory_ino, InodeType::Dir, dotdot_next_offset) {
                 if next_offset == offset {
                     return Err(error);
                 }
@@ -207,7 +229,14 @@ impl ExfatInode {
     }
 
     pub(super) fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
-        if self.type_() != InodeType::Dir {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let mut fs_state = fs.fs_state.write();
+        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let inode_state_guard = self.inode_state_read_guard();
+        if inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
         if name == "." || name == ".." {
@@ -217,19 +246,16 @@ impl ExfatInode {
                 .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not mounted"))?;
             return Ok(inode);
         }
-
-        let fs = self
-            .fs
-            .upgrade()
-            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_state = fs.mount_state_read_guard()?;
+        let _allocation_guard = fs.allocation_read_guard()?;
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let upcase_table = mount_state.upcase_table.clone();
+        let upcase_table = fs_state.upcase_table.as_ref().ok_or_else(super::super::not_mounted)?.clone();
         let lookup_name = Self::validate_name(name, &mount_state.options)?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         let child_inode = self.lookup_child_by_name(
             &fs,
+            &mut fs_state,
+            &inode_state_guard,
             &block_device,
             &boot_region,
             &upcase_table,

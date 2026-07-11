@@ -349,10 +349,11 @@ impl AllocationBitmap {
                     .ok_or_else(invalid_operation_input)
             })?;
         let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
-        if self.resident_bitmap.len() != bitmap_bytes {
+        if self.resident_bitmap.len() != bitmap_bytes
+            || self.dirty_byte_generations.len() != bitmap_bytes
+        {
             return Err(inconsistent_bitmap_accounting());
         }
-        let mut updated_clusters = 0usize;
         let mut dirty_byte_ranges = Vec::with_capacity(normalized_ranges.len());
         for normalized_range in &normalized_ranges {
             let dirty_byte_start = normalized_range.start / 8;
@@ -362,7 +363,7 @@ impl AllocationBitmap {
                 let bit_index = bitmap_index % 8;
                 let byte = self
                     .resident_bitmap
-                    .get_mut(byte_index)
+                    .get(byte_index)
                     .ok_or_else(inconsistent_bitmap_accounting)?;
                 let relevant_bits = cluster_count
                     .saturating_sub(byte_index * 8)
@@ -374,32 +375,42 @@ impl AllocationBitmap {
 
                 let bit_mask = 1u8 << bit_index;
                 match update {
-                    BitmapOp::Allocate => {
-                        if *byte & bit_mask != 0 {
-                            return Err(inconsistent_bitmap_accounting());
-                        }
-                        *byte |= bit_mask;
+                    BitmapOp::Allocate if *byte & bit_mask != 0 => {
+                        return Err(inconsistent_bitmap_accounting());
                     }
-                    BitmapOp::Free => {
-                        if *byte & bit_mask == 0 {
-                            return Err(inconsistent_bitmap_accounting());
-                        }
-                        *byte &= !bit_mask;
+                    BitmapOp::Free if *byte & bit_mask == 0 => {
+                        return Err(inconsistent_bitmap_accounting());
                     }
+                    BitmapOp::Allocate | BitmapOp::Free => {}
                 }
-                updated_clusters = updated_clusters
-                    .checked_add(1)
-                    .ok_or_else(inconsistent_bitmap_accounting)?;
             }
             dirty_byte_ranges.push(dirty_byte_start..dirty_byte_end);
         }
 
-        if updated_clusters != expected_cluster_count {
-            return Err(inconsistent_bitmap_accounting());
+        let next_used_clusters = match update {
+            BitmapOp::Allocate => self.used_clusters.checked_add(expected_cluster_count),
+            BitmapOp::Free => self.used_clusters.checked_sub(expected_cluster_count),
+        }
+        .ok_or_else(inconsistent_bitmap_accounting)?;
+
+        for normalized_range in &normalized_ranges {
+            for bitmap_index in normalized_range.clone() {
+                let byte_index = bitmap_index / 8;
+                let bit_index = bitmap_index % 8;
+                let Some(byte) = self.resident_bitmap.get_mut(byte_index) else {
+                    unreachable!("prevalidated bitmap index must exist");
+                };
+                let bit_mask = 1u8 << bit_index;
+                match update {
+                    BitmapOp::Allocate => *byte |= bit_mask,
+                    BitmapOp::Free => *byte &= !bit_mask,
+                }
+            }
         }
         for dirty_byte_range in dirty_byte_ranges {
-            self.record_dirty_byte_range(dirty_byte_range)?;
+            self.record_dirty_byte_range(dirty_byte_range);
         }
+        self.used_clusters = next_used_clusters;
         if matches!(update, BitmapOp::Allocate) {
             let next_allocation_search_cluster = cluster_ranges
                 .last()
@@ -416,23 +427,7 @@ impl AllocationBitmap {
                 });
             self.next_allocation_search_cluster = next_allocation_search_cluster;
         }
-        Ok(updated_clusters)
-    }
-
-    pub(super) fn record_allocated_clusters(&mut self, allocated_clusters: usize) -> Result<()> {
-        self.used_clusters = self
-            .used_clusters
-            .checked_add(allocated_clusters)
-            .ok_or_else(inconsistent_bitmap_accounting)?;
-        Ok(())
-    }
-
-    pub(super) fn record_released_clusters(&mut self, released_clusters: usize) -> Result<()> {
-        self.used_clusters = self
-            .used_clusters
-            .checked_sub(released_clusters)
-            .ok_or_else(inconsistent_bitmap_accounting)?;
-        Ok(())
+        Ok(expected_cluster_count)
     }
 
     pub(super) fn set_used_clusters(&mut self, used_clusters: usize) {
@@ -447,8 +442,9 @@ impl AllocationBitmap {
         &mut self,
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut pending_lazy_reclaims = Vec::new();
+        let mut released_any_clusters = false;
         let mut lazy_reclaimed_clusters =
             core::mem::take(&mut self.lazy_reclaimed_clusters).into_iter();
         while let Some(lazy_reclaimed_cluster) = lazy_reclaimed_clusters.next() {
@@ -458,13 +454,12 @@ impl AllocationBitmap {
             }
 
             let release_result = (|| {
-                let released_clusters = self.apply_cluster_ranges(
+                self.apply_cluster_ranges(
                     block_device,
                     boot_region,
                     &lazy_reclaimed_cluster.ranges,
                     BitmapOp::Free,
                 )?;
-                self.record_released_clusters(released_clusters)?;
                 Ok(())
             })();
             if let Err(error) = release_result {
@@ -473,9 +468,10 @@ impl AllocationBitmap {
                 self.lazy_reclaimed_clusters = pending_lazy_reclaims;
                 return Err(error);
             }
+            released_any_clusters = true;
         }
         self.lazy_reclaimed_clusters = pending_lazy_reclaims;
-        Ok(())
+        Ok(released_any_clusters)
     }
 
     pub(super) fn publish_dirty_ranges(
@@ -656,12 +652,9 @@ impl AllocationBitmap {
         Ok(*requested_clusters_remaining == 0)
     }
 
-    fn record_dirty_byte_range(&mut self, mut dirty_byte_range: Range<usize>) -> Result<()> {
+    fn record_dirty_byte_range(&mut self, mut dirty_byte_range: Range<usize>) {
         if dirty_byte_range.is_empty() {
-            return Ok(());
-        }
-        if dirty_byte_range.end > self.dirty_byte_generations.len() {
-            return Err(inconsistent_bitmap_accounting());
+            return;
         }
 
         self.next_dirty_generation = self.next_dirty_generation.saturating_add(1);
@@ -691,7 +684,6 @@ impl AllocationBitmap {
             merged_dirty_ranges.push(dirty_byte_range);
         }
         self.dirty_byte_ranges = merged_dirty_ranges;
-        Ok(())
     }
 
     fn rebuild_dirty_byte_ranges(&mut self) {

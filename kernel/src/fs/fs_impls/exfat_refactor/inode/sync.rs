@@ -6,11 +6,15 @@
 
 use aster_block::bio::BioStatus;
 
-use super::{ExfatInode, state::InodeDirtyState};
+use super::{
+    ExfatInode,
+    state::{InodeDirtyState, InodeStateWriteGuard},
+};
+use super::super::fs::{AllocGuard, ExfatFs, FsState};
 use crate::prelude::*;
 
 #[derive(Clone, Copy)]
-pub(super) enum InodeSyncScope {
+pub(in crate::fs::fs_impls::exfat_refactor) enum InodeSyncScope {
     Data,
     All,
 }
@@ -25,8 +29,10 @@ impl InodeSyncScope {
 }
 
 impl ExfatInode {
-    pub(in crate::fs::fs_impls::exfat_refactor) fn has_pending_regular_file_sync(&self) -> bool {
-        let inode_state_guard = self.inode_state_read_guard();
+    fn has_pending_regular_file_sync(
+        &self,
+        inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) -> bool {
         if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
             return false;
         }
@@ -57,19 +63,27 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mount_state = fs.mount_state_read_guard()?;
-        let block_device = fs.immutable_block_device();
+        let mut fs_state = fs.fs_state.write();
+        self.sync_regular_file_with_fs_guard(fs.as_ref(), &mut fs_state, scope)
+    }
+
+    pub(in crate::fs::fs_impls::exfat_refactor) fn sync_regular_file_with_fs_guard(
+        &self,
+        fs: &ExfatFs,
+        fs_state: &mut FsState,
+        scope: InodeSyncScope,
+    ) -> Result<()> {
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         if mount_state.forced_shutdown
-            || mount_state.flags.clear_to_zero
-            || mount_state.flags.media_failure
+            || mount_state.volume_flags.clear_to_zero
+            || mount_state.volume_flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
 
-        let page_cache = self
-            .page_cache
-            .get()
-            .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
         let parent = {
             let inode_state = self.inode_state_read_guard();
             inode_state.parent()
@@ -90,7 +104,47 @@ impl ExfatInode {
             Some(parent) => Some(guard_for_inode(parent.as_ref())?),
             None => None,
         };
-        let _ = self.current_cluster_map(inode_state)?;
+        let parent_is_revalidated = match (parent.as_ref(), inode_state.parent()) {
+            (Some(discovered_parent), Some(admitted_parent)) => {
+                Arc::ptr_eq(discovered_parent, &admitted_parent)
+            }
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        if !parent_is_revalidated {
+            return_errno!(Errno::EIO);
+        }
+        if inode_state.metadata().type_ != crate::fs::file::InodeType::File {
+            return Ok(());
+        }
+        let mut allocation_guard = fs.allocation_guard()?;
+        self.sync_regular_file_with_proofs(
+            fs,
+            scope,
+            inode_state,
+            parent_inode_state,
+            &mut allocation_guard,
+        )?;
+        if self.has_pending_regular_file_sync(inode_state) {
+            return_errno!(Errno::EIO);
+        }
+        Ok(())
+    }
+
+    pub(super) fn sync_regular_file_with_proofs(
+        &self,
+        fs: &ExfatFs,
+        scope: InodeSyncScope,
+        inode_state: &InodeStateWriteGuard<'_>,
+        parent_inode_state: Option<&InodeStateWriteGuard<'_>>,
+        allocation_guard: &mut AllocGuard<'_>,
+    ) -> Result<()> {
+        let block_device = fs.immutable_block_device();
+        let page_cache = self
+            .page_cache
+            .get()
+            .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
+        let _ = self.current_cluster_map(inode_state, allocation_guard)?;
         let data_length = self
             .active_page_cache_context()
             .map(|page_cache_context| page_cache_context.data_length)
@@ -123,7 +177,7 @@ impl ExfatInode {
         }
 
         if needs_regular_file_publish && !is_detached_regular_file {
-            fs.flush_dirty_allocation_bitmap()?;
+            allocation_guard.publish_dirty_ranges()?;
             let parent_inode_state_guard = parent_inode_state.ok_or_else(|| {
                 Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
             })?;
@@ -136,7 +190,7 @@ impl ExfatInode {
             if block_device.sync()? != BioStatus::Complete {
                 return_errno!(Errno::EIO);
             }
-            fs.commit_published_allocation_bitmap()?;
+            allocation_guard.commit_published_ranges()?;
 
             let current_dirty_state = inode_state.with_dirty_state_mut(|dirty_state| {
                 match scope {
@@ -155,7 +209,7 @@ impl ExfatInode {
         if block_device.sync()? != BioStatus::Complete {
             return_errno!(Errno::EIO);
         }
-        fs.commit_published_allocation_bitmap()?;
+        allocation_guard.commit_published_ranges()?;
 
         let current_dirty_state = inode_state.with_dirty_state_mut(|dirty_state| {
             match scope {

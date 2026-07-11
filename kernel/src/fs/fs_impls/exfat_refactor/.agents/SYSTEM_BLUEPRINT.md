@@ -12,6 +12,42 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Dispatch**: `.agents/subagent-tasks/macro_00_global_topology/macro_00_global_topology_architect_dispatch.md`
   - **Repair Dispatch**: `.agents/subagent-tasks/macro_00_global_topology/macro_00_global_topology_architect_repair_01_dispatch.md`
   - **Accepted Artifact**: `.agents/components/macro_00_global_topology/macro_00_global_topology.md`
+- [x] **Phase 1 Revision: Final Lock-Domain Acquisition Topology** (`pass_126_final_lock_domain_acquisition_topology_architect`)
+  - **Status**: Accepted after same-pass provenance repair; production remains unchanged
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_126_final_lock_domain_acquisition_topology_architect_dispatch.md`
+  - **Accepted Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_126_final_lock_domain_acquisition_topology_architect.md`
+  - **Decision**: Freeze `FsLock -> ordered InodeLock guard set -> AllocLock / AllocGuard -> PageCache/ReentryLock`; allocation has four legal root classes, lower helpers require guard proof, and migration-only wrappers/snapshots must converge or be deleted.
+- [x] **Cross-Meso Mapping: VFS-to-BIO Vertical Lock Boundaries** (`pass_127_vfs_to_bio_vertical_lock_boundary_architect`)
+  - **Status**: Accepted; production remains unchanged
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_127_vfs_to_bio_vertical_lock_boundary_architect_dispatch.md`
+  - **Accepted Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_127_vfs_to_bio_vertical_lock_boundary_architect.md`
+  - **Decision**: Every accepted VFS/admin surface has a complete static call stack and one acquisition layer per used domain; shared lower helper families have one cross-slice guard-proof inlet under accepted `pass_126` ordering.
+- [x] **Cross-Meso Designer: Continuous Guard Lifetimes And Helper Disposition** (`pass_128_vertical_lock_lifetime_and_helper_disposition_designer`)
+  - **Status**: Accepted after bounded repairs and final Sol Architect `PASS`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_128_vertical_lock_lifetime_and_helper_disposition_designer_dispatch.md`
+  - **Planned Spec**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_128_vertical_lock_lifetime_and_helper_disposition_designer_spec.md`
+  - **Planned Validation**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_128_vertical_lock_lifetime_and_helper_disposition_designer_validation.md`
+  - **Gate**: A serialized Sol Architect logical review is required before Creator slicing.
+- [x] **Architect Review: Continuous Guard Lifetimes And Helper Disposition** (`pass_129_vertical_lock_lifetime_and_helper_disposition_architect_review`)
+  - **Status**: `PASS`; no Designer repair remains open
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_129_vertical_lock_lifetime_and_helper_disposition_architect_review_dispatch.md`
+  - **Review Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_129_vertical_lock_lifetime_and_helper_disposition_architect_review.md`
+  - **Decision**: Designer contract is logically safe enough for later main-agent Creator slicing; this review does not itself authorize production edits.
+- [x] **Creator A: PageCache Callback Self-Containment** (`pass_130_pagecache_callback_self_containment_creator`)
+  - **Status**: Accepted; isolated `generic/001` reached final cleanup and the remaining `rmdir("sub")` stall is proven outside Creator A's PageCache boundary
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_creator_dispatch.md`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_creator.md`
+  - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_checker_dispatch.md`
+  - **Planned Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_130_pagecache_callback_self_containment_checker.md`
+  - **Scope**: Remove backend weak-owner traversal and supply narrow mapping/refusal plus separate immutable terminal callback capabilities without broadening `PageCacheContext`.
+- [ ] **Creator B: Global Lock Boundary And AllocGuard Conversion** (`pass_131_global_lock_boundary_and_allocguard_conversion_creator`)
+  - **Status**: Creator structurally accepted after two main-agent repair batches; synchronized Checker pending
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_creator_dispatch.md`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_creator.md`
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260711-141422-cross_meso_vfs_to_bio_topology-pass_131_global_lock_boundary_and_allocguard_conversion_creator/summary.tsv`
+  - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_checker_dispatch.md`
+  - **Planned Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_131_global_lock_boundary_and_allocguard_conversion_checker.md`
+  - **Scope**: Implement the accepted continuous `FsLock -> ordered InodeLock set -> AllocLock / AllocGuard -> PageCache/ReentryLock` boundary switch, remove snapshot/reacquisition wrappers, and convert all covered lower helpers to guard-through cores.
 
 ## 2. Meso-Component Pipeline Index
 <!-- Tracks the high-level end-to-end lifecycle of each Meso-Component. 

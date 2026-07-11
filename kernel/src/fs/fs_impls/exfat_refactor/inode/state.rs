@@ -22,7 +22,7 @@ use super::{
         device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
         fat::{ChainVisitControl, FatChainStep, FatReader},
-        fs::{ExfatFs, MountOptions},
+        fs::{AllocGuard, AllocReadGuard, ExfatFs, MountOptions},
         invalid_on_disk_layout, invalid_operation_input,
         upcase::UpcaseTable,
     },
@@ -56,6 +56,10 @@ impl<'a> InodeStateReadGuard<'a> {
         self.guard.metadata
     }
 
+    pub(super) fn guards_inode(&self, inode: &ExfatInode) -> bool {
+        core::ptr::eq(self.inode, inode)
+    }
+
     pub(super) fn parent(&self) -> Option<Arc<ExfatInode>> {
         self.guard.parent.upgrade()
     }
@@ -68,16 +72,16 @@ impl<'a> InodeStateReadGuard<'a> {
         self.guard.cluster_map.clone()
     }
 
-    pub(super) fn dirty_state(&self) -> InodeDirtyState {
-        self.guard.dirty_state
-    }
-
     pub(super) fn page_cache_context(&self) -> Option<super::page_backend::PageCacheContext> {
-        self.inode.page_cache_context.read().clone()
+        self.inode
+            .page_backend
+            .page_cache_context
+            .read()
+            .clone()
     }
 }
 
-pub(super) struct InodeStateWriteGuard<'a> {
+pub(in crate::fs::fs_impls::exfat_refactor) struct InodeStateWriteGuard<'a> {
     inode: &'a ExfatInode,
     guard: RefCell<RwMutexWriteGuard<'a, InodeState>>,
 }
@@ -135,7 +139,11 @@ impl<'a> InodeStateWriteGuard<'a> {
     }
 
     pub(super) fn page_cache_context(&self) -> Option<super::page_backend::PageCacheContext> {
-        self.inode.page_cache_context.read().clone()
+        self.inode
+            .page_backend
+            .page_cache_context
+            .read()
+            .clone()
     }
 
     pub(super) fn replace_page_cache_context(
@@ -143,6 +151,7 @@ impl<'a> InodeStateWriteGuard<'a> {
         page_cache_context: super::page_backend::PageCacheContext,
     ) -> Option<super::page_backend::PageCacheContext> {
         self.inode
+            .page_backend
             .page_cache_context
             .write()
             .replace(page_cache_context)
@@ -152,7 +161,8 @@ impl<'a> InodeStateWriteGuard<'a> {
         &self,
         page_cache_context: Option<super::page_backend::PageCacheContext>,
     ) {
-        *self.inode.page_cache_context.write() = page_cache_context;
+        let mut active_page_cache_context = self.inode.page_backend.page_cache_context.write();
+        *active_page_cache_context = page_cache_context;
     }
 
     pub(super) fn with_dirty_state_mut<R>(
@@ -171,7 +181,10 @@ impl<'a> InodeStateWriteGuard<'a> {
         self.guard.borrow().dirty_file_retention.is_some()
     }
 
-    pub(super) fn set_dirty_file_retention(&self, retained_inode: Option<Arc<ExfatInode>>) {
+    pub(in crate::fs::fs_impls::exfat_refactor) fn set_dirty_file_retention(
+        &self,
+        retained_inode: Option<Arc<ExfatInode>>,
+    ) {
         self.guard.borrow_mut().dirty_file_retention = retained_inode;
     }
 }
@@ -379,19 +392,12 @@ impl ExfatInode {
         InodeStateReadGuard::new(self, self.inode_state.read())
     }
 
-    pub(super) fn inode_state_write_guard(&self) -> InodeStateWriteGuard<'_> {
+    pub(in crate::fs::fs_impls::exfat_refactor) fn inode_state_write_guard(
+        &self,
+    ) -> InodeStateWriteGuard<'_> {
         InodeStateWriteGuard::new(self, self.inode_state.write())
     }
 
-    // Directory access
-
-    pub(super) fn directory_snapshot(
-        &self,
-    ) -> Result<(InodeStateReadGuard<'_>, StreamExtensionDirEntry)> {
-        let inode_state_guard = self.inode_state_read_guard();
-        let cluster_map = inode_state_guard.dir_entry_stream();
-        Ok((inode_state_guard, cluster_map))
-    }
 }
 
 // ---- Cluster map resolution ----
@@ -479,9 +485,10 @@ impl ExfatInode {
         })
     }
 
-    fn cluster_map_for_read_guard(
+    pub(super) fn cluster_map_for_read_guard(
         &self,
         inode_state_guard: &InodeStateReadGuard<'_>,
+        _allocation_guard: &AllocReadGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
         if let Some(generation) = inode_state_guard
@@ -504,6 +511,7 @@ impl ExfatInode {
     pub(super) fn cluster_map_for_write_guard(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
+        _allocation_guard: &AllocGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
         if let Some(generation) = inode_state_guard
@@ -528,6 +536,7 @@ impl ExfatInode {
     pub(super) fn current_cluster_map(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
+        allocation_guard: &AllocGuard<'_>,
     ) -> Result<Arc<ClusterMap>> {
         if inode_state_guard.metadata().type_ != InodeType::File {
             return_errno!(Errno::EOPNOTSUPP);
@@ -536,7 +545,8 @@ impl ExfatInode {
             return Ok(page_cache_context.cluster_map);
         }
         let cluster_map = inode_state_guard.dir_entry_stream();
-        let generation = self.cluster_map_for_write_guard(inode_state_guard, cluster_map)?;
+        let generation =
+            self.cluster_map_for_write_guard(inode_state_guard, allocation_guard, cluster_map)?;
         let (data_length, valid_data_length) = generation.validated_lengths()?;
         let page_cache_context = self.page_cache_context_for_mapping(
             generation.clone(),
@@ -547,8 +557,11 @@ impl ExfatInode {
         Ok(generation)
     }
 
-    pub(super) fn cluster_map_snapshot(&self) -> Result<(Arc<ClusterMap>, usize, usize)> {
-        let inode_state_guard = self.inode_state_read_guard();
+    pub(super) fn cluster_map_for_admitted_read(
+        &self,
+        inode_state_guard: &InodeStateReadGuard<'_>,
+        allocation_guard: &AllocReadGuard<'_>,
+    ) -> Result<(Arc<ClusterMap>, usize, usize)> {
         match inode_state_guard.metadata().type_ {
             InodeType::Dir => return_errno!(Errno::EISDIR),
             InodeType::File => {}
@@ -567,9 +580,10 @@ impl ExfatInode {
         }
 
         let cluster_map = inode_state_guard.dir_entry_stream();
-        let generation = self.cluster_map_for_read_guard(&inode_state_guard, cluster_map)?;
+        let generation =
+            self.cluster_map_for_read_guard(inode_state_guard, allocation_guard, cluster_map)?;
         let (data_length, valid_data_length) = generation.validated_lengths()?;
-        *self.page_cache_context.write() = Some(self.page_cache_context_for_mapping(
+        *self.page_backend.page_cache_context.write() = Some(self.page_cache_context_for_mapping(
             generation.clone(),
             data_length,
             valid_data_length,
@@ -580,11 +594,17 @@ impl ExfatInode {
     pub(super) fn replace_cluster_map(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
+        allocation_guard: &AllocGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
         let previous_generation = self
-            .cluster_map_for_write_guard(inode_state_guard, inode_state_guard.dir_entry_stream())?;
-        let next_generation = self.cluster_map_for_write_guard(inode_state_guard, cluster_map)?;
+            .cluster_map_for_write_guard(
+                inode_state_guard,
+                allocation_guard,
+                inode_state_guard.dir_entry_stream(),
+            )?;
+        let next_generation =
+            self.cluster_map_for_write_guard(inode_state_guard, allocation_guard, cluster_map)?;
         let (data_length, valid_data_length) = next_generation.validated_lengths()?;
         let _ = inode_state_guard.replace_dir_entry_stream(cluster_map);
         inode_state_guard.set_cached_cluster_map(next_generation.clone());
@@ -859,11 +879,6 @@ impl ExfatInode {
         inode_state_guard.with_dirty_state_mut(InodeDirtyState::mark_metadata_dirty);
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn clear_dirty_file_retention(&self) {
-        self.inode_state_write_guard()
-            .set_dirty_file_retention(None);
-    }
-
     pub(super) fn clear_detached_regular_file_publish_debt_with_guard(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -1103,11 +1118,22 @@ impl ExfatInode {
     pub(super) fn directory_write_guards_by_ino<'a>(
         mut directories: Vec<&'a ExfatInode>,
     ) -> Vec<InodeStateWriteGuard<'a>> {
-        directories.sort_by_key(|directory| directory.inode_state_read_guard().metadata().ino);
-        directories.dedup_by_key(|directory| directory.inode_state_read_guard().metadata().ino);
+        directories.sort_by_key(|directory| directory.stable_lock_identity());
+        directories.dedup_by_key(|directory| directory.stable_lock_identity());
         directories
             .into_iter()
             .map(ExfatInode::inode_state_write_guard)
+            .collect()
+    }
+
+    pub(super) fn directory_read_guards_by_stable_identity<'a>(
+        mut directories: Vec<&'a ExfatInode>,
+    ) -> Vec<InodeStateReadGuard<'a>> {
+        directories.sort_by_key(|directory| directory.stable_lock_identity());
+        directories.dedup_by_key(|directory| directory.stable_lock_identity());
+        directories
+            .into_iter()
+            .map(ExfatInode::inode_state_read_guard)
             .collect()
     }
 }

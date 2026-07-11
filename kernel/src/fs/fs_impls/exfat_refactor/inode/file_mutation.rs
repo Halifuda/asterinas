@@ -13,15 +13,16 @@ use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 use super::{
     super::{
         bitmap::ClusterRange, boot::BootRegion, device_io, direntry, fat::FatReader,
-        fs::{ClusterAllocGuard, MountStateWriteGuard},
+        fs::{AllocGuard, ExfatFs, FsState},
         inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
     },
-    ClusterMap, ExfatFs, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard,
+    ClusterMap, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard,
+    sync::InodeSyncScope,
 };
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
-        vfs::{file_system::FsFlags, inode::Inode},
+        vfs::file_system::FsFlags,
     },
     prelude::*,
     time::clocks::RealTimeCoarseClock,
@@ -229,41 +230,85 @@ impl ExfatInode {
         reader: &mut VmReader,
         status_flags: StatusFlags,
     ) -> Result<usize> {
-        match self.type_() {
-            InodeType::Dir => return_errno!(Errno::EISDIR),
-            InodeType::File => {}
-            _ => return_errno!(Errno::EOPNOTSUPP),
-        }
-
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        if !reader.has_remain() {
-            return Ok(0);
-        }
-
         let write_len = reader.remain();
-        let page_cache = self.page_cache_handle().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
-        })?;
         {
-            let mut admission = fs.mount_state_write_guard().map_err(Error::from)?;
+            let mut fs_state = fs.fs_state.write();
             let block_device = fs.immutable_block_device();
             let boot_region = fs.immutable_boot_region();
-            if admission.forced_shutdown
-                || admission.flags.clear_to_zero
-                || admission.flags.media_failure
+            let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+            if mount_state.forced_shutdown
+                || mount_state.volume_flags.clear_to_zero
+                || mount_state.volume_flags.media_failure
             {
                 return_errno!(Errno::EIO);
             }
-            if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+            if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
                 return_errno!(Errno::EROFS);
             }
 
             let write_result = (|| {
-                let inode_state_guard = self.inode_state_write_guard();
-                let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
+                let sync_scope = if status_flags.contains(StatusFlags::O_SYNC) {
+                    Some(InodeSyncScope::All)
+                } else if status_flags.contains(StatusFlags::O_DSYNC) {
+                    Some(InodeSyncScope::Data)
+                } else {
+                    None
+                };
+                let parent = if sync_scope.is_some() {
+                    self.inode_state_read_guard().parent()
+                } else {
+                    None
+                };
+                let mut guarded_inodes = vec![self];
+                if let Some(parent) = parent.as_ref() {
+                    guarded_inodes.push(parent.as_ref());
+                }
+                let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+                let inode_state_guard = inode_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(self))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                match inode_state_guard.metadata().type_ {
+                    InodeType::Dir => return_errno!(Errno::EISDIR),
+                    InodeType::File => {}
+                    _ => return_errno!(Errno::EOPNOTSUPP),
+                }
+                if !reader.has_remain() {
+                    return Ok(());
+                }
+                let parent_inode_state_guard = match parent.as_ref() {
+                    Some(parent) => Some(
+                        inode_guards
+                            .iter()
+                            .find(|guard| guard.guards_inode(parent.as_ref()))
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?,
+                    ),
+                    None => None,
+                };
+                if sync_scope.is_some() {
+                    let parent_is_revalidated = match (parent.as_ref(), inode_state_guard.parent()) {
+                        (Some(discovered_parent), Some(admitted_parent)) => {
+                            Arc::ptr_eq(discovered_parent, &admitted_parent)
+                        }
+                        (None, None) => true,
+                        (Some(_), None) | (None, Some(_)) => false,
+                    };
+                    if !parent_is_revalidated {
+                        return_errno!(Errno::EIO);
+                    }
+                }
+                let page_cache = self
+                    .page_cache_handle_for_metadata(inode_state_guard.metadata())
+                    .ok_or_else(|| {
+                        Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
+                    })?;
+                let mut allocation_guard = fs.allocation_guard()?;
+                let cluster_map_generation =
+                    self.current_cluster_map(inode_state_guard, &allocation_guard)?;
                 let cluster_map = cluster_map_generation.stream_extension();
                 let (data_length, valid_data_length) =
                     cluster_map_generation.validated_lengths()?;
@@ -287,11 +332,12 @@ impl ExfatInode {
                 let new_valid_data_length = valid_data_length.max(write_end);
                 let timestamp = RealTimeCoarseClock::get().read_time();
                 let write_result = (|| {
-                    fs.publish_dirty_admission(&mut admission)?;
+                    fs.publish_dirty_admission(&mut fs_state)?;
                     self.grow_and_commit_regular_file(
-                        &inode_state_guard,
-                        &fs,
-                        &mut admission,
+                        inode_state_guard,
+                        fs.as_ref(),
+                        &mut fs_state,
+                        &mut allocation_guard,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -335,48 +381,53 @@ impl ExfatInode {
                     }
                     return Err(error);
                 }
+                if let Some(sync_scope) = sync_scope {
+                    self.sync_regular_file_with_proofs(
+                        fs.as_ref(),
+                        sync_scope,
+                        inode_state_guard,
+                        parent_inode_state_guard,
+                        &mut allocation_guard,
+                    )?;
+                }
                 Ok(())
             })();
             if write_result.is_err() {
-                admission.mark_mount_dirty_after_failure();
+                ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
             }
             write_result?;
         }
-        if status_flags.contains(StatusFlags::O_SYNC) {
-            self.sync_all()?;
-        } else if status_flags.contains(StatusFlags::O_DSYNC) {
-            self.sync_data()?;
-        }
-
         Ok(write_len)
     }
 
     pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
-        match self.type_() {
-            InodeType::Dir => return_errno!(Errno::EISDIR),
-            InodeType::File => {}
-            _ => return_errno!(Errno::EOPNOTSUPP),
-        }
-
         let fs = self
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let mut admission = fs.mount_state_write_guard().map_err(Error::from)?;
+        let mut fs_state = fs.fs_state.write();
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        if admission.forced_shutdown
-            || admission.flags.clear_to_zero
-            || admission.flags.media_failure
+        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        if mount_state.forced_shutdown
+            || mount_state.volume_flags.clear_to_zero
+            || mount_state.volume_flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
-        if admission.options.fs_flags.contains(FsFlags::RDONLY) {
+        if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
         let inode_state_guard = self.inode_state_write_guard();
-        let cluster_map_generation = self.current_cluster_map(&inode_state_guard)?;
+        match inode_state_guard.metadata().type_ {
+            InodeType::Dir => return_errno!(Errno::EISDIR),
+            InodeType::File => {}
+            _ => return_errno!(Errno::EOPNOTSUPP),
+        }
+        let mut allocation_guard = fs.allocation_guard()?;
+        let cluster_map_generation =
+            self.current_cluster_map(&inode_state_guard, &allocation_guard)?;
         let cluster_map = cluster_map_generation.stream_extension();
         let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
         if new_size == data_length {
@@ -385,14 +436,15 @@ impl ExfatInode {
         let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata());
         let timestamp = RealTimeCoarseClock::get().read_time();
         let resize_result = (|| {
-            fs.publish_dirty_admission(&mut admission)?;
+            fs.publish_dirty_admission(&mut fs_state)?;
 
             if new_size > data_length {
                 let page_cache_result = if let Some(page_cache) = page_cache {
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
-                        &fs,
-                        &mut admission,
+                        fs.as_ref(),
+                        &mut fs_state,
+                        &mut allocation_guard,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -420,8 +472,9 @@ impl ExfatInode {
                 } else {
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
-                        &fs,
-                        &mut admission,
+                        fs.as_ref(),
+                        &mut fs_state,
+                        &mut allocation_guard,
                         &block_device,
                         &boot_region,
                         &cluster_map_generation,
@@ -528,7 +581,11 @@ impl ExfatInode {
                 no_fat_chain: retained_clusters != 0 && retained_is_contiguous,
             };
             let next_cluster_map_generation =
-                self.cluster_map_for_write_guard(&inode_state_guard, next_cluster_map)?;
+                self.cluster_map_for_write_guard(
+                    &inode_state_guard,
+                    &allocation_guard,
+                    next_cluster_map,
+                )?;
             let page_cache_context = self.page_cache_context_for_mapping(
                 next_cluster_map_generation,
                 new_size,
@@ -566,7 +623,11 @@ impl ExfatInode {
                 metadata.size = new_size;
             });
             let retired_generation =
-                self.replace_cluster_map(&inode_state_guard, next_cluster_map)?;
+                self.replace_cluster_map(
+                    &inode_state_guard,
+                    &allocation_guard,
+                    next_cluster_map,
+                )?;
             self.mark_content_dirty(&inode_state_guard);
             if !cluster_map.no_fat_chain && retained_clusters != 0 {
                 let retained_last_cluster =
@@ -577,12 +638,12 @@ impl ExfatInode {
             }
 
             if !released_ranges.is_empty() {
-                fs.lazy_reclaim_clusters(retired_generation, released_ranges)?;
+                allocation_guard.lazy_reclaim_clusters(retired_generation, released_ranges)?;
             }
             Ok(())
         })();
         if resize_result.is_err() {
-            admission.mark_mount_dirty_after_failure();
+            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
         }
         resize_result
     }
@@ -628,8 +689,9 @@ impl ExfatInode {
     fn grow_and_commit_regular_file(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
-        fs: &Arc<ExfatFs>,
-        mount_state_guard: &mut MountStateWriteGuard<'_>,
+        _fs: &ExfatFs,
+        fs_state: &mut FsState,
+        allocation_guard: &mut AllocGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map_generation: &Arc<ClusterMap>,
@@ -667,8 +729,8 @@ impl ExfatInode {
             let additional_clusters = target_allocated_clusters
                 .checked_sub(current_allocated_clusters)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let cluster_alloc_guard = if additional_clusters == 0 {
-                None
+            let has_allocation = if additional_clusters == 0 {
+                false
             } else {
                 let preferred_start_cluster = if current_allocated_clusters == 0 {
                     None
@@ -680,17 +742,14 @@ impl ExfatInode {
                     .and_then(|last_cluster| last_cluster.checked_add(1))
                     .filter(|cluster| boot_region.is_valid_cluster(*cluster))
                 };
-                let allocation_guard = ClusterAllocGuard::allocate(
-                    fs,
-                    mount_state_guard,
-                    additional_clusters,
-                    preferred_start_cluster,
-                )?;
-                Some(allocation_guard)
+                allocation_guard.allocate(additional_clusters, preferred_start_cluster)?;
+                true
             };
-            let allocated_ranges = cluster_alloc_guard
-                .as_ref()
-                .map_or(&[][..], ClusterAllocGuard::ranges);
+            let allocated_ranges = if has_allocation {
+                allocation_guard.ranges()
+            } else {
+                &[]
+            };
 
             let next_cluster_map = Self::grow_cluster_map(
                 block_device,
@@ -700,7 +759,11 @@ impl ExfatInode {
                 allocated_ranges,
             )?;
             let next_cluster_map_generation =
-                self.cluster_map_for_write_guard(inode_state_guard, next_cluster_map)?;
+                self.cluster_map_for_write_guard(
+                    inode_state_guard,
+                    allocation_guard,
+                    next_cluster_map,
+                )?;
             previous_page_cache_context = self.install_page_cache_context(
                 inode_state_guard,
                 self.page_cache_context_for_mapping(
@@ -751,16 +814,23 @@ impl ExfatInode {
                 metadata.last_modify_at = timestamp;
                 metadata.size = new_data_length;
             });
-            let _ = self.replace_cluster_map(inode_state_guard, next_cluster_map)?;
+            let _ = self.replace_cluster_map(
+                inode_state_guard,
+                allocation_guard,
+                next_cluster_map,
+            )?;
             self.mark_content_dirty(&inode_state_guard);
-            if let Some(cluster_alloc_guard) = cluster_alloc_guard {
-                cluster_alloc_guard.commit();
+            if has_allocation {
+                allocation_guard.commit_allocation();
             }
             Ok(())
         })();
         if result.is_err() {
             inode_state_guard.restore_page_cache_context(previous_page_cache_context);
             rollback_growth_fn();
+            if allocation_guard.rollback_allocation()? {
+                ExfatFs::disable_unsupported_discard_after_release(fs_state);
+            }
         }
         result
     }
