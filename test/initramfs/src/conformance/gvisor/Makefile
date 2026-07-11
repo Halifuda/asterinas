@@ -8,6 +8,7 @@
 TESTS ?= \
 	access_test \
 	brk_test \
+	capabilities_test \
 	chown_test \
 	creat_test \
 	dev_test \
@@ -29,6 +30,7 @@ TESTS ?= \
 	mknod_test \
 	mmap_test \
 	mount_test \
+	mount_fd_test \
 	mremap_test \
 	msync_test \
 	open_create_test \

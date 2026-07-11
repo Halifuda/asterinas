@@ -122,6 +122,7 @@ echo "All mount bind file test passed."
 ./isolation/chroot
 ./isolation/pivot_root
 
+./mount/mount_api
 ./mount/mount_move
 
 ./overlayfs/ovl_test
@@ -133,8 +134,10 @@ echo "All mount bind file test passed."
 ./procfs/mountstats
 ./procfs/pid_mem
 ./procfs/proc_fd_open_fifo_after_setid
+./procfs/proc_sys_kernel
 ./procfs/tid
 
+./pseudofs/fallocate
 ./pseudofs/memfd_access_err
 ./pseudofs/memfd_create
 ./pseudofs/pseudo_dentry
@@ -142,7 +145,11 @@ echo "All mount bind file test passed."
 ./pseudofs/pseudo_inode
 ./pseudofs/pseudo_mount
 
+./statx/btime
+
 ./symlink/symlink
+
+./sync/sync
 
 ./tmpfile/tmpfile
 

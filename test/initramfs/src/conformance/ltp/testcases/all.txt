@@ -414,15 +414,15 @@ fpathconf01
 # fremovexattr01
 # fremovexattr02
 
-# fsconfig01
-# fsconfig02
+fsconfig01
+fsconfig02
 # fsconfig03
 
-# fsmount01
-# fsmount02
+fsmount01
+fsmount02
 
-# fsopen01
-# fsopen02
+fsopen01
+fsopen02
 
 # fspick01
 # fspick02
@@ -738,9 +738,9 @@ lchown01
 # lgetxattr02
 
 link02
-# link04
+link04
 link05
-# link08
+link08
 
 #linkat test cases
 linkat01
@@ -1091,11 +1091,11 @@ poll01
 ppoll01
 
 prctl01
-# prctl02
+prctl02
 # prctl03 # FIXME: `SIGCHLD` must arrive by the time `wait()` returns. Otherwise, it is flaky.
 # prctl05
 # prctl06
-# prctl07
+prctl07
 # prctl08
 # prctl09
 # prctl10
@@ -1227,26 +1227,26 @@ readv01
 removexattr01
 # removexattr02
 
-# rename01
-# rename03
-# rename04
-# rename05
-# rename06
-# rename07
-# rename08
-# rename09
-# rename10
+rename01
+rename03
+rename04
+rename05
+rename06
+rename07
+rename08
+rename09
+rename10
 # rename11
-# rename12
-# rename13
+rename12
+rename13
 rename14
-# rename15
+rename15
 
 #renameat test cases
 # renameat01
 
-# renameat201
-# renameat202
+renameat201
+renameat202
 
 # request_key01
 # request_key02
@@ -1736,13 +1736,13 @@ umask01
 
 uname01
 uname02
-# uname04
+uname04
 
 unlink05
 unlink07
-# unlink08
+unlink08
 # unlink09
-# unlink10
+unlink10
 
 #unlinkat test cases
 unlinkat01

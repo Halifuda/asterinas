@@ -55,8 +55,8 @@ EXTRA_BLOCKLISTS ?= ""
 # Parameters for xfstests.
 XFSTESTS_RUNLIST ?= /opt/xfstests/short.list
 XFSTESTS_DISK_SIZE ?= 12G
-XFSTESTS_TEST_DEV ?= /dev/vdc
-XFSTESTS_SCRATCH_DEV ?= /dev/vdd
+XFSTESTS_TEST_DEV ?= /dev/vdd
+XFSTESTS_SCRATCH_DEV ?= /dev/vde
 XFSTESTS_FSTYP ?= ext2
 XFSTESTS_MKFS ?= mkfs.ext2
 XFSTESTS_MKFS_OPTIONS ?= -F
@@ -110,7 +110,8 @@ CARGO_OSDK := ~/.cargo/bin/cargo-osdk
 # Common arguments for `cargo osdk` `build`, `run` and `test` commands.
 CARGO_OSDK_COMMON_ARGS :=
 # The build arguments also apply to the `cargo osdk run` command.
-CARGO_OSDK_BUILD_ARGS := --kcmd-args="ostd.log_level=$(LOG_LEVEL)"
+CARGO_OSDK_BUILD_ARGS := --kcmd-args="loglevel=$(LOG_LEVEL)"
+CARGO_OSDK_BUILD_ARGS += --kcmd-args="earlycon"
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="console=$(CONSOLE)"
 CARGO_OSDK_TEST_ARGS :=
 

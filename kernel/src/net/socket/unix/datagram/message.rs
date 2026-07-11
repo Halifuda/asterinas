@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use ostd::sync::WaitQueue;
 use spin::Once;
@@ -13,7 +16,7 @@ use crate::{
             addr::{UnixSocketAddrBound, UnixSocketAddrKey},
             ctrl_msg::AuxiliaryData,
         },
-        util::ControlMessage,
+        util::{ControlMessage, SendRecvFlags},
     },
     prelude::*,
     process::signal::Pollee,
@@ -102,14 +105,22 @@ impl MessageQueue {
     }
 
     /// Blocks until the buffer is free and the `try_send` succeeds, or until interrupted.
-    pub(super) fn block_send<F, R>(&self, mut try_send: F) -> Result<R>
+    pub(super) fn block_send<F, R>(&self, timeout: Option<Duration>, mut try_send: F) -> Result<R>
     where
         F: FnMut() -> Result<R>,
     {
-        self.send_wait_queue.pause_until(|| match try_send() {
-            Err(err) if err.error() == Errno::EAGAIN => None,
-            result => Some(result),
-        })?
+        self.send_wait_queue
+            .pause_until_or_timeout(
+                || match try_send() {
+                    Err(err) if err.error() == Errno::EAGAIN => None,
+                    result => Some(result),
+                },
+                timeout.as_ref(),
+            )
+            .map_err(|err| match err.error() {
+                Errno::ETIME => Error::with_message(Errno::EAGAIN, "the socket timeout expired"),
+                _ => err,
+            })?
     }
 }
 
@@ -163,6 +174,7 @@ impl MessageReceiver {
     pub(super) fn try_recv(
         &self,
         writer: &mut dyn MultiWrite,
+        flags: SendRecvFlags,
     ) -> Result<(usize, Vec<ControlMessage>, UnixSocketAddr)> {
         let mut inner = self.queue.inner.lock();
         let inner = inner.as_mut().unwrap();
@@ -180,18 +192,26 @@ impl MessageReceiver {
             warn!("setting MSG_TRUNC is not supported");
         }
 
-        let mut msg = inner.messages.pop_front().unwrap();
-        inner.total_length -= msg.bytes.len();
-
         let is_pass_cred = self.queue.is_pass_cred.load(Ordering::Relaxed);
-        let ctrl_msgs = msg.aux.generate_control(is_pass_cred);
+        let src = msg.src.clone();
 
-        self.queue.pollee.invalidate();
-        // A writer may still fail if the free space is not enough.
-        // So we have to wake up all the writers here.
-        self.queue.send_wait_queue.wake_all();
+        let behavior = flags.receive_behavior();
+        let ctrl_msgs = if behavior.will_consume_data() {
+            let mut message = inner.messages.pop_front().unwrap();
+            inner.total_length -= message.bytes.len();
 
-        Ok((len, ctrl_msgs, msg.src))
+            self.queue.pollee.invalidate();
+            // A writer may still fail if the free space is not enough.
+            // So we have to wake up all the writers here.
+            self.queue.send_wait_queue.wake_all();
+
+            message.aux.generate_control(behavior, is_pass_cred)
+        } else {
+            let message = inner.messages.front_mut().unwrap();
+            message.aux.generate_control(behavior, is_pass_cred)
+        };
+
+        Ok((len, ctrl_msgs, src))
     }
 
     pub(super) fn shutdown(&self) {
