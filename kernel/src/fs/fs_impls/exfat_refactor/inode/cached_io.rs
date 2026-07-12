@@ -178,12 +178,16 @@ impl ExfatInode {
             BioType::Write => BioDirection::ToDevice,
             BioType::Flush => return_errno!(Errno::EINVAL),
         };
+        let transfer_len = initialized_len
+            .div_ceil(boot_region.sector_size)
+            .checked_mul(boot_region.sector_size)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
         let page_ranges = match Self::regular_file_page_bio_ranges(
             boot_region,
             cluster_map,
             data_length,
             file_offset,
-            initialized_len,
+            transfer_len,
         ) {
             Ok(page_ranges) if !page_ranges.is_empty() => page_ranges,
             Ok(_) => {
@@ -201,7 +205,8 @@ impl ExfatInode {
         };
         let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
         let pending_bios = page_ranges.len();
-        let page_io = FragmentedPageIo::new(locked_page, pending_bios, bio_type);
+        let page_io =
+            FragmentedPageIo::new(locked_page, pending_bios, bio_type, initialized_len);
 
         for (range_index, (page_offset, disk_offset, len)) in page_ranges.into_iter().enumerate() {
             let page_end = page_offset

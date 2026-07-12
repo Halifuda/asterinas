@@ -32,13 +32,14 @@ impl ExfatInode {
     fn has_pending_regular_file_sync(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
+        scope: InodeSyncScope,
     ) -> bool {
         if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
             return false;
         }
 
         let dirty_state = inode_state_guard.dirty_state();
-        if dirty_state.needs_sync_all() {
+        if scope.needs_device_sync(dirty_state) {
             return true;
         }
 
@@ -125,7 +126,7 @@ impl ExfatInode {
             parent_inode_state,
             &mut allocation_guard,
         )?;
-        if self.has_pending_regular_file_sync(inode_state) {
+        if self.has_pending_regular_file_sync(inode_state, scope) {
             return_errno!(Errno::EIO);
         }
         Ok(())

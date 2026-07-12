@@ -72,15 +72,22 @@ pub(super) struct FragmentedPageIo {
     pending: AtomicUsize,
     failed: AtomicBool,
     bio_type: BioType,
+    initialized_len: usize,
 }
 
 impl FragmentedPageIo {
-    pub(super) fn new(page: LockedCachePage, pending: usize, bio_type: BioType) -> Arc<Self> {
+    pub(super) fn new(
+        page: LockedCachePage,
+        pending: usize,
+        bio_type: BioType,
+        initialized_len: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             page,
             pending: AtomicUsize::new(pending),
             failed: AtomicBool::new(false),
             bio_type,
+            initialized_len,
         })
     }
 
@@ -106,6 +113,10 @@ impl FragmentedPageIo {
 
         if matches!(self.bio_type, BioType::Read) {
             if !self.failed.load(Ordering::Acquire) {
+                self.page
+                    .writer()
+                    .skip(self.initialized_len)
+                    .fill_zeros(PAGE_SIZE - self.initialized_len);
                 self.page.set_up_to_date();
             }
             return;
@@ -137,17 +148,8 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.data_length,
             page_cache_context.valid_data_length,
         )?;
-        let initialized_sector_len = initialized_len
-            .div_ceil(self.boot_region.sector_size)
-            .checked_mul(self.boot_region.sector_size)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        if initialized_sector_len < PAGE_SIZE {
-            locked_page
-                .writer()
-                .skip(initialized_sector_len)
-                .fill_zeros(PAGE_SIZE - initialized_sector_len);
-        }
-        if initialized_sector_len == 0 {
+        if initialized_len == 0 {
+            locked_page.writer().fill_zeros(PAGE_SIZE);
             locked_page.set_up_to_date();
             return Ok(());
         }
@@ -159,7 +161,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
             file_offset,
-            initialized_sector_len,
+            initialized_len,
             io_batch,
             BioType::Read,
         )
@@ -186,11 +188,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.data_length,
             page_cache_context.valid_data_length,
         )?;
-        let initialized_sector_len = initialized_len
-            .div_ceil(self.boot_region.sector_size)
-            .checked_mul(self.boot_region.sector_size)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        if initialized_sector_len == 0 {
+        if initialized_len == 0 {
             locked_page.set_up_to_date();
             return Ok(());
         }
@@ -206,7 +204,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
             page_cache_context.cluster_map.as_ref(),
             page_cache_context.data_length,
             file_offset,
-            initialized_sector_len,
+            initialized_len,
             io_batch,
             BioType::Write,
         )

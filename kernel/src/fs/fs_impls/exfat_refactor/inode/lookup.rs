@@ -147,6 +147,17 @@ impl ExfatInode {
         if inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
+        let parent = inode_state_guard.parent();
+        drop(inode_state_guard);
+        let mut guarded_inodes = vec![self];
+        if let Some(parent) = parent.as_ref() {
+            guarded_inodes.push(parent.as_ref());
+        }
+        let inode_guards = Self::directory_read_guards_by_stable_identity(guarded_inodes);
+        let inode_state_guard = inode_guards
+            .iter()
+            .find(|guard| guard.guards_inode(self))
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
         let _allocation_guard = fs.allocation_read_guard()?;
         let directory_ino = inode_state_guard.metadata().ino;
         let cluster_map = inode_state_guard.dir_entry_stream();
@@ -167,7 +178,18 @@ impl ExfatInode {
             let dotdot_next_offset = next_offset
                 .checked_add(1)
                 .ok_or_else(invalid_on_disk_layout)?;
-            if let Err(error) = visitor.visit("..", directory_ino, InodeType::Dir, dotdot_next_offset) {
+            let parent_ino = match parent.as_ref() {
+                Some(parent) => inode_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(parent.as_ref()))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?
+                    .metadata()
+                    .ino,
+                None => directory_ino,
+            };
+            if let Err(error) =
+                visitor.visit("..", parent_ino, InodeType::Dir, dotdot_next_offset)
+            {
                 if next_offset == offset {
                     return Err(error);
                 }
@@ -239,12 +261,21 @@ impl ExfatInode {
         if inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
-        if name == "." || name == ".." {
+        if name == "." {
             let inode: Arc<dyn Inode> = self
                 .weak_self()
                 .upgrade()
                 .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT inode is not mounted"))?;
             return Ok(inode);
+        }
+        if name == ".." {
+            let parent = inode_state_guard.parent().unwrap_or_else(|| {
+                self.weak_self()
+                    .upgrade()
+                    .unwrap_or_else(|| unreachable!("admitted inode must keep self reachable"))
+            });
+            let parent: Arc<dyn Inode> = parent;
+            return Ok(parent);
         }
         let _allocation_guard = fs.allocation_read_guard()?;
         let block_device = fs.immutable_block_device();

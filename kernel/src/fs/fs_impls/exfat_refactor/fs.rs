@@ -15,7 +15,6 @@ use super::{
     bitmap::{AllocationBitmap, BitmapOp, ClusterRange},
     boot::BootRegion,
     device_io,
-    fat::FatReader,
     inconsistent_bitmap_accounting,
     inode::{ClusterMap, ExfatInode},
     invalid_operation_input, not_mounted,
@@ -443,13 +442,9 @@ impl AllocGuard<'_> {
             .allocation_state
             .as_mut()
             .ok_or_else(not_mounted)?;
-        allocation_bitmap
-            .release_lazy_reclaimed_clusters(self.block_device, self.boot_region)?;
-        let mut fat_reader = FatReader::new(self.block_device, self.boot_region);
+        allocation_bitmap.release_lazy_reclaimed_clusters(self.boot_region)?;
         let allocated_ranges = allocation_bitmap.find_free_ranges(
-            self.block_device,
             self.boot_region,
-            &mut fat_reader,
             requested_clusters,
             preferred_start_cluster,
         )?;
@@ -465,7 +460,6 @@ impl AllocGuard<'_> {
             return Err(inconsistent_bitmap_accounting());
         }
         allocation_bitmap.apply_cluster_ranges(
-            self.block_device,
             self.boot_region,
             &allocated_ranges,
             BitmapOp::Allocate,
@@ -508,7 +502,6 @@ impl AllocGuard<'_> {
             .as_mut()
             .ok_or_else(not_mounted)?;
         allocation_bitmap.apply_cluster_ranges(
-            self.block_device,
             self.boot_region,
             ranges,
             BitmapOp::Free,
@@ -533,7 +526,7 @@ impl AllocGuard<'_> {
         self.allocation_state
             .as_mut()
             .ok_or_else(not_mounted)?
-            .release_lazy_reclaimed_clusters(self.block_device, self.boot_region)
+            .release_lazy_reclaimed_clusters(self.boot_region)
     }
 
     pub(super) fn publish_dirty_ranges(&mut self) -> Result<()> {

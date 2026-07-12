@@ -43,6 +43,78 @@ enum ReplacedTargetCleanup {
     },
 }
 
+struct AdmittedRenameChild<'inode, 'guard> {
+    inode: &'inode Arc<ExfatInode>,
+    guard: &'inode InodeStateWriteGuard<'guard>,
+}
+
+struct RenameNames<'a> {
+    source: &'a [u16],
+    source_hash: u16,
+    destination: &'a [u16],
+    destination_hash: u16,
+}
+
+struct SameDirectoryRenamePlan {
+    cluster_map: StreamExtensionDirEntry,
+    directory_bytes: Vec<u8>,
+    source_slot_range: DirEntrySlotRange,
+    destination_slot_range: DirEntrySlotRange,
+    replaced_slot_range: Option<DirEntrySlotRange>,
+    renamed_entry_set: Vec<u8>,
+    replacement: Option<ReplacedTargetCleanup>,
+}
+
+struct CrossDirectoryRenamePlan {
+    source_cluster_map: StreamExtensionDirEntry,
+    source_directory_bytes: Vec<u8>,
+    source_slot_range: DirEntrySlotRange,
+    target_cluster_map: StreamExtensionDirEntry,
+    target_directory_bytes: Vec<u8>,
+    target_slot_range: DirEntrySlotRange,
+    renamed_entry_set: Vec<u8>,
+    replacement: Option<ReplacedTargetCleanup>,
+}
+
+enum RenameDiscoveryRole {
+    Source,
+    Replacement,
+}
+
+enum RenameDiscovery {
+    SameDirectory {
+        parent_directory: Option<Arc<ExfatInode>>,
+        source_child_inode: Arc<ExfatInode>,
+        target_child_inode: Option<Arc<ExfatInode>>,
+    },
+    CrossDirectory {
+        source_parent_directory: Option<Arc<ExfatInode>>,
+        target_parent_directory: Option<Arc<ExfatInode>>,
+        source_child_inode: Arc<ExfatInode>,
+        target_child_inode: Option<Arc<ExfatInode>>,
+    },
+}
+
+enum FinalRenameAdmission<'a, 'guard> {
+    SameDirectory {
+        directory_guard: &'a InodeStateWriteGuard<'guard>,
+        parent_guard: Option<&'a InodeStateWriteGuard<'guard>>,
+        source_child: AdmittedRenameChild<'a, 'guard>,
+        target_child: Option<AdmittedRenameChild<'a, 'guard>>,
+        cluster_map: StreamExtensionDirEntry,
+    },
+    CrossDirectory {
+        source_guard: &'a InodeStateWriteGuard<'guard>,
+        source_parent_guard: Option<&'a InodeStateWriteGuard<'guard>>,
+        target_guard: &'a InodeStateWriteGuard<'guard>,
+        target_parent_guard: Option<&'a InodeStateWriteGuard<'guard>>,
+        source_child: AdmittedRenameChild<'a, 'guard>,
+        target_child: Option<AdmittedRenameChild<'a, 'guard>>,
+        source_cluster_map: StreamExtensionDirEntry,
+        target_cluster_map: StreamExtensionDirEntry,
+    },
+}
+
 impl ExfatInode {
     // VFS entry points
 
@@ -646,6 +718,352 @@ impl ExfatInode {
         rmdir_result
     }
 
+    fn discover_rename_child(
+        directory: &ExfatInode,
+        fs: &Arc<ExfatFs>,
+        fs_state: &FsState,
+        boot_region: &BootRegion,
+        directory_cluster_map: StreamExtensionDirEntry,
+        entry_view: FileEntrySetView<'_>,
+        role: RenameDiscoveryRole,
+    ) -> Result<Option<Arc<ExfatInode>>> {
+        let (inode_type, first_cluster, data_length, no_fat_chain) = entry_view
+            .child_metadata(boot_region)
+            .map_err(Error::from)?;
+        let ino = directory.entry_location_ino(
+            directory_cluster_map,
+            entry_view.slot_range().first_entry_index(),
+        )?;
+        if let Some(cached_inode) = ExfatFs::peek_cached_inode(fs_state, ino) {
+            return Ok(Some(cached_inode));
+        }
+        if matches!(role, RenameDiscoveryRole::Replacement) && inode_type != InodeType::Dir {
+            return Ok(None);
+        }
+        let valid_data_length = entry_view
+            .cluster_map()
+            .map_err(Error::from)?
+            .valid_data_length
+            .ok_or_else(invalid_on_disk_layout)
+            .map_err(Error::from)?;
+        Self::child_inode_from_directory_entry(
+            directory,
+            fs,
+            boot_region,
+            directory_cluster_map.first_cluster,
+            entry_view.slot_range(),
+            inode_type,
+            first_cluster,
+            data_length,
+            valid_data_length,
+            no_fat_chain,
+        )
+        .map(Some)
+        .map_err(Error::from)
+    }
+
+    fn discover_rename_participants(
+        &self,
+        target_directory: &ExfatInode,
+        fs: &Arc<ExfatFs>,
+        fs_state: &FsState,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        upcase_table: &UpcaseTable,
+        names: RenameNames<'_>,
+    ) -> Result<RenameDiscovery> {
+        let provisional_directory_guards =
+            Self::directory_read_guards_by_stable_identity(vec![self, target_directory]);
+        let (
+            self_ino,
+            source_parent_directory,
+            source_cluster_map,
+            target_directory_ino,
+            target_parent_directory,
+            target_cluster_map,
+        ) = {
+            let provisional_guard_for_inode = |inode: &ExfatInode| {
+                provisional_directory_guards
+                    .iter()
+                    .find(|guard| guard.guards_inode(inode))
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            };
+            let source_guard = provisional_guard_for_inode(self)?;
+            let target_guard = provisional_guard_for_inode(target_directory)?;
+            if source_guard.metadata().type_ != InodeType::Dir
+                || target_guard.metadata().type_ != InodeType::Dir
+            {
+                return_errno!(Errno::ENOTDIR);
+            }
+            (
+                source_guard.metadata().ino,
+                source_guard.parent(),
+                source_guard.dir_entry_stream(),
+                target_guard.metadata().ino,
+                target_guard.parent(),
+                target_guard.dir_entry_stream(),
+            )
+        };
+        let discovery_allocation_guard = fs.allocation_read_guard()?;
+        let discovery_result = (|| {
+            let discovery = if self_ino == target_directory_ino {
+            let directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                block_device,
+                boot_region,
+                source_cluster_map,
+            )
+            .map_err(Error::from)?;
+            let source_view = Self::locate_named_child_view(
+                &directory_bytes,
+                source_cluster_map.data_length.is_none(),
+                upcase_table,
+                names.source,
+                names.source_hash,
+            )
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            let source_child_inode = Self::discover_rename_child(
+                self,
+                fs,
+                fs_state,
+                boot_region,
+                source_cluster_map,
+                source_view,
+                RenameDiscoveryRole::Source,
+            )?
+            .ok_or_else(invalid_on_disk_layout)?;
+            let target_child_inode = Self::locate_named_child_view(
+                &directory_bytes,
+                source_cluster_map.data_length.is_none(),
+                upcase_table,
+                names.destination,
+                names.destination_hash,
+            )
+            .map_err(Error::from)?
+            .filter(|target_view| target_view.slot_range() != source_view.slot_range())
+            .map(|target_view| {
+                Self::discover_rename_child(
+                    self,
+                    fs,
+                    fs_state,
+                    boot_region,
+                    source_cluster_map,
+                    target_view,
+                    RenameDiscoveryRole::Replacement,
+                )
+            })
+            .transpose()
+            .map_err(Error::from)?
+            .flatten();
+            RenameDiscovery::SameDirectory {
+                parent_directory: source_parent_directory,
+                source_child_inode,
+                target_child_inode,
+            }
+        } else {
+            let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                block_device,
+                boot_region,
+                source_cluster_map,
+            )
+            .map_err(Error::from)?;
+            let source_view = Self::locate_named_child_view(
+                &source_directory_bytes,
+                source_cluster_map.data_length.is_none(),
+                upcase_table,
+                names.source,
+                names.source_hash,
+            )
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            let source_child_inode = Self::discover_rename_child(
+                self,
+                fs,
+                fs_state,
+                boot_region,
+                source_cluster_map,
+                source_view,
+                RenameDiscoveryRole::Source,
+            )?
+            .ok_or_else(invalid_on_disk_layout)?;
+            let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
+                block_device,
+                boot_region,
+                target_cluster_map,
+            )
+            .map_err(Error::from)?;
+            let target_child_inode = Self::locate_named_child_view(
+                &target_directory_bytes,
+                target_cluster_map.data_length.is_none(),
+                upcase_table,
+                names.destination,
+                names.destination_hash,
+            )
+            .map_err(Error::from)?
+            .map(|target_view| {
+                Self::discover_rename_child(
+                    target_directory,
+                    fs,
+                    fs_state,
+                    boot_region,
+                    target_cluster_map,
+                    target_view,
+                    RenameDiscoveryRole::Replacement,
+                )
+            })
+            .transpose()
+            .map_err(Error::from)?
+            .flatten();
+            RenameDiscovery::CrossDirectory {
+                source_parent_directory,
+                target_parent_directory,
+                source_child_inode,
+                target_child_inode,
+            }
+            };
+            Ok(discovery)
+        })();
+        drop(discovery_allocation_guard);
+        drop(provisional_directory_guards);
+        discovery_result
+    }
+
+    fn collect_rename_final_participants<'a>(
+        &'a self,
+        target_directory: &'a ExfatInode,
+        discovery: &'a RenameDiscovery,
+    ) -> Vec<&'a ExfatInode> {
+        match discovery {
+            RenameDiscovery::SameDirectory {
+                parent_directory,
+                source_child_inode,
+                target_child_inode,
+            } => {
+                let mut participants = vec![self, source_child_inode.as_ref()];
+                if let Some(parent_directory) = parent_directory.as_ref() {
+                    participants.push(parent_directory.as_ref());
+                }
+                if let Some(target_child_inode) = target_child_inode.as_ref() {
+                    participants.push(target_child_inode.as_ref());
+                }
+                participants
+            }
+            RenameDiscovery::CrossDirectory {
+                source_parent_directory,
+                target_parent_directory,
+                source_child_inode,
+                target_child_inode,
+            } => {
+                let mut participants = vec![self, target_directory, source_child_inode.as_ref()];
+                if let Some(source_parent_directory) = source_parent_directory.as_ref() {
+                    participants.push(source_parent_directory.as_ref());
+                }
+                if let Some(target_parent_directory) = target_parent_directory.as_ref() {
+                    participants.push(target_parent_directory.as_ref());
+                }
+                if let Some(target_child_inode) = target_child_inode.as_ref() {
+                    participants.push(target_child_inode.as_ref());
+                }
+                participants
+            }
+        }
+    }
+
+    fn project_final_rename_admission<'a, 'guard>(
+        &'a self,
+        target_directory: &'a ExfatInode,
+        discovery: &'a RenameDiscovery,
+        inode_guards: &'a [InodeStateWriteGuard<'guard>],
+    ) -> Result<FinalRenameAdmission<'a, 'guard>> {
+        let guard_for_inode = |inode: &ExfatInode| {
+            inode_guards
+                .iter()
+                .find(|guard| guard.guards_inode(inode))
+                .ok_or_else(|| Error::new(Errno::EINVAL))
+        };
+        match discovery {
+            RenameDiscovery::SameDirectory {
+                parent_directory,
+                source_child_inode,
+                target_child_inode,
+            } => {
+                let directory_guard = guard_for_inode(self)?;
+                if directory_guard.metadata().type_ != InodeType::Dir {
+                    return_errno!(Errno::ENOTDIR);
+                }
+                let parent_guard = parent_directory
+                    .as_ref()
+                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .transpose()?;
+                let source_child = AdmittedRenameChild {
+                    inode: source_child_inode,
+                    guard: guard_for_inode(source_child_inode.as_ref())?,
+                };
+                let target_child = target_child_inode
+                    .as_ref()
+                    .map(|target| -> Result<AdmittedRenameChild<'a, 'guard>> {
+                        Ok(AdmittedRenameChild {
+                            inode: target,
+                            guard: guard_for_inode(target.as_ref())?,
+                        })
+                    })
+                    .transpose()?;
+                Ok(FinalRenameAdmission::SameDirectory {
+                    directory_guard,
+                    parent_guard,
+                    source_child,
+                    target_child,
+                    cluster_map: directory_guard.dir_entry_stream(),
+                })
+            }
+            RenameDiscovery::CrossDirectory {
+                source_parent_directory,
+                target_parent_directory,
+                source_child_inode,
+                target_child_inode,
+            } => {
+                let source_guard = guard_for_inode(self)?;
+                let target_guard = guard_for_inode(target_directory)?;
+                if source_guard.metadata().type_ != InodeType::Dir
+                    || target_guard.metadata().type_ != InodeType::Dir
+                {
+                    return_errno!(Errno::ENOTDIR);
+                }
+                let source_parent_guard = source_parent_directory
+                    .as_ref()
+                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .transpose()?;
+                let target_parent_guard = target_parent_directory
+                    .as_ref()
+                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .transpose()?;
+                let source_child = AdmittedRenameChild {
+                    inode: source_child_inode,
+                    guard: guard_for_inode(source_child_inode.as_ref())?,
+                };
+                let target_child = target_child_inode
+                    .as_ref()
+                    .map(|target| -> Result<AdmittedRenameChild<'a, 'guard>> {
+                        Ok(AdmittedRenameChild {
+                            inode: target,
+                            guard: guard_for_inode(target.as_ref())?,
+                        })
+                    })
+                    .transpose()?;
+                Ok(FinalRenameAdmission::CrossDirectory {
+                    source_guard,
+                    source_parent_guard,
+                    target_guard,
+                    target_parent_guard,
+                    source_child,
+                    target_child,
+                    source_cluster_map: source_guard.dir_entry_stream(),
+                    target_cluster_map: target_guard.dir_entry_stream(),
+                })
+            }
+        }
+    }
+
     pub(super) fn rename_impl(
         &self,
         old_name: &str,
@@ -684,385 +1102,120 @@ impl ExfatInode {
         let old_name_hash = upcase_table.name_hash(&old_name);
         let new_name_hash = upcase_table.name_hash(&new_name);
         let rename_result = (|| {
-            let provisional_directory_guards =
-                Self::directory_read_guards_by_stable_identity(vec![self, target_directory]);
-            let (
-                self_ino,
-                source_parent_directory,
-                source_cluster_map,
-                target_directory_ino,
-                target_parent_directory,
-                target_cluster_map,
-            ) = {
-                let provisional_guard_for_inode = |inode: &ExfatInode| {
-                    provisional_directory_guards
-                        .iter()
-                        .find(|guard| guard.guards_inode(inode))
-                        .ok_or_else(|| Error::new(Errno::EINVAL))
-                };
-                let self_snapshot = provisional_guard_for_inode(self)?;
-                let target_snapshot = provisional_guard_for_inode(target_directory)?;
-                if self_snapshot.metadata().type_ != InodeType::Dir
-                    || target_snapshot.metadata().type_ != InodeType::Dir
-                {
-                    return_errno!(Errno::ENOTDIR);
-                }
-                (
-                    self_snapshot.metadata().ino,
-                    self_snapshot.parent(),
-                    self_snapshot.dir_entry_stream(),
-                    target_snapshot.metadata().ino,
-                    target_snapshot.parent(),
-                    target_snapshot.dir_entry_stream(),
-                )
+            let names = RenameNames {
+                source: &old_name,
+                source_hash: old_name_hash,
+                destination: &new_name,
+                destination_hash: new_name_hash,
             };
-            if self_ino == target_directory_ino {
-                let parent_directory = source_parent_directory;
-                let cluster_map = source_cluster_map;
-                let discovery_allocation_guard = fs.allocation_read_guard()?;
-                let directory_bytes = Self::read_directory_bytes_for_cluster_map(
-                    &block_device,
-                    &boot_region,
+            let discovery = self.discover_rename_participants(
+                target_directory,
+                &fs,
+                &fs_state,
+                &block_device,
+                &boot_region,
+                &upcase_table,
+                names,
+            )?;
+            let final_participants =
+                self.collect_rename_final_participants(target_directory, &discovery);
+            let inode_guards = Self::directory_write_guards_by_ino(final_participants);
+            let admission = Self::project_final_rename_admission(
+                self,
+                target_directory,
+                &discovery,
+                &inode_guards,
+            )?;
+            match admission {
+                FinalRenameAdmission::SameDirectory {
+                    directory_guard,
+                    parent_guard,
+                    source_child,
+                    target_child,
                     cluster_map,
-                )
-                .map_err(Error::from)?;
-                let Some(source_view) = Self::locate_named_child_view(
-                    &directory_bytes,
-                    cluster_map.data_length.is_none(),
-                    &upcase_table,
-                    &old_name,
-                    old_name_hash,
-                )
-                .map_err(Error::from)?
-                else {
-                    return_errno!(Errno::ENOENT);
-                };
-                let (
-                    source_inode_type,
-                    source_first_cluster,
-                    source_data_length,
-                    source_no_fat_chain,
-                ) = source_view
-                    .child_metadata(&boot_region)
-                    .map_err(Error::from)?;
-                let source_valid_data_length = source_view
-                    .cluster_map()
-                    .map_err(Error::from)?
-                    .valid_data_length
-                    .ok_or_else(invalid_on_disk_layout)
-                    .map_err(Error::from)?;
-                let source_ino = self.entry_location_ino(
-                    cluster_map,
-                    source_view.slot_range().first_entry_index(),
-                )?;
-                let source_child_inode = if let Some(cached_inode) =
-                    ExfatFs::peek_cached_inode(&fs_state, source_ino)
-                {
-                    cached_inode
-                } else {
-                    Self::child_inode_from_directory_entry(
-                        self,
-                        &fs,
+                } => {
+                    let mut allocation_guard = fs.allocation_guard()?;
+                    let renamed = self.rename_within_directory(
+                        cluster_map,
+                        directory_guard,
+                        parent_guard,
+                        source_child,
+                        target_child,
+                        fs.as_ref(),
+                        &mut fs_state,
+                        &mut allocation_guard,
+                        &block_device,
                         &boot_region,
-                        cluster_map.first_cluster,
-                        source_view.slot_range(),
-                        source_inode_type,
-                        source_first_cluster,
-                        source_data_length,
-                        source_valid_data_length,
-                        source_no_fat_chain,
-                    )
-                    .map_err(Error::from)?
-                };
-                let target_child_inode = Self::locate_named_child_view(
-                    &directory_bytes,
-                    cluster_map.data_length.is_none(),
-                    &upcase_table,
-                    &new_name,
-                    new_name_hash,
-                )
-                .map_err(Error::from)?
-                .filter(|target_view| target_view.slot_range() != source_view.slot_range())
-                .map(|target_view| {
-                    let (target_inode_type, first_cluster, data_length, no_fat_chain) =
-                        target_view.child_metadata(&boot_region)?;
-                    let target_ino = self
-                        .entry_location_ino(
-                            cluster_map,
-                            target_view.slot_range().first_entry_index(),
-                        )
-                        .map_err(Error::from)?;
-                    if let Some(cached_inode) = ExfatFs::peek_cached_inode(&fs_state, target_ino) {
-                        return Ok(Some(cached_inode));
+                        &upcase_table,
+                        RenameNames {
+                            source: &old_name,
+                            source_hash: old_name_hash,
+                            destination: &new_name,
+                            destination_hash: new_name_hash,
+                        },
+                    )?;
+                    if renamed {
+                        self.refresh_directory_metadata_after_namespace_mutation_with_guards(
+                            &block_device,
+                            &boot_region,
+                            RealTimeCoarseClock::get().read_time(),
+                            directory_guard,
+                            parent_guard,
+                        )?;
                     }
-                    if target_inode_type != InodeType::Dir {
-                        return Ok(None);
-                    }
-                    let valid_data_length = target_view
-                        .cluster_map()?
-                        .valid_data_length
-                        .ok_or_else(invalid_on_disk_layout)?;
-                    Self::child_inode_from_directory_entry(
-                        self,
-                        &fs,
+                    Ok(())
+                }
+                FinalRenameAdmission::CrossDirectory {
+                    source_guard,
+                    source_parent_guard,
+                    target_guard,
+                    target_parent_guard,
+                    source_child,
+                    target_child,
+                    source_cluster_map,
+                    target_cluster_map,
+                } => {
+                    let mut allocation_guard = fs.allocation_guard()?;
+                    self.rename_across_directories(
+                        source_cluster_map,
+                        source_guard,
+                        target_directory,
+                        target_cluster_map,
+                        target_guard,
+                        target_parent_guard,
+                        source_child,
+                        target_child,
+                        fs.as_ref(),
+                        &mut fs_state,
+                        &mut allocation_guard,
+                        &block_device,
                         &boot_region,
-                        cluster_map.first_cluster,
-                        target_view.slot_range(),
-                        target_inode_type,
-                        first_cluster,
-                        data_length,
-                        valid_data_length,
-                        no_fat_chain,
-                    )
-                    .map(Some)
-                })
-                .transpose()
-                .map_err(Error::from)?
-                .flatten();
-                drop(discovery_allocation_guard);
-                drop(provisional_directory_guards);
-                let mut guarded_inodes = vec![self, source_child_inode.as_ref()];
-                if let Some(parent_directory) = parent_directory.as_ref() {
-                    guarded_inodes.push(parent_directory.as_ref());
-                }
-                if let Some(target_child_inode) = target_child_inode.as_ref() {
-                    guarded_inodes.push(target_child_inode.as_ref());
-                }
-                let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
-                let guard_for_inode = |inode: &ExfatInode| {
-                    inode_guards
-                        .iter()
-                        .find(|guard| guard.guards_inode(inode))
-                        .ok_or_else(|| Error::new(Errno::EINVAL))
-                };
-                let self_inode_state_guard = guard_for_inode(self)?;
-                if self_inode_state_guard.metadata().type_ != InodeType::Dir {
-                    return_errno!(Errno::ENOTDIR);
-                }
-                let parent_inode_state_guard = match parent_directory.as_ref() {
-                    Some(parent_directory) => Some(guard_for_inode(parent_directory.as_ref())?),
-                    None => None,
-                };
-                let source_child_inode_state_guard = guard_for_inode(source_child_inode.as_ref())?;
-                let target_child_inode = target_child_inode.as_ref();
-                let target_child_inode_state_guard = match target_child_inode {
-                    Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
-                    None => None,
-                };
-                let cluster_map = self_inode_state_guard.dir_entry_stream();
-                let mut allocation_guard = fs.allocation_guard()?;
-                let renamed = self.rename_within_directory(
-                    cluster_map,
-                    self_inode_state_guard,
-                    &source_child_inode,
-                    source_child_inode_state_guard,
-                    target_child_inode,
-                    target_child_inode_state_guard,
-                    &mut fs_state,
-                    &mut allocation_guard,
-                    fs.as_ref(),
-                    &block_device,
-                    &boot_region,
-                    &upcase_table,
-                    &old_name,
-                    old_name_hash,
-                    &new_name,
-                    new_name_hash,
-                    parent_inode_state_guard,
-                )?;
-                if renamed {
+                        &upcase_table,
+                        RenameNames {
+                            source: &old_name,
+                            source_hash: old_name_hash,
+                            destination: &new_name,
+                            destination_hash: new_name_hash,
+                        },
+                    )?;
+                    let timestamp = RealTimeCoarseClock::get().read_time();
                     self.refresh_directory_metadata_after_namespace_mutation_with_guards(
                         &block_device,
                         &boot_region,
-                        RealTimeCoarseClock::get().read_time(),
-                        self_inode_state_guard,
-                        parent_inode_state_guard,
+                        timestamp,
+                        source_guard,
+                        source_parent_guard,
                     )?;
+                    target_directory
+                        .refresh_directory_metadata_after_namespace_mutation_with_guards(
+                            &block_device,
+                            &boot_region,
+                            timestamp,
+                            target_guard,
+                            target_parent_guard,
+                        )
                 }
-                return Ok(());
             }
-
-            let discovery_allocation_guard = fs.allocation_read_guard()?;
-            let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
-                &block_device,
-                &boot_region,
-                source_cluster_map,
-            )
-            .map_err(Error::from)?;
-            let source_view = Self::locate_named_child_view(
-                &source_directory_bytes,
-                source_cluster_map.data_length.is_none(),
-                &upcase_table,
-                &old_name,
-                old_name_hash,
-            )
-            .map_err(Error::from)?
-            .ok_or_else(|| Error::new(Errno::ENOENT))?;
-            let (source_inode_type, source_first_cluster, source_data_length, source_no_fat_chain) =
-                source_view
-                    .child_metadata(&boot_region)
-                    .map_err(Error::from)?;
-            let source_valid_data_length = source_view
-                .cluster_map()
-                .map_err(Error::from)?
-                .valid_data_length
-                .ok_or_else(invalid_on_disk_layout)
-                .map_err(Error::from)?;
-            let source_ino = self.entry_location_ino(
-                source_cluster_map,
-                source_view.slot_range().first_entry_index(),
-            )?;
-            let source_child_inode = if let Some(cached_inode) =
-                ExfatFs::peek_cached_inode(&fs_state, source_ino)
-            {
-                cached_inode
-            } else {
-                Self::child_inode_from_directory_entry(
-                    self,
-                    &fs,
-                    &boot_region,
-                    source_cluster_map.first_cluster,
-                    source_view.slot_range(),
-                    source_inode_type,
-                    source_first_cluster,
-                    source_data_length,
-                    source_valid_data_length,
-                    source_no_fat_chain,
-                )
-                .map_err(Error::from)?
-            };
-            let target_directory_bytes = Self::read_directory_bytes_for_cluster_map(
-                &block_device,
-                &boot_region,
-                target_cluster_map,
-            )
-            .map_err(Error::from)?;
-            let target_child_inode = Self::locate_named_child_view(
-                &target_directory_bytes,
-                target_cluster_map.data_length.is_none(),
-                &upcase_table,
-                &new_name,
-                new_name_hash,
-            )
-            .map_err(Error::from)?
-            .map(|target_view| {
-                let (target_inode_type, first_cluster, data_length, no_fat_chain) =
-                    target_view.child_metadata(&boot_region)?;
-                let target_ino = target_directory
-                    .entry_location_ino(
-                        target_cluster_map,
-                        target_view.slot_range().first_entry_index(),
-                    )
-                    .map_err(Error::from)?;
-                if let Some(cached_inode) = ExfatFs::peek_cached_inode(&fs_state, target_ino) {
-                    return Ok(Some(cached_inode));
-                }
-                if target_inode_type != InodeType::Dir {
-                    return Ok(None);
-                }
-                let valid_data_length = target_view
-                    .cluster_map()?
-                    .valid_data_length
-                    .ok_or_else(invalid_on_disk_layout)?;
-                Self::child_inode_from_directory_entry(
-                    target_directory,
-                    &fs,
-                    &boot_region,
-                    target_cluster_map.first_cluster,
-                    target_view.slot_range(),
-                    target_inode_type,
-                    first_cluster,
-                    data_length,
-                    valid_data_length,
-                    no_fat_chain,
-                )
-                .map(Some)
-            })
-            .transpose()
-            .map_err(Error::from)?
-            .flatten();
-            drop(discovery_allocation_guard);
-            drop(provisional_directory_guards);
-            let mut guarded_inodes = vec![self, target_directory, source_child_inode.as_ref()];
-            if let Some(source_parent_directory) = source_parent_directory.as_ref() {
-                guarded_inodes.push(source_parent_directory.as_ref());
-            }
-            if let Some(target_parent_directory) = target_parent_directory.as_ref() {
-                guarded_inodes.push(target_parent_directory.as_ref());
-            }
-            if let Some(target_child_inode) = target_child_inode.as_ref() {
-                guarded_inodes.push(target_child_inode.as_ref());
-            }
-            let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
-            let guard_for_inode = |inode: &ExfatInode| {
-                inode_guards
-                    .iter()
-                    .find(|guard| guard.guards_inode(inode))
-                    .ok_or_else(|| Error::new(Errno::EINVAL))
-            };
-            let source_inode_state_guard = guard_for_inode(self)?;
-            let target_inode_state_guard = guard_for_inode(target_directory)?;
-            if source_inode_state_guard.metadata().type_ != InodeType::Dir
-                || target_inode_state_guard.metadata().type_ != InodeType::Dir
-            {
-                return_errno!(Errno::ENOTDIR);
-            }
-            let source_parent_inode_state_guard = match source_parent_directory.as_ref() {
-                Some(source_parent_directory) => {
-                    Some(guard_for_inode(source_parent_directory.as_ref())?)
-                }
-                None => None,
-            };
-            let target_parent_inode_state_guard = match target_parent_directory.as_ref() {
-                Some(target_parent_directory) => {
-                    Some(guard_for_inode(target_parent_directory.as_ref())?)
-                }
-                None => None,
-            };
-            let source_child_inode_state_guard = guard_for_inode(source_child_inode.as_ref())?;
-            let target_child_inode = target_child_inode.as_ref();
-            let target_child_inode_state_guard = match target_child_inode {
-                Some(target_child_inode) => Some(guard_for_inode(target_child_inode.as_ref())?),
-                None => None,
-            };
-            let target_cluster_map = target_inode_state_guard.dir_entry_stream();
-            let mut allocation_guard = fs.allocation_guard()?;
-            self.rename_across_directories(
-                source_cluster_map,
-                &source_child_inode,
-                source_child_inode_state_guard,
-                target_directory,
-                target_inode_state_guard,
-                target_cluster_map,
-                target_child_inode,
-                target_child_inode_state_guard,
-                &mut fs_state,
-                &mut allocation_guard,
-                fs.as_ref(),
-                &block_device,
-                &boot_region,
-                &upcase_table,
-                &old_name,
-                old_name_hash,
-                &new_name,
-                new_name_hash,
-                target_parent_inode_state_guard,
-            )?;
-            let timestamp = RealTimeCoarseClock::get().read_time();
-            self.refresh_directory_metadata_after_namespace_mutation_with_guards(
-                &block_device,
-                &boot_region,
-                timestamp,
-                source_inode_state_guard,
-                source_parent_inode_state_guard,
-            )?;
-            target_directory.refresh_directory_metadata_after_namespace_mutation_with_guards(
-                &block_device,
-                &boot_region,
-                timestamp,
-                target_inode_state_guard,
-                target_parent_inode_state_guard,
-            )
         })();
         if rename_result.is_err() {
             ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
@@ -1076,22 +1229,27 @@ impl ExfatInode {
         &self,
         mut cluster_map: StreamExtensionDirEntry,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
-        source_child_inode: &Arc<Self>,
-        source_child_inode_state_guard: &InodeStateWriteGuard<'_>,
-        target_child_inode: Option<&Arc<Self>>,
-        target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        source_child: AdmittedRenameChild<'_, '_>,
+        target_child: Option<AdmittedRenameChild<'_, '_>>,
+        fs: &ExfatFs,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
-        fs: &ExfatFs,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         upcase_table: &UpcaseTable,
-        old_name: &[u16],
-        old_name_hash: u16,
-        new_name: &[u16],
-        new_name_hash: u16,
-        parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        names: RenameNames<'_>,
     ) -> Result<bool> {
+        let source_child_inode = source_child.inode;
+        let source_child_inode_state_guard = source_child.guard;
+        let (target_child_inode, target_child_inode_state_guard) = match target_child.as_ref() {
+            Some(child) => (Some(child.inode), Some(child.guard)),
+            None => (None, None),
+        };
+        let old_name = names.source;
+        let old_name_hash = names.source_hash;
+        let new_name = names.destination;
+        let new_name_hash = names.destination_hash;
         let current_directory_bytes =
             Self::read_directory_bytes_for_cluster_map(block_device, boot_region, cluster_map)
                 .map_err(Error::from)?;
@@ -1124,26 +1282,19 @@ impl ExfatInode {
         let (source_inode_type, _, _, _) = current_source_view
             .child_metadata(boot_region)
             .map_err(Error::from)?;
-        let (replaced_target_slot_range, replaced_target_ranges, detached_regular_file_reclaim) =
-            match Self::collect_replaced_target_cleanup(
-                current_target_view,
-                target_child_inode,
-                target_child_inode_state_guard,
-                source_inode_type,
-                block_device,
-                boot_region,
-                allocation_guard,
-            )? {
-                Some(ReplacedTargetCleanup::Immediate { slot_range, ranges }) => {
-                    (Some(slot_range), ranges, None)
-                }
-                Some(ReplacedTargetCleanup::CachedGeneration {
-                    slot_range,
-                    cluster_map,
-                    ranges,
-                }) => (Some(slot_range), Vec::new(), Some((cluster_map, ranges))),
-                None => (None, Vec::new(), None),
-            };
+        let replacement = Self::collect_replaced_target_cleanup(
+            current_target_view,
+            target_child_inode,
+            target_child_inode_state_guard,
+            source_inode_type,
+            block_device,
+            boot_region,
+            allocation_guard,
+        )?;
+        let replaced_target_slot_range = replacement.as_ref().map(|replacement| match replacement {
+            ReplacedTargetCleanup::Immediate { slot_range, .. }
+            | ReplacedTargetCleanup::CachedGeneration { slot_range, .. } => *slot_range,
+        });
         let reusable_slot_range = if current_source_slot_range.entry_count() >= required_entry_count
         {
             Some(current_source_slot_range)
@@ -1158,7 +1309,6 @@ impl ExfatInode {
                 reusable_slot_range,
                 fs_state,
                 allocation_guard,
-                fs,
                 block_device,
                 boot_region,
                 parent_inode_state_guard,
@@ -1192,52 +1342,26 @@ impl ExfatInode {
         )?
         .map(FileEntrySetView::slot_range)
         .filter(|slot_range| *slot_range != final_slot_range);
-        Self::persist_rename_directory_update(
-            block_device,
-            boot_region,
+        let plan = SameDirectoryRenamePlan {
             cluster_map,
-            renamed_directory_bytes,
-            Some((final_slot_range, &renamed_entry_set)),
-            replaced_target_slot_range,
-            (final_slot_range != source_slot_range).then_some(source_slot_range),
-        )?;
-        let old_source_ino = source_child_inode_state_guard.metadata().ino;
-        let new_source_ino = self
-            .entry_location_ino(cluster_map, final_slot_range.first_entry_index())
-            .map_err(Error::from)?;
-        let replaced_target_ino =
-            target_child_inode_state_guard.map(|target_guard| target_guard.metadata().ino);
-        source_child_inode_state_guard.set_parent(self.weak_self());
-        source_child_inode_state_guard.with_metadata_mut(|metadata| metadata.ino = new_source_ino);
-        if source_child_inode_state_guard.metadata().type_ == InodeType::File {
-            source_child_inode
-                .store_entry_set_location_hint(final_slot_range)
-                .map_err(Error::from)?;
-        }
-        if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
-            (target_child_inode, target_child_inode_state_guard)
-        {
-            let detached_target_ino = target_child_inode_state_guard.metadata().ino;
-            Self::detach_namespace_removed_inode(
-                fs_state,
-                allocation_guard,
-                detached_target_ino,
-                target_child_inode,
-                target_child_inode_state_guard,
-                detached_regular_file_reclaim,
-            )?;
-        }
-        ExfatFs::rebind_rename_inode_cache(
-            fs_state,
-            old_source_ino,
-            new_source_ino,
-            source_child_inode,
-            replaced_target_ino,
-        );
-        Self::cleanup_replaced_target_ranges(
+            directory_bytes: renamed_directory_bytes,
+            source_slot_range,
+            destination_slot_range: final_slot_range,
+            replaced_slot_range: replaced_target_slot_range,
+            renamed_entry_set,
+            replacement,
+        };
+        let (cluster_map, destination_slot_range, replacement) =
+            Self::persist_same_directory_rename(plan, block_device, boot_region)?;
+        Self::finalize_rename_protocol(
+            self,
+            cluster_map,
+            destination_slot_range,
+            source_child,
+            target_child,
+            replacement,
             fs_state,
             allocation_guard,
-            &replaced_target_ranges,
         )?;
         Ok(true)
     }
@@ -1245,25 +1369,31 @@ impl ExfatInode {
     fn rename_across_directories(
         &self,
         source_cluster_map: StreamExtensionDirEntry,
-        source_child_inode: &Arc<Self>,
-        source_child_inode_state_guard: &InodeStateWriteGuard<'_>,
+        _source_inode_state_guard: &InodeStateWriteGuard<'_>,
         target_directory: &ExfatInode,
-        target_inode_state_guard: &InodeStateWriteGuard<'_>,
         mut target_cluster_map: StreamExtensionDirEntry,
-        target_child_inode: Option<&Arc<Self>>,
-        target_child_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        target_inode_state_guard: &InodeStateWriteGuard<'_>,
+        target_parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        source_child: AdmittedRenameChild<'_, '_>,
+        target_child: Option<AdmittedRenameChild<'_, '_>>,
+        fs: &ExfatFs,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
-        fs: &ExfatFs,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         upcase_table: &UpcaseTable,
-        old_name: &[u16],
-        old_name_hash: u16,
-        new_name: &[u16],
-        new_name_hash: u16,
-        target_parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        names: RenameNames<'_>,
     ) -> Result<()> {
+        let source_child_inode = source_child.inode;
+        let source_child_inode_state_guard = source_child.guard;
+        let (target_child_inode, target_child_inode_state_guard) = match target_child.as_ref() {
+            Some(child) => (Some(child.inode), Some(child.guard)),
+            None => (None, None),
+        };
+        let old_name = names.source;
+        let old_name_hash = names.source_hash;
+        let new_name = names.destination;
+        let new_name_hash = names.destination_hash;
         let source_directory_bytes = Self::read_directory_bytes_for_cluster_map(
             block_device,
             boot_region,
@@ -1298,26 +1428,19 @@ impl ExfatInode {
             new_name_hash,
             None,
         )?;
-        let (replaced_target_slot_range, replaced_target_ranges, detached_regular_file_reclaim) =
-            match Self::collect_replaced_target_cleanup(
-                target_view,
-                target_child_inode,
-                target_child_inode_state_guard,
-                source_inode_type,
-                block_device,
-                boot_region,
-                allocation_guard,
-            )? {
-                Some(ReplacedTargetCleanup::Immediate { slot_range, ranges }) => {
-                    (Some(slot_range), ranges, None)
-                }
-                Some(ReplacedTargetCleanup::CachedGeneration {
-                    slot_range,
-                    cluster_map,
-                    ranges,
-                }) => (Some(slot_range), Vec::new(), Some((cluster_map, ranges))),
-                None => (None, Vec::new(), None),
-            };
+        let replacement = Self::collect_replaced_target_cleanup(
+            target_view,
+            target_child_inode,
+            target_child_inode_state_guard,
+            source_inode_type,
+            block_device,
+            boot_region,
+            allocation_guard,
+        )?;
+        let replaced_target_slot_range = replacement.as_ref().map(|replacement| match replacement {
+            ReplacedTargetCleanup::Immediate { slot_range, .. }
+            | ReplacedTargetCleanup::CachedGeneration { slot_range, .. } => *slot_range,
+        });
         fs.publish_dirty_admission(fs_state)?;
         let (
             updated_target_cluster_map,
@@ -1330,7 +1453,6 @@ impl ExfatInode {
             replaced_target_slot_range,
             fs_state,
             allocation_guard,
-            fs,
             block_device,
             boot_region,
             target_parent_inode_state_guard,
@@ -1338,6 +1460,141 @@ impl ExfatInode {
             required_entry_count,
         )?;
         target_cluster_map = updated_target_cluster_map;
+        let plan = CrossDirectoryRenamePlan {
+            source_cluster_map,
+            source_directory_bytes,
+            source_slot_range,
+            target_cluster_map,
+            target_directory_bytes,
+            target_slot_range,
+            renamed_entry_set,
+            replacement,
+        };
+        let (target_cluster_map, target_slot_range, replacement) =
+            Self::persist_cross_directory_rename(plan, block_device, boot_region)?;
+        Self::finalize_rename_protocol(
+            target_directory,
+            target_cluster_map,
+            target_slot_range,
+            source_child,
+            target_child,
+            replacement,
+            fs_state,
+            allocation_guard,
+        )?;
+        Ok(())
+    }
+
+    fn finalize_rename_protocol(
+        destination_directory: &ExfatInode,
+        destination_cluster_map: StreamExtensionDirEntry,
+        destination_slot_range: DirEntrySlotRange,
+        source_child: AdmittedRenameChild<'_, '_>,
+        target_child: Option<AdmittedRenameChild<'_, '_>>,
+        replacement: Option<ReplacedTargetCleanup>,
+        fs_state: &mut FsState,
+        allocation_guard: &mut AllocGuard<'_>,
+    ) -> Result<()> {
+        let old_source_ino = source_child.guard.metadata().ino;
+        let new_source_ino = destination_directory
+            .entry_location_ino(
+                destination_cluster_map,
+                destination_slot_range.first_entry_index(),
+            )
+            .map_err(Error::from)?;
+        let replaced_target_ino = target_child.as_ref().map(|child| child.guard.metadata().ino);
+        source_child
+            .guard
+            .set_parent(destination_directory.weak_self());
+        source_child
+            .guard
+            .with_metadata_mut(|metadata| metadata.ino = new_source_ino);
+        if source_child.guard.metadata().type_ == InodeType::File {
+            source_child
+                .inode
+                .store_entry_set_location_hint(destination_slot_range)
+                .map_err(Error::from)?;
+        }
+        let (replaced_target_ranges, detached_regular_file_reclaim) = match replacement {
+            Some(ReplacedTargetCleanup::Immediate { ranges, .. }) => (ranges, None),
+            Some(ReplacedTargetCleanup::CachedGeneration {
+                cluster_map, ranges, ..
+            }) => (Vec::new(), Some((cluster_map, ranges))),
+            None => (Vec::new(), None),
+        };
+        if let Some(target_child) = target_child {
+            Self::detach_namespace_removed_inode(
+                fs_state,
+                allocation_guard,
+                target_child.guard.metadata().ino,
+                target_child.inode,
+                target_child.guard,
+                detached_regular_file_reclaim,
+            )?;
+        }
+        ExfatFs::rebind_rename_inode_cache(
+            fs_state,
+            old_source_ino,
+            new_source_ino,
+            source_child.inode,
+            replaced_target_ino,
+        );
+        Self::cleanup_replaced_target_ranges(
+            fs_state,
+            allocation_guard,
+            &replaced_target_ranges,
+        )
+    }
+
+    fn persist_same_directory_rename(
+        plan: SameDirectoryRenamePlan,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<(
+        StreamExtensionDirEntry,
+        DirEntrySlotRange,
+        Option<ReplacedTargetCleanup>,
+    )> {
+        let SameDirectoryRenamePlan {
+            cluster_map,
+            directory_bytes,
+            source_slot_range,
+            destination_slot_range,
+            replaced_slot_range,
+            renamed_entry_set,
+            replacement,
+        } = plan;
+        Self::persist_rename_directory_update(
+            block_device,
+            boot_region,
+            cluster_map,
+            directory_bytes,
+            Some((destination_slot_range, &renamed_entry_set)),
+            replaced_slot_range,
+            (destination_slot_range != source_slot_range).then_some(source_slot_range),
+        )?;
+        Ok((cluster_map, destination_slot_range, replacement))
+    }
+
+    fn persist_cross_directory_rename(
+        plan: CrossDirectoryRenamePlan,
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+    ) -> Result<(
+        StreamExtensionDirEntry,
+        DirEntrySlotRange,
+        Option<ReplacedTargetCleanup>,
+    )> {
+        let CrossDirectoryRenamePlan {
+            source_cluster_map,
+            source_directory_bytes,
+            source_slot_range,
+            target_cluster_map,
+            target_directory_bytes,
+            target_slot_range,
+            renamed_entry_set,
+            replacement,
+        } = plan;
         Self::persist_rename_directory_update(
             block_device,
             boot_region,
@@ -1356,45 +1613,7 @@ impl ExfatInode {
             Some(source_slot_range),
             None,
         )?;
-        let old_source_ino = source_child_inode_state_guard.metadata().ino;
-        let new_source_ino = target_directory
-            .entry_location_ino(target_cluster_map, target_slot_range.first_entry_index())
-            .map_err(Error::from)?;
-        let replaced_target_ino =
-            target_child_inode_state_guard.map(|target_guard| target_guard.metadata().ino);
-        source_child_inode_state_guard.set_parent(target_directory.weak_self());
-        source_child_inode_state_guard.with_metadata_mut(|metadata| metadata.ino = new_source_ino);
-        if source_child_inode_state_guard.metadata().type_ == InodeType::File {
-            source_child_inode
-                .store_entry_set_location_hint(target_slot_range)
-                .map_err(Error::from)?;
-        }
-        if let (Some(target_child_inode), Some(target_child_inode_state_guard)) =
-            (target_child_inode, target_child_inode_state_guard)
-        {
-            let detached_target_ino = target_child_inode_state_guard.metadata().ino;
-            Self::detach_namespace_removed_inode(
-                fs_state,
-                allocation_guard,
-                detached_target_ino,
-                target_child_inode,
-                target_child_inode_state_guard,
-                detached_regular_file_reclaim,
-            )?;
-        }
-        ExfatFs::rebind_rename_inode_cache(
-            fs_state,
-            old_source_ino,
-            new_source_ino,
-            source_child_inode,
-            replaced_target_ino,
-        );
-        Self::cleanup_replaced_target_ranges(
-            fs_state,
-            allocation_guard,
-            &replaced_target_ranges,
-        )?;
-        Ok(())
+        Ok((target_cluster_map, target_slot_range, replacement))
     }
 
     // Slot management
@@ -1882,7 +2101,6 @@ impl ExfatInode {
         reusable_slot_range: Option<DirEntrySlotRange>,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
-        _fs: &ExfatFs,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,

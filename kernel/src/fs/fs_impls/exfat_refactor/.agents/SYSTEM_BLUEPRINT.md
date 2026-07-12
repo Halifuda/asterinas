@@ -87,6 +87,72 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Scope**: Five exact objectives: typed fragmented-page I/O mode/direct page ownership; exclusive rename cleanup outcome; one-use error-wrapper inlining; unused boot extraction deletion; unique hinted-slot identity validation while retaining lock-independent `AtomicU64` placement.
   - **Required Creator Gate**: `.agents/tools/checker_run.sh cargo-check --component cross_meso_vfs_to_bio_topology --phase pass_136_final_code_cleanup_creator` must pass inside the project container before submission.
   - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260711-202446-cross_meso_vfs_to_bio_topology-pass_136_final_code_cleanup_creator/summary.tsv` (`cargo-check=0`)
+- [x] **Refreshed-Container generic/001 Harness Smoke** (`pass_139_generic_001_new_container_harness_smoke_checker`)
+  - **Status**: Accepted; refreshed-container harness smoke is green
+  - **Dispatch**: `.agents/subagent-tasks/xfstests_linux_baseline_20260624/pass_139_generic_001_new_container_harness_smoke_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/xfstests_linux_baseline_20260624/pass_139_generic_001_new_container_harness_smoke_checker.md`
+  - **Control Evidence**: Accepted baseline `pass_137_upstream_rename_mode_compatibility_checker` plus receipt `.agents/tmp/pass_137_upstream_rename_mode_compatibility_batch52_full_new_devices/`
+  - **Compile Receipt**: `/tmp/pass_139_generic_001_new_container_harness_smoke_checker_cargo_check/summary.tsv` (`cargo-check=0`; explicit `/tmp` out-dir was required because `.agents/checker-runs/` is currently owned by `nobody:nogroup`)
+  - **Runtime Receipt**: `.agents/tmp/pass_139_generic_001_new_container_harness_smoke_checker_generic_001/`
+  - **Scope**: Prove the current xfstests harness still runs isolated `generic/001` in the refreshed container with `/root/asterinas` and `/root/asteinas-pr` both mounted, or classify the first harness/environment blocker without widening into broader suite or production repair.
+  - **Result**: Path proof confirmed both mounts; isolated `generic/001` ran under `FSTYP=exfat_refactor`, `TEST_DEV=/dev/vdd`, and `SCRATCH_DEV=/dev/vde`, then finished with `Passed all 1 tests` and `All conformance tests passed.`
+- [x] **Simple pass_138 Review Findings Landing** (`pass_140_simple_review_findings_creator`)
+  - **Status**: Accepted through compile-only synchronized Checker
+  - **Findings**: `F01`, `F02`, `F03`, `F06`, `F07`, `F10`
+  - **Creator Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_140_simple_review_findings_creator_dispatch.md`
+  - **Checker Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_140_simple_review_findings_checker_dispatch.md`
+  - **Write-set**: `bitmap.rs`, `fat.rs`, `fs.rs`, `inode/lookup.rs`, `upcase.rs`
+  - **Validation Override**: lock-guarded cargo-check only; no xfstests for this pass by explicit user direction
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_140_simple_review_findings_creator.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_140_simple_review_findings_checker.md`
+  - **Authoritative Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260712-102821-cross_meso_vfs_to_bio_topology-pass_140_simple_review_findings_checker/summary.tsv` (`cargo-check=0`)
+  - **Acceptance Notes**: Main-agent review repaired unordered child-to-parent inode locking in `readdir("..")`; a first passing compile then exposed one pass-introduced lazy-reclaim `block_device` warning, which the same pass removed before the authoritative rerun. No xfstests, QEMU, or runtime suite ran.
+- [ ] **Allocation Bitmap Required-Length Admission** (`pass_141_allocation_bitmap_required_length_creator`)
+  - **Status**: Creator code-side accepted; Checker/compile pending
+  - **Finding**: `F09`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_141_allocation_bitmap_required_length_creator_dispatch.md`
+  - **Write-set**: `bitmap.rs` only
+  - **Contract**: validate declared `DataLength` against stream/device geometry and reject undersized declarations; derive resident, scan, dirty-generation, and publish lengths only from `ceil(ClusterCount / 8)`; tolerate and do not cache oversized reserved tail, matching Linux exFAT
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_141_allocation_bitmap_required_length_creator.md`
+  - **Result**: `bitmap_lengths()` became owner-local `required_bitmap_bytes()`; declared length remains an admission check only, while all resident state and operations use required bytes. Main-agent review accepted the one-file landing. No compile/test command has run.
+- [x] **Partial-Sector VDL Read Design** (`pass_142_partial_sector_vdl_read_designer`)
+  - **Status**: Accepted after interactive Multi-Agent V1 review
+  - **Finding**: `F08`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_142_partial_sector_vdl_read_designer_dispatch.md`
+  - **Hard Boundary**: preserve callback no-climb, immutable `PageCacheContext`, direct locked-page ownership, and exactly-once fragmented completion; zero exact VDL tail only after overlapping read BIO completion and before up-to-date publication
+  - **Spec**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_142_partial_sector_vdl_read_designer_spec.md`
+  - **Validation**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_142_partial_sector_vdl_read_designer_validation.md`
+- [x] **Partial-Sector VDL Read Implementation** (`pass_143_partial_sector_vdl_read_creator`)
+  - **Status**: Accepted through user-authorized compile-only Creator exception; runtime pending
+  - **Finding**: `F08`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_143_partial_sector_vdl_read_creator_dispatch.md`
+  - **Write-set**: `inode/page_backend.rs`, `inode/cached_io.rs`
+  - **Contract**: keep exact `initialized_len` separate from aligned transfer length; zero `initialized_len..PAGE_SIZE` only at the unique successful all-retired read finalizer before up-to-date publication; preserve sticky failure, exactly-once retirement, callback no-climb, and writeback semantics
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_143_partial_sector_vdl_read_creator.md`
+  - **Result**: main-agent static review accepted the bounded implementation and complete no-new-entity census. Authoritative receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260712-185016-cross_meso_vfs_to_bio_topology-pass_143_partial_sector_vdl_read_creator/summary.tsv` records `cargo-check=0`; no runtime test ran.
+- [x] **Rename Protocol Decomposition Design** (`pass_144_rename_protocol_decomposition_designer`)
+  - **Status**: Accepted after interactive main-agent lock-lifetime repair
+  - **Findings**: `F04`, `F05`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_144_rename_protocol_decomposition_designer_dispatch.md`
+  - **Hard Boundary**: no change to `FsLock -> ordered InodeLock set -> AllocLock / AllocGuard -> PageCache/ReentryLock`, complete ordered final inode set, continuous guards, callback no-climb, rollback ownership, or accepted replacement-cleanup exclusivity
+  - **Spec**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_144_rename_protocol_decomposition_designer_spec.md`
+  - **Validation**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_144_rename_protocol_decomposition_designer_validation.md`
+  - **Repair Note**: Lower final inode/`AllocGuard` proofs remain continuous through lower persistence/finalization/cleanup/rollback, then may release; outer `FsLock(Write)` alone remains continuous through dirty-volume marking and return, matching the accepted implementation boundary.
+- [ ] **Rename Protocol Decomposition Implementation** (`pass_145_rename_protocol_decomposition_creator`)
+  - **Status**: Creator code-side accepted after interactive staged repair; compile/Checker pending
+  - **Findings**: `F04`, `F05`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_145_rename_protocol_decomposition_creator_dispatch.md`
+  - **Hard Boundary**: preserve `FsLock -> complete stable-ordered InodeLock set -> one AllocGuard -> PageCache/ReentryLock`, continuous lower proof lifetime through rollback/finalization, destination-before-source persistence, exclusive replacement cleanup, and uninterrupted outer `FsLock` dirty marking
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_145_rename_protocol_decomposition_creator.md`
+  - **Result**: rejected the initial tuple-only rewrite, committed checkpoint `2cbd78634`, then interactively accepted unified provisional discovery, complete participant collection, one final write-set, nonblocking final-proof projection, protocol-specific persistence plans, and shared inode/cache/cleanup finalization. No compile or runtime validation has run for the final repair.
+- [ ] **Sync-Scope Pending Completion Repair** (`pass_151_sync_scope_pending_completion_creator`)
+  - **Status**: Creator code-side accepted; compile/Checker pending
+  - **Review**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_150_aster_code_review.md`
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_151_sync_scope_pending_completion_creator_dispatch.md`
+  - **Write-set**: `inode/sync.rs` only
+  - **Contract**: `Data` requires no remaining dirty pages or content generation, including length/VDL/cluster-map publication, but may leave metadata-only debt; `All` requires no dirty generation
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_151_sync_scope_pending_completion_creator.md`
+  - **Result**: existing private pending predicate now consumes `InodeSyncScope` and reuses `scope.needs_device_sync`; no transition, publication, allocation, page-cache, or lock behavior changed.
 
 ## 2. Meso-Component Pipeline Index
 <!-- Tracks the high-level end-to-end lifecycle of each Meso-Component. 

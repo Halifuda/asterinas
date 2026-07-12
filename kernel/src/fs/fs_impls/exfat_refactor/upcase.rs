@@ -20,6 +20,7 @@ impl UpcaseTable {
     pub(super) const NAME_MAX: usize = 255;
     const TABLE_CODE_UNIT_COUNT: usize = u16::MAX as usize + 1;
     const UNCOMPRESSED_TABLE_BYTE_LEN: usize = Self::TABLE_CODE_UNIT_COUNT * 2;
+    const MAX_ENCODED_TABLE_BYTE_LEN: usize = 4 * Self::TABLE_CODE_UNIT_COUNT;
     const MANDATORY_PREFIX_CODE_UNIT_COUNT: u8 = 128;
 
     pub(super) fn load(
@@ -55,6 +56,9 @@ impl UpcaseTable {
         ]);
         boot_region.validate_stream_data(first_cluster, data_length)?;
         let data_length = usize::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
+        if data_length > Self::MAX_ENCODED_TABLE_BYTE_LEN {
+            return Err(invalid_on_disk_layout());
+        }
         let mut remaining = data_length;
         let mut table_bytes = Vec::with_capacity(data_length);
         fat_reader.walk_cluster_chain(first_cluster, |_, cluster_bytes| {

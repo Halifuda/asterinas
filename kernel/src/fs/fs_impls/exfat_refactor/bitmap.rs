@@ -56,9 +56,8 @@ impl AllocationBitmap {
         block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
     ) -> Result<()> {
-        let cluster_count = boot_region.cluster_count_usize()?;
-        let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
-        let mut resident_bitmap = vec![0; bitmap_bytes];
+        let required_bytes = self.required_bitmap_bytes(boot_region)?;
+        let mut resident_bitmap = vec![0; required_bytes];
         let mut copied_bytes = 0usize;
         let mut fat_reader = FatReader::new(block_device, boot_region);
         fat_reader.walk_cluster_chain(self.first_cluster, |_, cluster_bytes| {
@@ -82,7 +81,7 @@ impl AllocationBitmap {
         }
         self.resident_bitmap = resident_bitmap;
         self.dirty_byte_ranges.clear();
-        self.dirty_byte_generations = vec![0; bitmap_bytes];
+        self.dirty_byte_generations = vec![0; required_bytes];
         self.published_dirty_generation = None;
         self.next_dirty_generation = 0;
         Ok(())
@@ -94,11 +93,10 @@ impl AllocationBitmap {
         fat_reader: &mut FatReader<'_>,
     ) -> Result<usize> {
         let cluster_count = boot_region.cluster_count_usize()?;
-        let (bitmap_bytes, required_bytes) = self.bitmap_lengths(cluster_count, boot_region)?;
-        debug_assert!(bitmap_bytes >= required_bytes);
+        let required_bytes = self.required_bitmap_bytes(boot_region)?;
 
         let mut bits_remaining = cluster_count;
-        let mut bitmap_bytes_remaining = bitmap_bytes;
+        let mut bitmap_bytes_remaining = required_bytes;
         let mut used_clusters = 0usize;
         let result = fat_reader.walk_cluster_chain(self.first_cluster, |_, cluster_bytes| {
             let bytes_to_visit = bitmap_bytes_remaining.min(cluster_bytes.len());
@@ -144,9 +142,7 @@ impl AllocationBitmap {
 
     pub(super) fn find_free_ranges(
         &self,
-        _block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
-        _fat_reader: &mut FatReader<'_>,
         requested_clusters: usize,
         preferred_start_cluster: Option<u32>,
     ) -> Result<Vec<ClusterRange>> {
@@ -155,8 +151,8 @@ impl AllocationBitmap {
         }
 
         let cluster_count = boot_region.cluster_count_usize()?;
-        let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
-        if self.resident_bitmap.len() != bitmap_bytes {
+        let required_bytes = self.required_bitmap_bytes(boot_region)?;
+        if self.resident_bitmap.len() != required_bytes {
             return Err(inconsistent_bitmap_accounting());
         }
         let mut requested_clusters_remaining = requested_clusters;
@@ -327,7 +323,6 @@ impl AllocationBitmap {
 
     pub(super) fn apply_cluster_ranges(
         &mut self,
-        _block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
         cluster_ranges: &[ClusterRange],
         update: BitmapOp,
@@ -344,9 +339,9 @@ impl AllocationBitmap {
                     .checked_add(range.end - range.start)
                     .ok_or_else(invalid_operation_input)
             })?;
-        let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
-        if self.resident_bitmap.len() != bitmap_bytes
-            || self.dirty_byte_generations.len() != bitmap_bytes
+        let required_bytes = self.required_bitmap_bytes(boot_region)?;
+        if self.resident_bitmap.len() != required_bytes
+            || self.dirty_byte_generations.len() != required_bytes
         {
             return Err(inconsistent_bitmap_accounting());
         }
@@ -436,7 +431,6 @@ impl AllocationBitmap {
 
     pub(super) fn release_lazy_reclaimed_clusters(
         &mut self,
-        block_device: &dyn BlockDevice,
         boot_region: &BootRegion,
     ) -> Result<bool> {
         let mut pending_lazy_reclaims = Vec::new();
@@ -451,7 +445,6 @@ impl AllocationBitmap {
 
             let release_result = (|| {
                 self.apply_cluster_ranges(
-                    block_device,
                     boot_region,
                     &lazy_reclaimed_cluster.ranges,
                     BitmapOp::Free,
@@ -479,9 +472,8 @@ impl AllocationBitmap {
             return Ok(());
         }
 
-        let cluster_count = boot_region.cluster_count_usize()?;
-        let (bitmap_bytes, _) = self.bitmap_lengths(cluster_count, boot_region)?;
-        if self.resident_bitmap.len() != bitmap_bytes {
+        let required_bytes = self.required_bitmap_bytes(boot_region)?;
+        if self.resident_bitmap.len() != required_bytes {
             return Err(inconsistent_bitmap_accounting());
         }
         let dirty_byte_ranges = self.dirty_byte_ranges.clone();
@@ -513,7 +505,7 @@ impl AllocationBitmap {
                     let cluster_byte_start = current_bitmap_cluster_index
                         .checked_mul(boot_region.cluster_size)
                         .ok_or_else(inconsistent_bitmap_accounting)?;
-                    if cluster_byte_start >= bitmap_bytes {
+                    if cluster_byte_start >= required_bytes {
                         return Err(inconsistent_bitmap_accounting());
                     }
                     let intra_cluster_offset = dirty_byte_start
@@ -608,19 +600,15 @@ impl AllocationBitmap {
         })
     }
 
-    fn bitmap_lengths(
-        &self,
-        cluster_count: usize,
-        boot_region: &BootRegion,
-    ) -> Result<(usize, usize)> {
+    fn required_bitmap_bytes(&self, boot_region: &BootRegion) -> Result<usize> {
         boot_region.validate_stream_data(self.first_cluster, self.data_length)?;
-        let required_bytes = cluster_count.div_ceil(8);
-        let bitmap_bytes =
+        let required_bytes = boot_region.cluster_count_usize()?.div_ceil(8);
+        let declared_bytes =
             usize::try_from(self.data_length).map_err(|_| invalid_on_disk_layout())?;
-        if bitmap_bytes < required_bytes {
+        if declared_bytes < required_bytes {
             return Err(inconsistent_bitmap_accounting());
         }
-        Ok((bitmap_bytes, required_bytes))
+        Ok(required_bytes)
     }
 
     fn commit_run_to_ranges(
