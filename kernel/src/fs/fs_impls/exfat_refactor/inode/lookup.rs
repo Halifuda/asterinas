@@ -4,15 +4,18 @@
 //!
 //! Method groups: name lookup, directory-entry scans, readdir emission, and VFS lookup dispatch.
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use aster_block::BlockDevice;
 
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, DirEntryIssueKind, FileEntrySetView, ScannedDirEntry},
-        invalid_on_disk_layout,
+        direntry::{
+            self, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, FileEntrySetView, ScannedDirEntry,
+            ScannedDirEntrySlot,
+        },
+        invalid_on_disk_layout, invalid_operation_input,
     },
     ExfatFs, ExfatInode, UpcaseTable,
     state::InodeStateReadGuard,
@@ -23,6 +26,30 @@ use crate::{
 };
 
 impl ExfatInode {
+    fn readdir_cookie_for_entry_index(entry_index: usize) -> Result<usize> {
+        entry_index
+            .checked_add(1)
+            .and_then(|entry_count| entry_count.checked_mul(DIRECTORY_ENTRY_SIZE))
+            .ok_or_else(invalid_operation_input)
+    }
+
+    fn normalize_readdir_offset(offset: usize) -> Result<(usize, usize)> {
+        let normalized_offset = offset
+            .checked_add(DIRECTORY_ENTRY_SIZE - 1)
+            .and_then(|rounded| {
+                rounded
+                    .checked_div(DIRECTORY_ENTRY_SIZE)
+                    .and_then(|aligned| aligned.checked_mul(DIRECTORY_ENTRY_SIZE))
+            })
+            .map(|aligned| aligned.max(DIRECTORY_ENTRY_SIZE))
+            .ok_or_else(invalid_operation_input)?;
+        let entry_index = normalized_offset
+            .checked_div(DIRECTORY_ENTRY_SIZE)
+            .and_then(|aligned_entries| aligned_entries.checked_sub(1))
+            .ok_or_else(invalid_operation_input)?;
+        Ok((normalized_offset, entry_index))
+    }
+
     pub(super) fn lookup_child_by_name(
         &self,
         fs: &Arc<ExfatFs>,
@@ -68,6 +95,16 @@ impl ExfatInode {
             return Ok(Some(child_inode));
         }
 
+        let child_stream = super::StreamExtensionDirEntry {
+            data_length: Some(data_length),
+            first_cluster,
+            valid_data_length: Some(valid_data_length),
+            no_fat_chain,
+        };
+        let child_cluster_map = (inode_type == InodeType::Dir)
+            .then(|| Self::resolve_cluster_map(block_device, boot_region, child_stream))
+            .transpose()?
+            .map(Arc::new);
         let child_inode = Self::new_child(
             fs,
             self.weak_self(),
@@ -79,6 +116,7 @@ impl ExfatInode {
             data_length,
             valid_data_length,
             no_fat_chain,
+            child_cluster_map,
         );
         {
             let unpublished_child_guard = child_inode.inode_state_write_guard();
@@ -160,11 +198,13 @@ impl ExfatInode {
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         let _allocation_guard = fs.allocation_read_guard()?;
         let directory_ino = inode_state_guard.metadata().ino;
-        let cluster_map = inode_state_guard.dir_entry_stream();
-        let directory_bytes =
-            Self::read_directory_bytes_for_cluster_map(&block_device, &boot_region, cluster_map)?;
-
+        let directory_stream = inode_state_guard.dir_entry_stream();
+        let cluster_map = inode_state_guard
+            .cached_cluster_map()
+            .filter(|generation| generation.stream_extension() == directory_stream)
+            .ok_or_else(invalid_on_disk_layout)?;
         let mut next_offset = offset;
+        let mut accepted_entry = false;
         if next_offset == 0 {
             let dot_next_offset = next_offset
                 .checked_add(1)
@@ -173,11 +213,10 @@ impl ExfatInode {
                 return Err(error);
             }
             next_offset = dot_next_offset;
+            accepted_entry = true;
         }
         if next_offset == 1 {
-            let dotdot_next_offset = next_offset
-                .checked_add(1)
-                .ok_or_else(invalid_on_disk_layout)?;
+            let dotdot_next_offset = DIRECTORY_ENTRY_SIZE;
             let parent_ino = match parent.as_ref() {
                 Some(parent) => inode_guards
                     .iter()
@@ -190,60 +229,105 @@ impl ExfatInode {
             if let Err(error) =
                 visitor.visit("..", parent_ino, InodeType::Dir, dotdot_next_offset)
             {
-                if next_offset == offset {
+                if !accepted_entry {
                     return Err(error);
                 }
                 return Ok(next_offset.saturating_sub(offset));
             }
             next_offset = dotdot_next_offset;
+            accepted_entry = true;
         }
 
-        let mut visible_offset = 2usize;
         let mut entry_index = 0usize;
+        if next_offset >= 2 {
+            let (normalized_offset, normalized_entry_index) =
+                Self::normalize_readdir_offset(next_offset)?;
+            next_offset = normalized_offset;
+            entry_index = normalized_entry_index;
+        }
+        let logical_offset = entry_index
+            .checked_mul(DIRECTORY_ENTRY_SIZE)
+            .ok_or_else(invalid_operation_input)?;
+        let Some(mut cursor) = Self::directory_stream_cursor(
+            &block_device,
+            &boot_region,
+            cluster_map.clone(),
+            logical_offset,
+        )?
+        else {
+            return Ok(next_offset.saturating_sub(offset));
+        };
         loop {
-            match direntry::scan_dir_entry(
-                cluster_map.data_length.is_none(),
-                &directory_bytes,
+            let Some(entry_bytes) = cursor.read_next_slot()? else {
+                break;
+            };
+            match direntry::scan_dir_entry_slot(
+                directory_stream.data_length.is_none(),
                 entry_index,
+                &entry_bytes,
             )? {
-                ScannedDirEntry::EndOfDirectory { .. } => break,
-                ScannedDirEntry::Vacant(slot_range) => {
+                ScannedDirEntrySlot::EndOfDirectory { entry_index: end_entry_index } => {
+                    next_offset = Self::readdir_cookie_for_entry_index(end_entry_index)?;
+                    break;
+                }
+                ScannedDirEntrySlot::Vacant(slot_range)
+                | ScannedDirEntrySlot::RootMetadata(slot_range)
+                | ScannedDirEntrySlot::Secondary(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
+                    next_offset = Self::readdir_cookie_for_entry_index(entry_index)?;
                 }
-                ScannedDirEntry::File(entry_view) => {
-                    let candidate_name = entry_view.name()?;
-                    let (inode_type, _, _, _) = entry_view.child_metadata(&boot_region)?;
-                    let resume_offset = visible_offset
-                        .checked_add(1)
+                ScannedDirEntrySlot::FilePrimary(slot_range)
+                | ScannedDirEntrySlot::UnrecognizedPrimary(slot_range) => {
+                    let byte_length = slot_range
+                        .entry_count()
+                        .checked_mul(DIRECTORY_ENTRY_SIZE)
                         .ok_or_else(invalid_on_disk_layout)?;
-
-                    if visible_offset >= offset {
-                        let entry_name = String::from_utf16(&candidate_name)
-                            .map_err(|_| invalid_on_disk_layout())?;
-                        let entry_ino = (u64::from(cluster_map.first_cluster) << 32)
-                            | u64::from(
-                                u32::try_from(entry_view.slot_range().first_entry_index())
-                                    .map_err(|_| invalid_on_disk_layout())?,
-                            );
-                        if let Err(error) =
-                            visitor.visit(&entry_name, entry_ino, inode_type, resume_offset)
-                        {
-                            if next_offset == offset {
-                                return Err(error);
+                    let mut entry_set_bytes = Vec::with_capacity(byte_length);
+                    entry_set_bytes.extend_from_slice(&entry_bytes);
+                    for _ in 1..slot_range.entry_count() {
+                        let next_slot = cursor
+                            .read_next_slot()?
+                            .ok_or_else(invalid_on_disk_layout)?;
+                        entry_set_bytes.extend_from_slice(&next_slot);
+                    }
+                    let resume_offset =
+                        Self::readdir_cookie_for_entry_index(slot_range.next_entry_index()?)?;
+                    match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
+                        ScannedDirEntry::File(entry_view) => {
+                            let candidate_name = entry_view.name()?;
+                            let (inode_type, _, _, _) = entry_view.child_metadata(&boot_region)?;
+                            let entry_name = String::from_utf16(&candidate_name)
+                                .map_err(|_| invalid_on_disk_layout())?;
+                            let entry_ino = (u64::from(directory_stream.first_cluster) << 32)
+                                | u64::from(
+                                    u32::try_from(slot_range.first_entry_index())
+                                        .map_err(|_| invalid_on_disk_layout())?,
+                                );
+                            if let Err(error) =
+                                visitor.visit(&entry_name, entry_ino, inode_type, resume_offset)
+                            {
+                                if !accepted_entry {
+                                    return Err(error);
+                                }
+                                return Ok(next_offset.saturating_sub(offset));
                             }
-                            return Ok(next_offset.saturating_sub(offset));
+                            accepted_entry = true;
+                            next_offset = resume_offset;
+                            entry_index = slot_range.next_entry_index()?;
                         }
-                        next_offset = resume_offset;
+                        ScannedDirEntry::Issue {
+                            kind: DirEntryIssueKind::BenignUnrecognizedEntrySet,
+                            ..
+                        } => {
+                            next_offset = resume_offset;
+                            entry_index = slot_range.next_entry_index()?;
+                        }
+                        ScannedDirEntry::EndOfDirectory { .. }
+                        | ScannedDirEntry::Vacant(_)
+                        | ScannedDirEntry::Issue { .. } => {
+                            return Err(invalid_on_disk_layout().into());
+                        }
                     }
-                    visible_offset = resume_offset;
-                    entry_index = entry_view.slot_range().next_entry_index()?;
-                }
-                ScannedDirEntry::Issue { kind, slot_range } => {
-                    if kind == DirEntryIssueKind::BenignUnrecognizedEntrySet {
-                        entry_index = slot_range.next_entry_index()?;
-                        continue;
-                    }
-                    return Err(invalid_on_disk_layout().into());
                 }
             }
         }

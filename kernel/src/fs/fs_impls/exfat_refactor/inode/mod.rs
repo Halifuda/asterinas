@@ -69,6 +69,7 @@ impl ExfatInode {
         data_length: Option<usize>,
         valid_data_length: Option<usize>,
         no_fat_chain: bool,
+        cluster_map: Option<Arc<ClusterMap>>,
         parent: Weak<Self>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
@@ -77,7 +78,7 @@ impl ExfatInode {
                 dirty_file_retention: None,
                 metadata,
                 parent,
-                cluster_map: None,
+                cluster_map,
                 dir_entry_stream: StreamExtensionDirEntry {
                     data_length,
                     first_cluster,
@@ -97,7 +98,13 @@ impl ExfatInode {
         })
     }
 
-    pub(super) fn new_root(fs: &Arc<ExfatFs>, root_cluster: u32, cluster_size: usize) -> Arc<Self> {
+    pub(super) fn new_root(
+        fs: &Arc<ExfatFs>,
+        root_cluster_map: Arc<ClusterMap>,
+        cluster_size: usize,
+    ) -> Result<Arc<Self>> {
+        let root_cluster = root_cluster_map.stream_extension().first_cluster;
+        let allocated_size = root_cluster_map.allocated_byte_length(&fs.immutable_boot_region())?;
         let root_ino = u64::from(root_cluster);
         let mut metadata = Metadata::new_dir(
             root_ino,
@@ -105,13 +112,22 @@ impl ExfatInode {
             cluster_size,
             fs.container_device_id(),
         );
-        metadata.size = cluster_size;
-        let root_inode = Self::new(fs, metadata, root_cluster, None, None, false, Weak::new());
+        metadata.size = allocated_size;
+        let root_inode = Self::new(
+            fs,
+            metadata,
+            root_cluster,
+            None,
+            None,
+            false,
+            Some(root_cluster_map),
+            Weak::new(),
+        );
         fs.fs_state
             .write()
             .inode_cache
             .insert(root_ino, Arc::downgrade(&root_inode));
-        root_inode
+        Ok(root_inode)
     }
 
     fn new_child(
@@ -125,6 +141,7 @@ impl ExfatInode {
         data_length: usize,
         valid_data_length: usize,
         no_fat_chain: bool,
+        cluster_map: Option<Arc<ClusterMap>>,
     ) -> Arc<Self> {
         let mut metadata = match inode_type {
                 InodeType::Dir => Metadata::new_dir(
@@ -148,6 +165,7 @@ impl ExfatInode {
             Some(data_length),
             Some(valid_data_length),
             no_fat_chain,
+            cluster_map,
             parent,
         )
     }

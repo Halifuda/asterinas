@@ -98,33 +98,22 @@ impl<'a> FatReader<'a> {
         Ok(FatChainStep::Continue(next_cluster))
     }
 
-    pub(super) fn append_cluster_to_chain(
+    pub(super) fn link_prepared_chain_to_tail(
         &mut self,
-        start_cluster: u32,
+        tail_cluster: u32,
         appended_cluster: u32,
-    ) -> Result<()> {
+    ) -> Result<Result<()>> {
         if !self.boot_region.is_valid_cluster(appended_cluster) {
             return Err(invalid_operation_input());
         }
 
-        let mut current_cluster = start_cluster;
-        let mut visited_clusters = BTreeSet::new();
-        loop {
-            if !visited_clusters.insert(current_cluster) {
-                return Err(invalid_on_disk_layout());
-            }
-            match self.next_cluster(current_cluster)? {
-                FatChainStep::Continue(next_cluster) => current_cluster = next_cluster,
-                FatChainStep::End => {
-                    self.write_cluster_entry(appended_cluster, FAT_END_OF_CHAIN)?;
-                    self.write_cluster_entry(current_cluster, appended_cluster)?;
-                    return Ok(());
-                }
-            }
+        match self.next_cluster(tail_cluster)? {
+            FatChainStep::End => Ok(self.write_cluster_entry(tail_cluster, appended_cluster)),
+            FatChainStep::Continue(_) => Err(invalid_on_disk_layout()),
         }
     }
 
-    pub(super) fn link_contiguous_chain_to_cluster(
+    pub(super) fn link_contiguous_chain_to_prepared_cluster(
         &mut self,
         start_cluster: u32,
         cluster_count: usize,
@@ -134,7 +123,6 @@ impl<'a> FatReader<'a> {
             return Err(invalid_operation_input());
         }
 
-        self.write_cluster_entry(appended_cluster, FAT_END_OF_CHAIN)?;
         for cluster_offset in (0..cluster_count).rev() {
             let current_cluster = start_cluster
                 .checked_add(u32::try_from(cluster_offset).map_err(|_| invalid_operation_input())?)
@@ -150,13 +138,27 @@ impl<'a> FatReader<'a> {
                     .checked_add(1)
                     .ok_or_else(invalid_operation_input)?
             };
-            if next_cluster != appended_cluster && !self.boot_region.is_valid_cluster(next_cluster)
-            {
-                return Err(invalid_operation_input());
-            }
             self.write_cluster_entry(current_cluster, next_cluster)?;
         }
         Ok(())
+    }
+
+    pub(super) fn link_contiguous_chain_to_cluster(
+        &mut self,
+        start_cluster: u32,
+        cluster_count: usize,
+        appended_cluster: u32,
+    ) -> Result<()> {
+        if cluster_count == 0 || !self.boot_region.is_valid_cluster(appended_cluster) {
+            return Err(invalid_operation_input());
+        }
+
+        self.write_cluster_entry(appended_cluster, FAT_END_OF_CHAIN)?;
+        self.link_contiguous_chain_to_prepared_cluster(
+            start_cluster,
+            cluster_count,
+            appended_cluster,
+        )
     }
 
     pub(super) fn terminate_cluster_chain(&mut self, cluster: u32) -> Result<()> {

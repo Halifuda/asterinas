@@ -253,8 +253,18 @@ impl ExfatFs {
             boot_region,
             source.map(ToString::to_string),
         );
-        let root_inode =
-            ExfatInode::new_root(&fs, boot_region.root_dir_cluster, boot_region.cluster_size);
+        let root_stream = super::inode::StreamExtensionDirEntry {
+            data_length: None,
+            first_cluster: boot_region.root_dir_cluster,
+            valid_data_length: None,
+            no_fat_chain: false,
+        };
+        let root_cluster_map = Arc::new(ExfatInode::resolve_cluster_map(
+            block_device,
+            &boot_region,
+            root_stream,
+        )?);
+        let root_inode = ExfatInode::new_root(&fs, root_cluster_map, boot_region.cluster_size)?;
         let mount_state = MountedVolumeState {
             volume_flags: flags,
             dirty_bracket_opened_by_mount: false,

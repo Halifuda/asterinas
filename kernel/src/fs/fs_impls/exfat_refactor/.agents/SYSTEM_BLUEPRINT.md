@@ -107,14 +107,14 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_140_simple_review_findings_checker.md`
   - **Authoritative Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260712-102821-cross_meso_vfs_to_bio_topology-pass_140_simple_review_findings_checker/summary.tsv` (`cargo-check=0`)
   - **Acceptance Notes**: Main-agent review repaired unordered child-to-parent inode locking in `readdir("..")`; a first passing compile then exposed one pass-introduced lazy-reclaim `block_device` warning, which the same pass removed before the authoritative rerun. No xfstests, QEMU, or runtime suite ran.
-- [ ] **Allocation Bitmap Required-Length Admission** (`pass_141_allocation_bitmap_required_length_creator`)
-  - **Status**: Creator code-side accepted; Checker/compile pending
+- [x] **Allocation Bitmap Required-Length Admission** (`pass_141_allocation_bitmap_required_length_creator`)
+  - **Status**: Accepted; the change is covered by later successful whole-tree compile validation
   - **Finding**: `F09`
   - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_141_allocation_bitmap_required_length_creator_dispatch.md`
   - **Write-set**: `bitmap.rs` only
   - **Contract**: validate declared `DataLength` against stream/device geometry and reject undersized declarations; derive resident, scan, dirty-generation, and publish lengths only from `ceil(ClusterCount / 8)`; tolerate and do not cache oversized reserved tail, matching Linux exFAT
   - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_141_allocation_bitmap_required_length_creator.md`
-  - **Result**: `bitmap_lengths()` became owner-local `required_bitmap_bytes()`; declared length remains an admission check only, while all resident state and operations use required bytes. Main-agent review accepted the one-file landing. No compile/test command has run.
+  - **Result**: `bitmap_lengths()` became owner-local `required_bitmap_bytes()`; declared length remains an admission check only, while all resident state and operations use required bytes. Main-agent review accepted the one-file landing, and later whole-tree `cargo-check=0` receipts covering the merged state close the compile gate; no separate F09-only Checker run is required.
 - [x] **Partial-Sector VDL Read Design** (`pass_142_partial_sector_vdl_read_designer`)
   - **Status**: Accepted after interactive Multi-Agent V1 review
   - **Finding**: `F08`
@@ -139,20 +139,121 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Validation**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_144_rename_protocol_decomposition_designer_validation.md`
   - **Repair Note**: Lower final inode/`AllocGuard` proofs remain continuous through lower persistence/finalization/cleanup/rollback, then may release; outer `FsLock(Write)` alone remains continuous through dirty-volume marking and return, matching the accepted implementation boundary.
 - [ ] **Rename Protocol Decomposition Implementation** (`pass_145_rename_protocol_decomposition_creator`)
-  - **Status**: Creator code-side accepted after interactive staged repair; compile/Checker pending
+  - **Status**: Creator accepted after interactive staged repair; compile Checker passed, runtime acceptance remains open
   - **Findings**: `F04`, `F05`
   - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_145_rename_protocol_decomposition_creator_dispatch.md`
   - **Hard Boundary**: preserve `FsLock -> complete stable-ordered InodeLock set -> one AllocGuard -> PageCache/ReentryLock`, continuous lower proof lifetime through rollback/finalization, destination-before-source persistence, exclusive replacement cleanup, and uninterrupted outer `FsLock` dirty marking
   - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_145_rename_protocol_decomposition_creator.md`
   - **Result**: rejected the initial tuple-only rewrite, committed checkpoint `2cbd78634`, then interactively accepted unified provisional discovery, complete participant collection, one final write-set, nonblocking final-proof projection, protocol-specific persistence plans, and shared inode/cache/cleanup finalization. No compile or runtime validation has run for the final repair.
 - [ ] **Sync-Scope Pending Completion Repair** (`pass_151_sync_scope_pending_completion_creator`)
-  - **Status**: Creator code-side accepted; compile/Checker pending
+  - **Status**: Creator accepted; compile Checker passed, no runtime test has run
   - **Review**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_150_aster_code_review.md`
   - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_151_sync_scope_pending_completion_creator_dispatch.md`
   - **Write-set**: `inode/sync.rs` only
   - **Contract**: `Data` requires no remaining dirty pages or content generation, including length/VDL/cluster-map publication, but may leave metadata-only debt; `All` requires no dirty generation
   - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_151_sync_scope_pending_completion_creator.md`
   - **Result**: existing private pending predicate now consumes `InodeSyncScope` and reuses `scope.needs_device_sync`; no transition, publication, allocation, page-cache, or lock behavior changed.
+- [x] **Targeted Dirty-Retention Sequence Diagnosis** (`pass_154_generic_676_694_dirty_retention_checker`)
+  - **Status**: Accepted; PASS / no reproduction
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_154_generic_676_694_dirty_retention_checker_dispatch.md`
+  - **Scope**: one same-guest `generic/676,generic/694` batch with bounded successful-sync and drop-entry dirty-retention markers; no broad teardown instrumentation or full-suite rerun
+  - **Decision Gate**: open a Creator dirty-retention repair only if `generic/676` leaves a nonzero retained inode set after successful unmount sync and the immediately following `generic/694` hangs
+  - **Result**: `generic/676` passed in `116s`; its final `/dev/vdd` successful-sync and drop-entry markers both reported `retained_inodes=[]`. The immediately following `generic/694` passed in `8s`; the batch reported `Passed all 2 tests`. No Creator repair is authorized.
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_154_generic_676_694_dirty_retention_checker.md`
+  - **Receipt**: `.agents/tmp/20260713-095939-pass_154_generic_676_694_dirty_retention_checker_console_marker_xfstests/`
+- [x] **Long-Prefix Performance State Localization** (`pass_155_long_prefix_performance_state_localization_checker`)
+  - **Status**: Accepted diagnostic boundary; stale image-dependent performance slowdown reproduced
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_155_long_prefix_performance_state_localization_checker_dispatch.md`
+  - **Scope**: reproduce the historical full-prefix `generic/676` slowdown and following `generic/694` delay with aligned xfstests, guest, kernel, host, and image telemetry; then separate aged-image state from long-lived guest state
+  - **Image Law**: diagnostic image build and old-image reuse are distinct commands; every reuse must prove no kernel/initramfs/xfstests rebuild and no unintended device recreation/reformat
+  - **Result**: an authoritative image frozen after the historical 53-case prefix through completed `generic/676` reproduced isolated `generic/694` in a fresh guest. The first missing boundary is `_create_file_sized 4G` completion: `create_4g begin` appeared, but no end marker appeared after more than five minutes while QEMU remained CPU/syscall-active and TEST mtime advanced.
+  - **Image Inspection**: immutable pre-694 TEST is fsck-clean, 92.735% free, has a roughly 7.4 GiB contiguous free run, and only 16 noncontiguous FAT links. Coarse fragmentation/fullness is excluded; no production repair is authorized.
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_155_long_prefix_performance_state_localization_checker.md`
+  - **Preserved Evidence**: `.agents/tmp/frozen-pre694-after676/`; detailed pass receipts were deleted later by explicit user cleanup direction
+- [x] **generic/694 Allocation/Growth Production Logging** (`pass_156_generic_694_allocation_growth_logging_checker`)
+  - **Status**: Accepted actionable localization; repeated existing-FAT tail discovery is the dominant frozen-image cost
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_156_generic_694_allocation_growth_logging_checker_dispatch.md`
+  - **Scope**: bounded production aggregates over allocation search, bitmap scan, file-growth chunking, cluster-run publication, FAT linking, and adjacent accounting; compare fresh control with authoritative frozen pre-694 image
+  - **Launch Law**: direct frozen-image QEMU command must be mechanically derived from `.agents/tmp/frozen-pre694-after676/qemu-command-line.txt`; only ISO, x3/x4 image, and log paths may differ
+  - **Result**: fresh `generic/694` passed while remaining no-FAT with zero estimated chain traversal. On the frozen image, the file changed from no-FAT by 512 clusters; cumulative estimated existing-chain traversal then rose from `69,040` at 512 clusters to `462,000` at 1,024 and `2,034,352` at 2,048, while matched bitmap allocations continued to visit one byte / one bit without wrapping. The corresponding frozen intervals grew about `1.8s -> 8.9s -> 32.6s`. The dominant cost is `append_cluster_to_chain` walking from the chain head for every incremental extension after one early discontinuity, producing quadratic growth despite low fragmentation.
+  - **Repair Boundary**: no implementation strategy is accepted yet. Any follow-up must redesign the fragmented regular-file append ownership boundary without weakening FAT end-of-chain semantics, bitmap/FAT publication ordering, rollback/error behavior, on-disk compatibility, or lock scopes/order.
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_156_generic_694_allocation_growth_logging_checker.md`
+  - **Receipts**: `.agents/tmp/pass_156_preflight/` and `.agents/tmp/pass_156_runtime/`; temporary production diagnostics and disposable frozen-image copies were removed
+- [x] **Fresh Slow-Case Major-Cause Localization** (`pass_157_fresh_slow_case_major_cause_checker`)
+  - **Status**: Accepted and closed
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_157_fresh_slow_case_major_cause_checker_dispatch.md`
+  - **Scope**: isolated fresh-image `generic/676` followed by isolated fresh-image `generic/707`, with bounded production aggregates and a main-agent acceptance gate after each case
+  - **Evidence Threshold**: identify only the dominant major stage; do not widen into detailed leaf tracing after directory scan/materialization, rewrite, metadata refresh, rename/lock, allocation/FAT, cleanup, or another stage is clearly dominant
+  - **Image Law**: each case gets separately created fresh 8 GiB TEST/SCRATCH images; preserve logs and text receipts only, not image copies
+  - **generic/676 Result**: fresh isolated case passed in instrumented `198s`. More than 23,552 readdir calls each rematerialized the full 655,360-byte directory and restarted scanning from entry zero, exceeding 15.4 GB cumulative materialization and dominating the case. Create and unlink add secondary whole-directory read/rewrite amplification; allocation growth is minor.
+  - **generic/707 Result**: fresh isolated case passed in instrumented `642s` with no lock stall. Its 50,000 cross-directory renames, 50,000 unlinks, roughly 50,500 creates, and 200,500 refreshes produced roughly 28 GB (26 GiB) of whole-directory owner-level read/rewrite exposure; only about 3.31 MiB came from directory growth. Major cause is repeated namespace directory materialization/persistence and refresh amplification, not allocation or locking.
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_157_fresh_slow_case_major_cause_checker.md`
+  - **Cleanup**: all temporary production diagnostics removed; no fresh images preserved; logs/text receipts retained; no QEMU remains; Checker lock released
+  - **Next Gate**: after both major causes are accepted and recorded in the live handoff, dispatch one Architect packet for targeted design options covering accepted `pass_156` plus `pass_157` causes
+- [x] **Slow-Path Performance Ownership Architecture** (`pass_158_slow_path_performance_ownership_architect`)
+  - **Status**: Accepted
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_158_slow_path_performance_ownership_architect_dispatch.md`
+  - **Scope**: targeted owner-level architecture for FAT-tail append, offset directory enumeration, and targeted namespace directory entry-set I/O/refresh, including authoritative truth versus acceleration state and static lock boundaries
+  - **Result**: FAT tail is derived from the guarded immutable `ClusterMap` generation and validated as EOC by the FAT On-disk Structure Owner; readdir replaces visible ordinals with opaque physical-slot cookies and streamed checksum-valid entry sets; namespace mutation shares stateless directory range navigation and exact-span persistence without a whole-directory `Vec` or persistent index/cache/generation
+  - **Rejected State**: no standalone inode/FAT tail cache, naked caller tail, persistent directory index, per-open exFAT cursor carrier, or unused mutation generation
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_158_slow_path_performance_ownership_architecture.md`
+  - **Next Gate**: three dynamic Designer obligations remain before Creator work: fragmented-file append, physical-cookie enumeration, and streaming namespace mutation
+- [x] **Slow-Path Performance Dynamic Contract And Code Census** (`pass_160_slow_path_performance_designer`)
+  - **Status**: Accepted
+  - **Dispatch**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_slow_path_performance_designer_dispatch.md`
+  - **Scope**: freeze the dynamic execution and validation contracts for the three accepted `pass_158` repairs and exhaustively census every affected production code point across `ClusterMap` lifecycle, FAT traversal, physical-cookie enumeration, whole-directory namespace materialization/rewrite, exact-range transport, and downstream callers
+  - **Architecture Rule**: do not reopen `pass_158` or introduce Linux `hint_stat`, `hint_femp`, `hint_bmap`, a persistent directory index/cache/generation, or a second FAT-tail truth; classify each existing traversal/materialization site as required change, required preservation, or shared dependency
+  - **Artifacts**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_160_slow_path_performance_designer_spec.md` and `.agents/components/cross_meso_vfs_to_bio_topology/pass_160_slow_path_performance_designer_validation.md`
+  - **Result**: the dynamic contract preserves one-time authoritative FAT admission walks but eliminates redundant admitted-map rediscovery; selects one Linux-compatible raw-byte cookie namespace with bounded cross-cluster streaming; replaces all enumerated namespace whole-directory carriers/persistence paths with streamed discovery and exact-span writes; and records an exhaustive symbol/call-site census with explicit `must change`, `must remain`, and `shared dependency` dispositions
+  - **Validation Gate**: fragmented `generic/694` uses disposable copies of the accepted frozen/discontinuity image plus a separate fresh control; `generic/676` and `generic/707` require direct performance-shape evidence; `generic/701` is mandatory and adjacent correctness coverage is explicitly bounded
+  - **Next Gate**: repaired `pass_161` and `pass_162` now both have Creator compile acceptance. Schedule only the corrected matching/runtime validation before any `pass_163` dispatch.
+- [x] **Creator A: Fragmented Mapping Generation And FAT-Tail Append** (`pass_161_fragmented_mapping_generation_and_tail_append_creator`)
+  - **Status**: Second same-pass O1 repair accepted at compile boundary after the reopened pass-166 `EINVAL` diagnosis; runtime/behavioral acceptance remains pending the corrected Checker gate
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_161_fragmented_mapping_generation_and_tail_append_creator_dispatch.md`
+  - **Scope**: repair O1 only: prevalidate replacement/data work, completely author and EOC-terminate every new FAT range before old-tail exposure, preserve mapping-derived active-FAT EOC validation, and classify pre-/uncertain-/post-exposure allocation and generation maintenance
+  - **Boundary Rule**: no standalone inode/FAT tail cache, no naked caller-supplied tail, no root mapping/readdir work, and no raw-byte readdir or namespace exact-span work in this pass; the Creator must run the packet-authorized container harness cargo check before delivery
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_161_fragmented_mapping_generation_and_tail_append_creator.md`
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260714-062708-cross_meso_vfs_to_bio_topology-pass_161_fragmented_mapping_generation_and_tail_append_creator/summary.tsv` (`cargo-check=0`)
+  - **Result**: all accepted O1 ordering remains intact, and contiguous `NoFatChain` growth now appends the newly allocated range into the replacement immutable generation before validating the larger `DataLength`. No FAT exposure order, second tail truth, or rollback/uncertain-exposure rule changed.
+- [x] **Creator B: Raw-Byte Cookie Streaming Readdir** (`pass_162_raw_byte_cookie_streaming_readdir_creator`)
+  - **Status**: Second same-pass O2-O4 repair accepted at compile boundary from GPT-5.4 `Anscombe` (`019f5d95-54ef-78f0-a1a3-cd62adb28623`); runtime/behavioral acceptance remains pending the corrected Checker gate
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_162_raw_byte_cookie_streaming_readdir_creator_dispatch.md`
+  - **Scope**: repair O2-O4: finite/root directory readers consume the current admitted immutable map, map each normalized cookie once, reuse one operation-local forward position, admit root topology once to FAT EOC under the existing owner, replace it on root growth, and apply bounded raw-cookie streaming to root
+  - **Boundary Rule**: no Linux `hint_*`, semantic directory index, per-open cursor, second root-length/tail truth, `2 + slot` arithmetic, or lookup/create/rename persistence work; the Creator must run the packet-authorized container harness cargo check before delivery
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_162_raw_byte_cookie_streaming_readdir_creator.md`
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260714-063825-cross_meso_vfs_to_bio_topology-pass_162_raw_byte_cookie_streaming_readdir_creator/summary.tsv` (`cargo-check=0`)
+  - **Result**: accepted O2-O4 admission and raw-cookie transport remain intact. Ordinary directory growth now validates and prepares the old authoritative parent entry-set bytes plus exact physical write plan before FAT-tail exposure, then persists those prepared bytes after child publication without rereading or comparing against the new in-memory generation. Successful or uncertain exposure retains publication/allocation; pre-exposure failure remains rollback-eligible.
+- [ ] **Integration Checker: `generic/676` Fresh + `generic/694` Frozen Runtime Gate** (`pass_166_generic_676_fresh_694_frozen_runtime_checker`)
+  - **Status**: Bounded user-directed two-case rerun complete; fresh `generic/676` TIMEOUT and frozen-copy `generic/694` PASS; stopped for user acceptance without claiming full pass-166 acceptance
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_166_generic_676_fresh_694_frozen_runtime_checker_dispatch.md`
+  - **Scope**: run current-tree compile preflight; isolated fresh-image `generic/676`; isolated `generic/694` using disposable copies of the authoritative frozen pre-694 TEST/SCRATCH images and a proven `generic/694` payload; then ordinary/root small-buffer resume, fabricated-seek, cross-cluster complete-set, root admission, and root growth-resume scenarios required by the pass-160 repair validation
+  - **Boundary Rule**: `generic/694` must use copies of `.agents/tmp/frozen-pre694-after676/xfstests_test.pre694-after676.img` and `.agents/tmp/frozen-pre694-after676/xfstests_scratch.pre694-after676.img`; no production edits, temporary diagnostics, `generic/701`, `generic/707`, or `pass_163` work are authorized here
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_166_generic_676_fresh_694_frozen_runtime_checker.md`
+  - **Receipt Root**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260714-065126-cross_meso_vfs_to_bio_topology-pass_166_generic_676_fresh_694_frozen_runtime_checker/`
+  - **Current Result**: compile preflight passed. Fresh one-case `generic/676` reached its intended banner but produced no xfstests pass/fail footer before the unchanged 20-minute timeout. Frozen-copy one-case `generic/694` used a rebuilt intended payload, fresh disposable copies of the immutable sources, and a `63 -> 63` direct-QEMU command changing only indices `18,24,56,58`; it passed in `56s` with `Ran: generic/694`, `Passed all 1 tests`, and `All conformance tests passed.` Checker lock and process cleanup are complete. Later ordinary/root scenarios remain unrun by explicit user direction, so full pass-166 acceptance is not claimed.
+- [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
+  - **Status**: Accepted after main-agent structural review
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`
+  - **Scope**: exhaustively freeze the implementation and validation contract for FAT new-range-before-old-tail ordering, admitted-map physical-cookie transport, root FAT-EOC-bounded immutable mapping generation, and root readdir integration
+  - **Boundary Rule**: no production edits or commands; preserve accepted owner/lock topology and escalate explicitly if root requirements cannot be satisfied without reopening the prohibition on a directory index/cache/generation or Linux hints
+  - **Artifacts**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_spec.md` and `_validation.md`
+  - **Result**: O1-O4 are individually frozen; root reuses the existing inode-owned immutable `ClusterMap` with FAT-EOC admission and guarded Arc-identity replacement, O1 makes the old-tail link the last fallible exposure operation after complete new topology, and O2/O4 require one admitted-map startup mapping plus one operation-local forward cursor. No Architect escalation or prohibited hint/index/cursor/second truth is introduced.
+  - **Next Gate**: both serialized repair Creators are compile-accepted. Run the corrected matching/runtime Checker evidence, including fresh `generic/676`, frozen-copy `generic/694`, ordinary/root resume, fabricated seeks, cross-cluster sets, and root growth-resume; `pass_163` remains blocked.
+- [ ] **Creator C: Streaming Lookup / Vacancy / Emptiness Substrate** (`pass_163_streaming_lookup_vacancy_emptiness_substrate_creator`)
+  - **Status**: Sliced only; packet archived, Creator not yet dispatched
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_163_streaming_lookup_vacancy_emptiness_substrate_creator_dispatch.md`
+  - **Scope**: replace whole-directory discovery/materialization for lookup, duplicate detection, vacancy-run search, emptiness checks, and directory-growth resume frontier with streamed bounded scans over validated entry sets
+  - **Boundary Rule**: exact-span mutation persistence remains for later passes; no persistent directory index/cache/generation may be introduced
+- [ ] **Creator D: Exact-Span Create / Unlink / Rmdir / Refresh** (`pass_164_exact_span_create_unlink_rmdir_refresh_creator`)
+  - **Status**: Sliced only; packet archived, Creator not yet dispatched
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_164_exact_span_create_unlink_rmdir_refresh_creator_dispatch.md`
+  - **Scope**: create writes only its reserved target span; unlink/rmdir invalidate only their selected spans; ordinary-directory refresh remains the exact-range endpoint; directory growth resumes from the prior physical frontier
+  - **Boundary Rule**: preserve accepted `pass_42` refresh-scope and invalidate-before-free semantics; rename remains out of scope
+- [ ] **Creator E: Streaming Rename Exact-Span Persistence** (`pass_165_streaming_rename_exact_span_persistence_creator`)
+  - **Status**: Sliced only; packet archived, Creator not yet dispatched
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_165_streaming_rename_exact_span_persistence_creator_dispatch.md`
+  - **Scope**: same-directory and cross-directory rename move to streamed final discovery/revalidation and exact validated destination/source/replacement persistence, preserving target-before-source ordering and accepted `pass_145` cleanup/finalization semantics
+  - **Boundary Rule**: no whole-directory carrier survives; do not widen into non-rename mutators or unrelated VFS/shared-layer work
 
 ## 2. Meso-Component Pipeline Index
 <!-- Tracks the high-level end-to-end lifecycle of each Meso-Component. 

@@ -5,6 +5,8 @@
 //! Method groups: create/unlink/rmdir/rename entry points, slot management, directory growth,
 //! emptiness validation, cluster-range collection, and rename-stage helpers.
 
+use core::ops::Range;
+
 use aster_block::BlockDevice;
 
 use super::{
@@ -311,6 +313,28 @@ impl ExfatInode {
             let child_ino = self
                 .entry_location_ino(cluster_map, slot_range.first_entry_index())
                 .map_err(Error::from)?;
+            let child_cluster_map = if type_ == InodeType::Dir {
+                let child_stream = StreamExtensionDirEntry {
+                    data_length: Some(data_length),
+                    first_cluster,
+                    valid_data_length: Some(data_length),
+                    no_fat_chain,
+                };
+                Some(Arc::new(ClusterMap::from_stream_and_ranges(
+                    &boot_region,
+                    child_stream,
+                    if data_length == 0 {
+                        Vec::new()
+                    } else {
+                        vec![ClusterRange {
+                            start_cluster: first_cluster,
+                            cluster_count: data_length.div_ceil(boot_region.cluster_size),
+                        }]
+                    },
+                )?))
+            } else {
+                None
+            };
             let child_inode = Self::new_child(
                 &fs,
                 self.weak_self(),
@@ -322,6 +346,7 @@ impl ExfatInode {
                 data_length,
                 data_length,
                 no_fat_chain,
+                child_cluster_map,
             );
             if type_ == InodeType::File {
                 child_inode
@@ -1733,45 +1758,93 @@ impl ExfatInode {
     ) -> Result<StreamExtensionDirEntry> {
         allocation_guard.allocate(1, None)?;
         let allocated_cluster = allocation_guard.single_cluster()?;
+        let mut publication_complete = false;
         let update_result = (|| {
             Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)?;
-            let updated_cluster_map = self.attach_directory_cluster(
+            let (
+                updated_cluster_map,
+                updated_cluster_map_generation,
+                updated_allocated_size,
+                exposed_old_topology,
+                exposure_error,
+                prepared_parent_entry_set_write,
+            ) = self.attach_directory_cluster(
                 cluster_map,
+                allocation_guard,
+                self_inode_state_guard,
                 block_device,
                 boot_region,
                 allocated_cluster,
-            )?;
-        if updated_cluster_map.data_length.is_some() {
-            let parent_inode_state_guard = parent_inode_state_guard.ok_or_else(|| {
-                Error::with_message(
-                    Errno::EINVAL,
-                    "ordinary exFAT directory growth requires parent write-guard proof",
-                )
-            })?;
-            self.rewrite_validated_entry_set_with_guard(
-                self_inode_state_guard,
-                parent_inode_state_guard,
-                block_device,
-                boot_region,
-                |entry_view| {
-                    let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-                        entry_view.child_metadata(boot_region)?;
-                    if inode_type != InodeType::Dir || !entry_view.is_directory() {
-                        return Err(Error::from(invalid_on_disk_layout()));
+                |updated_cluster_map| {
+                    if updated_cluster_map.data_length.is_none() {
+                        return Ok(None);
                     }
+                    let parent_inode_state_guard = parent_inode_state_guard.ok_or_else(|| {
+                        Error::with_message(
+                            Errno::EINVAL,
+                            "ordinary exFAT directory growth requires parent write-guard proof",
+                        )
+                    })?;
+                    self.prepare_rewritten_entry_set_write_with_guard(
+                        self_inode_state_guard,
+                        parent_inode_state_guard,
+                        block_device,
+                        boot_region,
+                        |entry_view| {
+                            let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
+                                entry_view.child_metadata(boot_region)?;
+                            if inode_type != InodeType::Dir || !entry_view.is_directory() {
+                                return Err(Error::from(invalid_on_disk_layout()));
+                            }
 
-                    let mut updated_entry_set = entry_view.to_mutable();
-                    updated_entry_set.set_cluster_map(&updated_cluster_map)?;
-                    Ok(Some(updated_entry_set.into_bytes()))
+                            let mut updated_entry_set = entry_view.to_mutable();
+                            updated_entry_set.set_cluster_map(&updated_cluster_map)?;
+                            Ok(Some(updated_entry_set.into_bytes()))
+                        },
+                    )
                 },
             )?;
-        }
-            self.commit_directory_cluster_map(
-                self_inode_state_guard,
-                updated_cluster_map,
-                cluster_map,
-                boot_region,
-            )?;
+            if exposed_old_topology {
+                self.commit_directory_cluster_map(
+                    self_inode_state_guard,
+                    updated_cluster_map_generation.clone(),
+                    updated_allocated_size,
+                );
+                allocation_guard.commit_allocation();
+                publication_complete = true;
+                if let Some(error) = exposure_error {
+                    return Err(error);
+                }
+            }
+            let parent_entry_set_write_result = if let Some(prepared_parent_entry_set_write) =
+                prepared_parent_entry_set_write
+            {
+                Some(self.persist_prepared_entry_set_write_classified(
+                    prepared_parent_entry_set_write,
+                    block_device,
+                )?)
+            } else {
+                None
+            };
+            if !exposed_old_topology
+                && matches!(parent_entry_set_write_result.as_ref(), Some(Ok(false)))
+            {
+                return Err(invalid_on_disk_layout());
+            }
+            if !exposed_old_topology {
+                self.commit_directory_cluster_map(
+                    self_inode_state_guard,
+                    updated_cluster_map_generation,
+                    updated_allocated_size,
+                );
+                allocation_guard.commit_allocation();
+                publication_complete = true;
+            }
+            if let Some(entry_set_write_result) = parent_entry_set_write_result {
+                if !entry_set_write_result? {
+                    return Err(invalid_on_disk_layout());
+                }
+            }
             Ok(updated_cluster_map)
         })();
         match update_result {
@@ -1780,7 +1853,7 @@ impl ExfatInode {
                 Ok(updated_cluster_map)
             }
             Err(error) => {
-                if allocation_guard.rollback_allocation()? {
+                if !publication_complete && allocation_guard.rollback_allocation()? {
                     ExfatFs::disable_unsupported_discard_after_release(fs_state);
                 }
                 Err(error)
@@ -1791,10 +1864,22 @@ impl ExfatInode {
     fn attach_directory_cluster(
         &self,
         cluster_map: StreamExtensionDirEntry,
+        allocation_guard: &AllocGuard<'_>,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         allocated_cluster: u32,
-    ) -> Result<StreamExtensionDirEntry> {
+        prepare_parent_entry_set_write_fn: impl FnOnce(
+            StreamExtensionDirEntry,
+        ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>, Vec<(usize, Range<usize>)>)>>,
+    ) -> Result<(
+        StreamExtensionDirEntry,
+        Arc<ClusterMap>,
+        usize,
+        bool,
+        Option<Error>,
+        Option<(direntry::DirEntrySlotRange, Vec<u8>, Vec<(usize, Range<usize>)>)>,
+    )> {
         let next_data_length = match cluster_map.data_length {
             Some(data_length) => data_length
                 .checked_add(boot_region.cluster_size)
@@ -1802,25 +1887,29 @@ impl ExfatInode {
             None => boot_region.cluster_size,
         };
 
-        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-        match cluster_map.data_length {
-            Some(0) => {
-                fat_reader.terminate_cluster_chain(allocated_cluster)?;
-            }
-            Some(data_length) if cluster_map.no_fat_chain => {
-                let cluster_count = data_length.div_ceil(boot_region.cluster_size);
-                fat_reader.link_contiguous_chain_to_cluster(
-                    cluster_map.first_cluster,
-                    cluster_count,
-                    allocated_cluster,
-                )?;
-            }
+        let admitted_cluster_map = match cluster_map.data_length {
             Some(_) => {
-                fat_reader.append_cluster_to_chain(cluster_map.first_cluster, allocated_cluster)?;
+                self.cluster_map_for_write_guard(
+                    self_inode_state_guard,
+                    allocation_guard,
+                    cluster_map,
+                )
             }
-            None => {
-                fat_reader.append_cluster_to_chain(cluster_map.first_cluster, allocated_cluster)?;
-            }
+            None => self_inode_state_guard
+                .cached_cluster_map()
+                .filter(|generation| generation.stream_extension() == cluster_map)
+                .ok_or_else(invalid_on_disk_layout),
+        }?;
+        if self_inode_state_guard.dir_entry_stream() != cluster_map {
+            return Err(invalid_on_disk_layout());
+        }
+        if cluster_map.data_length.is_none()
+            && !self_inode_state_guard
+                .cached_cluster_map()
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &admitted_cluster_map))
+        {
+            return Err(invalid_on_disk_layout());
         }
 
         let updated_cluster_map = match cluster_map.data_length {
@@ -1842,33 +1931,71 @@ impl ExfatInode {
                 valid_data_length: Some(next_data_length),
                 ..cluster_map
             },
-            None => StreamExtensionDirEntry {
-                data_length: None,
-                ..cluster_map
-            },
+            None => cluster_map,
         };
-        Ok(updated_cluster_map)
+        let updated_generation = Arc::new(admitted_cluster_map.appended(
+            boot_region,
+            updated_cluster_map,
+            &[ClusterRange {
+                start_cluster: allocated_cluster,
+                cluster_count: 1,
+            }],
+        )?);
+        let updated_allocated_size = updated_generation.allocated_byte_length(boot_region)?;
+        let exposed_old_topology = match cluster_map.data_length {
+            None => true,
+            Some(data_length) => data_length != 0 && !cluster_map.no_fat_chain,
+        };
+        let prepared_parent_entry_set_write =
+            prepare_parent_entry_set_write_fn(updated_cluster_map)?;
+
+        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+        let exposure_error = match cluster_map.data_length {
+            Some(0) => {
+                fat_reader.terminate_cluster_chain(allocated_cluster)?;
+                None
+            }
+            Some(data_length) if cluster_map.no_fat_chain => {
+                let cluster_count = data_length.div_ceil(boot_region.cluster_size);
+                fat_reader.link_contiguous_chain_to_cluster(
+                    cluster_map.first_cluster,
+                    cluster_count,
+                    allocated_cluster,
+                )?;
+                None
+            }
+            Some(_) | None => {
+                fat_reader.terminate_cluster_chain(allocated_cluster)?;
+                let tail_cluster = admitted_cluster_map
+                    .terminal_cluster(boot_region)?
+                    .ok_or_else(invalid_on_disk_layout)?;
+                fat_reader
+                    .link_prepared_chain_to_tail(tail_cluster, allocated_cluster)?
+                    .err()
+            }
+        };
+        Ok((
+            updated_cluster_map,
+            updated_generation,
+            updated_allocated_size,
+            exposed_old_topology,
+            exposure_error,
+            prepared_parent_entry_set_write,
+        ))
     }
 
     fn commit_directory_cluster_map(
         &self,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
-        updated_cluster_map: StreamExtensionDirEntry,
-        previous_cluster_map: StreamExtensionDirEntry,
-        boot_region: &BootRegion,
-    ) -> Result<()> {
-        if self_inode_state_guard.dir_entry_stream() != previous_cluster_map {
-            return Err(invalid_on_disk_layout());
-        }
-        let _ = self_inode_state_guard.replace_dir_entry_stream(updated_cluster_map);
+        updated_cluster_map_generation: Arc<ClusterMap>,
+        updated_allocated_size: usize,
+    ) {
+        let _ = self_inode_state_guard
+            .replace_dir_entry_stream(updated_cluster_map_generation.stream_extension());
+        self_inode_state_guard.set_cached_cluster_map(updated_cluster_map_generation);
         self_inode_state_guard.with_metadata_mut(|metadata| {
-            metadata.size = metadata
-                .size
-                .checked_add(boot_region.cluster_size)
-                .ok_or_else(invalid_on_disk_layout)?;
-            Ok::<(), Error>(())
-        })?;
-        Ok(())
+            metadata.size = updated_allocated_size;
+        });
     }
 
     // Validation helpers
