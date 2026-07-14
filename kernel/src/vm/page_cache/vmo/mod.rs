@@ -702,13 +702,22 @@ impl<'a> BackedVmo<'a> {
             self.collect_pages_if(locked_pages, page_idx_range, |_, page| page.is_dirty());
 
         let mut io_batch = IoBatch::with_capacity(dirty_pages.len());
+        let mut first_error = None;
         for (idx, page) in dirty_pages {
             let locked_page = page.lock();
-            self.backend
-                .write_page_async(idx, locked_page, &mut io_batch)?;
+            if let Err(error) = self.backend.write_page_async(idx, locked_page, &mut io_batch) {
+                first_error = Some(error);
+                break;
+            }
         }
 
-        io_batch.wait_all().map_err(Into::into)
+        let wait_result = io_batch.wait_all().map_err(Error::from);
+        if let Some(error) = first_error {
+            let _ = wait_result;
+            return Err(error);
+        }
+
+        wait_result
     }
 
     /// Returns whether the specified byte range contains dirty cached pages.

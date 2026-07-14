@@ -2,29 +2,17 @@
 
 //! Maps regular-file clusters into page-cache I/O ranges and serves cached reads.
 //!
-//! Method groups: cluster-map validation, page BIO range planning, page waiters, and read dispatch.
+//! Method groups: cluster-map validation, cluster lookup, and read dispatch.
 
-use core::ops::Deref;
-
-use aster_block::{
-    BlockDevice,
-    bio::{Bio, BioCompleteFn, BioDirection, BioSegment, BioType},
-    id::Sid,
-};
-use io_util::batch::IoBatch;
-use ostd::mm::{Segment, VmIo};
+use ostd::mm::VmIo;
 
 use super::{
-    super::{
-        boot::BootRegion,
-    },
+    super::boot::BootRegion,
     ClusterMap, ExfatInode, StreamExtensionDirEntry,
-    page_backend::FragmentedPageIo,
 };
 use crate::{
     fs::file::{InodeType, StatusFlags},
     prelude::*,
-    vm::page_cache::{CachePageExt, LockedCachePage},
 };
 
 impl ExfatInode {
@@ -71,164 +59,6 @@ impl ExfatInode {
         cluster_map.mapped_cluster(boot_region, cluster_index)
     }
 
-    pub(super) fn regular_file_page_bio_ranges(
-        boot_region: &BootRegion,
-        cluster_map: &ClusterMap,
-        data_length: usize,
-        file_offset: usize,
-        len: usize,
-    ) -> Result<Vec<(usize, usize, usize)>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-
-        Self::validate_regular_file_mapping_shape(
-            boot_region,
-            &cluster_map.stream_extension(),
-            data_length,
-        )?;
-
-        let cluster_size = boot_region.cluster_size;
-        let mut cluster_index = file_offset / cluster_size;
-        let mut cluster_offset = file_offset % cluster_size;
-        let mut page_offset = 0usize;
-        let mut remaining = len;
-        let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
-
-        while remaining != 0 {
-            let current_cluster = cluster_map.mapped_cluster(boot_region, cluster_index)?;
-            let chunk_len = remaining.min(cluster_size - cluster_offset);
-            let chunk_offset = boot_region
-                .cluster_offset(current_cluster)
-                .map_err(Error::from)?
-                .checked_add(cluster_offset)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-
-            if let Some((last_page_offset, last_disk_offset, last_len)) = ranges.last_mut()
-                && last_page_offset
-                    .checked_add(*last_len)
-                    .zip(last_disk_offset.checked_add(*last_len))
-                    == Some((page_offset, chunk_offset))
-            {
-                *last_len = last_len
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            } else {
-                ranges.push((page_offset, chunk_offset, chunk_len));
-            }
-
-            page_offset = page_offset
-                .checked_add(chunk_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            remaining -= chunk_len;
-            cluster_index += 1;
-            cluster_offset = 0;
-            if remaining == 0 {
-                break;
-            }
-        }
-
-        Ok(ranges)
-    }
-
-    pub(super) fn regular_file_page_range(
-        idx: usize,
-        data_length: usize,
-        valid_data_length: usize,
-    ) -> Result<(usize, usize)> {
-        let file_offset = idx
-            .checked_mul(PAGE_SIZE)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        if file_offset >= data_length {
-            return_errno!(Errno::EINVAL);
-        }
-
-        let page_end = file_offset
-            .checked_add(PAGE_SIZE)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?
-            .min(data_length);
-        let initialized_end = page_end.min(valid_data_length);
-        let initialized_len = initialized_end.saturating_sub(file_offset);
-
-        Ok((file_offset, initialized_len))
-    }
-
-    pub(super) fn submit_regular_file_page_io(
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        locked_page: LockedCachePage,
-        cluster_map: &ClusterMap,
-        data_length: usize,
-        file_offset: usize,
-        initialized_len: usize,
-        io_batch: &mut IoBatch,
-        bio_type: BioType,
-    ) -> Result<()> {
-        let bio_direction = match bio_type {
-            BioType::Read => BioDirection::FromDevice,
-            BioType::Write => BioDirection::ToDevice,
-            BioType::Flush => return_errno!(Errno::EINVAL),
-        };
-        let transfer_len = initialized_len
-            .div_ceil(boot_region.sector_size)
-            .checked_mul(boot_region.sector_size)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        let page_ranges = match Self::regular_file_page_bio_ranges(
-            boot_region,
-            cluster_map,
-            data_length,
-            file_offset,
-            transfer_len,
-        ) {
-            Ok(page_ranges) if !page_ranges.is_empty() => page_ranges,
-            Ok(_) => {
-                if matches!(bio_type, BioType::Write) {
-                    locked_page.clear_writing_back();
-                }
-                return_errno!(Errno::EINVAL);
-            }
-            Err(error) => {
-                if matches!(bio_type, BioType::Write) {
-                    locked_page.clear_writing_back();
-                }
-                return Err(error);
-            }
-        };
-        let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
-        let pending_bios = page_ranges.len();
-        let page_io =
-            FragmentedPageIo::new(locked_page, pending_bios, bio_type, initialized_len);
-
-        for (range_index, (page_offset, disk_offset, len)) in page_ranges.into_iter().enumerate() {
-            let page_end = page_offset
-                .checked_add(len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let bio_segment = BioSegment::new_from_segment_slice(
-                page_segment.clone(),
-                page_offset..page_end,
-                bio_direction,
-            );
-            let completion_io = page_io.clone();
-            let complete_fn: BioCompleteFn =
-                Box::new(move |status| completion_io.complete(status));
-            let bio = Bio::new(
-                bio_type,
-                Sid::from_offset(disk_offset),
-                vec![bio_segment],
-                Some(complete_fn),
-            );
-            if let Err(error) = bio.submit(block_device.as_ref(), io_batch) {
-                let unsubmitted_bios = pending_bios
-                    .checked_sub(range_index)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                page_io.fail_unsubmitted(unsubmitted_bios);
-                return Err(Error::from(error));
-            }
-        }
-
-        Ok(())
-    }
-
     pub(super) fn read_at_impl(
         &self,
         offset: usize,
@@ -261,9 +91,11 @@ impl ExfatInode {
             return Ok(0);
         }
 
-        let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata()).ok_or_else(|| {
-            Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
-        })?;
+        let page_cache = self
+            .page_cache_handle(inode_state_guard.metadata())
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
+            })?;
         let read_start = offset.min(data_length);
         let read_end = offset
             .checked_add(writer.avail())

@@ -12,7 +12,7 @@ use ostd::mm::{VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
-        bitmap::ClusterRange, boot::BootRegion, device_io, direntry, fat::FatReader,
+        bitmap::ClusterRange, boot::BootRegion, direntry, fat::FatReader,
         fs::{AllocGuard, ExfatFs, FsState},
         inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
     },
@@ -22,7 +22,7 @@ use super::{
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
-        vfs::file_system::FsFlags,
+        vfs::{file_system::FsFlags, inode::Metadata},
     },
     prelude::*,
     time::clocks::RealTimeCoarseClock,
@@ -35,13 +35,29 @@ impl ExfatInode {
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_cluster_map_generation: &ClusterMap,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<(direntry::DirEntrySlotRange, Vec<u8>)> {
         let parent_cluster_map = parent_cluster_map_generation.stream_extension();
         if parent_inode_state_guard.dir_entry_stream() != parent_cluster_map {
             return Err(invalid_on_disk_layout());
         }
+        let parent_inode = self_inode_state_guard
+            .parent()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
+            })?;
+        if !parent_inode_state_guard.guards_inode(parent_inode.as_ref()) {
+            return Err(Error::new(Errno::EINVAL));
+        }
+        let logical_end = match parent_cluster_map.data_length {
+            Some(data_length) => data_length,
+            None => parent_cluster_map_generation.allocated_byte_length(boot_region)?,
+        };
+        let directory_bytes = parent_inode.read_directory_snapshot_from_page_cache(
+            parent_inode_state_guard.metadata(),
+            Arc::new(parent_cluster_map_generation.clone()),
+            logical_end,
+        )?;
         let fallback_entry_index = usize::try_from(self_inode_state_guard.metadata().ino as u32)
             .map_err(|_| Error::new(Errno::EIO))?;
 
@@ -55,9 +71,8 @@ impl ExfatInode {
             } else {
                 match self.try_read_validated_entry_set_at(
                     self_inode_state_guard,
-                    block_device,
                     boot_region,
-                    parent_cluster_map_generation,
+                    &directory_bytes,
                     hinted_slot_range,
                 ) {
                     Ok(Some((validated_slot_range, entry_set_bytes))) => {
@@ -76,12 +91,10 @@ impl ExfatInode {
         }
 
         let primary_slot_range = direntry::DirEntrySlotRange::new(fallback_entry_index, 1)?;
-        let primary_entry_bytes = Self::read_entry_set_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            parent_cluster_map_generation,
-            primary_slot_range,
-        )?;
+        let primary_entry_bytes = directory_bytes
+            .get(direntry::slot_range_bytes(primary_slot_range)?)
+            .ok_or_else(invalid_on_disk_layout)?
+            .to_vec();
         let entry_count = usize::from(primary_entry_bytes[1])
             .checked_add(1)
             .ok_or_else(invalid_on_disk_layout)?;
@@ -90,9 +103,8 @@ impl ExfatInode {
         let (validated_slot_range, entry_set_bytes) = self
             .try_read_validated_entry_set_at(
                 self_inode_state_guard,
-                block_device,
                 boot_region,
-                parent_cluster_map_generation,
+                &directory_bytes,
                 fallback_slot_range,
             )?
             .ok_or_else(invalid_on_disk_layout)?;
@@ -100,37 +112,11 @@ impl ExfatInode {
         Ok((validated_slot_range, entry_set_bytes))
     }
 
-    fn read_entry_set_bytes_for_cluster_map(
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        cluster_map: &ClusterMap,
-        slot_range: direntry::DirEntrySlotRange,
-    ) -> Result<Vec<u8>> {
-        let entry_set_range = direntry::slot_range_bytes(slot_range)?;
-        let entry_set_length = entry_set_range
-            .end
-            .checked_sub(entry_set_range.start)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let mut entry_set_bytes = vec![0; entry_set_length];
-        Self::visit_directory_byte_range_for_cluster_map(
-            boot_region,
-            cluster_map,
-            entry_set_range,
-            |byte_offset, request_range| {
-                block_device
-                    .read_bytes(byte_offset, &mut entry_set_bytes[request_range])
-                    .map_err(|_| device_io())
-            },
-        )?;
-        Ok(entry_set_bytes)
-    }
-
     fn try_read_validated_entry_set_at(
         &self,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        cluster_map: &ClusterMap,
+        directory_bytes: &[u8],
         slot_range: direntry::DirEntrySlotRange,
     ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>)>> {
         let current_cluster_map = self_inode_state_guard.dir_entry_stream();
@@ -139,12 +125,10 @@ impl ExfatInode {
             && self_inode_state_guard
                 .dirty_state()
                 .has_deferred_regular_file_publish();
-        let entry_set_bytes = Self::read_entry_set_bytes_for_cluster_map(
-            block_device,
-            boot_region,
-            cluster_map,
-            slot_range,
-        )?;
+        let entry_set_bytes = directory_bytes
+            .get(direntry::slot_range_bytes(slot_range)?)
+            .ok_or_else(invalid_on_disk_layout)?
+            .to_vec();
         let zero_based_slot_range = direntry::DirEntrySlotRange::new(0, slot_range.entry_count())?;
         let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0) {
             Ok(direntry::ScannedDirEntry::File(entry_view))
@@ -187,51 +171,54 @@ impl ExfatInode {
         Ok(Some((validated_slot_range, entry_set_bytes)))
     }
 
-    pub(super) fn rewrite_validated_entry_set_with_guard(
-        &self,
-        self_inode_state_guard: &InodeStateWriteGuard<'_>,
-        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
-    ) -> Result<bool> {
-        self.rewrite_validated_entry_set_with_guard_classified(
-            self_inode_state_guard,
-            parent_inode_state_guard,
-            block_device,
-            boot_region,
-            rewrite_entry_set_fn,
-        )?
-    }
-
     pub(super) fn rewrite_validated_entry_set_with_guard_classified(
         &self,
+        fs_state: &mut FsState,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
+        allow_not_exposed_rollback: bool,
     ) -> Result<Result<bool>> {
         let Some(prepared_entry_set_write) = self.prepare_rewritten_entry_set_write_with_guard(
             self_inode_state_guard,
             parent_inode_state_guard,
-            block_device,
             boot_region,
             rewrite_entry_set_fn,
         )? else {
             return Ok(Ok(false));
         };
-        self.persist_prepared_entry_set_write_classified(prepared_entry_set_write, block_device)
+        let parent_inode = self_inode_state_guard
+            .parent()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
+            })?;
+        if !parent_inode_state_guard.guards_inode(parent_inode.as_ref()) {
+            return Err(Error::new(Errno::EINVAL));
+        }
+        self.persist_prepared_entry_set_write_classified(
+            fs_state,
+            prepared_entry_set_write,
+            parent_inode.as_ref(),
+            parent_inode_state_guard.metadata(),
+            allow_not_exposed_rollback,
+        )
     }
 
     pub(super) fn prepare_rewritten_entry_set_write_with_guard(
         &self,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
-    ) -> Result<Option<(direntry::DirEntrySlotRange, Vec<u8>, Vec<(usize, Range<usize>)>)>> {
+    ) -> Result<
+        Option<(
+            direntry::DirEntrySlotRange,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<(usize, bool)>,
+        )>,
+    > {
         let parent_cluster_map = parent_inode_state_guard.dir_entry_stream();
         let parent_cluster_map_generation = parent_inode_state_guard
             .cached_cluster_map()
@@ -241,7 +228,6 @@ impl ExfatInode {
             self_inode_state_guard,
             parent_inode_state_guard,
             &parent_cluster_map_generation,
-            block_device,
             boot_region,
         )?;
         let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
@@ -258,39 +244,171 @@ impl ExfatInode {
         if updated_entry_set_bytes.len() != entry_set_bytes.len() {
             return Err(Error::from(invalid_on_disk_layout()));
         }
+        let old_entry_set_bytes = entry_set_bytes.clone();
         entry_set_bytes.copy_from_slice(&updated_entry_set_bytes);
 
-        let mut prepared_write_plan = Vec::new();
-        Self::visit_directory_byte_range_for_cluster_map(
-            boot_region,
-            &parent_cluster_map_generation,
-            direntry::slot_range_bytes(slot_range)?,
-            |byte_offset, request_range| {
-                prepared_write_plan.push((byte_offset, request_range));
-                Ok(())
-            },
-        )?;
-        Ok(Some((slot_range, entry_set_bytes, prepared_write_plan)))
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
+        let parent_inode = self_inode_state_guard
+            .parent()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
+            })?;
+        let parent_metadata = parent_inode_state_guard.metadata();
+        let page_cache = parent_inode
+            .page_cache_handle(parent_metadata)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?;
+        let mut prefaulted_old_bytes = vec![0; slot_byte_range.len()];
+        let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
+        page_cache
+            .read(slot_byte_range.start, &mut writer)
+            .map_err(Error::from)?;
+        if prefaulted_old_bytes != old_entry_set_bytes {
+            return Err(invalid_operation_input());
+        }
+        let start_page = slot_byte_range.start / PAGE_SIZE;
+        let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
+        let page_dirty_states = (start_page..=end_page)
+            .map(|page_idx| {
+                let page_start = page_idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let page_end = page_start
+                    .saturating_add(PAGE_SIZE)
+                    .min(page_cache.size());
+                Ok((page_idx, page_cache.has_dirty_pages(page_start..page_end)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some((
+            slot_range,
+            entry_set_bytes,
+            old_entry_set_bytes,
+            page_dirty_states,
+        )))
     }
 
     pub(super) fn persist_prepared_entry_set_write_classified(
         &self,
-        prepared_entry_set_write: (direntry::DirEntrySlotRange, Vec<u8>, Vec<(usize, Range<usize>)>),
-        block_device: &Arc<dyn BlockDevice>,
+        fs_state: &mut FsState,
+        prepared_entry_set_write: (
+            direntry::DirEntrySlotRange,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<(usize, bool)>,
+        ),
+        parent_inode: &ExfatInode,
+        parent_metadata: Metadata,
+        allow_not_exposed_rollback: bool,
     ) -> Result<Result<bool>> {
-        let (slot_range, entry_set_bytes, prepared_write_plan) = prepared_entry_set_write;
-        for (byte_offset, request_range) in prepared_write_plan {
-            if block_device
-                .write_bytes(byte_offset, &entry_set_bytes[request_range])
-                .is_err()
-            {
-                return Ok(Err(device_io()));
+        let (slot_range, entry_set_bytes, old_entry_set_bytes, page_dirty_states) =
+            prepared_entry_set_write;
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
+        let page_cache = parent_inode
+            .page_cache_handle(parent_metadata)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?;
+        let apply_result = {
+            let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+            page_cache
+                .write(slot_byte_range.start, &mut reader)
+                .map_err(Error::from)
+        };
+        let mut persist_error = None;
+        if let Err(error) = apply_result {
+            if allow_not_exposed_rollback {
+                let start_page = slot_byte_range.start / PAGE_SIZE;
+                let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
+                let mut old_byte_offset = 0usize;
+                let mut page_restores = Vec::new();
+                for page_idx in start_page..=end_page {
+                    let page_start = page_idx
+                        .checked_mul(PAGE_SIZE)
+                        .ok_or_else(invalid_operation_input)?;
+                    let page_end = page_start.saturating_add(PAGE_SIZE);
+                    let segment_start = slot_byte_range.start.max(page_start);
+                    let segment_end = slot_byte_range.end.min(page_end);
+                    let segment_len = segment_end
+                        .checked_sub(segment_start)
+                        .ok_or_else(invalid_operation_input)?;
+                    let was_dirty = page_dirty_states
+                        .iter()
+                        .find_map(|(captured_page_idx, was_dirty)| {
+                            (*captured_page_idx == page_idx).then_some(*was_dirty)
+                        })
+                        .ok_or_else(invalid_operation_input)?;
+                    let old_byte_end = old_byte_offset
+                        .checked_add(segment_len)
+                        .ok_or_else(invalid_operation_input)?;
+                    page_restores.push((
+                        page_idx,
+                        (segment_start - page_start)..(segment_end - page_start),
+                        &old_entry_set_bytes[old_byte_offset..old_byte_end],
+                        was_dirty,
+                    ));
+                    old_byte_offset = old_byte_end;
+                }
+                match page_cache.restore_prefaulted_pages(page_restores) {
+                    Ok(()) => return Err(error),
+                    Err(_restore_error) => {
+                        let rewrite_result = {
+                            let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+                            page_cache
+                                .write(slot_byte_range.start, &mut reader)
+                                .map_err(Error::from)
+                        };
+                        match rewrite_result {
+                            Ok(()) => persist_error = Some(error),
+                            Err(_) => {
+                                if let Some(fs) = self.fs.upgrade() {
+                                    fs.latch_forced_shutdown(fs_state);
+                                }
+                                return Ok(Err(error));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let rewrite_result = {
+                    let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+                    page_cache
+                        .write(slot_byte_range.start, &mut reader)
+                        .map_err(Error::from)
+                };
+                match rewrite_result {
+                    Ok(()) => persist_error = Some(error),
+                    Err(_) => {
+                        if let Some(fs) = self.fs.upgrade() {
+                            fs.latch_forced_shutdown(fs_state);
+                        }
+                        return Ok(Err(error));
+                    }
+                }
             }
         }
-        if let Err(error) = self.store_entry_set_location_hint(slot_range) {
-            return Ok(Err(error));
+        let flush_start = (slot_byte_range.start / PAGE_SIZE)
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(invalid_operation_input)?;
+        let flush_end = ((slot_byte_range.end - 1) / PAGE_SIZE)
+            .checked_add(1)
+            .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+            .ok_or_else(invalid_operation_input)?
+            .min(page_cache.size());
+        if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+            persist_error = Some(persist_error.unwrap_or(error));
         }
-        Ok(Ok(true))
+        if let Some(error) = persist_error {
+            let _ = self.store_entry_set_location_hint(slot_range);
+            Ok(Err(error))
+        } else {
+            match self.store_entry_set_location_hint(slot_range) {
+                Ok(()) => Ok(Ok(true)),
+                Err(error) => Ok(Err(error)),
+            }
+        }
     }
 
     // VFS entry points
@@ -373,7 +491,7 @@ impl ExfatInode {
                     }
                 }
                 let page_cache = self
-                    .page_cache_handle_for_metadata(inode_state_guard.metadata())
+                    .page_cache_handle(inode_state_guard.metadata())
                     .ok_or_else(|| {
                         Error::with_message(Errno::EIO, "regular exFAT file has no page cache")
                     })?;
@@ -450,6 +568,7 @@ impl ExfatInode {
                 if let Some(sync_scope) = sync_scope {
                     self.sync_regular_file_with_proofs(
                         fs.as_ref(),
+                        &mut fs_state,
                         sync_scope,
                         inode_state_guard,
                         parent_inode_state_guard,
@@ -499,7 +618,7 @@ impl ExfatInode {
         if new_size == data_length {
             return Ok(());
         }
-        let page_cache = self.page_cache_handle_for_metadata(inode_state_guard.metadata());
+        let page_cache = self.page_cache_handle(inode_state_guard.metadata());
         let timestamp = RealTimeCoarseClock::get().read_time();
         let resize_result = (|| {
             fs.publish_dirty_admission(&mut fs_state)?;
@@ -653,14 +772,12 @@ impl ExfatInode {
                 retained_ranges,
             )?);
             let page_cache_context = self.page_cache_context_for_mapping(
+                inode_state_guard.metadata(),
                 next_cluster_map_generation.clone(),
                 new_size,
                 valid_data_length.min(new_size),
             )?;
-            let _ = self.install_page_cache_context(
-                &inode_state_guard,
-                page_cache_context.clone(),
-            );
+            let _ = inode_state_guard.replace_page_cache_context(page_cache_context.clone());
             if let Some(page_cache) = page_cache {
                 page_cache.resize(new_size, data_length)?;
             }
@@ -827,9 +944,9 @@ impl ExfatInode {
                 new_data_length,
                 allocated_ranges,
             )?);
-            previous_page_cache_context = self.install_page_cache_context(
-                inode_state_guard,
+            previous_page_cache_context = inode_state_guard.replace_page_cache_context(
                 self.page_cache_context_for_mapping(
+                    inode_state_guard.metadata(),
                     next_cluster_map_generation.clone(),
                     new_data_length,
                     current_valid_data_length,
@@ -846,6 +963,7 @@ impl ExfatInode {
                 next_cluster_map_generation.cluster_ranges().to_vec(),
             )?);
             let published_page_cache_context = self.page_cache_context_for_mapping(
+                inode_state_guard.metadata(),
                 published_cluster_map_generation.clone(),
                 new_data_length,
                 new_valid_data_length,

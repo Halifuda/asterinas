@@ -312,7 +312,11 @@ impl Inode for ExfatInode {
     }
 
     fn page_cache(&self) -> Option<PageCache> {
-        self.page_cache_handle().cloned()
+        let metadata = self.inode_state_read_guard().metadata();
+        if metadata.type_ != InodeType::File {
+            return None;
+        }
+        self.page_cache_handle(metadata).cloned()
     }
 
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {

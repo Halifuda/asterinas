@@ -21,7 +21,7 @@ use super::{
         boot::BootRegion,
         device_io,
         direntry::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
-        fat::{ChainVisitControl, FatChainStep, FatReader},
+        fat::{FatChainStep, FatReader},
         fs::{AllocGuard, AllocReadGuard, ExfatFs, MountOptions},
         invalid_on_disk_layout, invalid_operation_input,
         upcase::UpcaseTable,
@@ -427,72 +427,6 @@ impl ClusterMap {
     }
 }
 
-pub(super) struct DirectoryStreamCursor<'a> {
-    block_device: &'a dyn BlockDevice,
-    boot_region: &'a BootRegion,
-    cluster_map: Arc<ClusterMap>,
-    range_index: usize,
-    cluster_index_in_range: usize,
-    intra_cluster_offset: usize,
-    logical_offset: usize,
-    logical_end: usize,
-}
-
-impl DirectoryStreamCursor<'_> {
-    pub(super) fn read_next_slot(&mut self) -> Result<Option<[u8; DIRECTORY_ENTRY_SIZE]>> {
-        if self.logical_offset == self.logical_end {
-            return Ok(None);
-        }
-        let slot_end = self
-            .logical_offset
-            .checked_add(DIRECTORY_ENTRY_SIZE)
-            .ok_or_else(invalid_on_disk_layout)?;
-        if slot_end > self.logical_end
-            || self
-                .intra_cluster_offset
-                .checked_add(DIRECTORY_ENTRY_SIZE)
-                .is_none_or(|end| end > self.boot_region.cluster_size)
-        {
-            return Err(invalid_on_disk_layout());
-        }
-        let range = self
-            .cluster_map
-            .cluster_ranges
-            .get(self.range_index)
-            .ok_or_else(invalid_on_disk_layout)?;
-        let current_cluster = range
-            .start_cluster
-            .checked_add(
-                u32::try_from(self.cluster_index_in_range)
-                    .map_err(|_| invalid_on_disk_layout())?,
-            )
-            .ok_or_else(invalid_on_disk_layout)?;
-        let mut slot = [0; DIRECTORY_ENTRY_SIZE];
-        self.block_device
-            .read_bytes(
-                self.boot_region
-                    .cluster_offset(current_cluster)?
-                    .checked_add(self.intra_cluster_offset)
-                    .ok_or_else(invalid_on_disk_layout)?,
-                &mut slot,
-            )
-            .map_err(|_| device_io())?;
-        self.logical_offset = slot_end;
-        self.intra_cluster_offset += DIRECTORY_ENTRY_SIZE;
-        if self.logical_offset != self.logical_end
-            && self.intra_cluster_offset == self.boot_region.cluster_size
-        {
-            self.intra_cluster_offset = 0;
-            self.cluster_index_in_range += 1;
-            if self.cluster_index_in_range == range.cluster_count {
-                self.range_index += 1;
-                self.cluster_index_in_range = 0;
-            }
-        }
-        Ok(Some(slot))
-    }
-}
-
 /// Classifies which dirty portions of an inode still need persistence.
 ///
 /// `Metadata` means only inode entry-set metadata remains dirty. `Data` means
@@ -799,13 +733,21 @@ impl ExfatInode {
             return_errno!(Errno::EOPNOTSUPP);
         }
         if let Some(page_cache_context) = inode_state_guard.page_cache_context() {
-            return Ok(page_cache_context.cluster_map);
+            return match page_cache_context {
+                super::page_backend::PageCacheContext::RegularFile { cluster_map, .. } => {
+                    Ok(cluster_map)
+                }
+                super::page_backend::PageCacheContext::Directory { .. } => {
+                    return_errno!(Errno::EINVAL)
+                }
+            };
         }
         let cluster_map = inode_state_guard.dir_entry_stream();
         let generation =
             self.cluster_map_for_write_guard(inode_state_guard, allocation_guard, cluster_map)?;
         let (data_length, valid_data_length) = generation.validated_lengths()?;
         let page_cache_context = self.page_cache_context_for_mapping(
+            inode_state_guard.metadata(),
             generation.clone(),
             data_length,
             valid_data_length,
@@ -826,14 +768,22 @@ impl ExfatInode {
         }
 
         if let Some(page_cache_context) = inode_state_guard.page_cache_context() {
-            if page_cache_context.valid_data_length > page_cache_context.data_length {
-                return_errno!(Errno::EINVAL);
-            }
-            return Ok((
-                page_cache_context.cluster_map,
-                page_cache_context.data_length,
-                page_cache_context.valid_data_length,
-            ));
+            return match page_cache_context {
+                super::page_backend::PageCacheContext::RegularFile {
+                    cluster_map,
+                    data_length,
+                    valid_data_length,
+                    ..
+                } => {
+                    if valid_data_length > data_length {
+                        return_errno!(Errno::EINVAL);
+                    }
+                    Ok((cluster_map, data_length, valid_data_length))
+                }
+                super::page_backend::PageCacheContext::Directory { .. } => {
+                    return_errno!(Errno::EINVAL)
+                }
+            };
         }
 
         let cluster_map = inode_state_guard.dir_entry_stream();
@@ -841,6 +791,7 @@ impl ExfatInode {
             self.cluster_map_for_read_guard(inode_state_guard, allocation_guard, cluster_map)?;
         let (data_length, valid_data_length) = generation.validated_lengths()?;
         *self.page_backend.page_cache_context.write() = Some(self.page_cache_context_for_mapping(
+            inode_state_guard.metadata(),
             generation.clone(),
             data_length,
             valid_data_length,
@@ -862,257 +813,234 @@ impl ExfatInode {
     }
 
     // Directory I/O
+
+    pub(super) fn read_directory_snapshot_from_page_cache(
+        &self,
+        metadata: Metadata,
+        cluster_map: Arc<ClusterMap>,
+        logical_end: usize,
+    ) -> Result<Vec<u8>> {
+        if metadata.type_ != InodeType::Dir || !logical_end.is_multiple_of(DIRECTORY_ENTRY_SIZE) {
+            return Err(invalid_on_disk_layout());
+        }
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        if fs.mount_runtime_projection().snapshot().forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+
+        let page_cache_context =
+            self.page_cache_context_for_mapping(metadata, cluster_map, logical_end, logical_end)?;
+        *self.page_backend.page_cache_context.write() = Some(page_cache_context);
+        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+        })?;
+        let mut directory_bytes = vec![0; logical_end];
+        if directory_bytes.is_empty() {
+            return Ok(directory_bytes);
+        }
+
+        let mut writer = VmWriter::from(directory_bytes.as_mut_slice()).to_fallible();
+        page_cache.read(0, &mut writer).map_err(Error::from)?;
+        Ok(directory_bytes)
+    }
+
+    pub(super) fn persist_directory_page_cache_mutation_classified(
+        &self,
+        fs_state: &mut super::super::fs::FsState,
+        metadata: Metadata,
+        byte_mutations: &[(Range<usize>, Vec<u8>, Vec<u8>)],
+        allow_not_exposed_rollback: bool,
+    ) -> Result<Result<()>> {
+        if metadata.type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+        if byte_mutations.is_empty() {
+            return Ok(Ok(()));
+        }
+
+        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+        })?;
+        let cache_size = page_cache.size();
+        let mut touched_pages = Vec::new();
+        let mut previous_end = 0usize;
+        for (mutation_index, (byte_range, old_bytes, new_bytes)) in byte_mutations.iter().enumerate()
+        {
+            if byte_range.is_empty()
+                || old_bytes.len() != byte_range.len()
+                || new_bytes.len() != byte_range.len()
+                || byte_range.end > cache_size
+                || (mutation_index != 0 && byte_range.start < previous_end)
+            {
+                return Err(invalid_operation_input());
+            }
+            previous_end = byte_range.end;
+            let start_page = byte_range.start / PAGE_SIZE;
+            let end_page = (byte_range.end - 1) / PAGE_SIZE;
+            for page_idx in start_page..=end_page {
+                if touched_pages.last().copied() != Some(page_idx) {
+                    touched_pages.push(page_idx);
+                }
+            }
+        }
+
+        for (byte_range, old_bytes, _) in byte_mutations.iter() {
+            let mut prefaulted_old_bytes = vec![0; byte_range.len()];
+            let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
+            page_cache
+                .read(byte_range.start, &mut writer)
+                .map_err(Error::from)?;
+            if prefaulted_old_bytes.as_slice() != old_bytes.as_slice() {
+                return Err(invalid_operation_input());
+            }
+        }
+
+        let page_dirty_states = touched_pages
+            .iter()
+            .map(|page_idx| {
+                let page_start = page_idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let page_end = page_start.saturating_add(PAGE_SIZE).min(cache_size);
+                Ok((*page_idx, page_cache.has_dirty_pages(page_start..page_end)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let apply_result = (|| {
+            for (byte_range, _, new_bytes) in byte_mutations.iter() {
+                let mut reader = VmReader::from(new_bytes.as_slice()).to_fallible();
+                page_cache
+                    .write(byte_range.start, &mut reader)
+                    .map_err(Error::from)?;
+            }
+            Ok(())
+        })();
+
+        let mut result_error = None;
+        if let Err(error) = apply_result {
+            if allow_not_exposed_rollback {
+                let mut page_restores = Vec::new();
+                for (byte_range, old_bytes, _) in byte_mutations.iter() {
+                    let mut old_byte_offset = 0usize;
+                    let start_page = byte_range.start / PAGE_SIZE;
+                    let end_page = (byte_range.end - 1) / PAGE_SIZE;
+                    for page_idx in start_page..=end_page {
+                        let page_start = page_idx
+                            .checked_mul(PAGE_SIZE)
+                            .ok_or_else(invalid_operation_input)?;
+                        let page_end = page_start.saturating_add(PAGE_SIZE);
+                        let segment_start = byte_range.start.max(page_start);
+                        let segment_end = byte_range.end.min(page_end);
+                        let segment_len = segment_end
+                            .checked_sub(segment_start)
+                            .ok_or_else(invalid_operation_input)?;
+                        let was_dirty = page_dirty_states
+                            .iter()
+                            .find_map(|(captured_page_idx, was_dirty)| {
+                                (*captured_page_idx == page_idx).then_some(*was_dirty)
+                            })
+                            .ok_or_else(invalid_operation_input)?;
+                        let old_byte_end = old_byte_offset
+                            .checked_add(segment_len)
+                            .ok_or_else(invalid_operation_input)?;
+                        page_restores.push((
+                            page_idx,
+                            (segment_start - page_start)..(segment_end - page_start),
+                            &old_bytes[old_byte_offset..old_byte_end],
+                            was_dirty,
+                        ));
+                        old_byte_offset = old_byte_end;
+                    }
+                }
+
+                match page_cache.restore_prefaulted_pages(page_restores) {
+                    Ok(()) => return Err(error),
+                    Err(_restore_error) => {
+                        let rewrite_result: Result<()> = (|| {
+                            for (byte_range, _, new_bytes) in byte_mutations.iter() {
+                                let mut reader = VmReader::from(new_bytes.as_slice()).to_fallible();
+                                page_cache
+                                    .write(byte_range.start, &mut reader)
+                                    .map_err(Error::from)?;
+                            }
+                            Ok(())
+                        })();
+                        match rewrite_result {
+                            Ok(()) => result_error = Some(error),
+                            Err(_) => {
+                                if let Some(fs) = self.fs.upgrade() {
+                                    fs.latch_forced_shutdown(fs_state);
+                                }
+                                return Ok(Err(error));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let rewrite_result: Result<()> = (|| {
+                    for (byte_range, _, new_bytes) in byte_mutations.iter() {
+                        let mut reader = VmReader::from(new_bytes.as_slice()).to_fallible();
+                        page_cache
+                            .write(byte_range.start, &mut reader)
+                            .map_err(Error::from)?;
+                    }
+                    Ok(())
+                })();
+                match rewrite_result {
+                    Ok(()) => result_error = Some(error),
+                    Err(_) => {
+                        if let Some(fs) = self.fs.upgrade() {
+                            fs.latch_forced_shutdown(fs_state);
+                        }
+                        return Ok(Err(error));
+                    }
+                }
+            }
+        }
+
+        let mut run_start_page = *touched_pages.first().ok_or_else(invalid_operation_input)?;
+        let mut previous_page = run_start_page;
+        for page_idx in touched_pages.iter().copied().skip(1) {
+            if page_idx != previous_page + 1 {
+                let flush_start = run_start_page
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let flush_end = previous_page
+                    .checked_add(1)
+                    .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+                    .ok_or_else(invalid_operation_input)?
+                    .min(cache_size);
+                if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+                    return Ok(Err(result_error.unwrap_or(error)));
+                }
+                run_start_page = page_idx;
+            }
+            previous_page = page_idx;
+        }
+        let flush_start = run_start_page
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(invalid_operation_input)?;
+        let flush_end = previous_page
+            .checked_add(1)
+            .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+            .ok_or_else(invalid_operation_input)?
+            .min(cache_size);
+        if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+            return Ok(Err(result_error.unwrap_or(error)));
+        }
+
+        match result_error {
+            Some(error) => Ok(Err(error)),
+            None => Ok(Ok(())),
+        }
+    }
 }
 
 // ---- Directory byte I/O ----
 impl ExfatInode {
-    pub(super) fn directory_stream_cursor<'a>(
-        block_device: &'a Arc<dyn BlockDevice>,
-        boot_region: &'a BootRegion,
-        cluster_map: Arc<ClusterMap>,
-        logical_offset: usize,
-    ) -> Result<Option<DirectoryStreamCursor<'a>>> {
-        let logical_end = match cluster_map.stream_extension.data_length {
-            Some(data_length) => data_length,
-            None => cluster_map.allocated_byte_length(boot_region)?,
-        };
-        if logical_end % DIRECTORY_ENTRY_SIZE != 0 || logical_offset % DIRECTORY_ENTRY_SIZE != 0 {
-            return Err(invalid_on_disk_layout());
-        }
-        if logical_offset >= logical_end {
-            return Ok(None);
-        }
-        let logical_cluster = logical_offset / boot_region.cluster_size;
-        let (range_index, cluster_index_in_range) = cluster_map
-            .mapped_range_frontier(logical_cluster)
-            .map_err(|_| invalid_on_disk_layout())?;
-        Ok(Some(DirectoryStreamCursor {
-            block_device: block_device.as_ref(),
-            boot_region,
-            cluster_map,
-            range_index,
-            cluster_index_in_range,
-            intra_cluster_offset: logical_offset % boot_region.cluster_size,
-            logical_offset,
-            logical_end,
-        }))
-    }
-
-    pub(super) fn visit_directory_byte_range_for_cluster_map(
-        boot_region: &BootRegion,
-        cluster_map: &ClusterMap,
-        byte_range: Range<usize>,
-        mut visit_chunk_fn: impl FnMut(usize, Range<usize>) -> Result<()>,
-    ) -> Result<()> {
-        let range_length = byte_range
-            .end
-            .checked_sub(byte_range.start)
-            .ok_or_else(invalid_operation_input)?;
-        if range_length == 0 {
-            return Ok(());
-        }
-
-        let logical_end = match cluster_map.stream_extension.data_length {
-            Some(data_length) => {
-                if data_length == 0 {
-                    if cluster_map.stream_extension.first_cluster != 0 {
-                        return Err(invalid_on_disk_layout());
-                    }
-                    return Err(invalid_on_disk_layout());
-                }
-                if data_length % DIRECTORY_ENTRY_SIZE != 0 || byte_range.end > data_length {
-                    return Err(invalid_on_disk_layout());
-                }
-
-                data_length
-            }
-            None => cluster_map.allocated_byte_length(boot_region)?,
-        };
-        if byte_range.end > logical_end {
-            return Err(invalid_on_disk_layout());
-        }
-
-        let logical_cluster = byte_range.start / boot_region.cluster_size;
-        let (mut range_index, mut cluster_index_in_range) = cluster_map
-            .mapped_range_frontier(logical_cluster)
-            .map_err(|_| invalid_on_disk_layout())?;
-
-        let mut remaining = range_length;
-        let mut request_offset = 0usize;
-        let mut intra_cluster_offset = byte_range.start % boot_region.cluster_size;
-        while remaining != 0 {
-            let bytes_in_cluster = boot_region
-                .cluster_size
-                .checked_sub(intra_cluster_offset)
-                .ok_or_else(invalid_on_disk_layout)?;
-            let bytes_to_visit = remaining.min(bytes_in_cluster);
-            let chunk_end = request_offset
-                .checked_add(bytes_to_visit)
-                .ok_or_else(invalid_on_disk_layout)?;
-            let range = cluster_map
-                .cluster_ranges
-                .get(range_index)
-                .ok_or_else(invalid_on_disk_layout)?;
-            let current_cluster = range
-                .start_cluster
-                .checked_add(
-                    u32::try_from(cluster_index_in_range)
-                        .map_err(|_| invalid_on_disk_layout())?,
-                )
-                .ok_or_else(invalid_on_disk_layout)?;
-            let cluster_offset = boot_region.cluster_offset(current_cluster)?;
-            let byte_offset = cluster_offset
-                .checked_add(intra_cluster_offset)
-                .ok_or_else(invalid_on_disk_layout)?;
-            visit_chunk_fn(byte_offset, request_offset..chunk_end)?;
-            remaining -= bytes_to_visit;
-            request_offset = chunk_end;
-            if remaining == 0 {
-                return Ok(());
-            }
-
-            cluster_index_in_range += 1;
-            if cluster_index_in_range == range.cluster_count {
-                range_index += 1;
-                cluster_index_in_range = 0;
-            }
-            intra_cluster_offset = 0;
-        }
-        Ok(())
-    }
-
-    pub(super) fn read_directory_bytes_for_cluster_map(
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        cluster_map: StreamExtensionDirEntry,
-    ) -> Result<Vec<u8>> {
-        let Some(data_length) = cluster_map.data_length else {
-            let mut directory_bytes = Vec::new();
-            let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-            fat_reader.walk_cluster_chain(cluster_map.first_cluster, |_, cluster_bytes| {
-                directory_bytes.extend_from_slice(cluster_bytes);
-                Ok(ChainVisitControl::Continue)
-            })?;
-            return Ok(directory_bytes);
-        };
-
-        if data_length == 0 {
-            if cluster_map.first_cluster != 0 {
-                return Err(invalid_on_disk_layout());
-            }
-            return Ok(Vec::new());
-        }
-        if data_length % DIRECTORY_ENTRY_SIZE != 0 {
-            return Err(invalid_on_disk_layout());
-        }
-
-        let data_length_u64 = u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?;
-        boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64)?;
-        if cluster_map.no_fat_chain {
-            let mut remaining = data_length;
-            let mut write_offset = 0usize;
-            let mut directory_bytes = vec![0; data_length];
-            let mut current_cluster = cluster_map.first_cluster;
-            while remaining != 0 {
-                let cluster_start = boot_region.cluster_offset(current_cluster)?;
-                let bytes_to_read = remaining.min(boot_region.cluster_size);
-                let write_end = write_offset
-                    .checked_add(bytes_to_read)
-                    .ok_or_else(invalid_on_disk_layout)?;
-                block_device
-                    .read_bytes(cluster_start, &mut directory_bytes[write_offset..write_end])
-                    .map_err(|_| device_io())?;
-                remaining -= bytes_to_read;
-                write_offset = write_end;
-                if remaining == 0 {
-                    return Ok(directory_bytes);
-                }
-                current_cluster = Self::advance_cluster(current_cluster, None)?
-                    .ok_or_else(invalid_on_disk_layout)?;
-            }
-            return Err(invalid_on_disk_layout());
-        }
-
-        let mut remaining = data_length;
-        let mut directory_bytes = Vec::with_capacity(data_length);
-        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
-        fat_reader.walk_cluster_chain(cluster_map.first_cluster, |_, cluster_bytes| {
-            let bytes_to_copy = remaining.min(cluster_bytes.len());
-            directory_bytes.extend_from_slice(&cluster_bytes[..bytes_to_copy]);
-            remaining -= bytes_to_copy;
-            Ok(if remaining == 0 {
-                ChainVisitControl::Stop
-            } else {
-                ChainVisitControl::Continue
-            })
-        })?;
-        if remaining != 0 {
-            return Err(invalid_on_disk_layout());
-        }
-        Ok(directory_bytes)
-    }
-
-    pub(super) fn write_directory_bytes_for_cluster_map(
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
-        directory_bytes: &[u8],
-        cluster_map: StreamExtensionDirEntry,
-    ) -> Result<()> {
-        let expected_length = match cluster_map.data_length {
-            Some(data_length) => data_length,
-            None => directory_bytes.len(),
-        };
-        if directory_bytes.len() != expected_length {
-            return Err(invalid_operation_input());
-        }
-        if directory_bytes.is_empty() {
-            return Ok(());
-        }
-        if cluster_map.data_length.is_some() && cluster_map.no_fat_chain {
-            let mut remaining = directory_bytes;
-            let mut current_cluster = cluster_map.first_cluster;
-            while !remaining.is_empty() {
-                let bytes_to_write = remaining.len().min(boot_region.cluster_size);
-                block_device
-                    .write_bytes(
-                        boot_region.cluster_offset(current_cluster)?,
-                        &remaining[..bytes_to_write],
-                    )
-                    .map_err(|_| device_io())?;
-                remaining = &remaining[bytes_to_write..];
-                if remaining.is_empty() {
-                    return Ok(());
-                }
-                current_cluster = Self::advance_cluster(current_cluster, None)?
-                    .ok_or_else(invalid_on_disk_layout)?;
-            }
-            return Err(invalid_on_disk_layout());
-        }
-
-        let mut remaining = directory_bytes;
-        let mut current_cluster = cluster_map.first_cluster;
-        let mut fat_reader =
-            (!cluster_map.no_fat_chain).then(|| FatReader::new(block_device.as_ref(), boot_region));
-        while !remaining.is_empty() {
-            let bytes_to_write = remaining.len().min(boot_region.cluster_size);
-            block_device
-                .write_bytes(
-                    boot_region.cluster_offset(current_cluster)?,
-                    &remaining[..bytes_to_write],
-                )
-                .map_err(|_| device_io())?;
-            remaining = &remaining[bytes_to_write..];
-            if remaining.is_empty() {
-                break;
-            }
-            current_cluster = match Self::advance_cluster(current_cluster, fat_reader.as_mut())? {
-                Some(next_cluster) => next_cluster,
-                None => return Err(invalid_on_disk_layout()),
-            };
-        }
-        Ok(())
-    }
-
     pub(super) fn initialize_directory_cluster(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
@@ -1123,23 +1051,6 @@ impl ExfatInode {
         block_device
             .write_bytes(cluster_offset, &cluster_bytes)
             .map_err(|_| device_io())
-    }
-
-    pub(super) fn advance_cluster(
-        current_cluster: u32,
-        fat_reader: Option<&mut FatReader<'_>>,
-    ) -> Result<Option<u32>> {
-        match fat_reader {
-            Some(fat_reader) => match fat_reader.next_cluster(current_cluster) {
-                Ok(FatChainStep::Continue(next_cluster)) => Ok(Some(next_cluster)),
-                Ok(FatChainStep::End) => Ok(None),
-                Err(error) => Err(error),
-            },
-            None => current_cluster
-                .checked_add(1)
-                .map(Some)
-                .ok_or(invalid_on_disk_layout()),
-        }
     }
 
     // Dirty tracking

@@ -212,6 +212,21 @@ impl ExfatFs {
         }
     }
 
+    pub(super) fn latch_forced_shutdown(&self, fs_state: &mut FsState) {
+        let Some(mount_state) = fs_state.mount_state.as_mut() else {
+            return;
+        };
+        mount_state.forced_shutdown = true;
+        let mount_runtime = MountRuntimeState {
+            forced_shutdown: true,
+            clear_to_zero: mount_state.volume_flags.clear_to_zero,
+            media_failure: mount_state.volume_flags.media_failure,
+            read_only: mount_state.options.fs_flags.contains(FsFlags::RDONLY),
+        };
+        fs_state.mount_runtime = mount_runtime;
+        self.mount_runtime_projection.publish(mount_runtime);
+    }
+
     pub(super) fn mark_mount_dirty_after_failure(fs_state: &mut FsState) {
         if let Some(mount_state) = fs_state.mount_state.as_mut() {
             mount_state.volume_flags.volume_dirty = true;

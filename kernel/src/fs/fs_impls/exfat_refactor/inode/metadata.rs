@@ -7,13 +7,11 @@
 
 use core::{cell::Cell, time::Duration};
 
-use aster_block::BlockDevice;
-
 use super::{
     super::{
         boot::BootRegion,
         direntry::{self, FileEntrySetView, FileEntryTimestamp},
-        fs::ExfatFs,
+        fs::{ExfatFs, FsState},
         invalid_on_disk_layout,
     },
     ExfatInode, InodeTimestampField,
@@ -148,16 +146,15 @@ impl ExfatInode {
             .iter()
             .find(|guard| guard.guards_inode(parent.as_ref()))
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
         let _allocation_guard = fs.allocation_read_guard()?;
         let update_result = (|| {
             fs.publish_dirty_admission(&mut fs_state)?;
 
             self.rewrite_inode_entry_set_with_guards(
+                &mut fs_state,
                 self_inode_state_guard,
                 parent_inode_state_guard,
-                &block_device,
                 &boot_region,
                 |entry_view| {
                     if requested_writable == !entry_view.is_read_only() {
@@ -316,7 +313,6 @@ impl ExfatInode {
         let Some(mount_state) = fs_state.mount_state.as_ref() else {
             return;
         };
-        let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
         if mount_state.forced_shutdown
             || mount_state.volume_flags.clear_to_zero
@@ -392,9 +388,9 @@ impl ExfatInode {
             fs.publish_dirty_admission(&mut fs_state)?;
 
             self.rewrite_inode_entry_set_with_guards(
+                &mut fs_state,
                 self_inode_state_guard,
                 parent_inode_state_guard,
-                &block_device,
                 &boot_region,
                 |entry_view| {
                     let mut mutable_entry_set = entry_view.to_mutable();
@@ -459,11 +455,18 @@ impl ExfatInode {
 
     pub(super) fn refresh_directory_metadata_after_namespace_mutation_with_guards(
         &self,
-        block_device: &Arc<dyn BlockDevice>,
+        fs_state: &mut FsState,
         boot_region: &BootRegion,
         timestamp: Duration,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
+        prepared_entry_set_write: Option<(
+            direntry::DirEntrySlotRange,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<(usize, bool)>,
+        )>,
+        namespace_stage_exposed: bool,
     ) -> Result<()> {
         if self_inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
@@ -488,63 +491,105 @@ impl ExfatInode {
                 "ordinary exFAT directory refresh requires parent write-guard proof",
             )
         })?;
-        let durable_updated = self.rewrite_inode_entry_set_with_guards(
-            self_inode_state_guard,
-            parent_inode_state_guard,
-            block_device,
-            boot_region,
-            |entry_view| {
-                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
-                    Self::encoded_exfat_timestamp_fields(
-                        timestamp,
-                        entry_view.last_modified_timestamp().utc_offset_byte(),
-                    )?;
-                let mut mutable_entry_set = entry_view.to_mutable();
-                mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
-                    timestamp_bytes,
-                    Some(ten_ms_increment),
-                    encoded_utc_offset_byte,
-                ));
-                Ok(Some(mutable_entry_set.into_bytes()))
-            },
-            |metadata| {
-                metadata.last_meta_change_at = timestamp;
-                metadata.last_modify_at = timestamp;
-            },
-        )?;
-        if durable_updated {
-            self.mark_metadata_dirty(self_inode_state_guard);
+        let classified_update = if let Some(prepared_entry_set_write) = prepared_entry_set_write {
+            let parent_inode = self_inode_state_guard
+                .parent()
+                .ok_or_else(|| {
+                    Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
+                })?;
+            if !parent_inode_state_guard.guards_inode(parent_inode.as_ref()) {
+                return Err(Error::new(Errno::EINVAL));
+            }
+            self.persist_prepared_entry_set_write_classified(
+                fs_state,
+                prepared_entry_set_write,
+                parent_inode.as_ref(),
+                parent_inode_state_guard.metadata(),
+                !namespace_stage_exposed,
+            )
+        } else {
+            self.rewrite_validated_entry_set_with_guard_classified(
+                fs_state,
+                self_inode_state_guard,
+                parent_inode_state_guard,
+                boot_region,
+                |entry_view| {
+                    let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                        Self::encoded_exfat_timestamp_fields(
+                            timestamp,
+                            entry_view.last_modified_timestamp().utc_offset_byte(),
+                        )?;
+                    let mut mutable_entry_set = entry_view.to_mutable();
+                    mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
+                        timestamp_bytes,
+                        Some(ten_ms_increment),
+                        encoded_utc_offset_byte,
+                    ));
+                    Ok(Some(mutable_entry_set.into_bytes()))
+                },
+                !namespace_stage_exposed,
+            )
+        };
+        match classified_update {
+            Ok(Ok(durable_updated)) => {
+                if durable_updated {
+                    self_inode_state_guard.with_metadata_mut(|metadata| {
+                        metadata.last_meta_change_at = timestamp;
+                        metadata.last_modify_at = timestamp;
+                    });
+                    self.mark_metadata_dirty(self_inode_state_guard);
+                }
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                self_inode_state_guard.with_metadata_mut(|metadata| {
+                    metadata.last_meta_change_at = timestamp;
+                    metadata.last_modify_at = timestamp;
+                });
+                self.mark_metadata_dirty(self_inode_state_guard);
+                Err(error)
+            }
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 
     fn rewrite_inode_entry_set_with_guards(
         &self,
+        fs_state: &mut FsState,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
         update_metadata_fn: impl FnOnce(&mut Metadata),
     ) -> Result<bool> {
-        let durable_updated = self.rewrite_validated_entry_set_with_guard(
+        let classified_update = self.rewrite_validated_entry_set_with_guard_classified(
+            fs_state,
             self_inode_state_guard,
             parent_inode_state_guard,
-            block_device,
             boot_region,
             rewrite_entry_set_fn,
-        )?;
-        if durable_updated {
-            self_inode_state_guard.with_metadata_mut(update_metadata_fn);
+            true,
+        );
+        match classified_update {
+            Ok(Ok(durable_updated)) => {
+                if durable_updated {
+                    self_inode_state_guard.with_metadata_mut(update_metadata_fn);
+                }
+                Ok(durable_updated)
+            }
+            Ok(Err(error)) => {
+                self_inode_state_guard.with_metadata_mut(update_metadata_fn);
+                Err(error)
+            }
+            Err(error) => Err(error),
         }
-        Ok(durable_updated)
     }
 
     pub(super) fn publish_live_regular_file_entry_set(
         &self,
+        fs_state: &mut FsState,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
     ) -> Result<bool> {
         if self_inode_state_guard.metadata().type_ != InodeType::File {
@@ -554,9 +599,9 @@ impl ExfatInode {
         let cluster_map = self_inode_state_guard.dir_entry_stream();
         let last_modify_at = self_inode_state_guard.metadata().last_modify_at;
         let durable_updated = match self.rewrite_inode_entry_set_with_guards(
+            fs_state,
             self_inode_state_guard,
             parent_inode_state_guard,
-            block_device,
             boot_region,
             |entry_view| {
                 let (inode_type, _first_cluster, _data_length, _no_fat_chain) =

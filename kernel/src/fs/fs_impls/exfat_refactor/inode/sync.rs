@@ -43,8 +43,13 @@ impl ExfatInode {
             return true;
         }
 
-        let data_length = if let Some(page_cache_context) = self.active_page_cache_context() {
-            page_cache_context.data_length
+        let data_length = if let Some(page_cache_context) = inode_state_guard.page_cache_context() {
+            match page_cache_context {
+                super::page_backend::PageCacheContext::RegularFile { data_length, .. } => {
+                    data_length
+                }
+                super::page_backend::PageCacheContext::Directory { .. } => return false,
+            }
         } else {
             let Some(data_length) = inode_state_guard.dir_entry_stream().data_length else {
                 return false;
@@ -121,6 +126,7 @@ impl ExfatInode {
         let mut allocation_guard = fs.allocation_guard()?;
         self.sync_regular_file_with_proofs(
             fs,
+            fs_state,
             scope,
             inode_state,
             parent_inode_state,
@@ -135,6 +141,7 @@ impl ExfatInode {
     pub(super) fn sync_regular_file_with_proofs(
         &self,
         fs: &ExfatFs,
+        fs_state: &mut FsState,
         scope: InodeSyncScope,
         inode_state: &InodeStateWriteGuard<'_>,
         parent_inode_state: Option<&InodeStateWriteGuard<'_>>,
@@ -146,9 +153,17 @@ impl ExfatInode {
             .get()
             .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
         let _ = self.current_cluster_map(inode_state, allocation_guard)?;
-        let data_length = self
-            .active_page_cache_context()
-            .map(|page_cache_context| page_cache_context.data_length)
+        let data_length = inode_state
+            .page_cache_context()
+            .map(|page_cache_context| match page_cache_context {
+                super::page_backend::PageCacheContext::RegularFile { data_length, .. } => {
+                    Ok(data_length)
+                }
+                super::page_backend::PageCacheContext::Directory { .. } => {
+                    Err(Error::new(Errno::EINVAL))
+                }
+            })
+            .transpose()?
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
         let dirty_state_snapshot = inode_state.dirty_state();
@@ -183,9 +198,9 @@ impl ExfatInode {
                 Error::with_message(Errno::EIO, "ordinary exFAT directory parent is not mounted")
             })?;
             self.publish_live_regular_file_entry_set(
+                fs_state,
                 inode_state,
                 parent_inode_state_guard,
-                &block_device,
                 &fs.immutable_boot_region(),
             )?;
             if block_device.sync()? != BioStatus::Complete {

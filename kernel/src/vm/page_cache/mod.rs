@@ -334,6 +334,71 @@ impl PageCache {
     pub fn fill_zeros(&self, range: Range<usize>) -> Result<()> {
         self.0.fill_zeros(range)
     }
+
+    /// Restores caller-captured bytes and clean/dirty state on prefaulted pages.
+    ///
+    /// This is an owner-internal rollback seam for filesystems that stage
+    /// cached mutations before deciding whether those bytes can be exposed. The
+    /// caller must ensure the target pages stay resident and excluded from
+    /// eviction or invalidation for the whole restore operation.
+    pub(crate) fn restore_prefaulted_pages<'a, I>(&self, page_restores: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (usize, Range<usize>, &'a [u8], bool)>,
+    {
+        for (page_idx, page_range, old_bytes, was_dirty) in page_restores {
+            if page_range.end > PAGE_SIZE
+                || page_range.start > page_range.end
+                || old_bytes.len() != page_range.len()
+            {
+                return_errno_with_message!(Errno::EINVAL, "invalid page-cache restore range");
+            }
+
+            let page = {
+                let locked_pages = self.0.pages.lock();
+                let mut cursor = locked_pages.cursor(page_idx as u64);
+                cursor.load().map(|page| page.clone()).ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EINVAL,
+                        "page-cache restore target is no longer resident",
+                    )
+                })?
+            };
+            let locked_page = page.lock();
+            if locked_page.is_uninit() {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "page-cache restore target is not initialized"
+                );
+            }
+            if locked_page.is_writing_back() {
+                return_errno_with_message!(
+                    Errno::EBUSY,
+                    "page-cache restore target is already writing back"
+                );
+            }
+
+            let mut reader = VmReader::from(old_bytes).to_fallible();
+            let written = locked_page
+                .writer()
+                .skip(page_range.start)
+                .write_fallible(&mut reader)
+                .map_err(|(err, _)| Error::from(err))?;
+            if written != old_bytes.len() {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "page-cache restore did not cover the requested range"
+                );
+            }
+
+            if was_dirty {
+                locked_page.set_dirty();
+            } else {
+                locked_page.set_up_to_date();
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl From<Arc<Vmo>> for PageCache {
