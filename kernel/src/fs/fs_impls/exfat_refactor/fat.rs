@@ -2,8 +2,8 @@
 
 //! Reads and mutates exFAT FAT chains for cluster traversal and topology updates.
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
-use core::{mem, ops::Range};
+use alloc::vec;
+use core::ops::Range;
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -215,7 +215,7 @@ impl<'a> FatReader<'a> {
         let entry_within_sector =
             usize::try_from(entry_offset % sector_size).map_err(|_| invalid_on_disk_layout())?;
         let entry_end = entry_within_sector
-            .checked_add(mem::size_of::<u32>())
+            .checked_add(size_of::<u32>())
             .ok_or_else(invalid_on_disk_layout)?;
         Ok((sector_index, entry_within_sector..entry_end))
     }

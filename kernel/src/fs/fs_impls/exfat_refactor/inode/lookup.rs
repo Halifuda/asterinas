@@ -4,13 +4,8 @@
 //!
 //! Method groups: name lookup, directory-entry scans, readdir emission, and VFS lookup dispatch.
 
-use alloc::string::String;
-
-use aster_block::BlockDevice;
-
 use super::{
     super::{
-        boot::BootRegion,
         direntry::{
             self, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, FileEntrySetView, ScannedDirEntry,
         },
@@ -54,19 +49,19 @@ impl ExfatInode {
         fs: &Arc<ExfatFs>,
         fs_state: &mut super::super::fs::FsState,
         inode_state_guard: &InodeStateReadGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> Result<Option<Arc<dyn Inode>>> {
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
         let cluster_map = inode_state_guard.dir_entry_stream();
         let allocation_guard = fs.allocation_read_guard()?;
         let cluster_map_generation =
             self.cluster_map_for_read_guard(inode_state_guard, &allocation_guard, cluster_map)?;
         let logical_end = match cluster_map.data_length {
             Some(data_length) => data_length,
-            None => cluster_map_generation.allocated_byte_length(boot_region)?,
+            None => cluster_map_generation.allocated_byte_length(&boot_region)?,
         };
         let directory_bytes = self.read_directory_snapshot_from_page_cache(
             inode_state_guard.metadata(),
@@ -85,7 +80,7 @@ impl ExfatInode {
         };
         let slot_range = entry_view.slot_range();
         let (inode_type, first_cluster, data_length, no_fat_chain) =
-            entry_view.child_metadata(boot_region)?;
+            entry_view.child_metadata(&boot_region)?;
         let ino = (u64::from(cluster_map.first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
@@ -111,7 +106,7 @@ impl ExfatInode {
             no_fat_chain,
         };
         let child_cluster_map = (inode_type == InodeType::Dir)
-            .then(|| Self::resolve_cluster_map(block_device, boot_region, child_stream))
+            .then(|| Self::resolve_cluster_map(&block_device, &boot_region, child_stream))
             .transpose()?
             .map(Arc::new);
         let child_inode = Self::new_child(
@@ -119,12 +114,8 @@ impl ExfatInode {
             self.weak_self(),
             ino,
             inode_type,
-            boot_region.cluster_size,
             data_length,
-            first_cluster,
-            data_length,
-            valid_data_length,
-            no_fat_chain,
+            child_stream,
             child_cluster_map,
         );
         {
@@ -132,7 +123,7 @@ impl ExfatInode {
             child_inode.refresh_cached_metadata_from_entry_view(
                 &unpublished_child_guard,
                 entry_view,
-                boot_region,
+                &boot_region,
             )?;
         }
         if inode_type == InodeType::File {
@@ -224,9 +215,7 @@ impl ExfatInode {
             let dot_next_offset = next_offset
                 .checked_add(1)
                 .ok_or_else(invalid_on_disk_layout)?;
-            if let Err(error) = visitor.visit(".", directory_ino, InodeType::Dir, dot_next_offset) {
-                return Err(error);
-            }
+            visitor.visit(".", directory_ino, InodeType::Dir, dot_next_offset)?;
             next_offset = dot_next_offset;
             accepted_entry = true;
         }
@@ -313,7 +302,7 @@ impl ExfatInode {
                     entry_index = slot_range.next_entry_index()?;
                 }
                 ScannedDirEntry::Issue { .. } => {
-                    return Err(invalid_on_disk_layout().into());
+                    return Err(invalid_on_disk_layout());
                 }
             }
         }
@@ -348,8 +337,6 @@ impl ExfatInode {
             return Ok(parent);
         }
         let _allocation_guard = fs.allocation_read_guard()?;
-        let block_device = fs.immutable_block_device();
-        let boot_region = fs.immutable_boot_region();
         let upcase_table = fs_state.upcase_table.as_ref().ok_or_else(super::super::not_mounted)?.clone();
         let lookup_name = Self::validate_name(name, &mount_state.options)?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
@@ -357,8 +344,6 @@ impl ExfatInode {
             &fs,
             &mut fs_state,
             &inode_state_guard,
-            &block_device,
-            &boot_region,
             &upcase_table,
             &lookup_name,
             lookup_name_hash,

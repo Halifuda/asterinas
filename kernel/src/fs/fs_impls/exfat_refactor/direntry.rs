@@ -2,7 +2,7 @@
 
 //! Scans, validates, and authors exFAT directory-entry sets as byte-backed records.
 
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 
 use super::{
     boot::BootRegion, inode::StreamExtensionDirEntry, invalid_on_disk_layout,
@@ -451,7 +451,7 @@ impl<'a> MutableDirEntrySlotSpan<'a> {
             .ok_or(invalid_on_disk_layout())?;
         if slot_span.is_empty()
             || slot_span.len() != expected_len
-            || slot_span.len() % DIRECTORY_ENTRY_SIZE != 0
+            || !slot_span.len().is_multiple_of(DIRECTORY_ENTRY_SIZE)
         {
             return Err(invalid_on_disk_layout());
         }
@@ -561,10 +561,10 @@ pub(super) enum ScannedDirEntrySlot {
     EndOfDirectory {
         entry_index: usize,
     },
-    FilePrimary(DirEntrySlotRange),
-    RootMetadata(DirEntrySlotRange),
+    FilePrimary,
+    RootMetadata,
     Secondary(DirEntrySlotRange),
-    UnrecognizedPrimary(DirEntrySlotRange),
+    UnrecognizedPrimary,
     Vacant(DirEntrySlotRange),
 }
 
@@ -610,7 +610,7 @@ pub(super) fn scan_dir_entry(
             ScannedDirEntrySlot::Vacant(slot_range) => {
                 return Ok(ScannedDirEntry::Vacant(slot_range));
             }
-            ScannedDirEntrySlot::RootMetadata(_) => {
+            ScannedDirEntrySlot::RootMetadata => {
                 entry_index = entry_index.checked_add(1).ok_or(invalid_on_disk_layout())?;
                 continue;
             }
@@ -620,10 +620,10 @@ pub(super) fn scan_dir_entry(
                     slot_range,
                 });
             }
-            ScannedDirEntrySlot::FilePrimary(_) => {
+            ScannedDirEntrySlot::FilePrimary => {
                 return scan_file_entry_set(directory_bytes, entry_index, entry_offset, entry);
             }
-            ScannedDirEntrySlot::UnrecognizedPrimary(_) => {
+            ScannedDirEntrySlot::UnrecognizedPrimary => {
                 return scan_unrecognized_entry_set(
                     directory_bytes,
                     entry_index,
@@ -648,13 +648,13 @@ pub(super) fn scan_dir_entry_slot(
         END_OF_DIRECTORY_ENTRY_TYPE => Ok(ScannedDirEntrySlot::EndOfDirectory { entry_index }),
         0x01..=0x7F => Ok(ScannedDirEntrySlot::Vacant(single_slot)),
         FILE_DIRECTORY_ENTRY_TYPE => {
-            let slot_range = DirEntrySlotRange::new(
+            DirEntrySlotRange::new(
                 entry_index,
                 usize::from(entry[1])
                     .checked_add(1)
                     .ok_or(invalid_on_disk_layout())?,
             )?;
-            Ok(ScannedDirEntrySlot::FilePrimary(slot_range))
+            Ok(ScannedDirEntrySlot::FilePrimary)
         }
         entry_type => {
             if entry_type & ENTRY_TYPE_IN_USE_BIT == 0 {
@@ -669,20 +669,20 @@ pub(super) fn scan_dir_entry_slot(
                     | VOLUME_GUID_ENTRY_TYPE
             );
             if is_root_directory && is_root_metadata {
-                return Ok(ScannedDirEntrySlot::RootMetadata(single_slot));
+                return Ok(ScannedDirEntrySlot::RootMetadata);
             }
 
             if entry_type & ENTRY_TYPE_CATEGORY_BIT != 0 {
                 return Ok(ScannedDirEntrySlot::Secondary(single_slot));
             }
 
-            let slot_range = DirEntrySlotRange::new(
+            DirEntrySlotRange::new(
                 entry_index,
                 usize::from(entry[1])
                     .checked_add(1)
                     .ok_or(invalid_on_disk_layout())?,
             )?;
-            Ok(ScannedDirEntrySlot::UnrecognizedPrimary(slot_range))
+            Ok(ScannedDirEntrySlot::UnrecognizedPrimary)
         }
     }
 }

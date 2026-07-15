@@ -2,7 +2,6 @@
 
 //! Implements the exFAT filesystem owner, mount admission, allocation, and VFS registration.
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use aster_block::{BlockDevice, bio::BioStatus};
@@ -286,7 +285,7 @@ impl ExfatFs {
         block_device: &Arc<dyn BlockDevice>,
         source: Option<&str>,
         options: &MountOptions,
-    ) -> Result<(Arc<ExfatFs>, Arc<dyn Inode>, SuperBlock, FsFlags)> {
+    ) -> Result<Arc<ExfatFs>> {
         let (boot_region, flags, bitmap, upcase_table) =
             BootRegion::load_mount_state(block_device.as_ref())?;
         let mut bitmap = bitmap;
@@ -316,15 +315,14 @@ impl ExfatFs {
             forced_shutdown: false,
         };
         fs.activate_mount_state(bitmap, root_inode.clone(), upcase_table, mount_state);
-        let super_block = {
+        let _super_block = {
             let fs_state = fs.fs_state.read();
             let mount_state = fs_state.mount_state.as_ref().ok_or_else(not_mounted)?;
             let allocation_state = fs.allocation_state.read();
             let bitmap = allocation_state.as_ref().ok_or_else(not_mounted)?;
             fs.build_super_block(mount_state, bitmap)?
         };
-        let root_inode: Arc<dyn Inode> = root_inode;
-        Ok((fs, root_inode, super_block, options.fs_flags))
+        Ok(fs)
     }
 
     fn activate_mount_state(
@@ -828,7 +826,7 @@ impl FsType for ExfatFsType {
     fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
         let block_device = fs_creation_ctx.resolve_block_device()?;
         let options = MountOptions::parse(fs_creation_ctx.flags(), fs_creation_ctx.args())?;
-        let (fs, ..) = ExfatFs::mount_candidate(&block_device, fs_creation_ctx.source(), &options)?;
+        let fs = ExfatFs::mount_candidate(&block_device, fs_creation_ctx.source(), &options)?;
         Ok(fs as Arc<dyn FileSystem>)
     }
 

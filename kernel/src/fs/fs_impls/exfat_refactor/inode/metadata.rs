@@ -157,7 +157,7 @@ impl ExfatInode {
                 parent_inode_state_guard,
                 &boot_region,
                 |entry_view| {
-                    if requested_writable == !entry_view.is_read_only() {
+                    if requested_writable != entry_view.is_read_only() {
                         return Ok(None);
                     }
                     let mut file_attributes = entry_view.file_attributes();
@@ -598,7 +598,7 @@ impl ExfatInode {
 
         let cluster_map = self_inode_state_guard.dir_entry_stream();
         let last_modify_at = self_inode_state_guard.metadata().last_modify_at;
-        let durable_updated = match self.rewrite_inode_entry_set_with_guards(
+        let durable_updated = self.rewrite_inode_entry_set_with_guards(
             fs_state,
             self_inode_state_guard,
             parent_inode_state_guard,
@@ -607,7 +607,7 @@ impl ExfatInode {
                 let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
                     entry_view.child_metadata(boot_region)?;
                 if inode_type != InodeType::File || entry_view.is_directory() {
-                    return Err(Error::from(invalid_on_disk_layout()));
+                    return Err(invalid_on_disk_layout());
                 }
 
                 let (timestamp_bytes, hundredths_increment, encoded_utc_offset_byte) =
@@ -625,10 +625,7 @@ impl ExfatInode {
                 Ok(Some(mutable_entry_set.into_bytes()))
             },
             |_| {},
-        ) {
-            Ok(durable_updated) => durable_updated,
-            Err(error) => return Err(error),
-        };
+        )?;
         Ok(durable_updated)
     }
 }

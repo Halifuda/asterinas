@@ -186,10 +186,10 @@ impl ExfatInode {
             return Ok(());
         }
 
-        if needs_page_writeback {
-            if let Some(page_cache) = page_cache {
-                page_cache.flush_range(0..data_length)?;
-            }
+        if needs_page_writeback
+            && let Some(page_cache) = page_cache
+        {
+            page_cache.flush_range(0..data_length)?;
         }
 
         if needs_regular_file_publish && !is_detached_regular_file {

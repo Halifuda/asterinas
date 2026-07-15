@@ -2,8 +2,6 @@
 
 //! Loads and validates the exFAT boot region and mount-time root-directory anchors.
 
-use core::mem;
-
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
@@ -207,10 +205,7 @@ impl BootRegion {
     pub(super) fn is_valid_cluster(&self, cluster: u32) -> bool {
         cluster >= FIRST_DATA_CLUSTER
             && cluster
-                <= self
-                    .cluster_count
-                    .checked_add(FIRST_DATA_CLUSTER - 1)
-                    .unwrap_or(u32::MAX)
+                <= self.cluster_count.saturating_add(FIRST_DATA_CLUSTER - 1)
     }
 
     pub(super) fn validate_stream_data(&self, first_cluster: u32, data_length: u64) -> Result<()> {
@@ -238,7 +233,7 @@ impl BootRegion {
         block_device
             .read_bytes(checksum_region_len, &mut checksum_sector)
             .map_err(|_| device_io())?;
-        for chunk in checksum_sector.chunks_exact(mem::size_of::<u32>()) {
+        for chunk in checksum_sector.chunks_exact(size_of::<u32>()) {
             if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != expected_checksum {
                 return Err(invalid_on_disk_layout());
             }

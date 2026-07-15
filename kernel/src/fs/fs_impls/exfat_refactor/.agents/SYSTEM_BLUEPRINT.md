@@ -316,6 +316,49 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Runtime Result**: original `generic/452` passed on the already-proven 8 GiB `/dev/vdd`/`/dev/vde` lane with both expected output lines and no old read-only teardown marker; receipt `.agents/tmp/20260715-110210-pass_177_exfat_owned_rw_to_ro_quiesce_checker_xfstests/`
   - **Environment Note**: the first 2 GiB `/dev/vdc`/`/dev/vdd` leg stopped before testcase execution on `Structure needs cleaning` although host read-only fsck classified both generated images clean; retained as separate harness/resource evidence, not a pass176 regression
   - **Next Gate**: run the required full production code review over the resulting project diff
+- [x] **Post-Upstream-Merge 56-Case Runtime Breadth** (`pass_178_post_upstream_merge_56_case_runtime_checker`)
+  - **Status**: Accepted / PASS
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_178_post_upstream_merge_56_case_runtime_checker_dispatch.md`
+  - **Starting Commit**: merge `60e2b8f36`, with upstream parent `435916bf0`
+  - **Scope**: exact pass175 ordered 56-case surface, fresh 8 GiB TEST/SCRATCH, `/dev/vdd` + `/dev/vde`, 12 GiB memory, one same-device batch, no `--keep-going`
+  - **Failure Rule**: independent failures are record-only; only a proven shared-signature TEST-device polluter permits an archived fresh suffix continuation
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_178_post_upstream_merge_56_case_runtime_checker.md`
+  - **Receipt**: `.agents/tmp/20260715-111712-pass_178_post_upstream_merge_56_case_runtime_checker_xfstests/`
+  - **Result**: exact HEAD `60e2b8f36`; 56 PASS / 0 FAIL / 0 NOTRUN / 0 polluters / 0 pollution-invalid; no suffix continuation, production edit, or harness-logic edit
+- [ ] **Project Warning Cleanup** (`pass_179_project_warning_cleanup_creator`)
+  - **Status**: Checker FAIL; bounded Creator repair 01 dispatched
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_179_project_warning_cleanup_creator_dispatch.md`
+  - **Authoritative Census**: pass177 cargo-check receipt contains 19 warnings rooted under `exfat_refactor` and one unrelated VFS registry warning
+  - **Scope**: remove only the 19 project warnings; preserve the three distinct `ScannedDirEntrySlot` states while deleting their unread payload storage
+  - **Exclusion**: do not modify or claim `kernel/src/fs/vfs/fs_apis/registry.rs:73`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_179_project_warning_cleanup_creator.md`
+  - **Static Result**: all 19 packeted dispositions are complete across the eight authorized files; six scanner states remain distinct and prior range validation is preserved without storing the three unread payloads
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_180_project_warning_cleanup_clippy_checker_dispatch.md`
+  - **Checker Outcome**: cargo-check exposed two pass179-introduced redundant `size_of` imports; targeted Clippy separately exposed 164 pre-existing project diagnostics
+  - **Repair Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_179_project_warning_cleanup_creator_repair_01_dispatch.md`
+  - **Next Gate**: accept the two-line repair, then continue the separately bounded Clippy cleanup wave
+- [ ] **exFAT Clippy Cleanup** (`pass_181_exfat_clippy_cleanup_creator`)
+  - **Status**: Mechanical Creator accepted and covered by the later pass183 cargo-check `0`; final independent review/Clippy gate deferred
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_181_exfat_clippy_cleanup_creator_dispatch.md`
+  - **Authoritative Census**: pass180 targeted Clippy receipt reports 164 project diagnostics across 11 lint categories
+  - **Mechanical Scope**: 144 diagnostics receive direct source-equivalent rewrites with no behavior, lock, owner, or error change
+  - **Result**: all 144 mechanical diagnostics were dispositioned; pass183 then repaired two compiler-proven pass181 fallout sites and delivered cargo-check `0`
+  - **Remaining Shape Findings**: pass182/pass183 closed five sites through existing-type refactors; ten `too_many_arguments` and five `type_complexity` findings remain explicitly deferred without `#[expect]`
+  - **Next Gate**: full production review first; only after review stabilization rerun independent source-scoped cargo-check/Clippy and disposition the surviving 15 findings
+- [ ] **Five Clippy Signature-Site Review** (`pass_182_five_clippy_signature_sites_reviewer`)
+  - **Status**: Reviewer and pass183 Creator compile gate accepted; independent Checker pending
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_182_five_clippy_signature_sites_reviewer_dispatch.md`
+  - **Scope**: `mount_candidate`, `lookup_child_by_name`, `child_inode_from_directory_entry`, `ExfatInode::new`, and `ExfatInode::new_child` only
+  - **Decision Rule**: existing accepted types/owned state only, otherwise narrow item-level `#[expect]`; no new carrier, type alias, owner climb, lock change, production edit, or command
+  - **Reviewer Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_182_five_clippy_signature_sites_reviewer.md`
+  - **Result**: five `EXISTING-TYPE REFACTOR`, zero `NARROW EXPECT`
+  - **Creator Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_183_five_clippy_signature_sites_creator_dispatch.md`
+  - **User Overrides**: Creator must deliver cargo-check `0`; compiler-proven pass179/pass181 mechanical fallout may be repaired inside the packeted exFAT files
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_183_five_clippy_signature_sites_creator.md`
+  - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260715-124611-cross_meso_vfs_to_bio_topology-pass_183_five_clippy_signature_sites_creator/summary.tsv` (`cargo-check=0`)
+  - **Compile Repairs**: one pass181 brace mismatch and one pass181 missing borrow, plus two refactor-local `BootRegion` borrows; all compiler-proven and packet-bounded
+  - **Deferred-15 Decision**: do not add `#[expect]` before the required full production review; recensus after review stabilization because refactors may move or naturally remove diagnostics
+  - **Next Gate**: full production review, then independent source-scoped cargo-check/Clippy and survivor-only disposition
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review
   - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`

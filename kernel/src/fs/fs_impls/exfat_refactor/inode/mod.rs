@@ -18,7 +18,6 @@ use core::{
     time::Duration,
 };
 
-use ostd::{mm::VmReader, sync::RwMutex};
 use spin::Once;
 
 pub(in crate::fs::fs_impls::exfat_refactor) use self::state::{
@@ -65,10 +64,7 @@ impl ExfatInode {
     fn new(
         fs: &Arc<ExfatFs>,
         metadata: Metadata,
-        first_cluster: u32,
-        data_length: Option<usize>,
-        valid_data_length: Option<usize>,
-        no_fat_chain: bool,
+        dir_entry_stream: StreamExtensionDirEntry,
         cluster_map: Option<Arc<ClusterMap>>,
         parent: Weak<Self>,
     ) -> Arc<Self> {
@@ -79,12 +75,7 @@ impl ExfatInode {
                 metadata,
                 parent,
                 cluster_map,
-                dir_entry_stream: StreamExtensionDirEntry {
-                    data_length,
-                    first_cluster,
-                    valid_data_length,
-                    no_fat_chain,
-                },
+                dir_entry_stream,
             }),
             extension: Extension::new(),
             fs: Arc::downgrade(fs),
@@ -103,7 +94,8 @@ impl ExfatInode {
         root_cluster_map: Arc<ClusterMap>,
         cluster_size: usize,
     ) -> Result<Arc<Self>> {
-        let root_cluster = root_cluster_map.stream_extension().first_cluster;
+        let root_stream = root_cluster_map.stream_extension();
+        let root_cluster = root_stream.first_cluster;
         let allocated_size = root_cluster_map.allocated_byte_length(&fs.immutable_boot_region())?;
         let root_ino = u64::from(root_cluster);
         let mut metadata = Metadata::new_dir(
@@ -116,10 +108,7 @@ impl ExfatInode {
         let root_inode = Self::new(
             fs,
             metadata,
-            root_cluster,
-            None,
-            None,
-            false,
+            root_stream,
             Some(root_cluster_map),
             Weak::new(),
         );
@@ -135,14 +124,11 @@ impl ExfatInode {
         parent: Weak<Self>,
         ino: u64,
         inode_type: InodeType,
-        cluster_size: usize,
         size: usize,
-        first_cluster: u32,
-        data_length: usize,
-        valid_data_length: usize,
-        no_fat_chain: bool,
+        child_stream: StreamExtensionDirEntry,
         cluster_map: Option<Arc<ClusterMap>>,
     ) -> Arc<Self> {
+        let cluster_size = fs.immutable_boot_region().cluster_size;
         let mut metadata = match inode_type {
                 InodeType::Dir => Metadata::new_dir(
                     ino,
@@ -161,10 +147,7 @@ impl ExfatInode {
         Self::new(
             fs,
             metadata,
-            first_cluster,
-            Some(data_length),
-            Some(valid_data_length),
-            no_fat_chain,
+            child_stream,
             cluster_map,
             parent,
         )

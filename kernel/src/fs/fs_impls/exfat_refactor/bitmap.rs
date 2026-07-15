@@ -2,7 +2,7 @@
 
 //! Owns allocation-bitmap scanning, range normalization, and cached used-cluster accounting.
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
+use alloc::vec;
 use core::ops::Range;
 
 use aster_block::BlockDevice;
@@ -171,10 +171,10 @@ impl AllocationBitmap {
             });
         let effective_start_index = boot_region.cluster_index(effective_start_cluster)?;
 
-        let mut scan_window = |scan_start_index: usize,
-                               scan_end_index: usize,
-                               requested_clusters_remaining: &mut usize,
-                               ranges: &mut Vec<ClusterRange>|
+        let scan_window = |scan_start_index: usize,
+                           scan_end_index: usize,
+                           requested_clusters_remaining: &mut usize,
+                           ranges: &mut Vec<ClusterRange>|
          -> Result<()> {
             if *requested_clusters_remaining == 0 || scan_start_index >= scan_end_index {
                 return Ok(());
@@ -540,9 +540,7 @@ impl AllocationBitmap {
             }
             Ok(())
         })();
-        if let Err(error) = publish_result {
-            return Err(error);
-        }
+        publish_result?;
         self.published_dirty_generation = Some(publish_generation);
         Ok(())
     }
@@ -584,11 +582,11 @@ impl AllocationBitmap {
             return Err(invalid_on_disk_layout());
         }
         Ok(Self {
-            first_cluster: u32::from_le_bytes([entry[20], entry[21], entry[22], entry[23]]),
             data_length: u64::from_le_bytes([
                 entry[24], entry[25], entry[26], entry[27], entry[28], entry[29], entry[30],
                 entry[31],
             ]),
+            first_cluster: u32::from_le_bytes([entry[20], entry[21], entry[22], entry[23]]),
             next_allocation_search_cluster: 0,
             resident_bitmap: Vec::new(),
             dirty_byte_ranges: Vec::new(),

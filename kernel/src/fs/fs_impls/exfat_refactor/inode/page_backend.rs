@@ -188,7 +188,7 @@ impl ExfatFilePageBackend {
             let chunk_offset = self
                 .boot_region
                 .cluster_offset(current_cluster)
-                .map_err(Error::from)?
+                ?
                 .checked_add(cluster_offset)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
 

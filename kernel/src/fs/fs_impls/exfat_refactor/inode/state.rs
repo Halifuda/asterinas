@@ -5,7 +5,7 @@
 //! Method groups: dirty-state transitions, directory access, regular-file snapshots,
 //! directory byte I/O, timestamp conversion, child construction, and ordered write guards.
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
+use alloc::vec;
 use core::{cell::RefCell, ops::Range, time::Duration};
 
 use aster_block::BlockDevice;
@@ -1119,22 +1119,13 @@ impl ExfatInode {
         parent_first_cluster: u32,
         slot_range: DirEntrySlotRange,
         inode_type: InodeType,
-        first_cluster: u32,
-        data_length: usize,
-        valid_data_length: usize,
-        no_fat_chain: bool,
+        child_stream: StreamExtensionDirEntry,
     ) -> Result<Arc<Self>> {
         let child_ino = (u64::from(parent_first_cluster) << 32)
             | u64::from(
                 u32::try_from(slot_range.first_entry_index())
                     .map_err(|_| invalid_on_disk_layout())?,
             );
-        let child_stream = StreamExtensionDirEntry {
-            data_length: Some(data_length),
-            first_cluster,
-            valid_data_length: Some(valid_data_length),
-            no_fat_chain,
-        };
         let child_cluster_map = (inode_type == InodeType::Dir)
             .then(|| {
                 Self::resolve_cluster_map(
@@ -1150,12 +1141,8 @@ impl ExfatInode {
             parent.weak_self(),
             child_ino,
             inode_type,
-            boot_region.cluster_size,
-            data_length,
-            first_cluster,
-            data_length,
-            valid_data_length,
-            no_fat_chain,
+            child_stream.data_length.ok_or_else(invalid_on_disk_layout)?,
+            child_stream,
             child_cluster_map,
         );
         if inode_type == InodeType::File {
