@@ -302,6 +302,20 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_175_directory_page_cache_56_case_runtime_checker.md`
   - **Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260715-012142-cross_meso_vfs_to_bio_topology-pass_175_directory_page_cache_56_case_runtime_checker/initial_56_same_device/`
   - **Result**: exact ordered 56-row batch, 56 PASS / 0 FAIL / 0 NOTRUN, 619s wrapper elapsed; no integrity signature, polluter, suffix continuation, rerun, production edit, or harness-logic edit
+- [x] **exFAT-Owned RW-to-RO Quiesce Relocation** (`pass_176_exfat_owned_rw_to_ro_quiesce_creator`)
+  - **Status**: Accepted through direct Creator and synchronized Checker under explicit user-authorized Designer bypass
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_176_exfat_owned_rw_to_ro_quiesce_creator_dispatch.md`
+  - **Parent Meso-Component**: `meso_08_filesystem_sync_and_volume_state`
+  - **Scope**: delete the project-owned pre-sync block from `Mount::remount`; move existing writable-side sync into the exFAT remount hook so sync and `RDONLY` publication share one continuous `FsLock` write-guard lifetime
+  - **Hard Boundary**: no other VFS change; preserve read-only no-write teardown, post-RO typed refusal, volume-dirty/failure ordering, unmount sync, forced-shutdown semantics, and `MountRuntimeProjection`
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_176_exfat_owned_rw_to_ro_quiesce_creator.md`
+  - **Static Result**: only the project pre-sync block was removed from VFS; one owner-private `sync_with_fs_guard` now serves public sync and RW-to-RO remount under a continuous `FsLock` guard after request validation
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_177_exfat_owned_rw_to_ro_quiesce_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_177_exfat_owned_rw_to_ro_quiesce_checker.md`
+  - **Compile Result**: cargo-check passed under the Checker runner
+  - **Runtime Result**: original `generic/452` passed on the already-proven 8 GiB `/dev/vdd`/`/dev/vde` lane with both expected output lines and no old read-only teardown marker; receipt `.agents/tmp/20260715-110210-pass_177_exfat_owned_rw_to_ro_quiesce_checker_xfstests/`
+  - **Environment Note**: the first 2 GiB `/dev/vdc`/`/dev/vdd` leg stopped before testcase execution on `Structure needs cleaning` although host read-only fsck classified both generated images clean; retained as separate harness/resource evidence, not a pass176 regression
+  - **Next Gate**: run the required full production code review over the resulting project diff
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review
   - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`

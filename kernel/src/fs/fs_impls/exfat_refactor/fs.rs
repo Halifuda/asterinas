@@ -69,82 +69,7 @@ impl FileSystem for ExfatFs {
 
     fn sync(&self) -> Result<()> {
         let mut fs_state = self.fs_state.write();
-        if fs_state
-            .mount_state
-            .as_ref()
-            .ok_or_else(not_mounted)?
-            .forced_shutdown
-        {
-            return_errno!(Errno::EIO);
-        }
-        let live_inodes = Self::live_cached_inodes(&mut fs_state);
-        for inode in &live_inodes {
-            if let Err(error) = inode.sync_regular_file_with_fs_guard(
-                self,
-                &mut fs_state,
-                super::inode::sync::InodeSyncScope::All,
-            ) {
-                Self::mark_mount_dirty_after_failure(&mut fs_state);
-                return Err(error);
-            }
-        }
-
-        let is_read_only = fs_state
-            .mount_state
-            .as_ref()
-            .ok_or_else(not_mounted)?
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY);
-        let mut allocation_guard = self.allocation_guard()?;
-        match allocation_guard.release_lazy_reclaimed_clusters() {
-            Ok(true) => Self::disable_unsupported_discard_after_release(&mut fs_state),
-            Ok(false) => {}
-            Err(error) => {
-                Self::mark_mount_dirty_after_failure(&mut fs_state);
-                return Err(error);
-            }
-        }
-        if let Err(error) = allocation_guard.publish_dirty_ranges() {
-            Self::mark_mount_dirty_after_failure(&mut fs_state);
-            return Err(error);
-        }
-        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
-            Self::mark_mount_dirty_after_failure(&mut fs_state);
-            return_errno!(Errno::EIO);
-        }
-        if let Err(error) = allocation_guard.commit_published_ranges() {
-            Self::mark_mount_dirty_after_failure(&mut fs_state);
-            return Err(error);
-        }
-        drop(allocation_guard);
-
-        let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
-        if is_read_only
-            || !mount_state.volume_flags.volume_dirty
-            || !mount_state.dirty_bracket_opened_by_mount
-        {
-            return Ok(());
-        }
-        let clean_flags = VolumeFlags {
-            volume_dirty: false,
-            ..mount_state.volume_flags
-        };
-        if let Err(error) = self
-            .boot_region
-            .write_volume_flags(self.block_device.as_ref(), clean_flags)
-        {
-            Self::mark_mount_dirty_after_failure(&mut fs_state);
-            return Err(error);
-        }
-        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
-            Self::mark_mount_dirty_after_failure(&mut fs_state);
-            return_errno!(Errno::EIO);
-        }
-        let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
-        mount_state.volume_flags = clean_flags;
-        mount_state.dirty_bracket_opened_by_mount = false;
-        Ok(())
+        self.sync_with_fs_guard(&mut fs_state)
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
@@ -184,16 +109,40 @@ impl FileSystem for ExfatFs {
 
     fn set_fs_flags(&self, flags: FsFlags, data: Option<CString>, _ctx: &Context) -> Result<()> {
         let mut fs_state = self.fs_state.write();
-        let current_options = fs_state
-            .mount_state
-            .as_ref()
-            .ok_or_else(not_mounted)?
-            .options
-            .clone();
+        let (current_flags, current_options) = {
+            let mount_state = fs_state.mount_state.as_ref().ok_or_else(not_mounted)?;
+            (mount_state.flags, mount_state.options.clone())
+        };
         let next_options = match data.as_deref() {
             Some(args) => MountOptions::parse(flags, Some(args))?,
             None => current_options.with_flags(flags),
         };
+
+        let changed_flags = current_flags ^ flags;
+        if changed_flags.intersects(
+            FsFlags::SYNCHRONOUS
+                | FsFlags::MANDLOCK
+                | FsFlags::DIRSYNC
+                | FsFlags::SILENT
+                | FsFlags::LAZYTIME,
+        ) {
+            return Err(unsupported_remount_delta());
+        }
+        if current_flags.contains(FsFlags::RDONLY) && !flags.contains(FsFlags::RDONLY) {
+            return Err(Error::new(Errno::EROFS));
+        }
+        if current_options.iocharset != next_options.iocharset
+            || current_options.keep_last_dots != next_options.keep_last_dots
+            || current_options.zero_size_dir != next_options.zero_size_dir
+        {
+            return Err(unsupported_remount_delta());
+        }
+
+        let remounts_read_only =
+            !current_flags.contains(FsFlags::RDONLY) && flags.contains(FsFlags::RDONLY);
+        if remounts_read_only {
+            self.sync_with_fs_guard(&mut fs_state)?;
+        }
         self.remount_active(&mut fs_state, flags, &next_options)?;
         Ok(())
     }
@@ -204,6 +153,85 @@ impl FileSystem for ExfatFs {
 }
 
 impl ExfatFs {
+    fn sync_with_fs_guard(&self, fs_state: &mut FsState) -> Result<()> {
+        if fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(not_mounted)?
+            .forced_shutdown
+        {
+            return_errno!(Errno::EIO);
+        }
+        let live_inodes = Self::live_cached_inodes(fs_state);
+        for inode in &live_inodes {
+            if let Err(error) = inode.sync_regular_file_with_fs_guard(
+                self,
+                fs_state,
+                super::inode::sync::InodeSyncScope::All,
+            ) {
+                Self::mark_mount_dirty_after_failure(fs_state);
+                return Err(error);
+            }
+        }
+
+        let is_read_only = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(not_mounted)?
+            .options
+            .fs_flags
+            .contains(FsFlags::RDONLY);
+        let mut allocation_guard = self.allocation_guard()?;
+        match allocation_guard.release_lazy_reclaimed_clusters() {
+            Ok(true) => Self::disable_unsupported_discard_after_release(fs_state),
+            Ok(false) => {}
+            Err(error) => {
+                Self::mark_mount_dirty_after_failure(fs_state);
+                return Err(error);
+            }
+        }
+        if let Err(error) = allocation_guard.publish_dirty_ranges() {
+            Self::mark_mount_dirty_after_failure(fs_state);
+            return Err(error);
+        }
+        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
+            Self::mark_mount_dirty_after_failure(fs_state);
+            return_errno!(Errno::EIO);
+        }
+        if let Err(error) = allocation_guard.commit_published_ranges() {
+            Self::mark_mount_dirty_after_failure(fs_state);
+            return Err(error);
+        }
+        drop(allocation_guard);
+
+        let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
+        if is_read_only
+            || !mount_state.volume_flags.volume_dirty
+            || !mount_state.dirty_bracket_opened_by_mount
+        {
+            return Ok(());
+        }
+        let clean_flags = VolumeFlags {
+            volume_dirty: false,
+            ..mount_state.volume_flags
+        };
+        if let Err(error) = self
+            .boot_region
+            .write_volume_flags(self.block_device.as_ref(), clean_flags)
+        {
+            Self::mark_mount_dirty_after_failure(fs_state);
+            return Err(error);
+        }
+        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
+            Self::mark_mount_dirty_after_failure(fs_state);
+            return_errno!(Errno::EIO);
+        }
+        let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
+        mount_state.volume_flags = clean_flags;
+        mount_state.dirty_bracket_opened_by_mount = false;
+        Ok(())
+    }
+
     pub(super) fn disable_unsupported_discard_after_release(fs_state: &mut FsState) {
         if let Some(mount_state) = fs_state.mount_state.as_mut()
             && mount_state.options.discard
@@ -328,25 +356,6 @@ impl ExfatFs {
         next_options: &MountOptions,
     ) -> Result<FsFlags> {
         let mount_state = fs_state.mount_state.as_mut().ok_or_else(not_mounted)?;
-        let changed_flags = mount_state.flags ^ next_flags;
-        if changed_flags.intersects(
-            FsFlags::SYNCHRONOUS
-                | FsFlags::MANDLOCK
-                | FsFlags::DIRSYNC
-                | FsFlags::SILENT
-                | FsFlags::LAZYTIME,
-        ) {
-            return Err(unsupported_remount_delta());
-        }
-        if mount_state.flags.contains(FsFlags::RDONLY) && !next_flags.contains(FsFlags::RDONLY) {
-            return Err(Error::new(Errno::EROFS));
-        }
-        if mount_state.options.iocharset != next_options.iocharset
-            || mount_state.options.keep_last_dots != next_options.keep_last_dots
-            || mount_state.options.zero_size_dir != next_options.zero_size_dir
-        {
-            return Err(unsupported_remount_delta());
-        }
         if !mount_state.flags.contains(FsFlags::RDONLY) && next_flags.contains(FsFlags::RDONLY) {
             mount_state.dirty_bracket_opened_by_mount = false;
         }
@@ -368,7 +377,6 @@ impl ExfatFs {
     ) -> Arc<MountRuntimeProjection> {
         self.mount_runtime_projection.clone()
     }
-
 }
 
 // ---- Superblock ----

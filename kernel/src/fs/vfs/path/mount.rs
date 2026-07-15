@@ -584,13 +584,6 @@ impl Mount {
 
         let _guard = REMOUNT_LOCK.lock();
 
-        let remounts_fs_read_only = fs_flags.is_some_and(|flags| {
-            !self.fs.flags().contains(FsFlags::RDONLY) && flags.contains(FsFlags::RDONLY)
-        });
-        if remounts_fs_read_only {
-            // Quiesce writable-side filesystem work before the remount publishes `RDONLY`.
-            self.sync()?;
-        }
         if let Some(flags) = fs_flags {
             self.fs.set_fs_flags(flags, data, ctx)?;
         }
