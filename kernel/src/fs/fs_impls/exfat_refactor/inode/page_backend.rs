@@ -15,12 +15,14 @@ use aster_block::{
     bio::{BioDirection, BioSegment, BioStatus, BioType},
 };
 use io_util::batch::IoBatch;
-use ostd::mm::{Segment, io::util::HasVmReaderWriter};
+use ostd::mm::{Segment, VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
         boot::BootRegion,
+        dir_entry_format::DIRECTORY_ENTRY_SIZE,
         fs::MountRuntimeProjection,
+        invalid_on_disk_layout,
     },
     ClusterMap, ExfatInode,
 };
@@ -52,9 +54,9 @@ pub(super) struct ExfatFilePageBackend {
 }
 
 struct PageIoRange {
-    page_offset: usize,
-    disk_offset: usize,
-    len: usize,
+    page_offset_bytes: usize,
+    disk_offset_bytes: usize,
+    len_bytes: usize,
 }
 
 impl ExfatFilePageBackend {
@@ -200,20 +202,24 @@ impl ExfatFilePageBackend {
 
             if let Some(last_range) = ranges.last_mut()
                 && last_range
-                    .page_offset
-                    .checked_add(last_range.len)
-                    .zip(last_range.disk_offset.checked_add(last_range.len))
+                    .page_offset_bytes
+                    .checked_add(last_range.len_bytes)
+                    .zip(
+                        last_range
+                            .disk_offset_bytes
+                            .checked_add(last_range.len_bytes),
+                    )
                     == Some((page_range_offset, chunk_offset))
             {
-                last_range.len = last_range
-                    .len
+                last_range.len_bytes = last_range
+                    .len_bytes
                     .checked_add(chunk_len)
                     .ok_or_else(|| Error::new(Errno::EINVAL))?;
             } else {
                 ranges.push(PageIoRange {
-                    page_offset: page_range_offset,
-                    disk_offset: chunk_offset,
-                    len: chunk_len,
+                    page_offset_bytes: page_range_offset,
+                    disk_offset_bytes: chunk_offset,
+                    len_bytes: chunk_len,
                 });
             }
 
@@ -255,12 +261,12 @@ impl ExfatFilePageBackend {
 
         for (range_index, page_range) in page_ranges.into_iter().enumerate() {
             let page_end = page_range
-                .page_offset
-                .checked_add(page_range.len)
+                .page_offset_bytes
+                .checked_add(page_range.len_bytes)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
             let bio_segment = BioSegment::new_from_segment_slice(
                 page_segment.clone(),
-                page_range.page_offset..page_end,
+                page_range.page_offset_bytes..page_end,
                 bio_direction,
             );
             let completion_io = page_io.clone();
@@ -268,7 +274,7 @@ impl ExfatFilePageBackend {
                 Box::new(move |status| completion_io.complete(status));
             let bio = aster_block::bio::Bio::new(
                 bio_type,
-                aster_block::id::Sid::from_offset(page_range.disk_offset),
+                aster_block::id::Sid::from_offset(page_range.disk_offset_bytes),
                 vec![bio_segment],
                 Some(complete_fn),
             );
@@ -402,6 +408,38 @@ impl PageCacheBackend for ExfatFilePageBackend {
 }
 
 impl ExfatInode {
+    pub(super) fn read_directory_snapshot_from_page_cache(
+        &self,
+        metadata: Metadata,
+        cluster_map: Arc<ClusterMap>,
+        logical_end: usize,
+    ) -> Result<Vec<u8>> {
+        if metadata.type_ != InodeType::Dir || !logical_end.is_multiple_of(DIRECTORY_ENTRY_SIZE) {
+            return Err(invalid_on_disk_layout());
+        }
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        if fs.mount_runtime_projection().snapshot().forced_shutdown {
+            return_errno!(Errno::EIO);
+        }
+
+        let page_cache_context =
+            self.page_cache_context_for_mapping(metadata, cluster_map, logical_end, logical_end)?;
+        *self.page_backend.page_cache_context.write() = Some(page_cache_context);
+        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+        })?;
+        let mut directory_bytes = vec![0; logical_end];
+        if directory_bytes.is_empty() {
+            return Ok(directory_bytes);
+        }
+        let mut writer = VmWriter::from(directory_bytes.as_mut_slice()).to_fallible();
+        page_cache.read(0, &mut writer).map_err(Error::from)?;
+        Ok(directory_bytes)
+    }
+
     pub(super) fn page_cache_context_for_mapping(
         &self,
         metadata: Metadata,

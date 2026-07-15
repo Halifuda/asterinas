@@ -7,6 +7,8 @@
 
 use core::{cell::Cell, time::Duration};
 
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
+
 use super::{
     super::{
         boot::BootRegion,
@@ -14,7 +16,7 @@ use super::{
         fs::{ExfatFs, FsState},
         invalid_on_disk_layout,
     },
-    ExfatInode, InodeTimestampField,
+    ExfatInode, PersistenceRecovery,
     parent_entry_set::PreparedEntrySetWrite,
     state::InodeStateWriteGuard,
 };
@@ -27,6 +29,135 @@ use crate::{
     process::{Gid, Uid},
     time::clocks::RealTimeCoarseClock,
 };
+
+#[derive(Clone, Copy)]
+pub(super) enum InodeTimestampField {
+    Accessed,
+    Modified,
+}
+
+impl ExfatInode {
+    pub(super) fn decoded_exfat_timestamp(
+        timestamp_bytes: [u8; 4],
+        ten_ms_increment: Option<u8>,
+        utc_offset_byte: u8,
+    ) -> Result<Duration> {
+        if timestamp_bytes == [0; 4] && ten_ms_increment.unwrap_or(0) == 0 {
+            return Ok(Duration::ZERO);
+        }
+        let encoded_date = u16::from_le_bytes([timestamp_bytes[2], timestamp_bytes[3]]);
+        let encoded_year = 1980i32 + i32::from(encoded_date >> 9);
+        let encoded_month =
+            u8::try_from((encoded_date >> 5) & 0x0f).map_err(|_| invalid_on_disk_layout())?;
+        let encoded_day =
+            u8::try_from(encoded_date & 0x1f).map_err(|_| invalid_on_disk_layout())?;
+        let month = Month::try_from(encoded_month).map_err(|_| invalid_on_disk_layout())?;
+        let date = Date::from_calendar_date(encoded_year, month, encoded_day)
+            .map_err(|_| invalid_on_disk_layout())?;
+        let encoded_time = u16::from_le_bytes([timestamp_bytes[0], timestamp_bytes[1]]);
+        let hour = u8::try_from((encoded_time >> 11) & 0x1f)
+            .map_err(|_| invalid_on_disk_layout())?;
+        let minute = u8::try_from((encoded_time >> 5) & 0x3f)
+            .map_err(|_| invalid_on_disk_layout())?;
+        let mut seconds = u8::try_from(encoded_time & 0x1f)
+            .map_err(|_| invalid_on_disk_layout())?
+            .checked_mul(2)
+            .ok_or_else(invalid_on_disk_layout)?;
+        let mut milliseconds = 0u16;
+        if let Some(ten_ms_increment) = ten_ms_increment {
+            if ten_ms_increment >= 200 {
+                return Err(invalid_on_disk_layout());
+            }
+            seconds = seconds
+                .checked_add(ten_ms_increment / 100)
+                .ok_or(invalid_on_disk_layout())?;
+            milliseconds = u16::from(ten_ms_increment % 100) * 10;
+        }
+        let time = Time::from_hms_milli(hour, minute, seconds, milliseconds)
+            .map_err(|_| invalid_on_disk_layout())?;
+        let utc_offset = Self::exfat_utc_offset(utc_offset_byte)?;
+        let date_time = PrimitiveDateTime::new(date, time).assume_offset(utc_offset);
+        let unix_timestamp_nanos = u64::try_from(date_time.unix_timestamp_nanos())
+            .map_err(|_| invalid_on_disk_layout())?;
+        Ok(Duration::from_nanos(unix_timestamp_nanos))
+    }
+
+    pub(super) fn exfat_utc_offset(utc_offset_byte: u8) -> Result<UtcOffset> {
+        if utc_offset_byte & 0x80 == 0 {
+            return Ok(UtcOffset::UTC);
+        }
+        let quarter_hours = (((utc_offset_byte & 0x7f) as i8) << 1) >> 1;
+        UtcOffset::from_whole_seconds(i32::from(quarter_hours) * 15 * 60)
+            .map_err(|_| invalid_on_disk_layout())
+    }
+
+    pub(super) fn encoded_exfat_timestamp_fields(
+        timestamp: Duration,
+        utc_offset_byte: u8,
+    ) -> Result<([u8; 4], u8, u8)> {
+        let unix_nanos =
+            i128::try_from(timestamp.as_nanos()).map_err(|_| Error::new(Errno::EINVAL))?;
+        let utc_offset = Self::exfat_utc_offset(utc_offset_byte)?;
+        let date_time = OffsetDateTime::from_unix_timestamp_nanos(unix_nanos)
+            .map_err(|_| Error::new(Errno::EINVAL))?
+            .to_offset(utc_offset);
+        let encoded_utc_offset = if utc_offset_byte & 0x80 == 0 {
+            0
+        } else {
+            utc_offset_byte
+        };
+        let (
+            encoded_year,
+            encoded_month,
+            encoded_day,
+            encoded_hour,
+            encoded_minute,
+            encoded_second,
+            encoded_millisecond,
+        ) = match date_time.year() {
+            ..1980 => (1980, 1u8, 1u8, 0u8, 0u8, 0u8, 0u16),
+            2108.. => (2107, 12u8, 31u8, 23u8, 59u8, 59u8, 990u16),
+            year => (
+                year,
+                date_time.month() as u8,
+                date_time.day(),
+                date_time.hour(),
+                date_time.minute(),
+                date_time.second(),
+                date_time.millisecond(),
+            ),
+        };
+        let date = ((u16::try_from(encoded_year - 1980)
+            .map_err(|_| Error::new(Errno::EINVAL))?) << 9)
+            | (u16::from(encoded_month) << 5)
+            | u16::from(encoded_day);
+        let time = (u16::from(encoded_hour) << 11)
+            | (u16::from(encoded_minute) << 5)
+            | u16::from(encoded_second / 2);
+        let date_bytes = date.to_le_bytes();
+        let time_bytes = time.to_le_bytes();
+        let hundredths_increment = u16::from(encoded_second % 2) * 100 + encoded_millisecond / 10;
+        Ok((
+            [time_bytes[0], time_bytes[1], date_bytes[0], date_bytes[1]],
+            u8::try_from(hundredths_increment).map_err(|_| Error::new(Errno::EINVAL))?,
+            encoded_utc_offset,
+        ))
+    }
+
+    pub(super) fn regular_file_allocated_sectors(
+        boot_region: &BootRegion,
+        data_length: usize,
+    ) -> Result<usize> {
+        let allocated_clusters = if data_length == 0 {
+            0
+        } else {
+            data_length.div_ceil(boot_region.cluster_size)
+        };
+        allocated_clusters
+            .checked_mul(boot_region.sectors_per_cluster)
+            .ok_or_else(invalid_on_disk_layout)
+    }
+}
 
 // ---- meta_write (refresh + setters) ----
 impl ExfatInode {
@@ -487,7 +618,7 @@ impl ExfatInode {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "Directory metadata refresh must keep caller-owned guard proof, boot-region timestamp context, the optional prepared write, and namespace exposure classification explicit for rollback handling."
+        reason = "Directory metadata refresh must keep caller-owned guard proof, boot-region timestamp context, the optional prepared write, and persistence-recovery classification explicit for rollback handling."
     )]
     pub(super) fn refresh_directory_metadata_after_namespace_mutation_with_guards(
         &self,
@@ -497,7 +628,7 @@ impl ExfatInode {
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         prepared_entry_set_write: Option<PreparedEntrySetWrite>,
-        namespace_stage_exposed: bool,
+        recovery: PersistenceRecovery,
     ) -> Result<()> {
         if self_inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
@@ -534,7 +665,7 @@ impl ExfatInode {
                 prepared_entry_set_write,
                 parent_inode.as_ref(),
                 parent_inode_state_guard.metadata(),
-                !namespace_stage_exposed,
+                recovery,
             )
         } else {
             self.rewrite_validated_entry_set_with_guard_classified(
@@ -556,7 +687,7 @@ impl ExfatInode {
                     ));
                     Ok(Some(mutable_entry_set.into_bytes()))
                 },
-                !namespace_stage_exposed,
+                recovery,
             )
         };
         match classified_update {
@@ -597,7 +728,7 @@ impl ExfatInode {
             parent_inode_state_guard,
             boot_region,
             rewrite_entry_set_fn,
-            true,
+            PersistenceRecovery::RollbackAllowed,
         );
         match classified_update {
             Ok(Ok(durable_updated)) => {

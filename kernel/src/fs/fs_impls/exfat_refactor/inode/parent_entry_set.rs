@@ -4,6 +4,8 @@
 //!
 //! Method groups: validated entry-set lookup, rewrite preparation, and persistence.
 
+use core::ops::Range;
+
 use ostd::mm::VmIo;
 
 use super::{
@@ -11,7 +13,7 @@ use super::{
         boot::BootRegion, dir_entry_format as direntry, fs::FsState, invalid_on_disk_layout,
         invalid_operation_input,
     },
-    ClusterMap, ExfatInode,
+    ClusterMap, ExfatInode, PersistenceRecovery,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -26,7 +28,306 @@ pub(super) struct PreparedEntrySetWrite {
     page_dirty_states: Vec<(usize, bool)>,
 }
 
+pub(super) struct DirectoryByteMutation {
+    byte_range: Range<usize>,
+    old_bytes: Vec<u8>,
+    new_bytes: Vec<u8>,
+}
+
+impl DirectoryByteMutation {
+    pub(super) fn new(
+        slot_range: direntry::DirEntrySlotRange,
+        directory_bytes: &[u8],
+        new_bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let byte_range = direntry::slot_range_bytes(slot_range)?;
+        if byte_range.is_empty()
+            || byte_range.start % direntry::DIRECTORY_ENTRY_SIZE != 0
+            || byte_range.end % direntry::DIRECTORY_ENTRY_SIZE != 0
+            || new_bytes.len() != byte_range.len()
+        {
+            return Err(invalid_operation_input());
+        }
+        let old_bytes = directory_bytes
+            .get(byte_range.clone())
+            .ok_or_else(invalid_on_disk_layout)?
+            .to_vec();
+        Ok(Self {
+            byte_range,
+            old_bytes,
+            new_bytes,
+        })
+    }
+
+    pub(super) fn range_start(&self) -> usize {
+        self.byte_range.start
+    }
+
+    fn byte_range(&self) -> &Range<usize> {
+        &self.byte_range
+    }
+
+    fn old_bytes(&self) -> &[u8] {
+        &self.old_bytes
+    }
+
+    fn new_bytes(&self) -> &[u8] {
+        &self.new_bytes
+    }
+}
+
 impl ExfatInode {
+    pub(super) fn persist_directory_page_cache_mutation_classified(
+        &self,
+        fs_state: &mut FsState,
+        metadata: Metadata,
+        byte_mutations: &[DirectoryByteMutation],
+        recovery: PersistenceRecovery,
+    ) -> Result<Result<()>> {
+        if metadata.type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+        if byte_mutations.is_empty() {
+            return Ok(Ok(()));
+        }
+
+        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+        })?;
+        let cache_size = page_cache.size();
+        let mut touched_pages = Vec::new();
+        let mut previous_end = 0usize;
+        for (mutation_index, mutation) in byte_mutations.iter().enumerate() {
+            let byte_range = mutation.byte_range();
+            let old_bytes = mutation.old_bytes();
+            let new_bytes = mutation.new_bytes();
+            if byte_range.is_empty()
+                || old_bytes.len() != byte_range.len()
+                || new_bytes.len() != byte_range.len()
+                || byte_range.end > cache_size
+                || (mutation_index != 0 && byte_range.start < previous_end)
+            {
+                return Err(invalid_operation_input());
+            }
+            previous_end = byte_range.end;
+            let start_page = byte_range.start / PAGE_SIZE;
+            let end_page = (byte_range.end - 1) / PAGE_SIZE;
+            for page_idx in start_page..=end_page {
+                if touched_pages.last().copied() != Some(page_idx) {
+                    touched_pages.push(page_idx);
+                }
+            }
+        }
+
+        for mutation in byte_mutations {
+            let byte_range = mutation.byte_range();
+            let old_bytes = mutation.old_bytes();
+            let mut prefaulted_old_bytes = vec![0; byte_range.len()];
+            let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
+            page_cache
+                .read(byte_range.start, &mut writer)
+                .map_err(Error::from)?;
+            if prefaulted_old_bytes.as_slice() != old_bytes {
+                return Err(invalid_operation_input());
+            }
+        }
+
+        let page_dirty_states = touched_pages
+            .iter()
+            .map(|page_idx| {
+                let page_start = page_idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let page_end = page_start.saturating_add(PAGE_SIZE).min(cache_size);
+                Ok((*page_idx, page_cache.has_dirty_pages(page_start..page_end)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let apply_result = (|| {
+            for mutation in byte_mutations {
+                let byte_range = mutation.byte_range();
+                let new_bytes = mutation.new_bytes();
+                let mut reader = VmReader::from(new_bytes).to_fallible();
+                page_cache
+                    .write(byte_range.start, &mut reader)
+                    .map_err(Error::from)?;
+            }
+            Ok(())
+        })();
+
+        let mut result_error = None;
+        if let Err(error) = apply_result {
+            if recovery == PersistenceRecovery::RollbackAllowed {
+                let mut page_restores = Vec::new();
+                for mutation in byte_mutations {
+                    let byte_range = mutation.byte_range();
+                    let old_bytes = mutation.old_bytes();
+                    let mut old_byte_offset = 0usize;
+                    let start_page = byte_range.start / PAGE_SIZE;
+                    let end_page = (byte_range.end - 1) / PAGE_SIZE;
+                    for page_idx in start_page..=end_page {
+                        let page_start = page_idx
+                            .checked_mul(PAGE_SIZE)
+                            .ok_or_else(invalid_operation_input)?;
+                        let page_end = page_start.saturating_add(PAGE_SIZE);
+                        let segment_start = byte_range.start.max(page_start);
+                        let segment_end = byte_range.end.min(page_end);
+                        let segment_len = segment_end
+                            .checked_sub(segment_start)
+                            .ok_or_else(invalid_operation_input)?;
+                        let was_dirty = page_dirty_states
+                            .iter()
+                            .find_map(|(captured_page_idx, was_dirty)| {
+                                (*captured_page_idx == page_idx).then_some(*was_dirty)
+                            })
+                            .ok_or_else(invalid_operation_input)?;
+                        let old_byte_end = old_byte_offset
+                            .checked_add(segment_len)
+                            .ok_or_else(invalid_operation_input)?;
+                        page_restores.push((
+                            page_idx,
+                            (segment_start - page_start)..(segment_end - page_start),
+                            &old_bytes[old_byte_offset..old_byte_end],
+                            was_dirty,
+                        ));
+                        old_byte_offset = old_byte_end;
+                    }
+                }
+
+                match page_cache.restore_prefaulted_pages(page_restores) {
+                    Ok(()) => return Err(error),
+                    Err(_restore_error) => {
+                        let rewrite_result: Result<()> = (|| {
+                            for mutation in byte_mutations {
+                                let byte_range = mutation.byte_range();
+                                let new_bytes = mutation.new_bytes();
+                                let mut reader = VmReader::from(new_bytes).to_fallible();
+                                page_cache
+                                    .write(byte_range.start, &mut reader)
+                                    .map_err(Error::from)?;
+                            }
+                            Ok(())
+                        })();
+                        match rewrite_result {
+                            Ok(()) => result_error = Some(error),
+                            Err(_) => {
+                                if let Some(fs) = self.fs.upgrade() {
+                                    fs.latch_forced_shutdown(fs_state);
+                                }
+                                return Ok(Err(error));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let rewrite_result: Result<()> = (|| {
+                    for mutation in byte_mutations {
+                        let byte_range = mutation.byte_range();
+                        let new_bytes = mutation.new_bytes();
+                        let mut reader = VmReader::from(new_bytes).to_fallible();
+                        page_cache
+                            .write(byte_range.start, &mut reader)
+                            .map_err(Error::from)?;
+                    }
+                    Ok(())
+                })();
+                match rewrite_result {
+                    Ok(()) => result_error = Some(error),
+                    Err(_) => {
+                        if let Some(fs) = self.fs.upgrade() {
+                            fs.latch_forced_shutdown(fs_state);
+                        }
+                        return Ok(Err(error));
+                    }
+                }
+            }
+        }
+
+        let mut run_start_page = *touched_pages.first().ok_or_else(invalid_operation_input)?;
+        let mut previous_page = run_start_page;
+        for page_idx in touched_pages.iter().copied().skip(1) {
+            if page_idx != previous_page + 1 {
+                let flush_start = run_start_page
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let flush_end = previous_page
+                    .checked_add(1)
+                    .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+                    .ok_or_else(invalid_operation_input)?
+                    .min(cache_size);
+                if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+                    return Ok(Err(result_error.unwrap_or(error)));
+                }
+                run_start_page = page_idx;
+            }
+            previous_page = page_idx;
+        }
+        let flush_start = run_start_page
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(invalid_operation_input)?;
+        let flush_end = previous_page
+            .checked_add(1)
+            .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+            .ok_or_else(invalid_operation_input)?
+            .min(cache_size);
+        if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+            return Ok(Err(result_error.unwrap_or(error)));
+        }
+
+        match result_error {
+            Some(error) => Ok(Err(error)),
+            None => Ok(Ok(())),
+        }
+    }
+
+    pub(super) fn prepare_raw_entry_set_write(
+        &self,
+        parent_metadata: Metadata,
+        slot_range: direntry::DirEntrySlotRange,
+        mutation: DirectoryByteMutation,
+    ) -> Result<PreparedEntrySetWrite> {
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
+        if mutation.byte_range != slot_byte_range {
+            return Err(invalid_operation_input());
+        }
+        let DirectoryByteMutation {
+            old_bytes: old_entry_set_bytes,
+            new_bytes: entry_set_bytes,
+            ..
+        } = mutation;
+        let page_cache = self
+            .page_cache_handle(parent_metadata)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?;
+        let mut prefaulted_old_bytes = vec![0; slot_byte_range.len()];
+        let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
+        page_cache
+            .read(slot_byte_range.start, &mut writer)
+            .map_err(Error::from)?;
+        if prefaulted_old_bytes != old_entry_set_bytes {
+            return Err(invalid_operation_input());
+        }
+        let start_page = slot_byte_range.start / PAGE_SIZE;
+        let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
+        let page_dirty_states = (start_page..=end_page)
+            .map(|page_idx| {
+                let page_start = page_idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let page_end = page_start.saturating_add(PAGE_SIZE).min(page_cache.size());
+                Ok((page_idx, page_cache.has_dirty_pages(page_start..page_end)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PreparedEntrySetWrite {
+            slot_range,
+            entry_set_bytes,
+            old_entry_set_bytes,
+            page_dirty_states,
+        })
+    }
+
     pub(super) fn read_validated_entry_set(
         &self,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -120,7 +421,11 @@ impl ExfatInode {
             .ok_or_else(invalid_on_disk_layout)?
             .to_vec();
         let zero_based_slot_range = direntry::DirEntrySlotRange::new(0, slot_range.entry_count())?;
-        let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0) {
+        let entry_view = match direntry::scan_dir_entry(
+            direntry::DirectoryScanMode::Ordinary,
+            &entry_set_bytes,
+            0,
+        ) {
             Ok(direntry::ScannedDirEntry::File(entry_view))
                 if entry_view.slot_range() == zero_based_slot_range =>
             {
@@ -168,7 +473,7 @@ impl ExfatInode {
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
-        allow_not_exposed_rollback: bool,
+        recovery: PersistenceRecovery,
     ) -> Result<Result<bool>> {
         let Some(prepared_entry_set_write) = self.prepare_rewritten_entry_set_write_with_guard(
             self_inode_state_guard,
@@ -190,7 +495,7 @@ impl ExfatInode {
             prepared_entry_set_write,
             parent_inode.as_ref(),
             parent_inode_state_guard.metadata(),
-            allow_not_exposed_rollback,
+            recovery,
         )
     }
 
@@ -212,7 +517,11 @@ impl ExfatInode {
             &parent_cluster_map_generation,
             boot_region,
         )?;
-        let entry_view = match direntry::scan_dir_entry(false, &entry_set_bytes, 0)? {
+        let entry_view = match direntry::scan_dir_entry(
+            direntry::DirectoryScanMode::Ordinary,
+            &entry_set_bytes,
+            0,
+        )? {
             direntry::ScannedDirEntry::File(entry_view) => entry_view,
             _ => return Err(invalid_on_disk_layout()),
         };
@@ -229,11 +538,11 @@ impl ExfatInode {
         let old_entry_set_bytes = entry_set_bytes.clone();
         entry_set_bytes.copy_from_slice(&updated_entry_set_bytes);
 
-        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let parent_inode = self_inode_state_guard.parent().ok_or_else(|| {
             Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
         })?;
         let parent_metadata = parent_inode_state_guard.metadata();
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = parent_inode
             .page_cache_handle(parent_metadata)
             .cloned()
@@ -273,7 +582,7 @@ impl ExfatInode {
         prepared_entry_set_write: PreparedEntrySetWrite,
         parent_inode: &ExfatInode,
         parent_metadata: Metadata,
-        allow_not_exposed_rollback: bool,
+        recovery: PersistenceRecovery,
     ) -> Result<Result<bool>> {
         let PreparedEntrySetWrite {
             slot_range,
@@ -296,7 +605,7 @@ impl ExfatInode {
         };
         let mut persist_error = None;
         if let Err(error) = apply_result {
-            if allow_not_exposed_rollback {
+            if recovery == PersistenceRecovery::RollbackAllowed {
                 let start_page = slot_byte_range.start / PAGE_SIZE;
                 let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
                 let mut old_byte_offset = 0usize;
@@ -387,5 +696,162 @@ impl ExfatInode {
                 Err(error) => Ok(Err(error)),
             }
         }
+    }
+
+    pub(super) fn persist_rename_target_entry_set_classified(
+        &self,
+        fs_state: &mut FsState,
+        parent_metadata: Metadata,
+        prepared_entry_set_write: PreparedEntrySetWrite,
+    ) -> Result<(Result<()>, bool)> {
+        let PreparedEntrySetWrite {
+            slot_range,
+            entry_set_bytes,
+            old_entry_set_bytes,
+            page_dirty_states,
+        } = prepared_entry_set_write;
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
+        let page_cache = self
+            .page_cache_handle(parent_metadata)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?;
+        let start_page = slot_byte_range.start / PAGE_SIZE;
+        let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
+        let apply_result = {
+            let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+            page_cache
+                .write(slot_byte_range.start, &mut reader)
+                .map_err(Error::from)
+        };
+        let mut persist_error = None;
+        let mut image_coherent = true;
+        if let Err(error) = apply_result {
+            let mut old_byte_offset = 0usize;
+            let mut page_restores = Vec::new();
+            for page_idx in start_page..=end_page {
+                let page_start = page_idx
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or_else(invalid_operation_input)?;
+                let page_end = page_start.saturating_add(PAGE_SIZE);
+                let segment_start = slot_byte_range.start.max(page_start);
+                let segment_end = slot_byte_range.end.min(page_end);
+                let segment_len = segment_end
+                    .checked_sub(segment_start)
+                    .ok_or_else(invalid_operation_input)?;
+                let was_dirty = page_dirty_states
+                    .iter()
+                    .find_map(|(captured_page_idx, was_dirty)| {
+                        (*captured_page_idx == page_idx).then_some(*was_dirty)
+                    })
+                    .ok_or_else(invalid_operation_input)?;
+                let old_byte_end = old_byte_offset
+                    .checked_add(segment_len)
+                    .ok_or_else(invalid_operation_input)?;
+                page_restores.push((
+                    page_idx,
+                    (segment_start - page_start)..(segment_end - page_start),
+                    &old_entry_set_bytes[old_byte_offset..old_byte_end],
+                    was_dirty,
+                ));
+                old_byte_offset = old_byte_end;
+            }
+            match page_cache.restore_prefaulted_pages(page_restores) {
+                Ok(()) => return Err(error),
+                Err(_restore_error) => {
+                    let rewrite_result = {
+                        let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+                        page_cache
+                            .write(slot_byte_range.start, &mut reader)
+                            .map_err(Error::from)
+                    };
+                    match rewrite_result {
+                        Ok(()) => persist_error = Some(error),
+                        Err(_) => {
+                            if let Some(fs) = self.fs.upgrade() {
+                                fs.latch_forced_shutdown(fs_state);
+                            }
+                            image_coherent = false;
+                            persist_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+        if image_coherent {
+            let flush_start = start_page
+                .checked_mul(PAGE_SIZE)
+                .ok_or_else(invalid_operation_input)?;
+            let flush_end = end_page
+                .checked_add(1)
+                .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+                .ok_or_else(invalid_operation_input)?
+                .min(page_cache.size());
+            if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+                persist_error = Some(persist_error.unwrap_or(error));
+            }
+        }
+        Ok((persist_error.map_or(Ok(()), Err), image_coherent))
+    }
+
+    pub(super) fn persist_rename_source_entry_set_classified(
+        &self,
+        fs_state: &mut FsState,
+        parent_metadata: Metadata,
+        prepared_entry_set_write: PreparedEntrySetWrite,
+    ) -> Result<(Result<()>, bool)> {
+        let PreparedEntrySetWrite {
+            slot_range,
+            entry_set_bytes,
+            ..
+        } = prepared_entry_set_write;
+        let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
+        let page_cache = self
+            .page_cache_handle(parent_metadata)
+            .cloned()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?;
+        let apply_result = {
+            let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+            page_cache
+                .write(slot_byte_range.start, &mut reader)
+                .map_err(Error::from)
+        };
+        let mut persist_error = None;
+        let mut image_coherent = true;
+        if let Err(error) = apply_result {
+            let rewrite_result = {
+                let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
+                page_cache
+                    .write(slot_byte_range.start, &mut reader)
+                    .map_err(Error::from)
+            };
+            match rewrite_result {
+                Ok(()) => persist_error = Some(error),
+                Err(_) => {
+                    if let Some(fs) = self.fs.upgrade() {
+                        fs.latch_forced_shutdown(fs_state);
+                    }
+                    image_coherent = false;
+                    persist_error = Some(error);
+                }
+            }
+        }
+        if image_coherent {
+            let flush_start = (slot_byte_range.start / PAGE_SIZE)
+                .checked_mul(PAGE_SIZE)
+                .ok_or_else(invalid_operation_input)?;
+            let flush_end = ((slot_byte_range.end - 1) / PAGE_SIZE)
+                .checked_add(1)
+                .and_then(|page_idx| page_idx.checked_mul(PAGE_SIZE))
+                .ok_or_else(invalid_operation_input)?
+                .min(page_cache.size());
+            if let Err(error) = page_cache.flush_range(flush_start..flush_end) {
+                persist_error = Some(persist_error.unwrap_or(error));
+            }
+        }
+        Ok((persist_error.map_or(Ok(()), Err), image_coherent))
     }
 }

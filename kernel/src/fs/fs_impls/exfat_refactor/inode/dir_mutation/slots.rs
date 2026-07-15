@@ -4,20 +4,19 @@
 //!
 //! Method groups: vacant-slot scan and slot reservation.
 
-use core::ops::Range;
-
 use super::super::{
     ExfatInode, StreamExtensionDirEntry,
+    parent_entry_set::DirectoryByteMutation,
     state::InodeStateWriteGuard,
 };
 use crate::{
     fs::fs_impls::exfat_refactor::{
-        boot::BootRegion,
         dir_entry_format::{
             self as direntry, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, MutableDirEntrySlotSpan,
-            ScannedDirEntry,
+            DirectoryScanMode, ScannedDirEntry,
         },
-        fs::{AllocGuard, ExfatFs, FsState},
+        bitmap::AllocGuard,
+        fs::{ExfatFs, FsState},
         invalid_on_disk_layout, invalid_operation_input,
     },
     prelude::*,
@@ -25,7 +24,7 @@ use crate::{
 
 impl ExfatInode {
     fn find_vacant_entry_slots(
-        is_root_directory: bool,
+        scan_mode: DirectoryScanMode,
         directory_bytes: &[u8],
         required_entry_count: usize,
     ) -> Result<Option<DirEntrySlotRange>> {
@@ -42,7 +41,7 @@ impl ExfatInode {
         let mut entry_index = 0usize;
         loop {
             let scan_start_index = entry_index;
-            match direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)? {
+            match direntry::scan_dir_entry(scan_mode, directory_bytes, entry_index)? {
                 ScannedDirEntry::EndOfDirectory { entry_index } => {
                     if entry_index != scan_start_index {
                         run_length = 0;
@@ -102,11 +101,11 @@ impl ExfatInode {
         allocation_guard: &mut AllocGuard<'_>,
         fs_state: &mut FsState,
         fs: &ExfatFs,
-        boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         required_entry_count: usize,
     ) -> Result<(StreamExtensionDirEntry, Vec<u8>, DirEntrySlotRange)> {
+        let boot_region = fs.immutable_boot_region();
         loop {
             let cluster_map_generation = self.cluster_map_for_write_guard(
                 self_inode_state_guard,
@@ -115,7 +114,7 @@ impl ExfatInode {
             )?;
             let logical_end = match cluster_map.data_length {
                 Some(data_length) => data_length,
-                None => cluster_map_generation.allocated_byte_length(boot_region)?,
+                None => cluster_map_generation.allocated_byte_length(&boot_region)?,
             };
             let directory_bytes = self.read_directory_snapshot_from_page_cache(
                 self_inode_state_guard.metadata(),
@@ -123,7 +122,11 @@ impl ExfatInode {
                 logical_end,
             )?;
             if let Some(slot_range) = Self::find_vacant_entry_slots(
-                cluster_map.data_length.is_none(),
+                if cluster_map.data_length.is_none() {
+                    DirectoryScanMode::Root
+                } else {
+                    DirectoryScanMode::Ordinary
+                },
                 &directory_bytes,
                 required_entry_count,
             )? {
@@ -152,7 +155,6 @@ impl ExfatInode {
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
         fs: &ExfatFs,
-        boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         required_entry_count: usize,
@@ -168,7 +170,6 @@ impl ExfatInode {
                 allocation_guard,
                 fs_state,
                 fs,
-                boot_region,
                 parent_inode_state_guard,
                 self_inode_state_guard,
                 required_entry_count,
@@ -179,30 +180,35 @@ impl ExfatInode {
     pub(super) fn prepare_invalidated_slot_mutation(
         directory_bytes: &[u8],
         slot_range: DirEntrySlotRange,
-    ) -> Result<(Range<usize>, Vec<u8>, Vec<u8>)> {
+    ) -> Result<DirectoryByteMutation> {
         let byte_range = direntry::slot_range_bytes(slot_range)?;
-        let old_bytes = directory_bytes
+        let mut new_bytes = directory_bytes
             .get(byte_range.clone())
             .ok_or_else(invalid_on_disk_layout)?
             .to_vec();
-        let mut new_bytes = old_bytes.clone();
         let mut invalidated_entry_set =
             MutableDirEntrySlotSpan::new(slot_range, new_bytes.as_mut_slice())?;
         direntry::invalidate_entry_set(&mut invalidated_entry_set)?;
-        Ok((byte_range, old_bytes, new_bytes))
+        DirectoryByteMutation::new(slot_range, directory_bytes, new_bytes)
     }
 
-    pub(super) fn prepare_renamed_slot_mutation(
+    pub(super) fn prepare_replacement_slot_mutation(
         directory_bytes: &[u8],
         destination_slot_range: DirEntrySlotRange,
         renamed_entry_set: &[u8],
-    ) -> Result<(Range<usize>, Vec<u8>, Vec<u8>)> {
-        let (byte_range, old_bytes, mut new_bytes) =
-            Self::prepare_invalidated_slot_mutation(directory_bytes, destination_slot_range)?;
+    ) -> Result<DirectoryByteMutation> {
+        let byte_range = direntry::slot_range_bytes(destination_slot_range)?;
+        let mut new_bytes = directory_bytes
+            .get(byte_range)
+            .ok_or_else(invalid_on_disk_layout)?
+            .to_vec();
+        let mut invalidated_entry_set =
+            MutableDirEntrySlotSpan::new(destination_slot_range, new_bytes.as_mut_slice())?;
+        direntry::invalidate_entry_set(&mut invalidated_entry_set)?;
         new_bytes
             .get_mut(..renamed_entry_set.len())
             .ok_or_else(invalid_on_disk_layout)?
             .copy_from_slice(renamed_entry_set);
-        Ok((byte_range, old_bytes, new_bytes))
+        DirectoryByteMutation::new(destination_slot_range, directory_bytes, new_bytes)
     }
 }

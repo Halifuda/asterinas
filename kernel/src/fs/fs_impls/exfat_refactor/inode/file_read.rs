@@ -60,14 +60,21 @@ impl ExfatInode {
         }
         let read_len = read_end - read_start;
 
-        {
+        let (read_result, copied_len) = {
             let mut limited_writer = writer.clone_exclusive();
             limited_writer.limit(read_len);
-            page_cache
+            let read_result = page_cache
                 .read(read_start, &mut limited_writer)
-                .map_err(Error::from)?;
+                .map_err(Error::from);
+            let copied_len = read_len - limited_writer.avail();
+            (read_result, copied_len)
+        };
+        if let Err(error) = read_result
+            && copied_len == 0
+        {
+            return Err(error);
         }
-        writer.skip(read_len);
-        Ok(read_len)
+        writer.skip(copied_len);
+        Ok(copied_len)
     }
 }

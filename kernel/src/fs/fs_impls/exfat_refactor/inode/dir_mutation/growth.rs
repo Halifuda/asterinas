@@ -4,8 +4,11 @@
 //!
 //! Method groups: directory cluster growth, attachment, and publication.
 
+use aster_block::BlockDevice;
+use ostd::mm::VmIo;
+
 use super::super::{
-    ClusterMap, ExfatInode, StreamExtensionDirEntry,
+    ClusterMap, ExfatInode, PersistenceRecovery, StreamExtensionDirEntry,
     parent_entry_set::PreparedEntrySetWrite,
     state::InodeStateWriteGuard,
 };
@@ -13,9 +16,11 @@ use crate::{
     fs::{
         file::InodeType,
         fs_impls::exfat_refactor::{
-            bitmap::ClusterRange,
+            bitmap::{AllocGuard, ClusterRange},
+            boot::BootRegion,
+            device_io,
             fat::FatReader,
-            fs::{AllocGuard, ExfatFs, FsState},
+            fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
     },
@@ -23,6 +28,78 @@ use crate::{
 };
 
 impl ExfatInode {
+    fn initialize_directory_cluster(
+        block_device: &Arc<dyn BlockDevice>,
+        boot_region: &BootRegion,
+        first_cluster: u32,
+    ) -> Result<()> {
+        let cluster_offset = boot_region.cluster_offset(first_cluster)?;
+        let cluster_bytes = vec![0; boot_region.cluster_size];
+        block_device
+            .write_bytes(cluster_offset, &cluster_bytes)
+            .map_err(|_| device_io())
+    }
+
+    pub(super) fn prepare_created_child_backing_state(
+        &self,
+        type_: InodeType,
+        zero_size_dir: bool,
+        allocation_guard: &mut AllocGuard<'_>,
+        fs_state: &mut FsState,
+        fs: &ExfatFs,
+    ) -> Result<(
+        StreamExtensionDirEntry,
+        Option<Arc<ClusterMap>>,
+        Option<u32>,
+    )> {
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
+        if type_ == InodeType::Dir && !zero_size_dir {
+            allocation_guard.allocate(1, None)?;
+            let allocated_cluster = allocation_guard.single_cluster()?;
+            if let Err(error) =
+                Self::initialize_directory_cluster(&block_device, &boot_region, allocated_cluster)
+            {
+                if allocation_guard.rollback_allocation()? {
+                    ExfatFs::disable_unsupported_discard_after_release(fs_state);
+                }
+                return Err(error);
+            }
+            let child_stream = StreamExtensionDirEntry {
+                data_length: Some(boot_region.cluster_size),
+                first_cluster: allocated_cluster,
+                valid_data_length: Some(boot_region.cluster_size),
+                no_fat_chain: true,
+            };
+            let child_cluster_map = Some(Arc::new(ClusterMap::from_stream_and_ranges(
+                &boot_region,
+                child_stream,
+                vec![ClusterRange {
+                    start_cluster: allocated_cluster,
+                    cluster_count: 1,
+                }],
+            )?));
+            Ok((child_stream, child_cluster_map, Some(allocated_cluster)))
+        } else {
+            let child_stream = StreamExtensionDirEntry {
+                data_length: Some(0),
+                first_cluster: 0,
+                valid_data_length: Some(0),
+                no_fat_chain: false,
+            };
+            let child_cluster_map = if type_ == InodeType::Dir {
+                Some(Arc::new(ClusterMap::from_stream_and_ranges(
+                    &boot_region,
+                    child_stream,
+                    Vec::new(),
+                )?))
+            } else {
+                None
+            };
+            Ok((child_stream, child_cluster_map, None))
+        }
+    }
+
     pub(super) fn grow_directory_cluster_map(
         &self,
         cluster_map: StreamExtensionDirEntry,
@@ -114,7 +191,7 @@ impl ExfatInode {
                         prepared_parent_entry_set_write,
                         parent_inode.as_ref(),
                         parent_inode_state_guard.metadata(),
-                        true,
+                        PersistenceRecovery::RollbackAllowed,
                     )?;
                     Some(entry_set_write_result)
                 } else {

@@ -413,6 +413,96 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Boundary**: no VFS behavior or API change, no additional lint suppression, and no filesystem implementation change beyond the already-accepted exFAT caller
   - **Checker Outcome**: cargo-check and targeted kernel Clippy both exit 0 with zero warning/error lines; the VFS expectation warning is absent and all eight exFAT expectations remain fulfilled. Artifact `.agents/components/cross_meso_vfs_to_bio_topology/pass_199_vfs_fs_creation_flags_expectation_cleanup_checker.md`.
   - **Final Gate**: include this one-line VFS cleanup with the accepted pass196-through-pass198 Clippy cleanup in one local commit; do not push or open a PR
+- [x] **Post-Clippy Four-Persona Code Review** (`pass_200_aster_code_review`)
+  - **Status**: superseded as the commit-series review by the complete working-tree review in pass201
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_200_aster_code_review.md`
+  - **Execution Model**: four isolated subagents ran strictly serially with medium reasoning for Maintainability, Development, Security, and Documentation; no command-line Codex reviewer execution and no overlapping persona agents
+  - **Outcome**: retained five non-blocking comments for its narrower commit-series scope; pass201 is the authority for the full current production tree
+- [x] **Full-Tree Four-Persona Code Review** (`pass_201_full_tree_aster_code_review`)
+  - **Status**: review and verification complete; no production edit authorized by this read-only review
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_201_full_tree_aster_code_review.md`
+  - **Scope**: `files` mode over all 25 current production `.rs` files under `exfat_refactor`; `.agents/` excluded from the target list and review input
+  - **Execution Model**: four reused persona subagents ran strictly serially with medium reasoning for Maintainability, Development, Security, and Documentation; no command-line Codex reviewer execution
+  - **Outcome**: 33 retained findings: 25 Maintainability, 4 Correctness, 1 Security, and 3 Documentation. Confirmed major risks are FAT geometry/bounds validation, partial user-I/O result handling, and shrink publication before fallible FAT termination. The FAT Correctness/Security comments are consolidated around one shared fix; no comment was retracted or left unverified.
+  - **Next Gate**: user disposition and separately bounded repair design for the confirmed correctness risks; structural and documentation findings remain independent follow-up work
+- [x] **Full-Tree Correctness Repairs** (`pass_202_correctness_repairs`)
+  - **Scope**: close only pass201's FAT geometry/bounds, partial cached read/write, and shrink publication-order findings in `boot.rs`, `fat.rs`, `inode/file_read.rs`, and `inode/file_mutation.rs`
+  - **Outcome**: mount and per-entry FAT bounds are enforced; read/write return actual user-memory progress without leaving an unreported dirty prefix; shrink publishes inode state only after successful FAT termination and restores prepared PageCache state on FAT failure
+  - **Validation**: compile-only by user direction. Final receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260715-204942-cross_meso_vfs_to_bio_topology-pass_202_correctness_repairs_final/summary.tsv` records cargo-check status 0; no Clippy or runtime test was run
+  - **Next Gate**: user disposition of pass201 structural Maintainability findings; runtime validation remains separately gated
+- [x] **Findings Groups 1 Through 4 Small Cleanup** (`pass_208` through `pass_209`)
+  - **Status**: Accepted/closed through aggregate Creator and compile-only synchronized Checker
+  - **Creator Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_208_findings_groups_1_through_4_small_cleanup_creator_dispatch.md`
+  - **Scope**: one aggregate pass for complete `StreamExtensionDirEntry` transport, ExfatFs-owned slot geometry, unused parameter removal, bitmap privacy, closure suffixes, explicit PageIoRange byte units, boot/FAT/dir-entry constants, typed directory scan mode, and creation-only entry-set encoding validation
+  - **Boundary**: pass202-through-pass207 behavior is immutable; findings groups 5 and 6, documentation, performance, VFS/shared layers, tests, harnesses, and runlists are excluded
+  - **Validation Override**: one synchronized lock-guarded cargo-check only after the complete aggregate edit; no xfstests, QEMU, Clippy, ktests, or runtime suite by explicit user direction
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_208_findings_groups_1_through_4_small_cleanup_creator.md`
+  - **Static Result**: all ten bounded objectives are dispositioned across 15 authorized Rust files; one typed scan enum and named constants are the only new entities; `fs.rs` changes only import and `VolumeFlags::read()` constant indexing; groups 5/6 and test/runlist surfaces remain unchanged
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_209_findings_groups_1_through_4_compile_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_209_findings_groups_1_through_4_compile_checker.md`
+  - **Compile Result**: cargo-check status `0`, no warnings; receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-095913-cross_meso_vfs_to_bio_topology-pass_209_findings_groups_1_through_4_compile_checker/summary.tsv`
+  - **Closure Rule**: no xfstests, QEMU, Clippy, runtime suite, or separate Reviewer gate is required for this simple stage by explicit user direction; findings groups 5 and 6 remain design-gated
+- [x] **Findings Groups 5 And 6 Existing-Owner Topology Design** (`pass_210_findings_groups_5_6_existing_owner_topology_designer`)
+  - **Status**: Accepted after same-Designer Revisions 01 and 02; no Creator dispatched yet
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_210_findings_groups_5_6_existing_owner_topology_designer_dispatch.md`
+  - **Scope**: freeze every affected `fs.rs`, `inode/state.rs`, directory-mutation tuple/persistence, caller/import/re-export, visibility, and surviving-entity code point into existing production files
+  - **Hard Boundary**: no new module file; only `DirectoryByteMutation` may be a new type; inode cache and all related `impl ExfatFs` methods remain in `fs.rs`; no `impl ExfatFs` in `inode/mod.rs`
+  - **Behavior Authority**: pass202-through-pass209 semantics and pass126-through-pass128 lock topology are immutable
+  - **Planned Artifacts**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_210_findings_groups_5_6_existing_owner_topology_designer_spec.md` and `_validation.md`
+  - **Revision 01**: distinguish cache implementation ownership in `fs.rs` from unchanged external caller invocations; close the create-path mutation-construction gap through the existing slots preparation family without a parallel helper family
+  - **Revision 02**: add the missed `inode/mod.rs::new_root` raw cache insertion to the code-point matrix and converge all three raw insertion sites through one fs-owned publication method; make `FsState::inode_cache` private after raw access closure without adding `impl ExfatFs` to `inode/mod.rs`
+  - **Accepted Artifacts**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_210_findings_groups_5_6_existing_owner_topology_designer_spec.md` and `_validation.md`
+  - **Accepted Result**: complete `fs.rs`/`state.rs` entity tables, directory tuple/persistence census, 25-file caller/import/re-export matrix, surviving-carrier dispositions, dependency-safe atomic relocation order, Creator-synced compile/static obligations, and one final aggregate 56-case xfstests integration obligation
+  - **Next Gate**: main-agent chooses and records Creator/Checker slices from the accepted dependency order; Designer did not slice implementation
+- [ ] **Findings Groups 5 And 6 Existing-Owner Topology Implementation** (`pass_211` through `pass_214`)
+  - **Status**: accepted/closed through pass214 warning repair and clean targeted Clippy; Reviewer explicitly waived by user
+  - **Creator Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_211_findings_groups_5_6_existing_owner_topology_creator_dispatch.md`
+  - **Creator Scope**: complete pass210 dependency order in one command-free implementation pass across the exact 16-file write set; only `DirectoryByteMutation` and one fs-owned cache publication method may be introduced
+  - **Hard Boundaries**: zero new module files; no tuple/cache facade or parallel helper family; private inode cache and every raw operation/`impl ExfatFs` method stay in `fs.rs`; no `impl ExfatFs` in `inode/mod.rs`; pass202-through-pass209 behavior and pass126-through-pass128 lock topology remain immutable
+  - **Reserved Synchronized Gate**: pass212 cargo-check plus full pass210 static entity/caller/import/re-export/visibility closure, mirroring pass211 exactly
+  - **Reserved Integration Gate**: pass213 one final aggregate established ordered 56-case xfstests run only after pass212 acceptance
+  - **Final Quality Gate Decision**: user explicitly declined the reserved full surviving-entity Reviewer; pass214 is reassigned to one read-only targeted kernel Clippy Checker against the frozen pass213 source
+  - **Creator Repair 01**: align only the moved-owner module docs in `state.rs`, `fs.rs`, `bitmap.rs`, `boot.rs`, and `sync.rs` with the implemented final responsibilities; update the Creator report's stale-comment closure claim; no general documentation expansion
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_211_findings_groups_5_6_existing_owner_topology_creator.md`
+  - **Static Result**: exact 16-file production write set; only `DirectoryByteMutation` plus one fs-owned cache publication method introduced; old tuple/state wrapper/raw-cache leakage removed; all pass210 owner rows dispositioned; final owner module docs repaired
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_212_findings_groups_5_6_existing_owner_topology_checker_dispatch.md`
+  - **Checker FAIL Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-113312-cross_meso_vfs_to_bio_topology-pass_212_findings_groups_5_6_existing_owner_topology_checker/` records `E0425` for missing `inconsistent_bitmap_accounting` plus six relocation-cleanup warnings; all substantive topology/mutation/owner matrices otherwise PASS
+  - **Creator Repair 02**: restore the required fs import; remove only the Checker-listed stale imports; remove one unnecessary lookup qualification; no semantic/owner/visibility change
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_212_findings_groups_5_6_existing_owner_topology_checker.md`
+  - **Checker PASS Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-114025-cross_meso_vfs_to_bio_topology-pass_212_findings_groups_5_6_existing_owner_topology_checker/summary.tsv` records cargo-check `0` with no warnings; all pass210 static matrices PASS
+  - **Runtime Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_213_findings_groups_5_6_existing_owner_topology_56_case_runtime_checker_dispatch.md`
+  - **Runtime Contract**: exact established ordered 56 cases, fresh 8 GiB `/dev/vdd`/`/dev/vde`, 12 GiB memory, one same-device batch, no `--keep-going`, frozen pass212 source, pollution-only suffix rule
+  - **Runtime Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_213_findings_groups_5_6_existing_owner_topology_56_case_runtime_checker.md`
+  - **Runtime Result**: accepted PASS. Receipt `.agents/tmp/20260716-115622-pass_213_findings_groups_5_6_existing_owner_topology_56_case_runtime_checker_xfstests/` proves frozen pass212 source alignment, exact ordered 56-row execution, fresh TEST/SCRATCH formatting, 56 PASS / 0 FAIL / 0 NOTRUN, zero pollution or continuation, clean guest/suite scans, released lock, and no residual execution process
+  - **Clippy Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_214_findings_groups_5_6_final_clippy_checker_dispatch.md`
+  - **Clippy Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_214_findings_groups_5_6_final_clippy_checker.md`
+  - **Clippy Result**: report-only FAIL. The exact targeted command exits 0 but emits one `clippy::collapsible_if` warning at `inode/file_read.rs:72:9`; there are zero other `exfat_refactor` warnings/errors and zero project `unfulfilled_lint_expectations`. Frozen source is unchanged, the lock is released, and no residual execution process remains
+  - **Direct Warning Repair**: by explicit user direction and without a subagent, collapsed only the nested error/zero-progress condition in `inode/file_read.rs`; behavior and partial-read semantics are unchanged
+  - **Final Clippy Result**: the same lock-guarded targeted kernel Clippy command exits 0 with no warnings; `git diff --check` passes and the lock is unlocked
+  - **Closure**: no Reviewer or further gate is required unless the user reopens this wave
+- [x] **Full-Tree Code Findings Recheck** (`pass_215_full_tree_code_findings_recheck`)
+  - **Status**: review complete; four distinct non-documentation code findings remain for user disposition
+  - **Mode / Baseline**: `aster-code-review files` over all 25 current `exfat_refactor` production Rust files at committed HEAD `2249c8aac`; Documentation persona intentionally deferred by user
+  - **Execution**: isolated GPT-5.4 Maintainability, Correctness, and Security passes ran strictly serially
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_215_full_tree_code_findings_recheck.md`
+  - **Confirmed Findings**: two minor unnamed on-disk flag-constant families in `boot.rs` and `dir_entry_format.rs`; one major partial-`O_DIRECT` committed-length mismatch in `inode/file_mutation.rs` reported by both Correctness and Security; one major detached-file device-sync retry gap in `inode/sync.rs`
+  - **Retracted Finding**: the proposed `rename_impl()` transaction split is refuted because current discovery, admission, same-directory persistence, and cross-directory persistence already delegate to named helpers while the function retains one orchestration level
+  - **Boundary**: no code, comments, tests, or validation commands changed during the review
+  - **Next Gate**: pass216 four-item Creator dispatched; comments/documentation remain a separate later review
+- [x] **Full-Tree Code Findings Small Repair** (`pass_216` through `pass_217`)
+  - **Status**: accepted/closed through static closure, cargo-check, and targeted Clippy
+  - **Creator Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_216_full_tree_code_findings_small_repair_creator_dispatch.md`
+  - **Creator Scope**: exactly four production files and four findings: Boot VolumeFlags masks, directory-entry archive/stream flags, `O_DIRECT` committed reader length, detached-file dirty-debt timing
+  - **Hard Boundaries**: no comments/docs, tests, harnesses, runlists, new type/helper/module, behavior expansion, lock/order change, or Creator command
+  - **Reserved Checker**: pass217 mirrors all four items, runs cargo-check plus targeted `cargo clippy -p aster-kernel --target x86_64-unknown-none --no-deps`, and performs source/diff/static closure checks
+  - **Creator Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_216_full_tree_code_findings_small_repair_creator.md`
+  - **Creator Repair 01**: remove the added final detached full-debt clear because it would make `sync(Data)` clear metadata generation; retain only the no-dirty-page fast-path clear and the existing post-device-sync scoped commit/retention cleanup
+  - **Creator Repair 02**: collapse only the detached/no-writeback nested condition after pass217's initial Clippy warning; preserve debt clear and immediate return exactly
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_217_full_tree_code_findings_small_repair_checker_dispatch.md`
+  - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_217_full_tree_code_findings_small_repair_checker.md`
+  - **Checker Result**: accepted PASS. Cargo-check receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-131543-cross_meso_vfs_to_bio_topology-pass_217_full_tree_code_findings_small_repair_checker_repair02/` records status 0/no warnings; targeted Clippy receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-131555-cross_meso_vfs_to_bio_topology-pass_217_full_tree_code_findings_small_repair_checker_repair02_clippy/` records status 0/no warnings
+  - **Closure**: all four pass215 non-documentation code findings are code-side closed; no xfstests or other runtime lane was run
+  - **Validation Boundary**: no xfstests, QEMU, ktests, Reviewer, or other runtime lane is scheduled; runtime disposition remains separate
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review
   - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`

@@ -13,6 +13,27 @@ use crate::{fs::file::InodeType, prelude::*};
 pub(super) const DIRECTORY_ENTRY_SIZE: usize = 32;
 pub(super) const FILE_ATTRIBUTE_READ_ONLY: u16 = 0x0001;
 pub(super) const FILE_ATTRIBUTE_DIRECTORY: u16 = 0x0010;
+const FILE_ATTRIBUTE_ARCHIVE: u16 = 0x0020;
+const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
+const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
+const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
+const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
+const VOLUME_GUID_ENTRY_TYPE: u8 = 0xA0;
+const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
+const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
+const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
+const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
+const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
+const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
+const FILE_ATTRIBUTES_OFFSET: usize = 4;
+const STREAM_FLAGS_OFFSET: usize = 1;
+const STREAM_FLAG_ALLOCATION_POSSIBLE: u8 = 0x01;
+const STREAM_FLAG_NO_FAT_CHAIN: u8 = 0x02;
+const STREAM_NAME_LENGTH_OFFSET: usize = 3;
+const STREAM_NAME_HASH_OFFSET: usize = 4;
+const STREAM_VALID_DATA_LENGTH_OFFSET: usize = 8;
+const STREAM_FIRST_CLUSTER_OFFSET: usize = 20;
+const STREAM_DATA_LENGTH_OFFSET: usize = 24;
 const CREATE_TIMESTAMP_OFFSET: usize = 8;
 const LAST_MODIFIED_TIMESTAMP_OFFSET: usize = 12;
 const LAST_ACCESSED_TIMESTAMP_OFFSET: usize = 16;
@@ -134,7 +155,7 @@ impl StreamExtensionDirEntry {
                 stream_entry[STREAM_FIRST_CLUSTER_OFFSET + 3],
             ]),
             valid_data_length: Some(valid_data_length),
-            no_fat_chain: stream_entry[STREAM_FLAGS_OFFSET] & 0x02 != 0,
+            no_fat_chain: stream_entry[STREAM_FLAGS_OFFSET] & STREAM_FLAG_NO_FAT_CHAIN != 0,
         })
     }
 
@@ -151,7 +172,8 @@ impl StreamExtensionDirEntry {
         if valid_data_length > data_length {
             return Err(invalid_operation_input());
         }
-        stream_entry[STREAM_FLAGS_OFFSET] = if self.no_fat_chain { 0x03 } else { 0x01 };
+        stream_entry[STREAM_FLAGS_OFFSET] = STREAM_FLAG_ALLOCATION_POSSIBLE
+            | if self.no_fat_chain { STREAM_FLAG_NO_FAT_CHAIN } else { 0 };
         stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET..STREAM_VALID_DATA_LENGTH_OFFSET + 8]
             .copy_from_slice(
                 &u64::try_from(valid_data_length)
@@ -357,15 +379,18 @@ pub(super) fn file_entry_set_entry_count(name_length: usize) -> Result<usize> {
         .ok_or(invalid_operation_input())
 }
 
-pub(super) fn encode_file_entry_set(
+pub(super) fn encode_file_entry_set_for_creation(
     name: &[u16],
     name_hash: u16,
     inode_type: InodeType,
-    cluster_map: StreamExtensionDirEntry,
+    stream_entry: StreamExtensionDirEntry,
     create_timestamp: FileEntryTimestamp,
     last_accessed_timestamp: FileEntryTimestamp,
     last_modified_timestamp: FileEntryTimestamp,
 ) -> Result<Vec<u8>> {
+    if stream_entry.valid_data_length != stream_entry.data_length {
+        return Err(invalid_operation_input());
+    }
     let entry_count = file_entry_set_entry_count(name.len())?;
     let secondary_count = entry_count
         .checked_sub(1)
@@ -380,7 +405,7 @@ pub(super) fn encode_file_entry_set(
     entry_set[1] = secondary_count;
     let file_attributes = match inode_type {
         InodeType::Dir => FILE_ATTRIBUTE_DIRECTORY,
-        InodeType::File => 0x0020,
+        InodeType::File => FILE_ATTRIBUTE_ARCHIVE,
         _ => return Err(invalid_operation_input()),
     };
     entry_set[4..6].copy_from_slice(&file_attributes.to_le_bytes());
@@ -399,16 +424,13 @@ pub(super) fn encode_file_entry_set(
 
     let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
     entry_set[stream_entry_offset] = STREAM_EXTENSION_ENTRY_TYPE;
-    entry_set[stream_entry_offset + 1] = if cluster_map.no_fat_chain { 0x03 } else { 0x01 };
+    entry_set[stream_entry_offset + 1] = STREAM_FLAG_ALLOCATION_POSSIBLE
+        | if stream_entry.no_fat_chain { STREAM_FLAG_NO_FAT_CHAIN } else { 0 };
     entry_set[stream_entry_offset + 3] =
         u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 4..stream_entry_offset + 6]
         .copy_from_slice(&name_hash.to_le_bytes());
-    StreamExtensionDirEntry {
-        valid_data_length: cluster_map.data_length,
-        ..cluster_map
-    }
-    .write_to_file_stream_entry(
+    stream_entry.write_to_file_stream_entry(
         &mut entry_set[stream_entry_offset..stream_entry_offset + DIRECTORY_ENTRY_SIZE],
     )?;
 
@@ -562,27 +584,14 @@ pub(super) enum ScannedDirEntrySlot {
     Vacant(DirEntrySlotRange),
 }
 
-const END_OF_DIRECTORY_ENTRY_TYPE: u8 = 0x00;
-const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
-const UPCASE_TABLE_ENTRY_TYPE: u8 = 0x82;
-const VOLUME_LABEL_ENTRY_TYPE: u8 = 0x83;
-const VOLUME_GUID_ENTRY_TYPE: u8 = 0xA0;
-const FILE_DIRECTORY_ENTRY_TYPE: u8 = 0x85;
-const STREAM_EXTENSION_ENTRY_TYPE: u8 = 0xC0;
-const FILE_NAME_ENTRY_TYPE: u8 = 0xC1;
-const ENTRY_TYPE_IMPORTANCE_BIT: u8 = 0x20;
-const ENTRY_TYPE_CATEGORY_BIT: u8 = 0x40;
-const ENTRY_TYPE_IN_USE_BIT: u8 = 0x80;
-const FILE_ATTRIBUTES_OFFSET: usize = 4;
-const STREAM_FLAGS_OFFSET: usize = 1;
-const STREAM_NAME_LENGTH_OFFSET: usize = 3;
-const STREAM_NAME_HASH_OFFSET: usize = 4;
-const STREAM_VALID_DATA_LENGTH_OFFSET: usize = 8;
-const STREAM_FIRST_CLUSTER_OFFSET: usize = 20;
-const STREAM_DATA_LENGTH_OFFSET: usize = 24;
+#[derive(Clone, Copy)]
+pub(super) enum DirectoryScanMode {
+    Root,
+    Ordinary,
+}
 
 pub(super) fn scan_dir_entry(
-    is_root_directory: bool,
+    scan_mode: DirectoryScanMode,
     directory_bytes: &[u8],
     mut entry_index: usize,
 ) -> Result<ScannedDirEntry<'_>> {
@@ -597,7 +606,7 @@ pub(super) fn scan_dir_entry(
             return Ok(ScannedDirEntry::EndOfDirectory { entry_index });
         };
 
-        match scan_dir_entry_slot(is_root_directory, entry_index, entry)? {
+        match scan_dir_entry_slot(scan_mode, entry_index, entry)? {
             ScannedDirEntrySlot::EndOfDirectory { entry_index } => {
                 return Ok(ScannedDirEntry::EndOfDirectory { entry_index });
             }
@@ -630,7 +639,7 @@ pub(super) fn scan_dir_entry(
 }
 
 pub(super) fn scan_dir_entry_slot(
-    is_root_directory: bool,
+    scan_mode: DirectoryScanMode,
     entry_index: usize,
     entry: &[u8],
 ) -> Result<ScannedDirEntrySlot> {
@@ -657,7 +666,7 @@ pub(super) fn scan_dir_entry_slot(
                     | VOLUME_LABEL_ENTRY_TYPE
                     | VOLUME_GUID_ENTRY_TYPE
             );
-            if is_root_directory && is_root_metadata {
+            if matches!(scan_mode, DirectoryScanMode::Root) && is_root_metadata {
                 return Ok(ScannedDirEntrySlot::RootMetadata);
             }
 
@@ -805,7 +814,7 @@ fn file_stream_entry(entry_set: &[u8]) -> Result<&[u8]> {
     if stream_entry[0] != STREAM_EXTENSION_ENTRY_TYPE {
         return Err(invalid_on_disk_layout());
     }
-    if stream_entry[1] & 0x01 == 0 {
+    if stream_entry[1] & STREAM_FLAG_ALLOCATION_POSSIBLE == 0 {
         return Err(invalid_on_disk_layout());
     }
     Ok(stream_entry)

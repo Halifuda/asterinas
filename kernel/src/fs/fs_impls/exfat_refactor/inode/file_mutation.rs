@@ -11,13 +11,15 @@ mod page_cache_growth;
 
 use core::{ops::Range, time::Duration};
 
+use align_ext::AlignExt;
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
 
 use super::{
     super::{
         bitmap::ClusterRange, boot::BootRegion, fat::FatReader,
-        fs::{AllocGuard, ExfatFs, FsState},
+        bitmap::AllocGuard,
+        fs::{ExfatFs, FsState},
         inconsistent_bitmap_accounting, invalid_on_disk_layout,
     },
     ClusterMap, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard,
@@ -45,7 +47,8 @@ impl ExfatInode {
             .fs
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
-        let write_len = reader.remain();
+        let requested_write_len = reader.remain();
+        let mut completed_write_len = 0;
         {
             let mut fs_state = fs.fs_state.write();
             let block_device = fs.immutable_block_device();
@@ -128,16 +131,43 @@ impl ExfatInode {
                 } else {
                     offset
                 };
-                let write_end = effective_offset
-                    .checked_add(write_len)
+                effective_offset
+                    .checked_add(requested_write_len)
                     .ok_or_else(|| Error::new(Errno::EINVAL))?;
                 if status_flags.contains(StatusFlags::O_DIRECT)
                     && (!effective_offset.is_multiple_of(boot_region.sector_size)
-                        || !write_len.is_multiple_of(boot_region.sector_size))
+                        || !requested_write_len.is_multiple_of(boot_region.sector_size))
                 {
                     return_errno!(Errno::EINVAL);
                 }
 
+                let mut staged_bytes = vec![0; requested_write_len];
+                let mut staged_source = reader.clone();
+                let (staged_len, staging_error) = match staged_source
+                    .read_fallible(&mut VmWriter::from(staged_bytes.as_mut_slice()))
+                {
+                    Ok(staged_len) => (staged_len, None),
+                    Err((error, staged_len)) if staged_len != 0 => (staged_len, Some(error)),
+                    Err((error, _)) => return Err(error.into()),
+                };
+                let write_len = if staging_error.is_some()
+                    && status_flags.contains(StatusFlags::O_DIRECT)
+                {
+                    staged_len / boot_region.sector_size * boot_region.sector_size
+                } else {
+                    staged_len
+                };
+                if write_len == 0 {
+                    if let Some(error) = staging_error {
+                        return Err(error.into());
+                    }
+                    return_errno!(Errno::EIO);
+                }
+                let write_end = effective_offset
+                    .checked_add(write_len)
+                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                let mut staged_reader =
+                    VmReader::from(&staged_bytes[..write_len]).to_fallible();
                 let new_data_length = data_length.max(write_end);
                 let new_valid_data_length = valid_data_length.max(write_end);
                 let timestamp = RealTimeCoarseClock::get().read_time();
@@ -145,7 +175,6 @@ impl ExfatInode {
                     fs.publish_dirty_admission(&mut fs_state)?;
                     self.grow_and_commit_regular_file(
                         inode_state_guard,
-                        fs.as_ref(),
                         &mut fs_state,
                         &mut allocation_guard,
                         &block_device,
@@ -173,7 +202,7 @@ impl ExfatInode {
                                 effective_offset..write_end,
                             )?;
                             page_cache
-                                .write(effective_offset, reader)
+                                .write(effective_offset, &mut staged_reader)
                                 .map_err(Error::from)?;
                             Ok(())
                         },
@@ -185,6 +214,7 @@ impl ExfatInode {
                     )
                 })();
                 write_result?;
+                completed_write_len = write_len;
                 if let Some(sync_scope) = sync_scope {
                     self.sync_regular_file_with_proofs(
                         fs.as_ref(),
@@ -202,7 +232,8 @@ impl ExfatInode {
             }
             write_result?;
         }
-        Ok(write_len)
+        reader.skip(completed_write_len);
+        Ok(completed_write_len)
     }
 
     pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
@@ -247,7 +278,6 @@ impl ExfatInode {
                 let page_cache_result = if let Some(page_cache) = page_cache {
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
-                        fs.as_ref(),
                         &mut fs_state,
                         &mut allocation_guard,
                         &block_device,
@@ -278,7 +308,6 @@ impl ExfatInode {
                 } else {
                     self.grow_and_commit_regular_file(
                         &inode_state_guard,
-                        fs.as_ref(),
                         &mut fs_state,
                         &mut allocation_guard,
                         &block_device,
@@ -395,10 +424,6 @@ impl ExfatInode {
                 new_size,
                 valid_data_length.min(new_size),
             )?;
-            let _ = inode_state_guard.replace_page_cache_context(page_cache_context.clone());
-            if let Some(page_cache) = page_cache {
-                page_cache.resize(new_size, data_length)?;
-            }
             let Some(next_valid_data_length) = next_cluster_map.valid_data_length else {
                 return_errno!(Errno::EINVAL);
             };
@@ -420,6 +445,57 @@ impl ExfatInode {
             let allocated_sectors = retained_clusters
                 .checked_mul(boot_region.sectors_per_cluster)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
+
+            let mut partial_page_rollback = None;
+            if let Some(page_cache) = page_cache {
+                let partial_page_end = data_length.min(new_size.align_up(PAGE_SIZE));
+                if new_size < partial_page_end {
+                    let mut old_bytes = vec![0; partial_page_end - new_size];
+                    let mut writer = VmWriter::from(old_bytes.as_mut_slice()).to_fallible();
+                    page_cache
+                        .read(new_size, &mut writer)
+                        .map_err(Error::from)?;
+                    let page_idx = new_size / PAGE_SIZE;
+                    let page_start = page_idx
+                        .checked_mul(PAGE_SIZE)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    let page_end = page_start.saturating_add(PAGE_SIZE).min(page_cache.size());
+                    let was_dirty = page_cache.has_dirty_pages(page_start..page_end);
+                    partial_page_rollback = Some((page_idx, old_bytes, was_dirty));
+                }
+                page_cache.resize(new_size, data_length)?;
+            }
+
+            if !cluster_map.no_fat_chain && retained_clusters != 0 {
+                let retained_last_cluster =
+                    previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
+                if let Err(error) = FatReader::new(block_device.as_ref(), &boot_region)
+                    .terminate_cluster_chain(retained_last_cluster)
+                {
+                    if let Some(page_cache) = page_cache {
+                        let rollback_result: Result<()> = (|| {
+                            page_cache.resize(data_length, new_size)?;
+                            if let Some((page_idx, old_bytes, was_dirty)) =
+                                partial_page_rollback.as_ref()
+                            {
+                                page_cache.restore_prefaulted_pages([(
+                                    *page_idx,
+                                    (new_size % PAGE_SIZE)
+                                        ..(new_size % PAGE_SIZE + old_bytes.len()),
+                                    old_bytes.as_slice(),
+                                    *was_dirty,
+                                )])?;
+                            }
+                            Ok(())
+                        })();
+                        if rollback_result.is_err() {
+                            fs.latch_forced_shutdown(&mut fs_state);
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+
             inode_state_guard.with_metadata_mut(|metadata| {
                 metadata.last_meta_change_at = timestamp;
                 metadata.last_modify_at = timestamp;
@@ -433,13 +509,6 @@ impl ExfatInode {
                 page_cache_context,
             );
             self.mark_content_dirty(&inode_state_guard);
-            if !cluster_map.no_fat_chain && retained_clusters != 0 {
-                let retained_last_cluster =
-                    previous_retained_cluster.ok_or_else(invalid_on_disk_layout)?;
-                FatReader::new(block_device.as_ref(), &boot_region)
-                    .terminate_cluster_chain(retained_last_cluster)
-                    ?;
-            }
 
             if !released_ranges.is_empty() {
                 allocation_guard.lazy_reclaim_clusters(retired_generation, released_ranges)?;
@@ -459,7 +528,6 @@ impl ExfatInode {
     fn grow_and_commit_regular_file(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
-        _fs: &ExfatFs,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
         block_device: &Arc<dyn BlockDevice>,

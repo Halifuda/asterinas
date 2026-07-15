@@ -6,13 +6,15 @@
 
 use super::{
     super::{
+        boot::BootRegion,
         dir_entry_format::{
-            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, FileEntrySetView,
-            ScannedDirEntry,
+            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, DirectoryScanMode,
+            DirEntrySlotRange, FileEntrySetView, ScannedDirEntry,
         },
+        fs::MountOptions,
         invalid_on_disk_layout, invalid_operation_input,
     },
-    ExfatFs, ExfatInode, UpcaseTable,
+    ExfatFs, ExfatInode, StreamExtensionDirEntry, UpcaseTable,
     state::InodeStateReadGuard,
 };
 use crate::{
@@ -21,6 +23,83 @@ use crate::{
 };
 
 impl ExfatInode {
+    pub(super) fn entry_location_ino(
+        &self,
+        cluster_map: StreamExtensionDirEntry,
+        entry_index: usize,
+    ) -> Result<u64> {
+        Ok((u64::from(cluster_map.first_cluster) << 32)
+            | u64::from(u32::try_from(entry_index).map_err(|_| invalid_on_disk_layout())?))
+    }
+
+    pub(super) fn child_inode_from_directory_entry(
+        parent: &Self,
+        fs: &Arc<ExfatFs>,
+        boot_region: &BootRegion,
+        parent_first_cluster: u32,
+        slot_range: DirEntrySlotRange,
+        inode_type: InodeType,
+        child_stream: StreamExtensionDirEntry,
+    ) -> Result<Arc<Self>> {
+        let child_ino = (u64::from(parent_first_cluster) << 32)
+            | u64::from(
+                u32::try_from(slot_range.first_entry_index())
+                    .map_err(|_| invalid_on_disk_layout())?,
+            );
+        let child_cluster_map = (inode_type == InodeType::Dir)
+            .then(|| {
+                Self::resolve_cluster_map(
+                    &fs.immutable_block_device(),
+                    boot_region,
+                    child_stream,
+                )
+            })
+            .transpose()?
+            .map(Arc::new);
+        let child_inode = Self::new_child(
+            fs,
+            parent.weak_self(),
+            child_ino,
+            inode_type,
+            child_stream.data_length.ok_or_else(invalid_on_disk_layout)?,
+            child_stream,
+            child_cluster_map,
+        );
+        if inode_type == InodeType::File {
+            child_inode.store_entry_set_location_hint(slot_range)?;
+        }
+        Ok(child_inode)
+    }
+
+    pub(super) fn validate_name(
+        name: &str,
+        options: &MountOptions,
+    ) -> core::result::Result<Vec<u16>, Error> {
+        let normalized_name = if options.keep_last_dots {
+            name
+        } else {
+            name.trim_end_matches('.')
+        };
+        if normalized_name.is_empty() || normalized_name == "." || normalized_name == ".." {
+            return_errno_with_message!(Errno::EINVAL, "invalid exFAT name");
+        }
+
+        let mut name = Vec::new();
+        for character in normalized_name.chars() {
+            if character <= '\u{001F}'
+                || matches!(character, '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|')
+            {
+                return_errno_with_message!(Errno::EINVAL, "invalid exFAT name");
+            }
+            let mut encoded = [0u16; 2];
+            name.extend(character.encode_utf16(&mut encoded).iter().copied());
+        }
+        if name.len() > UpcaseTable::NAME_MAX {
+            return_errno!(Errno::ENAMETOOLONG);
+        }
+        Ok(name)
+    }
+
     fn readdir_cookie_for_entry_index(entry_index: usize) -> Result<usize> {
         entry_index
             .checked_add(1)
@@ -71,7 +150,11 @@ impl ExfatInode {
         )?;
         let Some(entry_view) = Self::locate_named_child_view(
             &directory_bytes,
-            cluster_map.data_length.is_none(),
+            if cluster_map.data_length.is_none() {
+                DirectoryScanMode::Root
+            } else {
+                DirectoryScanMode::Ordinary
+            },
             upcase_table,
             lookup_name,
             lookup_name_hash,
@@ -100,7 +183,7 @@ impl ExfatInode {
             return Ok(Some(child_inode));
         }
 
-        let child_stream = super::StreamExtensionDirEntry {
+        let child_stream = StreamExtensionDirEntry {
             data_length: Some(data_length),
             first_cluster,
             valid_data_length: Some(valid_data_length),
@@ -130,22 +213,20 @@ impl ExfatInode {
         if inode_type == InodeType::File {
             child_inode.store_entry_set_location_hint(slot_range)?;
         }
-        fs_state
-            .inode_cache
-            .insert(ino, Arc::downgrade(&child_inode));
+        ExfatFs::publish_cached_inode(fs_state, ino, &child_inode);
         Ok(Some(child_inode))
     }
 
     pub(super) fn locate_named_child_view<'a>(
         directory_bytes: &'a [u8],
-        is_root_directory: bool,
+        scan_mode: DirectoryScanMode,
         upcase_table: &UpcaseTable,
         lookup_name: &[u16],
         lookup_name_hash: u16,
     ) -> Result<Option<FileEntrySetView<'a>>> {
         let mut entry_index = 0usize;
         loop {
-            match direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)? {
+            match direntry::scan_dir_entry(scan_mode, directory_bytes, entry_index)? {
                 ScannedDirEntry::EndOfDirectory { .. } => return Ok(None),
                 ScannedDirEntry::Vacant(slot_range) => {
                     entry_index = slot_range.next_entry_index()?;
@@ -258,7 +339,11 @@ impl ExfatInode {
         }
         loop {
             match direntry::scan_dir_entry(
-                directory_stream.data_length.is_none(),
+                if directory_stream.data_length.is_none() {
+                    DirectoryScanMode::Root
+                } else {
+                    DirectoryScanMode::Ordinary
+                },
                 &directory_bytes,
                 entry_index,
             )? {

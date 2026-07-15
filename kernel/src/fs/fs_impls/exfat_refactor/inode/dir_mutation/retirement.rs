@@ -7,7 +7,7 @@
 use aster_block::BlockDevice;
 
 use super::{
-    super::{ClusterMap, ExfatInode, state::InodeStateWriteGuard},
+    super::{ClusterMap, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard},
     admission::AdmittedRenameChild,
 };
 use crate::{
@@ -18,7 +18,8 @@ use crate::{
             boot::BootRegion,
             dir_entry_format::{DirEntrySlotRange, FileEntrySetView},
             fat::{ChainVisitControl, FatReader},
-            fs::{AllocGuard, ExfatFs, FsState},
+            bitmap::AllocGuard,
+            fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
     },
@@ -37,14 +38,22 @@ pub(super) enum ReplacedTargetCleanup {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RenameTargetRemovalState {
+    Persisted,
+    Uncertain,
+}
+
 impl ExfatInode {
     pub(super) fn allocated_cluster_ranges(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
-        first_cluster: u32,
-        data_length: usize,
-        no_fat_chain: bool,
+        stream_entry: StreamExtensionDirEntry,
     ) -> Result<Vec<ClusterRange>> {
+        let data_length = stream_entry
+            .data_length
+            .ok_or_else(invalid_on_disk_layout)?;
+        let first_cluster = stream_entry.first_cluster;
         if data_length == 0 {
             if first_cluster != 0 {
                 return Err(invalid_on_disk_layout());
@@ -57,7 +66,7 @@ impl ExfatInode {
             u64::try_from(data_length).map_err(|_| invalid_on_disk_layout())?,
         )?;
         let expected_cluster_count = data_length.div_ceil(boot_region.cluster_size);
-        if no_fat_chain {
+        if stream_entry.no_fat_chain {
             return Ok(vec![ClusterRange {
                 start_cluster: first_cluster,
                 cluster_count: expected_cluster_count,
@@ -119,8 +128,7 @@ impl ExfatInode {
             return Ok(None);
         };
         let target_slot_range = target_view.slot_range();
-        let (target_inode_type, first_cluster, data_length, no_fat_chain) =
-            target_view.child_metadata(boot_region)?;
+        let (target_inode_type, _, _, _) = target_view.child_metadata(boot_region)?;
         if source_inode_type == InodeType::Dir && target_inode_type != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
         }
@@ -158,9 +166,7 @@ impl ExfatInode {
         let replaced_target_ranges = Self::allocated_cluster_ranges(
             block_device,
             boot_region,
-            first_cluster,
-            data_length,
-            no_fat_chain,
+            target_view.cluster_map()?,
         )?;
         Ok(Some(ReplacedTargetCleanup::Immediate {
             slot_range: target_slot_range,
@@ -225,7 +231,7 @@ impl ExfatInode {
         replacement: Option<ReplacedTargetCleanup>,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
-        finalize_cleanup: bool,
+        rename_target_removal_state: RenameTargetRemovalState,
     ) -> Result<()> {
         let old_source_ino = source_child.guard.metadata().ino;
         let replaced_target_ino = target_child
@@ -259,9 +265,10 @@ impl ExfatInode {
                 target_child.guard.metadata().ino,
                 target_child.inode,
                 target_child.guard,
-                finalize_cleanup
-                    .then_some(detached_regular_file_reclaim)
-                    .flatten(),
+                match rename_target_removal_state {
+                    RenameTargetRemovalState::Persisted => detached_regular_file_reclaim,
+                    RenameTargetRemovalState::Uncertain => None,
+                },
             )
             && finalization_error.is_none()
         {
@@ -274,7 +281,10 @@ impl ExfatInode {
             source_child.inode,
             replaced_target_ino,
         );
-        if finalize_cleanup
+        if matches!(
+            rename_target_removal_state,
+            RenameTargetRemovalState::Persisted
+        )
             && finalization_error.is_none()
             && let Err(error) = Self::cleanup_replaced_target_ranges(
                 fs_state,

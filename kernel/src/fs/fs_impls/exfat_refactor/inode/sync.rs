@@ -1,17 +1,111 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Commits regular-file dirty state through page-cache and block-device synchronization.
+//! Owns inode synchronization and the dirty-generation state machine.
 //!
-//! Method groups: sync-scope classification, pending-sync detection, and VFS sync dispatch.
+//! Method groups: dirty transitions, sync-scope classification, pending-sync detection, and VFS
+//! sync dispatch.
 
 use aster_block::bio::BioStatus;
 
-use super::{
-    ExfatInode,
-    state::{InodeDirtyState, InodeStateWriteGuard},
+use super::super::{
+    bitmap::AllocGuard,
+    fs::{ExfatFs, FsState},
 };
-use super::super::fs::{AllocGuard, ExfatFs, FsState};
+use super::{ExfatInode, state::InodeStateWriteGuard};
 use crate::prelude::*;
+
+/// Classifies which dirty portions of an inode still need persistence.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DirtyLevel {
+    Clean,
+    Metadata,
+    Data,
+    DataAndMetadata,
+}
+
+/// Tracks the dirty generations that Level-2 inode state has marked.
+#[derive(Clone, Copy, Default)]
+pub(super) struct InodeDirtyState {
+    next_generation: u64,
+    content_generation: Option<u64>,
+    metadata_generation: Option<u64>,
+}
+
+impl InodeDirtyState {
+    fn next_dirty_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.next_generation
+    }
+
+    pub(super) fn dirty_level(self) -> DirtyLevel {
+        match (self.content_generation, self.metadata_generation) {
+            (None, None) => DirtyLevel::Clean,
+            (None, Some(_)) => DirtyLevel::Metadata,
+            (Some(_), None) => DirtyLevel::Data,
+            (Some(_), Some(_)) => DirtyLevel::DataAndMetadata,
+        }
+    }
+
+    pub(super) fn mark_content_dirty(&mut self) {
+        let generation = self.next_dirty_generation();
+        self.content_generation = Some(generation);
+        self.metadata_generation = None;
+    }
+
+    pub(super) fn mark_metadata_dirty(&mut self) {
+        self.metadata_generation = Some(self.next_dirty_generation());
+    }
+
+    pub(super) fn needs_sync_data(self) -> bool {
+        matches!(self.dirty_level(), DirtyLevel::Data | DirtyLevel::DataAndMetadata)
+    }
+
+    pub(super) fn needs_sync_all(self) -> bool {
+        self.dirty_level() != DirtyLevel::Clean
+    }
+
+    pub(super) fn has_deferred_regular_file_publish(self) -> bool {
+        self.content_generation.is_some()
+    }
+
+    pub(super) fn clear_detached_regular_file_publish_debt(&mut self) {
+        self.content_generation = None;
+        self.metadata_generation = None;
+    }
+
+    fn clear_committed_content(&mut self, synced_state: Self) {
+        if synced_state
+            .content_generation
+            .zip(self.content_generation)
+            .is_some_and(|(synced_generation, current_generation)| {
+                current_generation <= synced_generation
+            })
+        {
+            self.content_generation = None;
+        }
+    }
+
+    fn clear_committed_metadata(&mut self, synced_state: Self) {
+        if synced_state
+            .metadata_generation
+            .zip(self.metadata_generation)
+            .is_some_and(|(synced_generation, current_generation)| {
+                current_generation <= synced_generation
+            })
+        {
+            self.metadata_generation = None;
+        }
+    }
+
+    pub(super) fn commit_data(&mut self, synced_state: Self) {
+        self.clear_committed_content(synced_state);
+    }
+
+    pub(super) fn commit_all(&mut self, synced_state: Self) {
+        self.clear_committed_content(synced_state);
+        self.clear_committed_metadata(synced_state);
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(in crate::fs::fs_impls::exfat_refactor) enum InodeSyncScope {
@@ -29,6 +123,43 @@ impl InodeSyncScope {
 }
 
 impl ExfatInode {
+    pub(super) fn mark_content_dirty(&self, inode_state_guard: &InodeStateWriteGuard<'_>) {
+        inode_state_guard.with_dirty_state_mut(InodeDirtyState::mark_content_dirty);
+        if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
+            return;
+        }
+        if !inode_state_guard.has_dirty_file_retention() {
+            inode_state_guard.set_dirty_file_retention(self.weak_self().upgrade());
+        }
+    }
+
+    pub(super) fn mark_metadata_dirty(&self, inode_state_guard: &InodeStateWriteGuard<'_>) {
+        if inode_state_guard.metadata().type_ == crate::fs::file::InodeType::Dir {
+            return;
+        }
+        inode_state_guard.with_dirty_state_mut(InodeDirtyState::mark_metadata_dirty);
+    }
+
+    pub(super) fn clear_detached_regular_file_publish_debt_with_guard(
+        &self,
+        inode_state_guard: &InodeStateWriteGuard<'_>,
+    ) {
+        inode_state_guard
+            .with_dirty_state_mut(InodeDirtyState::clear_detached_regular_file_publish_debt);
+        inode_state_guard.set_dirty_file_retention(None);
+    }
+
+    pub(super) fn clear_dirty_file_retention_if_not_needed_with_guard(
+        &self,
+        inode_state_guard: &InodeStateWriteGuard<'_>,
+        dirty_state: InodeDirtyState,
+    ) {
+        if dirty_state.has_deferred_regular_file_publish() {
+            return;
+        }
+        inode_state_guard.set_dirty_file_retention(None);
+    }
+
     fn has_pending_regular_file_sync(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -171,13 +302,11 @@ impl ExfatInode {
         let needs_page_writeback = page_cache.is_some_and(|page_cache| {
             data_length != 0 && page_cache.has_dirty_pages(0..data_length)
         });
-        if is_detached_regular_file {
+        if is_detached_regular_file && !needs_page_writeback {
             if dirty_state_snapshot.needs_sync_all() {
                 self.clear_detached_regular_file_publish_debt_with_guard(inode_state);
             }
-            if !needs_page_writeback {
-                return Ok(());
-            }
+            return Ok(());
         }
 
         let needs_device_sync = scope.needs_device_sync(dirty_state_snapshot);

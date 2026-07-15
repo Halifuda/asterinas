@@ -1,28 +1,32 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Owns allocation-bitmap scanning, range normalization, and cached used-cluster accounting.
+//! Owns Allocation Bitmap state, scanning, range operations, accounting, and guard transactions.
 
 use alloc::vec;
 use core::ops::Range;
 
 use aster_block::BlockDevice;
-use ostd::mm::VmIo;
+use ostd::{
+    mm::VmIo,
+    sync::{RwMutexReadGuard, RwMutexWriteGuard},
+};
 
 use super::{
     boot::BootRegion,
     device_io,
     fat::{ChainVisitControl, FatChainStep, FatReader},
+    fs::ExfatFs,
     inconsistent_bitmap_accounting,
     inode::ClusterMap,
-    invalid_on_disk_layout, invalid_operation_input,
+    invalid_on_disk_layout, invalid_operation_input, not_mounted,
 };
 use crate::prelude::*;
 
 pub(super) const ALLOCATION_BITMAP_ENTRY_TYPE: u8 = 0x81;
 
 pub(super) struct AllocationBitmap {
-    pub(super) data_length: u64,
-    pub(super) first_cluster: u32,
+    data_length: u64,
+    first_cluster: u32,
     next_allocation_search_cluster: u32,
     resident_bitmap: Vec<u8>,
     dirty_byte_ranges: Vec<Range<usize>>,
@@ -48,6 +52,145 @@ pub(super) enum BitmapOp {
 struct LazyReclaimedCluster {
     cluster_map: Arc<ClusterMap>,
     ranges: Vec<ClusterRange>,
+}
+
+pub(super) struct AllocGuard<'a> {
+    allocation_state: RwMutexWriteGuard<'a, Option<AllocationBitmap>>,
+    allocated_ranges: Option<Vec<ClusterRange>>,
+    block_device: &'a dyn BlockDevice,
+    boot_region: &'a BootRegion,
+}
+
+pub(super) type AllocReadGuard<'a> = RwMutexReadGuard<'a, Option<AllocationBitmap>>;
+
+impl AllocGuard<'_> {
+    pub(super) fn allocate(
+        &mut self,
+        requested_clusters: usize,
+        preferred_start_cluster: Option<u32>,
+    ) -> Result<()> {
+        if requested_clusters == 0 || self.allocated_ranges.is_some() {
+            return Err(invalid_operation_input());
+        }
+        let allocation_bitmap = self
+            .allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?;
+        allocation_bitmap.release_lazy_reclaimed_clusters(self.boot_region)?;
+        let allocated_ranges = allocation_bitmap.find_free_ranges(
+            self.boot_region,
+            requested_clusters,
+            preferred_start_cluster,
+        )?;
+        let allocated_cluster_count = allocated_ranges.iter().try_fold(
+            0usize,
+            |total_clusters, range| {
+                total_clusters
+                    .checked_add(range.cluster_count)
+                    .ok_or_else(inconsistent_bitmap_accounting)
+            },
+        )?;
+        if allocated_cluster_count != requested_clusters {
+            return Err(inconsistent_bitmap_accounting());
+        }
+        allocation_bitmap.apply_cluster_ranges(
+            self.boot_region,
+            &allocated_ranges,
+            BitmapOp::Allocate,
+        )?;
+        self.allocated_ranges = Some(allocated_ranges);
+        Ok(())
+    }
+
+    pub(super) fn ranges(&self) -> &[ClusterRange] {
+        self.allocated_ranges
+            .as_deref()
+            .unwrap_or_else(|| unreachable!("committed allocation guards hold no ranges"))
+    }
+
+    pub(super) fn single_cluster(&self) -> Result<u32> {
+        match self.ranges() {
+            [allocated_range] if allocated_range.cluster_count == 1 => {
+                Ok(allocated_range.start_cluster)
+            }
+            _ => Err(inconsistent_bitmap_accounting()),
+        }
+    }
+
+    pub(super) fn commit_allocation(&mut self) {
+        self.allocated_ranges = None;
+    }
+
+    pub(super) fn rollback_allocation(&mut self) -> Result<bool> {
+        let Some(allocated_ranges) = self.allocated_ranges.as_ref().cloned() else {
+            return Ok(false);
+        };
+        self.free_clusters(&allocated_ranges)?;
+        self.allocated_ranges = None;
+        Ok(true)
+    }
+
+    pub(super) fn free_clusters(&mut self, ranges: &[ClusterRange]) -> Result<()> {
+        let allocation_bitmap = self
+            .allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?;
+        allocation_bitmap.apply_cluster_ranges(self.boot_region, ranges, BitmapOp::Free)?;
+        Ok(())
+    }
+
+    pub(super) fn lazy_reclaim_clusters(
+        &mut self,
+        cluster_map: Arc<ClusterMap>,
+        ranges: Vec<ClusterRange>,
+    ) -> Result<()> {
+        let allocation_bitmap = self
+            .allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?;
+        allocation_bitmap.lazy_reclaim_clusters(cluster_map, ranges);
+        Ok(())
+    }
+
+    pub(super) fn release_lazy_reclaimed_clusters(&mut self) -> Result<bool> {
+        self.allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?
+            .release_lazy_reclaimed_clusters(self.boot_region)
+    }
+
+    pub(super) fn publish_dirty_ranges(&mut self) -> Result<()> {
+        self.allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?
+            .publish_dirty_ranges(self.block_device, self.boot_region)
+    }
+
+    pub(super) fn commit_published_ranges(&mut self) -> Result<()> {
+        self.allocation_state
+            .as_mut()
+            .ok_or_else(not_mounted)?
+            .commit_published_ranges()
+    }
+}
+
+impl ExfatFs {
+    pub(super) fn allocation_read_guard(&self) -> Result<AllocReadGuard<'_>> {
+        let allocation_state = self.allocation_state.read();
+        if allocation_state.is_none() {
+            return Err(not_mounted());
+        }
+        Ok(allocation_state)
+    }
+
+    pub(super) fn allocation_guard(&self) -> Result<AllocGuard<'_>> {
+        Ok(AllocGuard {
+            allocation_state: self.allocation_state.write(),
+            allocated_ranges: None,
+            block_device: self.block_device.as_ref(),
+            boot_region: &self.boot_region,
+        })
+    }
 }
 
 impl AllocationBitmap {
@@ -171,7 +314,7 @@ impl AllocationBitmap {
             });
         let effective_start_index = boot_region.cluster_index(effective_start_cluster)?;
 
-        let scan_window = |scan_start_index: usize,
+        let scan_window_fn = |scan_start_index: usize,
                            scan_end_index: usize,
                            requested_clusters_remaining: &mut usize,
                            ranges: &mut Vec<ClusterRange>|
@@ -262,14 +405,14 @@ impl AllocationBitmap {
             Ok(())
         };
 
-        scan_window(
+        scan_window_fn(
             effective_start_index,
             cluster_count,
             &mut requested_clusters_remaining,
             &mut ranges,
         )?;
         if requested_clusters_remaining != 0 && effective_start_index != 0 {
-            scan_window(
+            scan_window_fn(
                 0,
                 effective_start_index,
                 &mut requested_clusters_remaining,

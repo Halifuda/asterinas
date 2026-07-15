@@ -8,8 +8,8 @@ use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGu
 use crate::{
     fs::fs_impls::exfat_refactor::{
         boot::BootRegion,
-        dir_entry_format::{self as direntry, ScannedDirEntry},
-        fs::AllocGuard,
+        dir_entry_format::{self as direntry, DirectoryScanMode, ScannedDirEntry},
+        bitmap::AllocGuard,
         invalid_on_disk_layout,
     },
     prelude::*,
@@ -20,11 +20,14 @@ impl ExfatInode {
         cluster_map: StreamExtensionDirEntry,
         directory_bytes: &'a [u8],
     ) -> Result<Option<ScannedDirEntry<'a>>> {
-        let is_root_directory = cluster_map.data_length.is_none();
+        let scan_mode = if cluster_map.data_length.is_none() {
+            DirectoryScanMode::Root
+        } else {
+            DirectoryScanMode::Ordinary
+        };
         let mut entry_index = 0usize;
         loop {
-            let entry_scan =
-                direntry::scan_dir_entry(is_root_directory, directory_bytes, entry_index)?;
+            let entry_scan = direntry::scan_dir_entry(scan_mode, directory_bytes, entry_index)?;
             match entry_scan {
                 ScannedDirEntry::EndOfDirectory { .. } => return Ok(None),
                 ScannedDirEntry::Vacant(slot_range) => {

@@ -25,7 +25,7 @@ impl ExfatInode {
         }
 
         let vmo = page_cache.as_vmo().clone();
-        let prepare_page = |page_idx: usize| -> Result<()> {
+        let prepare_page_fn = |page_idx: usize| -> Result<()> {
             let frame = vmo.commit_on(page_idx)?;
             frame.writer().fill_zeros(PAGE_SIZE);
             Ok(())
@@ -36,7 +36,7 @@ impl ExfatInode {
             .checked_mul(PAGE_SIZE)
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         if !range.start.is_multiple_of(PAGE_SIZE) && start_page_offset >= current_data_length {
-            prepare_page(start_page_idx)?;
+            prepare_page_fn(start_page_idx)?;
         }
 
         if !range.end.is_multiple_of(PAGE_SIZE) {
@@ -47,7 +47,7 @@ impl ExfatInode {
             if end_page_offset >= current_data_length
                 && (end_page_idx != start_page_idx || range.start.is_multiple_of(PAGE_SIZE))
             {
-                prepare_page(end_page_idx)?;
+                prepare_page_fn(end_page_idx)?;
             }
         }
         Ok(())

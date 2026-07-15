@@ -11,7 +11,10 @@ use ostd::mm::VmIo;
 use super::{boot::BootRegion, device_io, invalid_on_disk_layout, invalid_operation_input};
 use crate::prelude::*;
 
+const FAT_BAD_CLUSTER: u32 = 0xFFFF_FFF7;
+const FAT_END_OF_CHAIN_MIN: u32 = 0xFFFF_FFF8;
 const FAT_END_OF_CHAIN: u32 = 0xFFFF_FFFF;
+const FAT_ENTRY_SIZE: u64 = size_of::<u32>() as u64;
 
 #[derive(Clone, Copy)]
 pub(super) enum ChainVisitControl {
@@ -86,10 +89,10 @@ impl<'a> FatReader<'a> {
                 .ok_or_else(invalid_on_disk_layout)?;
             u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]])
         };
-        if next_cluster == 0xFFFF_FFF7 {
+        if next_cluster == FAT_BAD_CLUSTER {
             return Err(invalid_on_disk_layout());
         }
-        if next_cluster >= 0xFFFF_FFF8 {
+        if next_cluster >= FAT_END_OF_CHAIN_MIN {
             return Ok(FatChainStep::End);
         }
         if !self.boot_region.is_valid_cluster(next_cluster) {
@@ -190,15 +193,25 @@ impl<'a> FatReader<'a> {
     }
 
     fn cached_entry_range_for_cluster(&mut self, cluster: u32) -> Result<(u64, Range<usize>)> {
-        let entry_offset = u64::from(self.boot_region.fat_offset_sectors)
-            .checked_mul(
-                u64::try_from(self.boot_region.sector_size)
-                    .map_err(|_| invalid_on_disk_layout())?,
-            )
-            .and_then(|offset| offset.checked_add(u64::from(cluster) * 4))
-            .ok_or_else(invalid_on_disk_layout)?;
         let sector_size =
             u64::try_from(self.boot_region.sector_size).map_err(|_| invalid_on_disk_layout())?;
+        let fat_start = u64::from(self.boot_region.fat_offset_sectors)
+            .checked_mul(sector_size)
+            .ok_or_else(invalid_on_disk_layout)?;
+        let fat_end = u64::from(self.boot_region.fat_length_sectors)
+            .checked_mul(sector_size)
+            .and_then(|fat_bytes| fat_start.checked_add(fat_bytes))
+            .ok_or_else(invalid_on_disk_layout)?;
+        let entry_offset = u64::from(cluster)
+            .checked_mul(FAT_ENTRY_SIZE)
+            .and_then(|cluster_offset| fat_start.checked_add(cluster_offset))
+            .ok_or_else(invalid_on_disk_layout)?;
+        let entry_end_offset = entry_offset
+            .checked_add(FAT_ENTRY_SIZE)
+            .ok_or_else(invalid_on_disk_layout)?;
+        if entry_end_offset > fat_end {
+            return Err(invalid_on_disk_layout());
+        }
         let sector_index = entry_offset / sector_size;
         if self.cached_sector_index != Some(sector_index) {
             let sector_offset = sector_index

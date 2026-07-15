@@ -25,7 +25,7 @@ pub(in crate::fs::fs_impls::exfat_refactor) use self::state::{
     ClusterMap, StreamExtensionDirEntry,
 };
 use self::{
-    state::{InodeState, InodeTimestampField},
+    state::InodeState,
     sync::InodeSyncScope,
 };
 use super::{
@@ -59,6 +59,12 @@ pub(super) struct ExfatInode {
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
     page_cache: Once<Option<PageCache>>,
     weak_self: Weak<ExfatInode>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PersistenceRecovery {
+    RollbackAllowed,
+    RewriteRequired,
 }
 
 impl ExfatInode {
@@ -113,10 +119,7 @@ impl ExfatInode {
             Some(root_cluster_map),
             Weak::new(),
         );
-        fs.fs_state
-            .write()
-            .inode_cache
-            .insert(root_ino, Arc::downgrade(&root_inode));
+        ExfatFs::publish_cached_inode(&mut fs.fs_state.write(), root_ino, &root_inode);
         Ok(root_inode)
     }
 

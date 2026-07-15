@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Implements the exFAT filesystem owner, mount admission, allocation, and VFS registration.
+//! Owns exFAT filesystem lifecycle, mount runtime, inode caching, and VFS registration.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use aster_block::{BlockDevice, bio::BioStatus};
-use ostd::{
-    mm::VmIo,
-    sync::{RwMutexReadGuard, RwMutexWriteGuard},
-};
 
 use super::{
-    bitmap::{AllocationBitmap, BitmapOp, ClusterRange},
-    boot::BootRegion,
-    device_io,
+    bitmap::AllocationBitmap,
+    boot::{BootRegion, VolumeFlags},
     inconsistent_bitmap_accounting,
-    inode::{ClusterMap, ExfatInode},
-    invalid_operation_input, not_mounted,
+    inode::ExfatInode,
+    not_mounted,
     upcase::UpcaseTable,
 };
 use crate::{
@@ -39,9 +34,9 @@ fn unsupported_remount_delta() -> Error {
 }
 
 pub(super) struct ExfatFs {
-    allocation_state: RwMutex<Option<AllocationBitmap>>,
-    block_device: Arc<dyn BlockDevice>,
-    boot_region: BootRegion,
+    pub(super) allocation_state: RwMutex<Option<AllocationBitmap>>,
+    pub(super) block_device: Arc<dyn BlockDevice>,
+    pub(super) boot_region: BootRegion,
     pub(super) fs_state: RwMutex<FsState>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
     mount_runtime_projection: Arc<MountRuntimeProjection>,
@@ -50,7 +45,7 @@ pub(super) struct ExfatFs {
 
 #[derive(Default)]
 pub(super) struct FsState {
-    pub(super) inode_cache: BTreeMap<u64, Weak<ExfatInode>>,
+    inode_cache: BTreeMap<u64, Weak<ExfatInode>>,
     pub(super) mount_runtime: MountRuntimeState,
     pub(super) root_inode: Option<Arc<ExfatInode>>,
     pub(super) mount_state: Option<MountedVolumeState>,
@@ -449,150 +444,7 @@ impl ExfatFs {
 
 }
 
-// ---- Allocation ----
-
-pub(super) struct AllocGuard<'a> {
-    allocation_state: RwMutexWriteGuard<'a, Option<AllocationBitmap>>,
-    allocated_ranges: Option<Vec<ClusterRange>>,
-    block_device: &'a dyn BlockDevice,
-    boot_region: &'a BootRegion,
-}
-
-pub(super) type AllocReadGuard<'a> = RwMutexReadGuard<'a, Option<AllocationBitmap>>;
-
-impl AllocGuard<'_> {
-    pub(super) fn allocate(
-        &mut self,
-        requested_clusters: usize,
-        preferred_start_cluster: Option<u32>,
-    ) -> Result<()> {
-        if requested_clusters == 0 || self.allocated_ranges.is_some() {
-            return Err(invalid_operation_input());
-        }
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
-        allocation_bitmap.release_lazy_reclaimed_clusters(self.boot_region)?;
-        let allocated_ranges = allocation_bitmap.find_free_ranges(
-            self.boot_region,
-            requested_clusters,
-            preferred_start_cluster,
-        )?;
-        let allocated_cluster_count = allocated_ranges.iter().try_fold(
-            0usize,
-            |total_clusters, range| {
-                total_clusters
-                    .checked_add(range.cluster_count)
-                    .ok_or_else(inconsistent_bitmap_accounting)
-            },
-        )?;
-        if allocated_cluster_count != requested_clusters {
-            return Err(inconsistent_bitmap_accounting());
-        }
-        allocation_bitmap.apply_cluster_ranges(
-            self.boot_region,
-            &allocated_ranges,
-            BitmapOp::Allocate,
-        )?;
-        self.allocated_ranges = Some(allocated_ranges);
-        Ok(())
-    }
-
-    pub(super) fn ranges(&self) -> &[ClusterRange] {
-        self.allocated_ranges
-            .as_deref()
-            .unwrap_or_else(|| unreachable!("committed allocation guards hold no ranges"))
-    }
-
-    pub(super) fn single_cluster(&self) -> Result<u32> {
-        match self.ranges() {
-            [allocated_range] if allocated_range.cluster_count == 1 => {
-                Ok(allocated_range.start_cluster)
-            }
-            _ => Err(inconsistent_bitmap_accounting()),
-        }
-    }
-
-    pub(super) fn commit_allocation(&mut self) {
-        self.allocated_ranges = None;
-    }
-
-    pub(super) fn rollback_allocation(&mut self) -> Result<bool> {
-        let Some(allocated_ranges) = self.allocated_ranges.as_ref().cloned() else {
-            return Ok(false);
-        };
-        self.free_clusters(&allocated_ranges)?;
-        self.allocated_ranges = None;
-        Ok(true)
-    }
-
-    pub(super) fn free_clusters(&mut self, ranges: &[ClusterRange]) -> Result<()> {
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
-        allocation_bitmap.apply_cluster_ranges(
-            self.boot_region,
-            ranges,
-            BitmapOp::Free,
-        )?;
-        Ok(())
-    }
-
-    pub(super) fn lazy_reclaim_clusters(
-        &mut self,
-        cluster_map: Arc<ClusterMap>,
-        ranges: Vec<ClusterRange>,
-    ) -> Result<()> {
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
-        allocation_bitmap.lazy_reclaim_clusters(cluster_map, ranges);
-        Ok(())
-    }
-
-    pub(super) fn release_lazy_reclaimed_clusters(&mut self) -> Result<bool> {
-        self.allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?
-            .release_lazy_reclaimed_clusters(self.boot_region)
-    }
-
-    pub(super) fn publish_dirty_ranges(&mut self) -> Result<()> {
-        self.allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?
-            .publish_dirty_ranges(self.block_device, self.boot_region)
-    }
-
-    pub(super) fn commit_published_ranges(&mut self) -> Result<()> {
-        self.allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?
-            .commit_published_ranges()
-    }
-}
-
 impl ExfatFs {
-    pub(super) fn allocation_read_guard(&self) -> Result<AllocReadGuard<'_>> {
-        let allocation_state = self.allocation_state.read();
-        if allocation_state.is_none() {
-            return Err(not_mounted());
-        }
-        Ok(allocation_state)
-    }
-
-    pub(super) fn allocation_guard(&self) -> Result<AllocGuard<'_>> {
-        Ok(AllocGuard {
-            allocation_state: self.allocation_state.write(),
-            allocated_ranges: None,
-            block_device: self.block_device.as_ref(),
-            boot_region: &self.boot_region,
-        })
-    }
-
     pub(super) fn immutable_block_device(&self) -> Arc<dyn BlockDevice> {
         self.block_device.clone()
     }
@@ -624,6 +476,14 @@ impl ExfatFs {
             .inode_cache
             .get(&ino)
             .and_then(Weak::upgrade)
+    }
+
+    pub(super) fn publish_cached_inode(
+        fs_state: &mut FsState,
+        ino: u64,
+        inode: &Arc<ExfatInode>,
+    ) {
+        fs_state.inode_cache.insert(ino, Arc::downgrade(inode));
     }
 
     pub(super) fn remove_cached_inode(fs_state: &mut FsState, ino: u64) {
@@ -725,28 +585,6 @@ impl MountRuntimeProjection {
             media_failure: bits & Self::MEDIA_FAILURE != 0,
             read_only: bits & Self::READ_ONLY != 0,
         }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct VolumeFlags {
-    pub(super) clear_to_zero: bool,
-    pub(super) media_failure: bool,
-    pub(super) volume_dirty: bool,
-}
-
-impl VolumeFlags {
-    pub(super) fn read(block_device: &dyn BlockDevice, boot_region: &BootRegion) -> Result<Self> {
-        let mut boot_sector = vec![0; boot_region.sector_size];
-        block_device
-            .read_bytes(0, &mut boot_sector)
-            .map_err(|_| device_io())?;
-        let volume_flags = u16::from_le_bytes([boot_sector[106], boot_sector[107]]);
-        Ok(Self {
-            clear_to_zero: volume_flags & 0x0008 != 0,
-            media_failure: volume_flags & 0x0004 != 0,
-            volume_dirty: volume_flags & 0x0002 != 0,
-        })
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
         file::InodeType,
         fs_impls::exfat_refactor::{
             boot::BootRegion,
-            dir_entry_format::{DirEntrySlotRange, FileEntrySetView},
+            dir_entry_format::{DirectoryScanMode, DirEntrySlotRange, FileEntrySetView},
             fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
@@ -123,7 +123,7 @@ impl ExfatInode {
     ) -> Result<RenameDiscovery> {
         let provisional_directory_guards =
             Self::directory_read_guards_by_stable_identity(vec![self, target_directory]);
-        let provisional_guard_for_inode = |inode: &ExfatInode| {
+        let provisional_guard_for_inode_fn = |inode: &ExfatInode| {
             provisional_directory_guards
                 .iter()
                 .find(|guard| guard.guards_inode(inode))
@@ -137,8 +137,8 @@ impl ExfatInode {
             target_parent_directory,
             target_cluster_map,
         ) = {
-            let source_guard = provisional_guard_for_inode(self)?;
-            let target_guard = provisional_guard_for_inode(target_directory)?;
+            let source_guard = provisional_guard_for_inode_fn(self)?;
+            let target_guard = provisional_guard_for_inode_fn(target_directory)?;
             if source_guard.metadata().type_ != InodeType::Dir
                 || target_guard.metadata().type_ != InodeType::Dir
             {
@@ -156,7 +156,7 @@ impl ExfatInode {
         let discovery_allocation_guard = fs.allocation_read_guard()?;
         let discovery_result = (|| {
             let discovery = if self_ino == target_directory_ino {
-                let source_guard = provisional_guard_for_inode(self)?;
+                let source_guard = provisional_guard_for_inode_fn(self)?;
                 let source_cluster_map_generation = self.cluster_map_for_read_guard(
                     source_guard,
                     &discovery_allocation_guard,
@@ -173,7 +173,11 @@ impl ExfatInode {
                 )?;
                 let source_view = Self::locate_named_child_view(
                     &directory_bytes,
-                    source_cluster_map.data_length.is_none(),
+                    if source_cluster_map.data_length.is_none() {
+                        DirectoryScanMode::Root
+                    } else {
+                        DirectoryScanMode::Ordinary
+                    },
                     upcase_table,
                     names.source,
                     names.source_hash,
@@ -191,7 +195,11 @@ impl ExfatInode {
                 .ok_or_else(invalid_on_disk_layout)?;
                 let target_child_inode = Self::locate_named_child_view(
                     &directory_bytes,
-                    source_cluster_map.data_length.is_none(),
+                    if source_cluster_map.data_length.is_none() {
+                        DirectoryScanMode::Root
+                    } else {
+                        DirectoryScanMode::Ordinary
+                    },
                     upcase_table,
                     names.destination,
                     names.destination_hash,
@@ -216,7 +224,7 @@ impl ExfatInode {
                     target_child_inode,
                 }
             } else {
-                let source_guard = provisional_guard_for_inode(self)?;
+                let source_guard = provisional_guard_for_inode_fn(self)?;
                 let source_cluster_map_generation = self.cluster_map_for_read_guard(
                     source_guard,
                     &discovery_allocation_guard,
@@ -233,7 +241,11 @@ impl ExfatInode {
                 )?;
                 let source_view = Self::locate_named_child_view(
                     &source_directory_bytes,
-                    source_cluster_map.data_length.is_none(),
+                    if source_cluster_map.data_length.is_none() {
+                        DirectoryScanMode::Root
+                    } else {
+                        DirectoryScanMode::Ordinary
+                    },
                     upcase_table,
                     names.source,
                     names.source_hash,
@@ -249,7 +261,7 @@ impl ExfatInode {
                     RenameDiscoveryRole::Source,
                 )?
                 .ok_or_else(invalid_on_disk_layout)?;
-                let target_guard = provisional_guard_for_inode(target_directory)?;
+                let target_guard = provisional_guard_for_inode_fn(target_directory)?;
                 let target_cluster_map_generation = target_directory.cluster_map_for_read_guard(
                     target_guard,
                     &discovery_allocation_guard,
@@ -267,7 +279,11 @@ impl ExfatInode {
                     )?;
                 let target_child_inode = Self::locate_named_child_view(
                     &target_directory_bytes,
-                    target_cluster_map.data_length.is_none(),
+                    if target_cluster_map.data_length.is_none() {
+                        DirectoryScanMode::Root
+                    } else {
+                        DirectoryScanMode::Ordinary
+                    },
                     upcase_table,
                     names.destination,
                     names.destination_hash,
@@ -346,7 +362,7 @@ impl ExfatInode {
         discovery: &'a RenameDiscovery,
         inode_guards: &'a [InodeStateWriteGuard<'guard>],
     ) -> Result<FinalRenameAdmission<'a, 'guard>> {
-        let guard_for_inode = |inode: &ExfatInode| {
+        let guard_for_inode_fn = |inode: &ExfatInode| {
             inode_guards
                 .iter()
                 .find(|guard| guard.guards_inode(inode))
@@ -358,24 +374,24 @@ impl ExfatInode {
                 source_child_inode,
                 target_child_inode,
             } => {
-                let directory_guard = guard_for_inode(self)?;
+                let directory_guard = guard_for_inode_fn(self)?;
                 if directory_guard.metadata().type_ != InodeType::Dir {
                     return_errno!(Errno::ENOTDIR);
                 }
                 let parent_guard = parent_directory
                     .as_ref()
-                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .map(|parent| guard_for_inode_fn(parent.as_ref()))
                     .transpose()?;
                 let source_child = AdmittedRenameChild {
                     inode: source_child_inode,
-                    guard: guard_for_inode(source_child_inode.as_ref())?,
+                    guard: guard_for_inode_fn(source_child_inode.as_ref())?,
                 };
                 let target_child = target_child_inode
                     .as_ref()
                     .map(|target| -> Result<AdmittedRenameChild<'a, 'guard>> {
                         Ok(AdmittedRenameChild {
                             inode: target,
-                            guard: guard_for_inode(target.as_ref())?,
+                            guard: guard_for_inode_fn(target.as_ref())?,
                         })
                     })
                     .transpose()?;
@@ -393,8 +409,8 @@ impl ExfatInode {
                 source_child_inode,
                 target_child_inode,
             } => {
-                let source_guard = guard_for_inode(self)?;
-                let target_guard = guard_for_inode(target_directory)?;
+                let source_guard = guard_for_inode_fn(self)?;
+                let target_guard = guard_for_inode_fn(target_directory)?;
                 if source_guard.metadata().type_ != InodeType::Dir
                     || target_guard.metadata().type_ != InodeType::Dir
                 {
@@ -402,22 +418,22 @@ impl ExfatInode {
                 }
                 let source_parent_guard = source_parent_directory
                     .as_ref()
-                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .map(|parent| guard_for_inode_fn(parent.as_ref()))
                     .transpose()?;
                 let target_parent_guard = target_parent_directory
                     .as_ref()
-                    .map(|parent| guard_for_inode(parent.as_ref()))
+                    .map(|parent| guard_for_inode_fn(parent.as_ref()))
                     .transpose()?;
                 let source_child = AdmittedRenameChild {
                     inode: source_child_inode,
-                    guard: guard_for_inode(source_child_inode.as_ref())?,
+                    guard: guard_for_inode_fn(source_child_inode.as_ref())?,
                 };
                 let target_child = target_child_inode
                     .as_ref()
                     .map(|target| -> Result<AdmittedRenameChild<'a, 'guard>> {
                         Ok(AdmittedRenameChild {
                             inode: target,
-                            guard: guard_for_inode(target.as_ref())?,
+                            guard: guard_for_inode_fn(target.as_ref())?,
                         })
                     })
                     .transpose()?;
@@ -444,7 +460,11 @@ impl ExfatInode {
     ) -> Result<FileEntrySetView<'a>> {
         Self::locate_named_child_view(
             directory_bytes,
-            cluster_map.data_length.is_none(),
+            if cluster_map.data_length.is_none() {
+                DirectoryScanMode::Root
+            } else {
+                DirectoryScanMode::Ordinary
+            },
             upcase_table,
             old_name,
             old_name_hash,
@@ -462,7 +482,11 @@ impl ExfatInode {
     ) -> Result<Option<FileEntrySetView<'a>>> {
         Ok(Self::locate_named_child_view(
             directory_bytes,
-            cluster_map.data_length.is_none(),
+            if cluster_map.data_length.is_none() {
+                DirectoryScanMode::Root
+            } else {
+                DirectoryScanMode::Ordinary
+            },
             upcase_table,
             new_name,
             new_name_hash,
