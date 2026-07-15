@@ -358,7 +358,22 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Compile Receipt**: `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260715-124611-cross_meso_vfs_to_bio_topology-pass_183_five_clippy_signature_sites_creator/summary.tsv` (`cargo-check=0`)
   - **Compile Repairs**: one pass181 brace mismatch and one pass181 missing borrow, plus two refactor-local `BootRegion` borrows; all compiler-proven and packet-bounded
   - **Deferred-15 Decision**: do not add `#[expect]` before the required full production review; recensus after review stabilization because refactors may move or naturally remove diagnostics
-  - **Next Gate**: full production review, then independent source-scoped cargo-check/Clippy and survivor-only disposition
+  - **Next Gate**: pass184 review findings must close before independent source-scoped cargo-check/Clippy and survivor-only disposition
+- [ ] **Post-Warning-Cleanup Full Production Review** (`pass_184_aster_code_review`)
+  - **Status**: Review artifact accepted; six verified findings keep the quality gate open
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_184_aster_code_review.md`
+  - **Execution Model**: three isolated GPT-5.4 subagents run strictly serially for Maintainability, Development, and Security using exact skill-generated prompts; no Codex CLI reviewer execution and no concurrent reviewer agents
+  - **Verified Findings**: four major and two minor; the sole behavioral defect is unbounded `VmWriter` consumption past EOF in `read_at_impl`
+  - **Structural Findings**: oversized create/cross-directory-rename protocol scripts and two durability-phase booleans remain production-quality questions
+  - **Documentation Deferral**: the stable inode lock-rank comment is deferred to the final Documentation Writer review and does not block the current production cleanup wave
+  - **Retractions**: both `NoReplace` comments are false because VFS validates destination absence before filesystem dispatch; packed-hint newtype proposal conflicts with the accepted owner-local `AtomicU64` boundary
+  - **Next Gate**: route the EOF-read correctness repair first; require a read-only design decision before any create/rename decomposition; handle the typed exposure phase separately; defer the remaining 15 Clippy shape findings until this review wave stabilizes
+- [ ] **EOF-Bounded Cached Read Repair** (`pass_185_eof_bounded_cached_read_creator`)
+  - **Status**: Creator packet archived and dispatched
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_185_eof_bounded_cached_read_creator_dispatch.md`
+  - **Scope**: `inode/cached_io.rs::read_at_impl` only; limit PageCache writer consumption to the exact EOF-bounded returned length
+  - **Boundary**: no VDL/PageCache resize/zero-fill/lock/error/structural/Clippy change and no Creator command
+  - **Next Gate**: main-agent static acceptance, synchronized compile Checker, then review finding closure
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review
   - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`

@@ -104,8 +104,16 @@ impl ExfatInode {
         if read_start == read_end {
             return Ok(0);
         }
+        let read_len = read_end - read_start;
 
-        page_cache.read(read_start, writer).map_err(Error::from)?;
-        Ok(read_end - read_start)
+        {
+            let mut limited_writer = writer.clone_exclusive();
+            limited_writer.limit(read_len);
+            page_cache
+                .read(read_start, &mut limited_writer)
+                .map_err(Error::from)?;
+        }
+        writer.skip(read_len);
+        Ok(read_len)
     }
 }
