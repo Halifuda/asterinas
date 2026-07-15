@@ -51,6 +51,12 @@ pub(super) struct ExfatFilePageBackend {
     pub(super) page_cache_context: RwMutex<Option<PageCacheContext>>,
 }
 
+struct PageIoRange {
+    page_offset: usize,
+    disk_offset: usize,
+    len: usize,
+}
+
 impl ExfatFilePageBackend {
     pub(super) fn new(block_device: Arc<dyn BlockDevice>, boot_region: BootRegion) -> Self {
         Self {
@@ -78,7 +84,7 @@ impl ExfatFilePageBackend {
         page_cache_context: &PageCacheContext,
         idx: usize,
         bio_type: BioType,
-    ) -> Result<(usize, Vec<(usize, usize, usize)>)> {
+    ) -> Result<(usize, Vec<PageIoRange>)> {
         let (cluster_map, logical_end, initialized_limit, mount_runtime) = match page_cache_context {
             PageCacheContext::RegularFile {
                 cluster_map,
@@ -171,7 +177,7 @@ impl ExfatFilePageBackend {
         let mut cluster_offset = page_offset % cluster_size;
         let mut page_range_offset = 0usize;
         let mut remaining = transfer_len;
-        let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
+        let mut ranges: Vec<PageIoRange> = Vec::new();
 
         while remaining != 0 {
             let range = cluster_ranges
@@ -192,17 +198,23 @@ impl ExfatFilePageBackend {
                 .checked_add(cluster_offset)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
 
-            if let Some((last_page_offset, last_disk_offset, last_len)) = ranges.last_mut()
-                && last_page_offset
-                    .checked_add(*last_len)
-                    .zip(last_disk_offset.checked_add(*last_len))
+            if let Some(last_range) = ranges.last_mut()
+                && last_range
+                    .page_offset
+                    .checked_add(last_range.len)
+                    .zip(last_range.disk_offset.checked_add(last_range.len))
                     == Some((page_range_offset, chunk_offset))
             {
-                *last_len = last_len
+                last_range.len = last_range
+                    .len
                     .checked_add(chunk_len)
                     .ok_or_else(|| Error::new(Errno::EINVAL))?;
             } else {
-                ranges.push((page_range_offset, chunk_offset, chunk_len));
+                ranges.push(PageIoRange {
+                    page_offset: page_range_offset,
+                    disk_offset: chunk_offset,
+                    len: chunk_len,
+                });
             }
 
             page_range_offset = page_range_offset
@@ -227,7 +239,7 @@ impl ExfatFilePageBackend {
         &self,
         locked_page: LockedCachePage,
         initialized_len: usize,
-        page_ranges: Vec<(usize, usize, usize)>,
+        page_ranges: Vec<PageIoRange>,
         io_batch: &mut IoBatch,
         bio_type: BioType,
     ) -> Result<()> {
@@ -241,13 +253,14 @@ impl ExfatFilePageBackend {
         let page_io =
             FragmentedPageIo::new(locked_page, pending_bios, bio_type, initialized_len);
 
-        for (range_index, (page_offset, disk_offset, len)) in page_ranges.into_iter().enumerate() {
-            let page_end = page_offset
-                .checked_add(len)
+        for (range_index, page_range) in page_ranges.into_iter().enumerate() {
+            let page_end = page_range
+                .page_offset
+                .checked_add(page_range.len)
                 .ok_or_else(|| Error::new(Errno::EINVAL))?;
             let bio_segment = BioSegment::new_from_segment_slice(
                 page_segment.clone(),
-                page_offset..page_end,
+                page_range.page_offset..page_end,
                 bio_direction,
             );
             let completion_io = page_io.clone();
@@ -255,7 +268,7 @@ impl ExfatFilePageBackend {
                 Box::new(move |status| completion_io.complete(status));
             let bio = aster_block::bio::Bio::new(
                 bio_type,
-                aster_block::id::Sid::from_offset(disk_offset),
+                aster_block::id::Sid::from_offset(page_range.disk_offset),
                 vec![bio_segment],
                 Some(complete_fn),
             );

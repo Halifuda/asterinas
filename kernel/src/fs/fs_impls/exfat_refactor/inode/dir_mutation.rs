@@ -159,7 +159,7 @@ impl ExfatInode {
                     cluster_map,
                     &mut allocation_guard,
                     &mut fs_state,
-                    &block_device,
+                    fs.as_ref(),
                     &boot_region,
                     parent_inode_state_guard,
                     self_inode_state_guard,
@@ -185,7 +185,7 @@ impl ExfatInode {
             };
             let slot_range_bytes = direntry::slot_range_bytes(slot_range)?;
             let child_ino = self.entry_location_ino(cluster_map, slot_range.first_entry_index())?;
-            let (first_cluster, data_length, no_fat_chain, child_cluster_map) =
+            let (child_stream, child_cluster_map) =
                 if type_ == InodeType::Dir && !options.zero_size_dir {
                     allocation_guard.allocate(1, None)?;
                     let allocated_cluster = allocation_guard.single_cluster()?;
@@ -199,13 +199,17 @@ impl ExfatInode {
                         }
                         return Err(error);
                     }
+                    let child_stream = StreamExtensionDirEntry {
+                        data_length: Some(boot_region.cluster_size),
+                        first_cluster: allocated_cluster,
+                        valid_data_length: Some(boot_region.cluster_size),
+                        no_fat_chain: true,
+                    };
                     let entry_set = direntry::encode_file_entry_set(
                         &name,
                         name_hash,
                         type_,
-                        allocated_cluster,
-                        boot_region.cluster_size,
-                        true,
+                        child_stream,
                         create_timestamp,
                         last_accessed_timestamp,
                         last_modified_timestamp,
@@ -220,12 +224,7 @@ impl ExfatInode {
                     )];
                     let child_cluster_map = Some(Arc::new(ClusterMap::from_stream_and_ranges(
                         &boot_region,
-                        StreamExtensionDirEntry {
-                            data_length: Some(boot_region.cluster_size),
-                            first_cluster: allocated_cluster,
-                            valid_data_length: Some(boot_region.cluster_size),
-                            no_fat_chain: true,
-                        },
+                        child_stream,
                         vec![ClusterRange {
                             start_cluster: allocated_cluster,
                             cluster_count: 1,
@@ -251,20 +250,19 @@ impl ExfatInode {
                             return Err(error);
                         }
                     }
-                    (
-                        allocated_cluster,
-                        boot_region.cluster_size,
-                        true,
-                        child_cluster_map,
-                    )
+                    (child_stream, child_cluster_map)
                 } else {
+                    let child_stream = StreamExtensionDirEntry {
+                        data_length: Some(0),
+                        first_cluster: 0,
+                        valid_data_length: Some(0),
+                        no_fat_chain: false,
+                    };
                     let entry_set = direntry::encode_file_entry_set(
                         &name,
                         name_hash,
                         type_,
-                        0,
-                        0,
-                        false,
+                        child_stream,
                         create_timestamp,
                         last_accessed_timestamp,
                         last_modified_timestamp,
@@ -280,12 +278,7 @@ impl ExfatInode {
                     let child_cluster_map = if type_ == InodeType::Dir {
                         Some(Arc::new(ClusterMap::from_stream_and_ranges(
                             &boot_region,
-                            StreamExtensionDirEntry {
-                                data_length: Some(0),
-                                first_cluster: 0,
-                                valid_data_length: Some(0),
-                                no_fat_chain: false,
-                            },
+                            child_stream,
                             Vec::new(),
                         )?))
                     } else {
@@ -301,19 +294,13 @@ impl ExfatInode {
                         Ok(Err(error)) => create_primary_error = Some(error),
                         Err(error) => return Err(error),
                     }
-                    (0, 0, false, child_cluster_map)
+                    (child_stream, child_cluster_map)
                 };
 
             let child_size = if type_ == InodeType::Dir {
-                data_length
+                child_stream.data_length.unwrap_or(0)
             } else {
                 0
-            };
-            let child_stream = StreamExtensionDirEntry {
-                data_length: Some(data_length),
-                first_cluster,
-                valid_data_length: Some(data_length),
-                no_fat_chain,
             };
             let child_inode = Self::new_child(
                 &fs,
@@ -973,6 +960,10 @@ impl ExfatInode {
 
     // Cross-directory rename helpers
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Same-directory rename keeps the admitted child state, guard proof, shared filesystem/allocation state, and names explicit across one namespace persistence transaction."
+    )]
     fn rename_within_directory(
         &self,
         mut cluster_map: StreamExtensionDirEntry,
@@ -1064,7 +1055,7 @@ impl ExfatInode {
                 reusable_slot_range,
                 fs_state,
                 allocation_guard,
-                block_device,
+                fs,
                 boot_region,
                 parent_inode_state_guard,
                 self_inode_state_guard,
@@ -1177,6 +1168,10 @@ impl ExfatInode {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Cross-directory rename must hold source and target guard surfaces plus shared filesystem/allocation state explicitly to preserve target-before-source persistence and cleanup ordering."
+    )]
     fn rename_across_directories(
         &self,
         source_cluster_map: StreamExtensionDirEntry,
@@ -1277,7 +1272,7 @@ impl ExfatInode {
             replaced_target_slot_range,
             fs_state,
             allocation_guard,
-            block_device,
+            fs,
             boot_region,
             target_parent_inode_state_guard,
             target_inode_state_guard,

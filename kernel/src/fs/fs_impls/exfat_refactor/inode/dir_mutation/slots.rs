@@ -6,9 +6,10 @@
 
 use core::ops::Range;
 
-use aster_block::BlockDevice;
-
-use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};
+use super::super::{
+    ExfatInode, StreamExtensionDirEntry,
+    state::InodeStateWriteGuard,
+};
 use crate::{
     fs::fs_impls::exfat_refactor::{
         boot::BootRegion,
@@ -16,7 +17,7 @@ use crate::{
             self as direntry, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, MutableDirEntrySlotSpan,
             ScannedDirEntry,
         },
-        fs::{AllocGuard, FsState},
+        fs::{AllocGuard, ExfatFs, FsState},
         invalid_on_disk_layout, invalid_operation_input,
     },
     prelude::*,
@@ -91,12 +92,16 @@ impl ExfatInode {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Slot reservation may trigger directory growth, so it keeps the admitted guards, mutable allocation/filesystem state, and immutable filesystem owner explicit across the publish-or-rollback boundary."
+    )]
     pub(super) fn reserve_directory_entry_slots(
         &self,
         mut cluster_map: StreamExtensionDirEntry,
         allocation_guard: &mut AllocGuard<'_>,
         fs_state: &mut FsState,
-        block_device: &Arc<dyn BlockDevice>,
+        fs: &ExfatFs,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -128,14 +133,17 @@ impl ExfatInode {
                 cluster_map,
                 allocation_guard,
                 fs_state,
-                block_device,
-                boot_region,
+                fs,
                 parent_inode_state_guard,
                 self_inode_state_guard,
             )?;
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Rename destination reservation must thread the current snapshot, reusable-slot decision, and the same admitted growth state explicitly so destination reuse and growth stay in one transaction."
+    )]
     pub(super) fn reserve_rename_destination_slot(
         &self,
         cluster_map: StreamExtensionDirEntry,
@@ -143,7 +151,7 @@ impl ExfatInode {
         reusable_slot_range: Option<DirEntrySlotRange>,
         fs_state: &mut FsState,
         allocation_guard: &mut AllocGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
+        fs: &ExfatFs,
         boot_region: &BootRegion,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -159,7 +167,7 @@ impl ExfatInode {
                 cluster_map,
                 allocation_guard,
                 fs_state,
-                block_device,
+                fs,
                 boot_region,
                 parent_inode_state_guard,
                 self_inode_state_guard,

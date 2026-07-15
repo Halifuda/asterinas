@@ -19,6 +19,13 @@ use crate::{
     prelude::*,
 };
 
+pub(super) struct PreparedEntrySetWrite {
+    slot_range: direntry::DirEntrySlotRange,
+    entry_set_bytes: Vec<u8>,
+    old_entry_set_bytes: Vec<u8>,
+    page_dirty_states: Vec<(usize, bool)>,
+}
+
 impl ExfatInode {
     pub(super) fn read_validated_entry_set(
         &self,
@@ -193,14 +200,7 @@ impl ExfatInode {
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         boot_region: &BootRegion,
         rewrite_entry_set_fn: impl FnOnce(direntry::FileEntrySetView<'_>) -> Result<Option<Vec<u8>>>,
-    ) -> Result<
-        Option<(
-            direntry::DirEntrySlotRange,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<(usize, bool)>,
-        )>,
-    > {
+    ) -> Result<Option<PreparedEntrySetWrite>> {
         let parent_cluster_map = parent_inode_state_guard.dir_entry_stream();
         let parent_cluster_map_generation = parent_inode_state_guard
             .cached_cluster_map()
@@ -259,29 +259,28 @@ impl ExfatInode {
                 Ok((page_idx, page_cache.has_dirty_pages(page_start..page_end)))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Some((
+        Ok(Some(PreparedEntrySetWrite {
             slot_range,
             entry_set_bytes,
             old_entry_set_bytes,
             page_dirty_states,
-        )))
+        }))
     }
 
     pub(super) fn persist_prepared_entry_set_write_classified(
         &self,
         fs_state: &mut FsState,
-        prepared_entry_set_write: (
-            direntry::DirEntrySlotRange,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<(usize, bool)>,
-        ),
+        prepared_entry_set_write: PreparedEntrySetWrite,
         parent_inode: &ExfatInode,
         parent_metadata: Metadata,
         allow_not_exposed_rollback: bool,
     ) -> Result<Result<bool>> {
-        let (slot_range, entry_set_bytes, old_entry_set_bytes, page_dirty_states) =
-            prepared_entry_set_write;
+        let PreparedEntrySetWrite {
+            slot_range,
+            entry_set_bytes,
+            old_entry_set_bytes,
+            page_dirty_states,
+        } = prepared_entry_set_write;
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = parent_inode
             .page_cache_handle(parent_metadata)

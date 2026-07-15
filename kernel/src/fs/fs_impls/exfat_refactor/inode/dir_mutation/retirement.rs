@@ -212,6 +212,10 @@ impl ExfatInode {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Rename finalization must receive the admitted source and optional target participants plus shared cleanup state explicitly to preserve post-persistence error and cleanup gating."
+    )]
     pub(super) fn finalize_rename_protocol(
         destination_directory: &ExfatInode,
         destination_slot_range: DirEntrySlotRange,

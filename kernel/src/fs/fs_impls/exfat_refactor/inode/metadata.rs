@@ -15,6 +15,7 @@ use super::{
         invalid_on_disk_layout,
     },
     ExfatInode, InodeTimestampField,
+    parent_entry_set::PreparedEntrySetWrite,
     state::InodeStateWriteGuard,
 };
 use crate::{
@@ -35,14 +36,7 @@ impl ExfatInode {
         parent_inode_state_guard: &InodeStateWriteGuard<'_>,
         boot_region: &BootRegion,
         timestamp: Duration,
-    ) -> Result<
-        Option<(
-            direntry::DirEntrySlotRange,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<(usize, bool)>,
-        )>,
-    > {
+    ) -> Result<Option<PreparedEntrySetWrite>> {
         self.prepare_rewritten_entry_set_write_with_guard(
             self_inode_state_guard,
             parent_inode_state_guard,
@@ -491,6 +485,10 @@ impl ExfatInode {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Directory metadata refresh must keep caller-owned guard proof, boot-region timestamp context, the optional prepared write, and namespace exposure classification explicit for rollback handling."
+    )]
     pub(super) fn refresh_directory_metadata_after_namespace_mutation_with_guards(
         &self,
         fs_state: &mut FsState,
@@ -498,12 +496,7 @@ impl ExfatInode {
         timestamp: Duration,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
-        prepared_entry_set_write: Option<(
-            direntry::DirEntrySlotRange,
-            Vec<u8>,
-            Vec<u8>,
-            Vec<(usize, bool)>,
-        )>,
+        prepared_entry_set_write: Option<PreparedEntrySetWrite>,
         namespace_stage_exposed: bool,
     ) -> Result<()> {
         if self_inode_state_guard.metadata().type_ != InodeType::Dir {

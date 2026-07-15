@@ -361,9 +361,7 @@ pub(super) fn encode_file_entry_set(
     name: &[u16],
     name_hash: u16,
     inode_type: InodeType,
-    first_cluster: u32,
-    data_length: usize,
-    no_fat_chain: bool,
+    cluster_map: StreamExtensionDirEntry,
     create_timestamp: FileEntryTimestamp,
     last_accessed_timestamp: FileEntryTimestamp,
     last_modified_timestamp: FileEntryTimestamp,
@@ -401,16 +399,14 @@ pub(super) fn encode_file_entry_set(
 
     let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
     entry_set[stream_entry_offset] = STREAM_EXTENSION_ENTRY_TYPE;
-    entry_set[stream_entry_offset + 1] = if no_fat_chain { 0x03 } else { 0x01 };
+    entry_set[stream_entry_offset + 1] = if cluster_map.no_fat_chain { 0x03 } else { 0x01 };
     entry_set[stream_entry_offset + 3] =
         u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 4..stream_entry_offset + 6]
         .copy_from_slice(&name_hash.to_le_bytes());
     StreamExtensionDirEntry {
-        data_length: Some(data_length),
-        first_cluster,
-        valid_data_length: Some(data_length),
-        no_fat_chain,
+        valid_data_length: cluster_map.data_length,
+        ..cluster_map
     }
     .write_to_file_stream_entry(
         &mut entry_set[stream_entry_offset..stream_entry_offset + DIRECTORY_ENTRY_SIZE],

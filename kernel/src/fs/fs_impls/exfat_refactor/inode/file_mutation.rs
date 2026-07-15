@@ -452,6 +452,10 @@ impl ExfatInode {
         resize_result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Regular-file growth spans allocation exposure, page-cache publication, and rollback closures, so the live guard/state inputs stay separate instead of being hidden in a carrier."
+    )]
     fn grow_and_commit_regular_file(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -631,7 +635,7 @@ impl ExfatInode {
                 published_cluster_map_generation,
                 published_page_cache_context,
             );
-            self.mark_content_dirty(&inode_state_guard);
+            self.mark_content_dirty(inode_state_guard);
             if has_allocation {
                 allocation_guard.commit_allocation();
             }

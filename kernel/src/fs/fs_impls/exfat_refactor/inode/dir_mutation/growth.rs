@@ -4,16 +4,16 @@
 //!
 //! Method groups: directory cluster growth, attachment, and publication.
 
-use aster_block::BlockDevice;
-
-use super::super::{ClusterMap, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};
+use super::super::{
+    ClusterMap, ExfatInode, StreamExtensionDirEntry,
+    parent_entry_set::PreparedEntrySetWrite,
+    state::InodeStateWriteGuard,
+};
 use crate::{
     fs::{
         file::InodeType,
         fs_impls::exfat_refactor::{
             bitmap::ClusterRange,
-            boot::BootRegion,
-            dir_entry_format::DirEntrySlotRange,
             fat::FatReader,
             fs::{AllocGuard, ExfatFs, FsState},
             invalid_on_disk_layout,
@@ -28,16 +28,17 @@ impl ExfatInode {
         cluster_map: StreamExtensionDirEntry,
         allocation_guard: &mut AllocGuard<'_>,
         fs_state: &mut FsState,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
+        fs: &ExfatFs,
         parent_inode_state_guard: Option<&InodeStateWriteGuard<'_>>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
     ) -> Result<StreamExtensionDirEntry> {
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
         allocation_guard.allocate(1, None)?;
         let allocated_cluster = allocation_guard.single_cluster()?;
         let mut publication_complete = false;
         let update_result = (|| {
-            Self::initialize_directory_cluster(block_device, boot_region, allocated_cluster)?;
+            Self::initialize_directory_cluster(&block_device, &boot_region, allocated_cluster)?;
             let (
                 updated_cluster_map,
                 updated_cluster_map_generation,
@@ -49,8 +50,7 @@ impl ExfatInode {
                 cluster_map,
                 allocation_guard,
                 self_inode_state_guard,
-                block_device,
-                boot_region,
+                fs,
                 allocated_cluster,
                 |updated_cluster_map| {
                     if updated_cluster_map.data_length.is_none() {
@@ -65,10 +65,10 @@ impl ExfatInode {
                     self.prepare_rewritten_entry_set_write_with_guard(
                         self_inode_state_guard,
                         parent_inode_state_guard,
-                        boot_region,
+                        &boot_region,
                         |entry_view| {
                             let (inode_type, _first_cluster, _data_length, _no_fat_chain) =
-                                entry_view.child_metadata(boot_region)?;
+                                entry_view.child_metadata(&boot_region)?;
                             if inode_type != InodeType::Dir || !entry_view.is_directory() {
                                 return Err(invalid_on_disk_layout());
                             }
@@ -155,27 +155,30 @@ impl ExfatInode {
         }
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "The return tuple carries publication state, exposure error, and the opaque prepared parent-entry write across the attach/persist boundary without introducing another carrier."
+    )]
     fn attach_directory_cluster(
         &self,
         cluster_map: StreamExtensionDirEntry,
         allocation_guard: &AllocGuard<'_>,
         self_inode_state_guard: &InodeStateWriteGuard<'_>,
-        block_device: &Arc<dyn BlockDevice>,
-        boot_region: &BootRegion,
+        fs: &ExfatFs,
         allocated_cluster: u32,
         prepare_parent_entry_set_write_fn: impl FnOnce(
             StreamExtensionDirEntry,
-        ) -> Result<
-            Option<(DirEntrySlotRange, Vec<u8>, Vec<u8>, Vec<(usize, bool)>)>,
-        >,
+        ) -> Result<Option<PreparedEntrySetWrite>>,
     ) -> Result<(
         StreamExtensionDirEntry,
         Arc<ClusterMap>,
         usize,
         bool,
         Option<Error>,
-        Option<(DirEntrySlotRange, Vec<u8>, Vec<u8>, Vec<(usize, bool)>)>,
+        Option<PreparedEntrySetWrite>,
     )> {
+        let block_device = fs.immutable_block_device();
+        let boot_region = fs.immutable_boot_region();
         let next_data_length = match cluster_map.data_length {
             Some(data_length) => data_length
                 .checked_add(boot_region.cluster_size)
@@ -227,14 +230,14 @@ impl ExfatInode {
             None => cluster_map,
         };
         let updated_generation = Arc::new(admitted_cluster_map.appended(
-            boot_region,
+            &boot_region,
             updated_cluster_map,
             &[ClusterRange {
                 start_cluster: allocated_cluster,
                 cluster_count: 1,
             }],
         )?);
-        let updated_allocated_size = updated_generation.allocated_byte_length(boot_region)?;
+        let updated_allocated_size = updated_generation.allocated_byte_length(&boot_region)?;
         let exposed_old_topology = match cluster_map.data_length {
             None => true,
             Some(data_length) => data_length != 0 && !cluster_map.no_fat_chain,
@@ -242,7 +245,7 @@ impl ExfatInode {
         let prepared_parent_entry_set_write =
             prepare_parent_entry_set_write_fn(updated_cluster_map)?;
 
-        let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
+        let mut fat_reader = FatReader::new(block_device.as_ref(), &boot_region);
         let exposure_error = match cluster_map.data_length {
             Some(0) => {
                 fat_reader.terminate_cluster_chain(allocated_cluster)?;
@@ -260,7 +263,7 @@ impl ExfatInode {
             Some(_) | None => {
                 fat_reader.terminate_cluster_chain(allocated_cluster)?;
                 let tail_cluster = admitted_cluster_map
-                    .terminal_cluster(boot_region)?
+                    .terminal_cluster(&boot_region)?
                     .ok_or_else(invalid_on_disk_layout)?;
                 fat_reader
                     .link_prepared_chain_to_tail(tail_cluster, allocated_cluster)?

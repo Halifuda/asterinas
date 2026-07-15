@@ -387,9 +387,32 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Creator Outcome**: pass192 code-side accepted after one uninterrupted GPT-5.4 Creator execution and main-agent static acceptance. All five stage receipts plus final Creator cargo-check are status 0 with no exFAT warning. The final surface has exactly four new functions, one moved finalizer, zero new carriers/modules, all seven visibilities narrowed, no raw parent-entry byte decode or direct hint publication outside the owner, and `dir_mutation.rs` at 1547 lines versus 1822 before cleanup.
   - **Final Gate**: pass193 owns one independent cargo-check and one exact ordered pass189 56-case runtime batch after all five stages.
   - **Final Outcome**: accepted/closed. Pass193 compile is status 0 with only the unrelated VFS registry warning. Runtime receipt `.agents/tmp/20260715-174216-pass_193_directory_orchestration_existing_owner_cleanup_56_case_runtime_checker_xfstests/` records 56 PASS, 0 FAIL, 0 NOTRUN, no pollution, clean deep-log scans, released locks, and no residual QEMU/cargo-osdk process. Pass194 Reviewer closes every pass190 finding and every pass191 checklist row with no production edit; final Checker is skippable.
-  - **Scope**: `inode/cached_io.rs::read_at_impl` only; limit PageCache writer consumption to the exact EOF-bounded returned length
-  - **Boundary**: no VDL/PageCache resize/zero-fill/lock/error/structural/Clippy change and no Creator command
-  - **Next Gate**: main-agent static acceptance, synchronized compile Checker, then review finding closure
+  - **Next Gate**: pass195 fresh post-restructure Clippy census; do not reuse historical remaining-finding counts or line locations
+- [x] **Post-Restructure Clippy Census** (`pass_195_post_restructure_clippy_census_checker`)
+  - **Status**: Accepted census complete; production disposition remains user-gated
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_195_post_restructure_clippy_census_checker_dispatch.md`
+  - **Scope**: one lock-guarded cargo-check plus targeted kernel Clippy; archive complete output and report every current `exfat_refactor` finding by lint, current location, and item/type surface
+  - **Boundary**: no production, test, harness, generated-runlist, prior-artifact, or scheduler-state edit by Checker; no QEMU/runtime; unrelated VFS registry warning remains excluded
+  - **Outcome**: cargo-check exit 0 with no project diagnostic; targeted Clippy exit 0 with 17 project findings: ten `too_many_arguments`, six `type_complexity`, and one `needless_borrow`. Complete artifact `.agents/components/cross_meso_vfs_to_bio_topology/pass_195_post_restructure_clippy_census_checker.md`; locks released.
+  - **Next Gate**: main-agent explanation and user disposition before any Creator repair pass; no production edit is authorized by the census alone
+- [x] **Clippy Shape Cleanup** (`pass_196` through `pass_198`)
+  - **Status**: Accepted/closed after GPT-5.4 Creator, independent GPT-5.4 Checker PASS, and non-GPT-5.4 Reviewer approval
+  - **Creator Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_196_clippy_shape_cleanup_creator_dispatch.md`
+  - **Scope**: close all 17 pass195 project findings through one mechanical repair, existing owner/type reuse, exactly two concrete invariant-bearing types, and survivor-only narrow item expectations
+  - **Boundary**: no behavior, typed exposure-phase, lock/guard, persistence/rollback ordering, VFS registry, test, harness, or runlist change
+  - **Creator Outcome**: all five stages completed; exactly `PreparedEntrySetWrite` and `PageIoRange` were introduced, eight survivor-only item expectations were added, final Creator cargo-check passed, and final targeted Clippy reports no project diagnostic. Two initial compile failures and bounded repairs are recorded in the Creator artifact.
+  - **Checker Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_197_clippy_shape_cleanup_checker_dispatch.md`
+  - **Checker Outcome**: PASS. Independent cargo-check and targeted Clippy both exit 0; no project diagnostic, all eight item expectations fulfilled, only the excluded VFS registry warning remains. Artifact `.agents/components/cross_meso_vfs_to_bio_topology/pass_197_clippy_shape_cleanup_checker.md`.
+  - **Reviewer Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_198_clippy_shape_cleanup_reviewer_dispatch.md`
+  - **Reviewer Outcome**: APPROVED with no production edit. Both introduced types are accepted as concrete invariant-bearing owner-local shapes; all eight item expectations are accurate and narrower than carrier-based alternatives; behavior, guard topology, target-before-source persistence, rollback, PageCache/BIO mapping, and error precedence remain unchanged. Artifact `.agents/components/cross_meso_vfs_to_bio_topology/pass_198_clippy_shape_cleanup_reviewer.md`.
+  - **Final Gate**: closed. Reviewer made no production edit, so pass197 remains the final Checker evidence and another Checker is not required.
+- [x] **VFS Stale Expectation Removal** (`pass_199_vfs_fs_creation_flags_expectation_cleanup`)
+  - **Status**: accepted/closed after independent GPT-5.4 Checker PASS
+  - **Scope**: remove only the stale `#[expect(dead_code)]` from `FsCreationCtx::flags()` now that `exfat_refactor` consumes filesystem-level creation flags
+  - **Rationale**: the accessor is intentionally live and its historical expectation makes GitHub Actions `make check` fail under `RUSTFLAGS=-Dwarnings`; retaining the exFAT call is required for initial read-only/runtime/remount semantics
+  - **Boundary**: no VFS behavior or API change, no additional lint suppression, and no filesystem implementation change beyond the already-accepted exFAT caller
+  - **Checker Outcome**: cargo-check and targeted kernel Clippy both exit 0 with zero warning/error lines; the VFS expectation warning is absent and all eight exFAT expectations remain fulfilled. Artifact `.agents/components/cross_meso_vfs_to_bio_topology/pass_199_vfs_fs_creation_flags_expectation_cleanup_checker.md`.
+  - **Final Gate**: include this one-line VFS cleanup with the accepted pass196-through-pass198 Clippy cleanup in one local commit; do not push or open a PR
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review
   - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_160_mapping_and_root_readdir_repair_designer_dispatch.md`
