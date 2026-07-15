@@ -6,7 +6,7 @@ use crate::prelude::*;
 
 mod bitmap;
 mod boot;
-mod direntry;
+mod dir_entry_format;
 mod fat;
 mod fs;
 mod inode;

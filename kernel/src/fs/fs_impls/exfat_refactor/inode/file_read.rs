@@ -6,59 +6,13 @@
 
 use ostd::mm::VmIo;
 
-use super::{
-    super::boot::BootRegion,
-    ClusterMap, ExfatInode, StreamExtensionDirEntry,
-};
+use super::ExfatInode;
 use crate::{
     fs::file::{InodeType, StatusFlags},
     prelude::*,
 };
 
 impl ExfatInode {
-    pub(super) fn validate_regular_file_mapping_shape(
-        boot_region: &BootRegion,
-        cluster_map: &StreamExtensionDirEntry,
-        data_length: usize,
-    ) -> Result<()> {
-        let data_length_u64 = u64::try_from(data_length).map_err(|_| Error::new(Errno::EINVAL))?;
-        match boot_region.validate_stream_data(cluster_map.first_cluster, data_length_u64) {
-            Ok(()) => Ok(()),
-            Err(_) => return_errno!(Errno::EINVAL),
-        }
-    }
-
-    pub(super) fn mapped_regular_file_cluster(
-        boot_region: &BootRegion,
-        cluster_map: &ClusterMap,
-        cluster_index: usize,
-    ) -> Result<u32> {
-        let (data_length, _) = cluster_map.validated_lengths()?;
-        let stream_extension = cluster_map.stream_extension();
-        if stream_extension.no_fat_chain {
-            let cluster_count = data_length.div_ceil(boot_region.cluster_size);
-            if cluster_index >= cluster_count {
-                return_errno!(Errno::EINVAL);
-            }
-            let last_cluster = stream_extension
-                .first_cluster
-                .checked_add(
-                    u32::try_from(cluster_count.saturating_sub(1))
-                        .map_err(|_| Error::new(Errno::EINVAL))?,
-                )
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            if !boot_region.is_valid_cluster(last_cluster) {
-                return_errno!(Errno::EINVAL);
-            }
-            return stream_extension
-                .first_cluster
-                .checked_add(u32::try_from(cluster_index).map_err(|_| Error::new(Errno::EINVAL))?)
-                .ok_or_else(|| Error::new(Errno::EINVAL));
-        }
-
-        cluster_map.mapped_cluster(boot_region, cluster_index)
-    }
-
     pub(super) fn read_at_impl(
         &self,
         offset: usize,

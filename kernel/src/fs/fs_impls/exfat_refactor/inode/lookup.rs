@@ -6,8 +6,9 @@
 
 use super::{
     super::{
-        direntry::{
-            self, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, FileEntrySetView, ScannedDirEntry,
+        dir_entry_format::{
+            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, FileEntrySetView,
+            ScannedDirEntry,
         },
         invalid_on_disk_layout, invalid_operation_input,
     },

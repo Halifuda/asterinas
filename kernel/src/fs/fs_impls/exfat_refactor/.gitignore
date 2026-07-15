@@ -7,6 +7,10 @@
 !/.agents/
 !/inode/
 !/inode/*
+!/inode/dir_mutation/
+!/inode/dir_mutation/*.rs
+!/inode/file_mutation/
+!/inode/file_mutation/*.rs
 
 /.agents/*
 !/.agents/README.md

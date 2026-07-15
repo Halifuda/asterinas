@@ -558,9 +558,7 @@ pub(super) enum ScannedDirEntry<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) enum ScannedDirEntrySlot {
-    EndOfDirectory {
-        entry_index: usize,
-    },
+    EndOfDirectory { entry_index: usize },
     FilePrimary,
     RootMetadata,
     Secondary(DirEntrySlotRange),
@@ -648,12 +646,7 @@ pub(super) fn scan_dir_entry_slot(
         END_OF_DIRECTORY_ENTRY_TYPE => Ok(ScannedDirEntrySlot::EndOfDirectory { entry_index }),
         0x01..=0x7F => Ok(ScannedDirEntrySlot::Vacant(single_slot)),
         FILE_DIRECTORY_ENTRY_TYPE => {
-            DirEntrySlotRange::new(
-                entry_index,
-                usize::from(entry[1])
-                    .checked_add(1)
-                    .ok_or(invalid_on_disk_layout())?,
-            )?;
+            file_primary_entry_slot_range(entry_index, entry)?;
             Ok(ScannedDirEntrySlot::FilePrimary)
         }
         entry_type => {
@@ -685,6 +678,24 @@ pub(super) fn scan_dir_entry_slot(
             Ok(ScannedDirEntrySlot::UnrecognizedPrimary)
         }
     }
+}
+
+pub(super) fn file_primary_entry_slot_range(
+    entry_index: usize,
+    primary_entry: &[u8],
+) -> Result<DirEntrySlotRange> {
+    if primary_entry.len() != DIRECTORY_ENTRY_SIZE {
+        return Err(invalid_on_disk_layout());
+    }
+    if primary_entry[0] != FILE_DIRECTORY_ENTRY_TYPE {
+        return Err(invalid_on_disk_layout());
+    }
+    DirEntrySlotRange::new(
+        entry_index,
+        usize::from(primary_entry[1])
+            .checked_add(1)
+            .ok_or(invalid_on_disk_layout())?,
+    )
 }
 
 fn scan_file_entry_set<'a>(

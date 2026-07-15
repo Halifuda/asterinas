@@ -20,7 +20,7 @@ use super::{
         bitmap::ClusterRange,
         boot::BootRegion,
         device_io,
-        direntry::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
+        dir_entry_format::{DIRECTORY_ENTRY_SIZE, DirEntrySlotRange},
         fat::{FatChainStep, FatReader},
         fs::{AllocGuard, AllocReadGuard, ExfatFs, MountOptions},
         invalid_on_disk_layout, invalid_operation_input,

@@ -10,7 +10,7 @@ use core::{cell::Cell, time::Duration};
 use super::{
     super::{
         boot::BootRegion,
-        direntry::{self, FileEntrySetView, FileEntryTimestamp},
+        dir_entry_format::{self as direntry, FileEntrySetView, FileEntryTimestamp},
         fs::{ExfatFs, FsState},
         invalid_on_disk_layout,
     },
@@ -29,6 +29,41 @@ use crate::{
 
 // ---- meta_write (refresh + setters) ----
 impl ExfatInode {
+    pub(super) fn prepare_directory_metadata_refresh_with_guards(
+        &self,
+        self_inode_state_guard: &InodeStateWriteGuard<'_>,
+        parent_inode_state_guard: &InodeStateWriteGuard<'_>,
+        boot_region: &BootRegion,
+        timestamp: Duration,
+    ) -> Result<
+        Option<(
+            direntry::DirEntrySlotRange,
+            Vec<u8>,
+            Vec<u8>,
+            Vec<(usize, bool)>,
+        )>,
+    > {
+        self.prepare_rewritten_entry_set_write_with_guard(
+            self_inode_state_guard,
+            parent_inode_state_guard,
+            boot_region,
+            |entry_view| {
+                let (timestamp_bytes, ten_ms_increment, encoded_utc_offset_byte) =
+                    Self::encoded_exfat_timestamp_fields(
+                        timestamp,
+                        entry_view.last_modified_timestamp().utc_offset_byte(),
+                    )?;
+                let mut mutable_entry_set = entry_view.to_mutable();
+                mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
+                    timestamp_bytes,
+                    Some(ten_ms_increment),
+                    encoded_utc_offset_byte,
+                ));
+                Ok(Some(mutable_entry_set.into_bytes()))
+            },
+        )
+    }
+
     pub(super) fn refresh_cached_metadata_from_entry_view(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
@@ -54,20 +89,20 @@ impl ExfatInode {
         )?;
         let allocated_sectors = Self::regular_file_allocated_sectors(boot_region, data_length)?;
         inode_state_guard.with_metadata_mut(|metadata| {
-                if metadata.type_ != inode_type {
-                    return Err(invalid_on_disk_layout());
-                }
-                let writable_bits = metadata.mode & mkmod!(a+w);
-                metadata.mode = chmod!(metadata.mode, a-w);
-                if !entry_view.is_read_only() {
-                    metadata.mode |= writable_bits;
-                }
-                metadata.last_access_at = last_access_at;
-                metadata.last_meta_change_at = last_modify_at;
-                metadata.last_modify_at = last_modify_at;
-                metadata.nr_sectors_allocated = allocated_sectors;
-                metadata.size = data_length;
-                Ok(())
+            if metadata.type_ != inode_type {
+                return Err(invalid_on_disk_layout());
+            }
+            let writable_bits = metadata.mode & mkmod!(a+w);
+            metadata.mode = chmod!(metadata.mode, a-w);
+            if !entry_view.is_read_only() {
+                metadata.mode |= writable_bits;
+            }
+            metadata.last_access_at = last_access_at;
+            metadata.last_meta_change_at = last_modify_at;
+            metadata.last_modify_at = last_modify_at;
+            metadata.nr_sectors_allocated = allocated_sectors;
+            metadata.size = data_length;
+            Ok(())
         })?;
         Ok(())
     }
@@ -80,24 +115,26 @@ impl ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let mut fs_state = fs.fs_state.write();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         if mount_state.forced_shutdown
             || mount_state.volume_flags.clear_to_zero
             || mount_state.volume_flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
-        if mount_state
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY)
-        {
+        if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
         let (discovered_type, parent) = {
             let inode_state_guard = self.inode_state_read_guard();
-            (inode_state_guard.metadata().type_, inode_state_guard.parent())
+            (
+                inode_state_guard.metadata().type_,
+                inode_state_guard.parent(),
+            )
         };
         let mut guarded_inodes = vec![self];
         if matches!(discovered_type, InodeType::Dir | InodeType::File)
@@ -224,11 +261,7 @@ impl ExfatInode {
         {
             return;
         }
-        if mount_state
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY)
-        {
+        if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
             return;
         }
 
@@ -244,7 +277,10 @@ impl ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let fs_state = fs.fs_state.read();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         if mount_state.forced_shutdown
             || mount_state.volume_flags.clear_to_zero
             || mount_state.volume_flags.media_failure
@@ -255,7 +291,10 @@ impl ExfatInode {
             return_errno!(Errno::EROFS);
         }
         let inode_state_guard = self.inode_state_write_guard();
-        if !matches!(inode_state_guard.metadata().type_, InodeType::Dir | InodeType::File) {
+        if !matches!(
+            inode_state_guard.metadata().type_,
+            InodeType::Dir | InodeType::File
+        ) {
             inode_state_guard.with_metadata_mut(|metadata| metadata.uid = uid);
             return Ok(());
         }
@@ -271,23 +310,25 @@ impl ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let fs_state = fs.fs_state.read();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         if mount_state.forced_shutdown
             || mount_state.volume_flags.clear_to_zero
             || mount_state.volume_flags.media_failure
         {
             return_errno!(Errno::EIO);
         }
-        if mount_state
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY)
-        {
+        if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
             return_errno!(Errno::EROFS);
         }
 
         let inode_state_guard = self.inode_state_write_guard();
-        if !matches!(inode_state_guard.metadata().type_, InodeType::Dir | InodeType::File) {
+        if !matches!(
+            inode_state_guard.metadata().type_,
+            InodeType::Dir | InodeType::File
+        ) {
             inode_state_guard.with_metadata_mut(|metadata| metadata.gid = gid);
             return Ok(());
         }
@@ -320,11 +361,7 @@ impl ExfatInode {
         {
             return;
         }
-        if mount_state
-            .options
-            .fs_flags
-            .contains(FsFlags::RDONLY)
-        {
+        if mount_state.options.fs_flags.contains(FsFlags::RDONLY) {
             return;
         }
 
@@ -339,10 +376,12 @@ impl ExfatInode {
         if !matches!(discovered_type, InodeType::Dir | InodeType::File) {
             let inode_state_guard = self.inode_state_write_guard();
             match field_kind {
-                InodeTimestampField::Accessed => inode_state_guard
-                    .with_metadata_mut(|metadata| metadata.last_access_at = time),
-                InodeTimestampField::Modified => inode_state_guard
-                    .with_metadata_mut(|metadata| metadata.last_modify_at = time),
+                InodeTimestampField::Accessed => {
+                    inode_state_guard.with_metadata_mut(|metadata| metadata.last_access_at = time)
+                }
+                InodeTimestampField::Modified => {
+                    inode_state_guard.with_metadata_mut(|metadata| metadata.last_modify_at = time)
+                }
             }
             return;
         }
@@ -358,9 +397,8 @@ impl ExfatInode {
             return;
         };
         let inode_guards = Self::directory_write_guards_by_ino(vec![self, parent.as_ref()]);
-        let Some(self_inode_state_guard) = inode_guards
-            .iter()
-            .find(|guard| guard.guards_inode(self))
+        let Some(self_inode_state_guard) =
+            inode_guards.iter().find(|guard| guard.guards_inode(self))
         else {
             return;
         };
@@ -492,11 +530,9 @@ impl ExfatInode {
             )
         })?;
         let classified_update = if let Some(prepared_entry_set_write) = prepared_entry_set_write {
-            let parent_inode = self_inode_state_guard
-                .parent()
-                .ok_or_else(|| {
-                    Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
-                })?;
+            let parent_inode = self_inode_state_guard.parent().ok_or_else(|| {
+                Error::with_message(Errno::EIO, "ordinary exFAT inode parent is not mounted")
+            })?;
             if !parent_inode_state_guard.guards_inode(parent_inode.as_ref()) {
                 return Err(Error::new(Errno::EINVAL));
             }

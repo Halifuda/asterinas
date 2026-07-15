@@ -4,12 +4,13 @@
 //!
 //! Method groups: inode construction and VFS trait dispatch.
 
-mod cached_io;
 mod dir_mutation;
 mod file_mutation;
+mod file_read;
 mod lookup;
 mod metadata;
 mod page_backend;
+mod parent_entry_set;
 mod state;
 pub(super) mod sync;
 
@@ -28,7 +29,7 @@ use self::{
     sync::InodeSyncScope,
 };
 use super::{
-    direntry::DirEntrySlotRange,
+    dir_entry_format::DirEntrySlotRange,
     fs::ExfatFs,
     invalid_on_disk_layout,
     upcase::UpcaseTable,
