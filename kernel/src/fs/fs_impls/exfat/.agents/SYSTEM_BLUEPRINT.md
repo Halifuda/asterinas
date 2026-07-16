@@ -2,7 +2,7 @@
 
 # System Blueprint & Dispatch Ledger
 
-This file is the dynamic central blackboard and tracker for the multi-agent exFAT refactor. It tracks the progress of the Top-Down Strict Protocol, ensuring all artifacts are generated in the correct sequence and no concurrency invariants (locks/owner gaps) are violated. Managers and Agents must continuously update this ledger as work progresses.
+This file is the dynamic central blackboard and tracker for the multi-agent exFAT implementation. The refactored implementation is now the official `exfat` filesystem and exposes the Linux-compatible `FSTYP=exfat` name. It tracks the Top-Down Strict Protocol, ensuring all artifacts are generated in the correct sequence and no concurrency invariants (locks/owner gaps) are violated. Managers and Agents must continuously update this ledger as work progresses.
 
 ## Current Active Wave: Comment/Naming Completion
 

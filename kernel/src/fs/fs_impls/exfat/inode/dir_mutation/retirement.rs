@@ -36,7 +36,7 @@ use super::{
 use crate::{
     fs::{
         file::InodeType,
-        fs_impls::exfat_refactor::{
+        exfat::{
             bitmap::ClusterRange,
             boot::BootRegion,
             dir_entry_format::{DirEntrySlotRange, FileEntrySetView},

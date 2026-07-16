@@ -27,7 +27,7 @@
 //!
 //! Authoritative references are Microsoft exFAT File System Specification,
 //! Sections 7.4, 7.6, 8.1, and 9.5,
-//! plus `crate::fs::fs_impls::exfat_refactor::inode::page_backend::PageCacheContext`.
+//! plus `crate::fs::fs_impls::exfat::inode::page_backend::PageCacheContext`.
 
 use alloc::vec;
 use core::cell::RefCell;
@@ -98,7 +98,7 @@ impl<'a> InodeStateReadGuard<'a> {
     }
 }
 
-pub(in crate::fs::fs_impls::exfat_refactor) struct InodeStateWriteGuard<'a> {
+pub(in crate::fs::fs_impls::exfat) struct InodeStateWriteGuard<'a> {
     inode: &'a ExfatInode,
     guard: RefCell<RwMutexWriteGuard<'a, InodeState>>,
 }
@@ -198,7 +198,7 @@ impl<'a> InodeStateWriteGuard<'a> {
         self.guard.borrow().dirty_file_retention.is_some()
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn set_dirty_file_retention(
+    pub(in crate::fs::fs_impls::exfat) fn set_dirty_file_retention(
         &self,
         retained_inode: Option<Arc<ExfatInode>>,
     ) {
@@ -207,18 +207,18 @@ impl<'a> InodeStateWriteGuard<'a> {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::exfat_refactor) struct StreamExtensionDirEntry {
+pub(in crate::fs::fs_impls::exfat) struct StreamExtensionDirEntry {
     // `None` is reserved for the unbounded root directory; ordinary files and
     // directories always keep `Some(data_length)`.
-    pub(in crate::fs::fs_impls::exfat_refactor) data_length: Option<usize>,
-    pub(in crate::fs::fs_impls::exfat_refactor) first_cluster: u32,
+    pub(in crate::fs::fs_impls::exfat) data_length: Option<usize>,
+    pub(in crate::fs::fs_impls::exfat) first_cluster: u32,
     // `None` is reserved for the unbounded root directory.
-    pub(in crate::fs::fs_impls::exfat_refactor) valid_data_length: Option<usize>,
-    pub(in crate::fs::fs_impls::exfat_refactor) no_fat_chain: bool,
+    pub(in crate::fs::fs_impls::exfat) valid_data_length: Option<usize>,
+    pub(in crate::fs::fs_impls::exfat) no_fat_chain: bool,
 }
 
 #[derive(Clone)]
-pub(in crate::fs::fs_impls::exfat_refactor) struct ClusterMap {
+pub(in crate::fs::fs_impls::exfat) struct ClusterMap {
     stream_extension: StreamExtensionDirEntry,
     cluster_ranges: Vec<ClusterRange>,
 }
@@ -449,7 +449,7 @@ impl ExfatInode {
         InodeStateReadGuard::new(self, self.inode_state.read())
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn inode_state_write_guard(
+    pub(in crate::fs::fs_impls::exfat) fn inode_state_write_guard(
         &self,
     ) -> InodeStateWriteGuard<'_> {
         InodeStateWriteGuard::new(self, self.inode_state.write())
@@ -459,7 +459,7 @@ impl ExfatInode {
 
 // ---- Cluster map resolution ----
 impl ExfatInode {
-    pub(in crate::fs::fs_impls::exfat_refactor) fn resolve_cluster_map(
+    pub(in crate::fs::fs_impls::exfat) fn resolve_cluster_map(
         block_device: &Arc<dyn BlockDevice>,
         boot_region: &BootRegion,
         cluster_map: StreamExtensionDirEntry,

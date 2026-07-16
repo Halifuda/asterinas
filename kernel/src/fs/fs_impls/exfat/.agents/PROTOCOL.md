@@ -1,8 +1,8 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# exFAT Refactor Multi-Agent Protocol
+# exFAT Multi-Agent Protocol
 
-This file is the main-agent-owned scheduler protocol for the `exfat_refactor` workspace.
+This file is the main-agent-owned scheduler protocol for the official `exfat` workspace.
 It defines what the main agent controls: delegation, gates, parallel scheduling, and acceptance.
 
 Use the surrounding documents as follows:
@@ -26,7 +26,7 @@ Use the surrounding documents as follows:
 
 ## 1. Scheduler Rules
 
-1. **Global Repository Boundary**: Every agent must obey the repository-level `AGENTS.md`; no `unsafe` is allowed in `kernel/src/fs/fs_impls/exfat_refactor/`. Components may depend only on accepted components or stable pre-existing kernel interfaces, and the legacy `exfat` module remains the active registered filesystem until explicitly scheduled for takeover. Any local Asterinas interface divergence from Microsoft or Linux behavior must be recorded by the Architect or Designer artifact.
+1. **Global Repository Boundary**: Every agent must obey the repository-level `AGENTS.md`; no `unsafe` is allowed in `kernel/src/fs/fs_impls/exfat/`. Components may depend only on accepted components or stable pre-existing kernel interfaces. The refactored implementation is the active registered filesystem under the formal Linux-compatible name `exfat`. Any local Asterinas interface divergence from Microsoft or Linux behavior must be recorded by the Architect or Designer artifact.
 2. **Main-Agent Authority & Continuity**: The main agent is the only scheduler and the only role that changes official component state, `SYSTEM_BLUEPRINT.md`, or `PASS_SLICING.md`. The active main-agent thread must maintain exactly one live handoff record under `.agents/main-agent/`, update it for every material scheduling action / acceptance / rejection / escalation, and end each session with explicit next-main-agent tasks.
 3. **Subagent Instantiation & Context Policy**: The main agent selects the model and reasoning effort for each delegated Architect, Designer, Creator, Checker, Reviewer, or lightweight triage task according to cost, risk, and required judgment. Subagents MUST NOT be spawned with forked main-thread context; dispatch packets carry the authorized context boundary. Results are protocol-valid only when the dispatch packet names the role, scope, and expected artifact authority clearly enough for the selected agent class. Within the same pass and same role, the main agent SHOULD reuse an existing live subagent for repair or follow-up work instead of spawning a duplicate, provided the pass boundary and role do not change. Lightweight xfstests triage receipts under `.agents/protocol/XFSTESTS_LIGHTWEIGHT_TRIAGE.md` remain non-authoritative by default: they do not accept Checker passes, update official state, or authorize production repair until the main agent or a formal Checker accepts the evidence.
 4. **Pipeline Gates & Pass Slicing**: No component enters implementation before its Architect handoff and meso-scoped Designer artifacts (`_designer_spec.md` and a validation contract) exist. New Designer validation contracts MUST describe upstream-approved external/system-level validation obligations and MUST NOT request new `#[ktest]` coverage, `test_support/` modules, or other tests under `kernel/src/fs/fs_impls/`. The main agent decides every Creator Pass boundary, records it in `PASS_SLICING.md` before or with dispatch, and requires every Creator / Checker / Reviewer packet to name exactly one parent meso-component plus explicit covered micro-features. Architects and Designers stay exhaustive at the meso level and must not pre-slice implementation passes.
@@ -34,7 +34,7 @@ Use the surrounding documents as follows:
 6. **Strict Information Funnel & Artifact Layout**: Packets MUST be saved under `subagent-tasks/<component-id>/`, use `protocol/templates/[level]_[XX]_[component]_[role]_dispatch_TEMPLATE.md`, and remain pointer routes rather than design summaries. Subagent artifacts MUST be written under `.agents/components/<component-id>/`; mixed artifact directories are forbidden. Allowed context by role:
    - **Architect**: `priors/Microsoft-exFAT-spec.md`, `priors/linux-exFAT-implementation-summary.md`, and relevant Asterinas priors.
    - **Designer**: accepted Architect topology plus local component context.
-   - **Creator**: Designer contract, main-agent-selected covered micro set, `priors/ASTERINAS_CODE_QUALITY_PRIORS.md`, and only stable pre-existing kernel interfaces required to typecheck. NEVER provide heavy exFAT specs, Linux code, or legacy `kernel/src/fs/fs_impls/exfat/` references to Creator.
+   - **Creator**: Designer contract, main-agent-selected covered micro set, `priors/ASTERINAS_CODE_QUALITY_PRIORS.md`, and only stable pre-existing kernel interfaces required to typecheck. NEVER provide heavy exFAT specs or Linux code to Creator.
    - **Checker (Creator-Synced)**: Designer validation contract, the matching Creator Pass report, and pass write-set / code paths.
    - **Checker (Meso Integration)**: Designer validation contract, accepted Creator reports covering the target micro-features, and pass write-set / code paths.
 7. **Template Acceptance Is Structural**: Main-agent acceptance is structural, not logical. Subagent artifacts MUST fully populate their required templates; omitted, conceptually empty, or wrong-destination sections are protocol violations and must be rejected.

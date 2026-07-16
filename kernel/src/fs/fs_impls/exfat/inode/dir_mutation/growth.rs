@@ -37,7 +37,7 @@ use super::super::{
 use crate::{
     fs::{
         file::InodeType,
-        fs_impls::exfat_refactor::{
+        exfat::{
             bitmap::{AllocGuard, ClusterRange},
             boot::BootRegion,
             device_io,

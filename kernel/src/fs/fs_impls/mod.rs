@@ -8,7 +8,6 @@ pub mod cgroupfs;
 pub mod configfs;
 pub mod devpts;
 pub mod exfat;
-pub mod exfat_refactor;
 pub mod ext2;
 pub mod overlayfs;
 pub mod procfs;
@@ -30,7 +29,6 @@ pub(super) fn init() {
 
     ext2::init();
     exfat::init();
-    exfat_refactor::init();
     overlayfs::init();
     virtiofs::init();
 }

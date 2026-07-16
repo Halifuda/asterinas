@@ -22,7 +22,7 @@
 
 use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};
 use crate::{
-    fs::fs_impls::exfat_refactor::{
+    fs::exfat::{
         boot::BootRegion,
         dir_entry_format::{self as direntry, DirectoryScanMode, ScannedDirEntry},
         bitmap::AllocGuard,

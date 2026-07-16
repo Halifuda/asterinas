@@ -45,7 +45,7 @@ use core::{
 
 use spin::Once;
 
-pub(in crate::fs::fs_impls::exfat_refactor) use self::state::{
+pub(in crate::fs::fs_impls::exfat) use self::state::{
     ClusterMap, StreamExtensionDirEntry,
 };
 use self::{
@@ -375,7 +375,7 @@ impl Inode for ExfatInode {
             }
             RenameMode::Exchange => return_errno_with_message!(
                 Errno::EINVAL,
-                "RENAME_EXCHANGE is not supported on exfat_refactor"
+                "RENAME_EXCHANGE is not supported on exfat"
             ),
         }
     }

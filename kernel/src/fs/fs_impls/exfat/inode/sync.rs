@@ -27,7 +27,7 @@
 //! Authoritative references are Microsoft exFAT File System Specification,
 //! Sections 7.4, 7.6, and 8.1,
 //! plus `aster_block::bio::BioStatus`
-//! and `crate::fs::fs_impls::exfat_refactor::fs::FsState`.
+//! and `crate::fs::fs_impls::exfat::fs::FsState`.
 
 use aster_block::bio::BioStatus;
 
@@ -132,7 +132,7 @@ impl InodeDirtyState {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::fs::fs_impls::exfat_refactor) enum InodeSyncScope {
+pub(in crate::fs::fs_impls::exfat) enum InodeSyncScope {
     Data,
     All,
 }
@@ -228,7 +228,7 @@ impl ExfatInode {
         self.sync_regular_file_with_fs_guard(fs.as_ref(), &mut fs_state, scope)
     }
 
-    pub(in crate::fs::fs_impls::exfat_refactor) fn sync_regular_file_with_fs_guard(
+    pub(in crate::fs::fs_impls::exfat) fn sync_regular_file_with_fs_guard(
         &self,
         fs: &ExfatFs,
         fs_state: &mut FsState,

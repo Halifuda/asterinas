@@ -30,7 +30,7 @@ use super::super::{
     state::InodeStateWriteGuard,
 };
 use crate::{
-    fs::fs_impls::exfat_refactor::{
+    fs::exfat::{
         dir_entry_format::{
             self as direntry, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, MutableDirEntrySlotSpan,
             DirectoryScanMode, ScannedDirEntry,

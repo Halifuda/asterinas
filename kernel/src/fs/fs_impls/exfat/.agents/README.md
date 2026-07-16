@@ -1,8 +1,8 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# exFAT Refactor Multi-Agent Workspace
+# exFAT Multi-Agent Workspace
 
-This directory stores the operating protocol for the parallel exFAT refactor module.
+This directory stores the operating protocol for the exFAT filesystem implementation.
 
 ## Project Framing
 
@@ -14,7 +14,7 @@ It has two equally important goals:
 
 The main question is whether agents can do filesystem engineering without losing control of specification coverage, implementation detail, style consistency, and bug rate.
 
-The implementation strategy keeps the `exfat` module intact while building the refactored implementation in parallel under `exfat_refactor`. Microsoft exFAT and the Linux exFAT implementation remain the primary authorities.
+The refactored implementation is now the official `exfat` module. Microsoft exFAT and the Linux exFAT implementation remain the primary authorities.
 
 **Top-Down Strict Protocol**: Concurrency, locks, and system states are static and dynamic laws determined upfront by the Architect and Designer before the Creator writes a single line of code. Architect and Designer artifacts stay at the Meso level; the main agent later slices that Meso contract into one or more implementation passes for the Creator and synchronized Checker.
 
@@ -23,7 +23,7 @@ The implementation strategy keeps the `exfat` module intact while building the r
 Two reusable Codex skills mirror the stable workflow rules for this workspace:
 
 - `$exfat-main-agent`
-  Use when acting as the scheduler for `exfat_refactor`: resuming the board, shaping waves, curating packets, updating `SYSTEM_BLUEPRINT.md`, or writing main-agent handoffs.
+  Use when acting as the scheduler for the exFAT module: resuming the board, shaping waves, curating packets, updating `SYSTEM_BLUEPRINT.md`, or writing main-agent handoffs.
 - `$exfat-subagent-workflow`
   Use for ordinary delegated architect, designer, creator, checker, and reviewer work.
 
@@ -48,8 +48,8 @@ Two reusable Codex skills mirror the stable workflow rules for this workspace:
 - `ASTERINAS_CODE_QUALITY_PRIORS.md`: Reusable code-quality guidance.
 - `linux-exFAT-implementation-summary.md`: Linux-side implementation map. 
 - *Note on Priors*: We use an **Information Funnel**. Heavy priors (Microsoft specs, Linux source) are internalized by the Architect. Designers internalize Architect outputs + Linux references. Creators only see the Designer's contract, the main-agent-selected pass coverage, and Code Quality priors. Checkers see the Designer validation contract plus the relevant Creator pass receipts.
-- `TESTING_GUIDE.md`: Legacy testing note retained only for historical context; new exFAT refactor validation must use upstream-approved external/system-level methods, currently expected to be NixOS xfstests.
-- `XFSTEST_GUIDELINES.md`: Current main-agent guide for migrating `exfat_refactor` validation onto upstream's initramfs xfstests conformance lane.
+- `TESTING_GUIDE.md`: Legacy testing note retained only for historical context; new exFAT validation must use upstream-approved external/system-level methods, currently expected to be NixOS xfstests.
+- `XFSTEST_GUIDELINES.md`: Current main-agent guide for the upstream initramfs xfstests conformance lane.
 - `PROTOCOL.md`: Main-agent-owned normative workflow.
 - `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The test suite for exFAT refactor filesystem validation on Asterinas NixOS.
+//! The test suite for exFAT filesystem validation on Asterinas NixOS.
 
 use std::env;
 
@@ -15,7 +15,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 #[nixos_test]
-fn exfat_refactor_boot_prompt_probe(_nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_boot_prompt_probe(_nixos_shell: &mut Session) -> Result<(), Error> {
     Ok(())
 }
 
@@ -48,22 +48,22 @@ fn write_guest_file(nixos_shell: &mut Session, path: &str, lines: &[&str]) -> Re
 }
 
 #[nixos_test]
-fn exfat_refactor_mount_smoke(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_mount_smoke(nixos_shell: &mut Session) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
     let scratch_dev = env::var("XFSTESTS_SCRATCH_DEV").unwrap_or_else(|_| "/dev/vdc".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo sd", scratch_dev), "sd")?;
 
     nixos_shell.run_cmd("mkdir -p /t /s")?;
 
     nixos_shell.run_cmd_and_expect(
-        &format!("mount -t exfat_refactor {} /t&&echo mt", test_dev),
+        &format!("mount -t exfat {} /t&&echo mt", test_dev),
         "mt",
     )?;
     nixos_shell.run_cmd_and_expect(
-        &format!("mount -t exfat_refactor {} /s&&echo ms", scratch_dev),
+        &format!("mount -t exfat {} /s&&echo ms", scratch_dev),
         "ms",
     )?;
     nixos_shell.run_cmd_and_expect("printf x >/t/f&&echo wr", "wr")?;
@@ -71,7 +71,7 @@ fn exfat_refactor_mount_smoke(nixos_shell: &mut Session) -> Result<(), Error> {
     nixos_shell.run_cmd_and_expect("umount /s&&echo us", "us")?;
     nixos_shell.run_cmd_and_expect("umount /t&&echo ut", "ut")?;
     nixos_shell.run_cmd_and_expect(
-        &format!("mount -t exfat_refactor {} /t&&echo rt", test_dev),
+        &format!("mount -t exfat {} /t&&echo rt", test_dev),
         "rt",
     )?;
     nixos_shell.run_cmd_and_expect("cat /t/f", "x")?;
@@ -81,10 +81,10 @@ fn exfat_refactor_mount_smoke(nixos_shell: &mut Session) -> Result<(), Error> {
 }
 
 #[nixos_test]
-fn exfat_refactor_s1a_named_batch(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_s1a_named_batch(nixos_shell: &mut Session) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
 
@@ -200,7 +200,7 @@ fn exfat_refactor_s1a_named_batch(nixos_shell: &mut Session) -> Result<(), Error
         nixos_shell,
         "l",
         &[
-            "export FSTYP=exfat_refactor",
+            "export FSTYP=exfat",
             "export TEST_DEV=/dev/vdb",
             "export TEST_DIR=/mnt/test",
             "export SCRATCH_MNT=/mnt/scratch",
@@ -243,13 +243,13 @@ fn exfat_refactor_s1a_named_batch(nixos_shell: &mut Session) -> Result<(), Error
             "echo XFSTESTS_BATCH_EXPORT_END",
             "}",
             "trap 'st=$?; echo \"$st\" >/tmp/b/check.exit_status; emit_export; trap - EXIT; exit 0' EXIT",
-            "cp /tmp/m /tmp/x/mkfs.exfat_refactor",
-            "cp /tmp/f /tmp/x/fsck.exfat_refactor",
+            "cp /tmp/m /tmp/x/mkfs.exfat",
+            "cp /tmp/f /tmp/x/fsck.exfat",
             "cp /tmp/mt /tmp/x/mount",
             "cp /tmp/ut /tmp/x/umount",
             "cp /tmp/ft /tmp/x/findmnt",
             "cp /tmp/sy /tmp/x/sync",
-            "chmod +x /tmp/x/mkfs.exfat_refactor /tmp/x/fsck.exfat_refactor /tmp/x/mount /tmp/x/umount /tmp/x/findmnt /tmp/x/sync",
+            "chmod +x /tmp/x/mkfs.exfat /tmp/x/fsck.exfat /tmp/x/mount /tmp/x/umount /tmp/x/findmnt /tmp/x/sync",
             "check_path=/nix/var/nix/profiles/system/sw/bin/xfstests-check",
             "echo \"$PATH\" >/tmp/b/path.txt",
             "ls -l \"$check_path\" >/tmp/b/check-path-ls.txt 2>&1 || true",
@@ -314,10 +314,10 @@ fn exfat_refactor_s1a_named_batch(nixos_shell: &mut Session) -> Result<(), Error
 }
 
 #[nixos_test]
-fn exfat_refactor_fsck_same_image_probe(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_fsck_same_image_probe(nixos_shell: &mut Session) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(
@@ -367,12 +367,12 @@ fn exfat_refactor_fsck_same_image_probe(nixos_shell: &mut Session) -> Result<(),
 }
 
 #[nixos_test]
-fn exfat_refactor_fsck_same_image_verbose_probe(
+fn exfat_fsck_same_image_verbose_probe(
     nixos_shell: &mut Session,
 ) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(
@@ -566,10 +566,10 @@ fn ext2_blockdev_fsck_strace_probe(nixos_shell: &mut Session) -> Result<(), Erro
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_block_probe(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_same_image_block_probe(nixos_shell: &mut Session) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(
@@ -684,7 +684,7 @@ fn run_python_block_probe(
 ) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(nixos_shell, script_name, script_lines)?;
@@ -701,7 +701,7 @@ fn run_python_block_probe(
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_blkpbszget_probe(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_same_image_blkpbszget_probe(nixos_shell: &mut Session) -> Result<(), Error> {
     run_python_block_probe(
         nixos_shell,
         "ppbs",
@@ -743,7 +743,7 @@ fn exfat_refactor_same_image_blkpbszget_probe(nixos_shell: &mut Session) -> Resu
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_pread_512_at_zero_probe(
+fn exfat_same_image_pread_512_at_zero_probe(
     nixos_shell: &mut Session,
 ) -> Result<(), Error> {
     run_python_block_probe(
@@ -775,7 +775,7 @@ fn exfat_refactor_same_image_pread_512_at_zero_probe(
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_pread_64_at_zero_probe(
+fn exfat_same_image_pread_64_at_zero_probe(
     nixos_shell: &mut Session,
 ) -> Result<(), Error> {
     run_python_block_probe(
@@ -807,7 +807,7 @@ fn exfat_refactor_same_image_pread_64_at_zero_probe(
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_pread_root_fat_entry_probe(
+fn exfat_same_image_pread_root_fat_entry_probe(
     nixos_shell: &mut Session,
 ) -> Result<(), Error> {
     run_python_block_probe(
@@ -841,12 +841,12 @@ fn exfat_refactor_same_image_pread_root_fat_entry_probe(
 }
 
 #[nixos_test]
-fn exfat_refactor_same_image_aligned_sector_probe(
+fn exfat_same_image_aligned_sector_probe(
     nixos_shell: &mut Session,
 ) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(
@@ -935,10 +935,10 @@ fn exfat_refactor_same_image_aligned_sector_probe(
 }
 
 #[nixos_test]
-fn exfat_refactor_fsck_same_image_strace_probe(nixos_shell: &mut Session) -> Result<(), Error> {
+fn exfat_fsck_same_image_strace_probe(nixos_shell: &mut Session) -> Result<(), Error> {
     let test_dev = env::var("XFSTESTS_TEST_DEV").unwrap_or_else(|_| "/dev/vdb".to_string());
 
-    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat_refactor")?;
+    nixos_shell.run_cmd_and_expect("cat /proc/filesystems", "exfat")?;
     nixos_shell.run_cmd_and_expect(&format!("test -b {}&&echo td", test_dev), "td")?;
     nixos_shell.run_cmd("cd /tmp")?;
     write_guest_file(
