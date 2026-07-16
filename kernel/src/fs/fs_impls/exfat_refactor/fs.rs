@@ -1,6 +1,36 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Owns exFAT filesystem lifecycle, mount runtime, inode caching, and VFS registration.
+//!
+//! This file is the owner of mounted exFAT state.
+//! It loads the validated boot-region anchors,
+//! owns the allocation bitmap and up-case table handles,
+//! tracks mount/runtime state,
+//! and publishes the inode cache used by lookup, mutation, and sync paths.
+//!
+//! Its main entry points are mount construction,
+//! root-inode access,
+//! cache publication and lookup,
+//! and the `FileSystem` trait methods that register exFAT with the VFS layer.
+//! The surrounding module set delegates on-disk decoding to `boot`, `fat`, `bitmap`,
+//! and `dir_entry_format`,
+//! while `inode` owns per-inode behavior after this file admits a mounted filesystem.
+//!
+//! Locking and publication rules matter here because mount state,
+//! inode-cache membership,
+//! and dirty-state visibility must move in a consistent order
+//! across filesystem, allocation, and inode owners.
+//! Recovery paths preserve forced-shutdown and not-mounted distinctions
+//! rather than publishing partially initialized runtime state.
+//!
+//! This module is intentionally limited to owner/runtime coordination.
+//! It does not duplicate inode-local policy,
+//! and it rejects unsupported or inconsistent images at mount boundaries.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 3, 7.1, 7.2, and 8.1,
+//! plus `crate::fs::vfs::file_system::FileSystem`
+//! and `crate::fs::vfs::file_system::SuperBlock`.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 

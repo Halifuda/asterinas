@@ -2,8 +2,32 @@
 
 //! Owns inode state, state guards, cluster maps, and ordered inode-guard acquisition.
 //!
-//! Method groups: state admission, guard access, cluster-map validation/publication, and ordered
-//! read/write guard acquisition.
+//! This module is the owner for mutable inode runtime state.
+//! It defines the guarded metadata and stream state,
+//! the validated `ClusterMap` model used by file and directory paths,
+//! and the read/write guard helpers that make inode access explicit.
+//!
+//! Its entry points admit state into read or write guards,
+//! resolve cluster maps from on-disk stream entries,
+//! publish cacheable page-backend context,
+//! and acquire ordered guard sets for multi-inode operations.
+//! The core data model is the relationship between file-entry metadata,
+//! stream-extension cluster mapping,
+//! and the page-cache-visible generation derived from them.
+//!
+//! Lock ordering is a hard contract here.
+//! Multi-inode helpers sort and deduplicate by stable identity
+//! so rename, sync, and metadata paths can avoid deadlocks while sharing the same inode domain.
+//! Recovery behavior is also centralized here:
+//! invalid stream state is rejected before publication,
+//! and callers distinguish read-side resolution from write-side publication.
+//!
+//! This module does not own namespace policy or direct BIO submission.
+//! It only supplies the validated state and guard machinery required by those higher layers.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 7.4, 7.6, 8.1, and 9.5,
+//! plus `crate::fs::fs_impls::exfat_refactor::inode::page_backend::PageCacheContext`.
 
 use alloc::vec;
 use core::cell::RefCell;
@@ -211,7 +235,7 @@ impl ClusterMap {
         };
         let data_length = match cluster_map.stream_extension.data_length {
             Some(data_length) => {
-                let (_, _) = cluster_map.validated_lengths()?;
+                let (_, _) = cluster_map.validated_data_lengths()?;
                 data_length
             }
             None => {
@@ -320,7 +344,7 @@ impl ClusterMap {
         &self.cluster_ranges
     }
 
-    pub(super) fn validated_lengths(&self) -> Result<(usize, usize)> {
+    pub(super) fn validated_data_lengths(&self) -> Result<(usize, usize)> {
         let Some(data_length) = self.stream_extension.data_length else {
             return_errno!(Errno::EINVAL);
         };
@@ -347,7 +371,7 @@ impl ClusterMap {
         boot_region: &BootRegion,
         cluster_index: usize,
     ) -> Result<u32> {
-        let (data_length, _) = self.validated_lengths()?;
+        let (data_length, _) = self.validated_data_lengths()?;
         let allocated_clusters = data_length.div_ceil(boot_region.cluster_size);
         let materialized_clusters =
             self.cluster_ranges
@@ -563,6 +587,10 @@ impl ExfatInode {
         _allocation_guard: &AllocReadGuard<'_>,
         cluster_map: StreamExtensionDirEntry,
     ) -> Result<Arc<ClusterMap>> {
+        // A cached generation is reusable only when it still describes the exact admitted
+        // stream-extension identity.
+        // The read path may resolve a fresh map for this caller,
+        // but it must not publish that resolution back into shared inode state.
         if let Some(generation) = inode_state_guard
             .cached_cluster_map()
             .filter(|generation| generation.stream_extension() == cluster_map)
@@ -601,11 +629,14 @@ impl ExfatInode {
             &fs.immutable_boot_region(),
             cluster_map,
         )?);
+        // The write-admitted path publishes the validated generation here
+        // so later mutation and page-cache steps observe the same cluster-map identity.
+        // The read-admitted path intentionally leaves publication to its caller.
         inode_state_guard.set_cached_cluster_map(generation.clone());
         Ok(generation)
     }
 
-    pub(super) fn current_cluster_map(
+    pub(super) fn ensure_cluster_map(
         &self,
         inode_state_guard: &InodeStateWriteGuard<'_>,
         allocation_guard: &AllocGuard<'_>,
@@ -626,7 +657,7 @@ impl ExfatInode {
         let cluster_map = inode_state_guard.dir_entry_stream();
         let generation =
             self.cluster_map_for_write_guard(inode_state_guard, allocation_guard, cluster_map)?;
-        let (data_length, valid_data_length) = generation.validated_lengths()?;
+        let (data_length, valid_data_length) = generation.validated_data_lengths()?;
         let page_cache_context = self.page_cache_context_for_mapping(
             inode_state_guard.metadata(),
             generation.clone(),
@@ -670,7 +701,7 @@ impl ExfatInode {
         let cluster_map = inode_state_guard.dir_entry_stream();
         let generation =
             self.cluster_map_for_read_guard(inode_state_guard, allocation_guard, cluster_map)?;
-        let (data_length, valid_data_length) = generation.validated_lengths()?;
+        let (data_length, valid_data_length) = generation.validated_data_lengths()?;
         *self.page_backend.page_cache_context.write() = Some(self.page_cache_context_for_mapping(
             inode_state_guard.metadata(),
             generation.clone(),
@@ -696,7 +727,9 @@ impl ExfatInode {
 }
 
 impl ExfatInode {
-    pub(super) fn directory_write_guards_by_ino<'a>(
+    // Multi-inode operations sort and deduplicate by stable lock identity
+    // so every caller acquires the shared inode domain in one deadlock-avoiding order.
+    pub(super) fn inode_write_guards_in_lock_order<'a>(
         mut directories: Vec<&'a ExfatInode>,
     ) -> Vec<InodeStateWriteGuard<'a>> {
         directories.sort_by_key(|directory| directory.stable_lock_identity());
@@ -707,7 +740,7 @@ impl ExfatInode {
             .collect()
     }
 
-    pub(super) fn directory_read_guards_by_stable_identity<'a>(
+    pub(super) fn inode_read_guards_in_lock_order<'a>(
         mut directories: Vec<&'a ExfatInode>,
     ) -> Vec<InodeStateReadGuard<'a>> {
         directories.sort_by_key(|directory| directory.stable_lock_identity());

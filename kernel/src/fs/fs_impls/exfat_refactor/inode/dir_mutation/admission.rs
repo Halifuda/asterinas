@@ -2,7 +2,29 @@
 
 //! Owns rename discovery, admission, and view lookup helpers.
 //!
-//! Method groups: rename participant discovery, final admission projection, and lookup helpers.
+//! This child module gathers the information needed before a rename can commit.
+//! It discovers source and target directory-entry views,
+//! classifies the participating child inodes,
+//! and projects the final admitted rename state used by the outer orchestration path.
+//!
+//! Its entry points cover provisional discovery,
+//! final admission assembly,
+//! and the supporting lookup helpers that search source and target directories.
+//! The data model is the set of validated rename participants and their entry-set views.
+//!
+//! Ordered guard acquisition matters because discovery spans multiple directories and children
+//! before the caller can decide which final participants must remain locked.
+//! Recovery and error policy are also shaped here:
+//! revalidation distinguishes stale namespace state from device or format failure
+//! before later persistence phases begin.
+//!
+//! This module is limited to rename admission and lookup.
+//! It does not own slot reservation,
+//! directory growth,
+//! or irreversible persistence phases.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.4, 7.6, and 7.7.
 
 use super::super::{ExfatInode, StreamExtensionDirEntry, UpcaseTable, state::InodeStateWriteGuard};
 use crate::{
@@ -122,7 +144,7 @@ impl ExfatInode {
         names: RenameNames<'_>,
     ) -> Result<RenameDiscovery> {
         let provisional_directory_guards =
-            Self::directory_read_guards_by_stable_identity(vec![self, target_directory]);
+            Self::inode_read_guards_in_lock_order(vec![self, target_directory]);
         let provisional_guard_for_inode_fn = |inode: &ExfatInode| {
             provisional_directory_guards
                 .iter()

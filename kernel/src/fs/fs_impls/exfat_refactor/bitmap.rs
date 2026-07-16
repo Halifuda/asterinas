@@ -1,6 +1,32 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Owns Allocation Bitmap state, scanning, range operations, accounting, and guard transactions.
+//!
+//! This module owns the exFAT Allocation Bitmap as both an on-disk byte layout
+//! and a mounted runtime accounting structure.
+//! It scans free and allocated ranges,
+//! applies normalized allocation/free operations,
+//! and keeps the runtime accounting needed by file and directory growth paths.
+//!
+//! The main entry points are bitmap loading,
+//! range reservation and release,
+//! accounting queries,
+//! and guarded transaction helpers used together with FAT and inode owners.
+//! Its data model is the validated allocation-bit view anchored by the mounted boot region.
+//!
+//! Locking and guard ordering matter because bitmap changes must stay coordinated with FAT edits
+//! and inode publication.
+//! Recovery paths preserve rollback before publication where possible
+//! and surface inconsistency explicitly when bitmap accounting can no longer be trusted.
+//!
+//! This module is limited to the mounted bitmap image and its range semantics.
+//! It does not own namespace policy,
+//! and it rejects malformed bitmap extents or impossible range requests.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 5.1, 7.1, and 8.1,
+//! plus the mounted owner/runtime boundaries in
+//! `crate::fs::fs_impls::exfat_refactor::fs::ExfatFs`.
 
 use alloc::vec;
 use core::ops::Range;

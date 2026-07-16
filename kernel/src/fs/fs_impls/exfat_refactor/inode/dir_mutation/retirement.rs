@@ -2,7 +2,30 @@
 
 //! Owns replaced-target cleanup and retired namespace inode detachment helpers.
 //!
-//! Method groups: cluster-range collection, replaced-target cleanup, and detached inode retirement.
+//! This child module handles the namespace participants that stop being live
+//! after rename or removal commits.
+//! It collects retired cluster ranges,
+//! cleans up replaced targets,
+//! and detaches or retires inodes whose directory presence has been removed.
+//!
+//! Its entry points cover retired mapping collection,
+//! replaced-target cleanup state,
+//! and detached-inode retirement helpers used by the parent mutation flow.
+//! The data model is the retired inode's validated cluster map and directory-entry relationship
+//! after the namespace transition has already been admitted.
+//!
+//! Lock ordering remains important because cleanup still operates in the shared inode domain,
+//! and recovery policy is stricter here because some namespace effects are already committed.
+//! Retry, escalation, and forced-shutdown decisions therefore stay explicit
+//! instead of being folded into generic deletion logic.
+//!
+//! This module is limited to post-admission retirement and cleanup.
+//! It does not own rename discovery,
+//! slot mutation,
+//! or the initial namespace decision.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 5.1, 7.4, 7.6, and 8.1.
 
 use aster_block::BlockDevice;
 
@@ -193,7 +216,7 @@ impl ExfatInode {
         allocation_guard: &AllocGuard<'_>,
     ) -> Result<(Arc<ClusterMap>, Vec<ClusterRange>)> {
         let retired_generation =
-            child_inode.current_cluster_map(child_inode_state_guard, allocation_guard)?;
+            child_inode.ensure_cluster_map(child_inode_state_guard, allocation_guard)?;
         let retired_ranges = retired_generation.cluster_ranges().to_vec();
         Ok((retired_generation, retired_ranges))
     }

@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Reads and mutates exFAT FAT chains for cluster traversal and topology updates.
+//!
+//! This module owns exFAT FAT entry decoding and the traversal/linking operations
+//! that turn on-disk FAT words into cluster-chain topology.
+//! It is the shared owner for walking allocated chains,
+//! appending or rewriting links during growth,
+//! and validating that chain progress stays within the mounted boot geometry.
+//!
+//! Its public surface to sibling modules is the FAT reader/writer machinery
+//! used by boot loading, directory growth, file growth, and up-case loading.
+//! Allocation-sensitive callers pair these operations with allocation guards
+//! so that bitmap and FAT publication remain ordered.
+//!
+//! Locking matters because FAT mutation must not race bitmap accounting
+//! or inode-visible cluster-map publication.
+//! Recovery paths preserve the distinction between read-only traversal failure,
+//! mutation failure before publication,
+//! and forced-shutdown-worthy writeback loss.
+//!
+//! This module is limited to exFAT FAT semantics.
+//! It does not own higher-level inode or namespace policy,
+//! and it rejects impossible cluster values or malformed chains instead of guessing.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 4, 5.1, and 8.1,
+//! plus `aster_block::BlockDevice`.
 
 use alloc::vec;
 use core::ops::Range;

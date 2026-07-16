@@ -2,8 +2,30 @@
 
 //! Projects and mutates inode metadata backed by exFAT file-entry sets.
 //!
-//! Method groups: cached projection, VFS metadata getters, metadata setters, timestamp rewrite,
-//! entry-set rewrite, and directory metadata refresh.
+//! This module owns the metadata view derived from exFAT file-entry sets.
+//! It projects cached metadata for VFS queries,
+//! applies metadata mutations such as timestamps and size-related fields,
+//! and rewrites the backing entry set when inode metadata must be persisted.
+//!
+//! Its entry points cover VFS metadata getters and setters,
+//! timestamp conversion,
+//! entry-set rewrite helpers,
+//! and directory metadata refresh after namespace changes.
+//! The data model is the correspondence between in-memory metadata fields
+//! and the on-disk file-entry and stream-extension records.
+//!
+//! Lock ordering and dirty publication are important here
+//! because metadata changes may involve parent directories and shared persistence helpers.
+//! Recovery paths preserve whether failure happened before or after entry-set rewrite preparation
+//! so sync and forced-shutdown policy stay coherent.
+//!
+//! This module is limited to metadata projection and persistence.
+//! It does not own directory admission or cluster allocation policy,
+//! and it rejects invalid on-disk metadata encodings rather than synthesizing replacements.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 7.4 and 7.6,
+//! plus `crate::fs::vfs::inode::Metadata`.
 
 use core::{cell::Cell, time::Duration};
 
@@ -267,7 +289,7 @@ impl ExfatInode {
         {
             guarded_inodes.push(parent.as_ref());
         }
-        let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+        let inode_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
         let self_inode_state_guard = inode_guards
             .iter()
             .find(|guard| guard.guards_inode(self))
@@ -521,7 +543,7 @@ impl ExfatInode {
         let Some(parent) = parent else {
             return;
         };
-        let inode_guards = Self::directory_write_guards_by_ino(vec![self, parent.as_ref()]);
+        let inode_guards = Self::inode_write_guards_in_lock_order(vec![self, parent.as_ref()]);
         let Some(self_inode_state_guard) =
             inode_guards.iter().find(|guard| guard.guards_inode(self))
         else {

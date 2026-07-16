@@ -2,7 +2,20 @@
 
 //! Owns boundary-page preparation for regular-file page-cache growth.
 //!
-//! Method groups: page-cache boundary preparation.
+//! This child module isolates the narrow page-cache seam used by regular-file growth.
+//! It prepares only the boundary pages that must exist before zero-fill or user-copy work
+//! can expose newly grown bytes through the shared page cache.
+//!
+//! Its entry point accepts the current data length and a candidate growth range
+//! and derives the start and end page boundaries that need preparation.
+//! The helper assumes higher layers already own the validated cluster-map generation
+//! and the correct publication order for callback-visible page-cache context.
+//!
+//! This module is intentionally limited.
+//! It does not own generic whole-range preparation,
+//! cluster allocation,
+//! or entry-set persistence,
+//! and it relies on callers to preserve the dirty-page and growth-order premises around it.
 
 use core::ops::Range;
 
@@ -15,7 +28,7 @@ use crate::{
 };
 
 impl ExfatInode {
-    pub(super) fn prepare_regular_file_page_cache_range(
+    pub(super) fn prepare_regular_file_page_cache_boundary_pages(
         page_cache: &PageCache,
         current_data_length: usize,
         range: Range<usize>,

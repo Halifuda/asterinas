@@ -2,8 +2,32 @@
 
 //! Implements directory namespace mutations and directory cluster-map growth.
 //!
-//! Method groups: create/unlink/rmdir/rename entry points, slot management, directory growth,
-//! emptiness validation, cluster-range collection, and rename-stage helpers.
+//! This module is the orchestration owner for directory namespace mutation.
+//! It drives create, unlink, rmdir, and rename entry points,
+//! coordinates slot discovery and directory growth,
+//! and sequences the multi-phase namespace and persistence steps required for directory updates.
+//!
+//! The child-module map is:
+//! `admission` for rename discovery and final participant admission;
+//! `growth` for directory cluster-map extension and publication;
+//! `retirement` for replaced-target cleanup and detached inode handling;
+//! `slots` for vacant-slot search and reservation;
+//! and `validation` for empty-directory checks.
+//!
+//! Ordered inode guards are a hard contract here
+//! because namespace mutation may involve the source inode,
+//! target inode,
+//! and one or two parent directories at once.
+//! Recovery paths preserve rename phase ordering,
+//! including target persistence, source retirement, and forced-shutdown escalation.
+//!
+//! This module is limited to directory mutation within the supported VFS surface.
+//! It does not change the owner placement of child logic,
+//! and it rejects malformed directory state or unsupported namespace cases explicitly.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.4, 7.6, 7.7, 8.1, and 9.5,
+//! plus `crate::fs::vfs::inode::Inode`.
 
 mod admission;
 mod growth;
@@ -84,7 +108,7 @@ impl ExfatInode {
             if let Some(parent_directory) = parent_directory.as_ref() {
                 guarded_directories.push(parent_directory.as_ref());
             }
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_directories);
+            let directory_guards = Self::inode_write_guards_in_lock_order(guarded_directories);
             let guard_for_inode_fn = |inode: &ExfatInode| {
                 directory_guards
                     .iter()
@@ -369,7 +393,7 @@ impl ExfatInode {
             if let Some(cached_child_inode) = cached_child_inode.as_ref() {
                 guarded_inodes.push(cached_child_inode.as_ref());
             }
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+            let directory_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
             let guard_for_inode_fn = |inode: &ExfatInode| {
                 directory_guards
                     .iter()
@@ -623,7 +647,7 @@ impl ExfatInode {
             if let Some(parent_directory) = parent_directory.as_ref() {
                 guarded_inodes.push(parent_directory.as_ref());
             }
-            let directory_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+            let directory_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
             let guard_for_inode_fn = |inode: &ExfatInode| {
                 directory_guards
                     .iter()
@@ -825,7 +849,7 @@ impl ExfatInode {
             )?;
             let final_participants =
                 self.collect_rename_final_participants(target_directory, &discovery);
-            let inode_guards = Self::directory_write_guards_by_ino(final_participants);
+            let inode_guards = Self::inode_write_guards_in_lock_order(final_participants);
             let admission = Self::project_final_rename_admission(
                 self,
                 target_directory,

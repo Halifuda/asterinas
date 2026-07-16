@@ -2,7 +2,23 @@
 
 //! Owns directory-emptiness validation for namespace mutation.
 //!
-//! Method groups: first-child scan and empty-directory validation.
+//! This child module answers the narrow question of whether a directory can be removed
+//! without violating exFAT namespace rules.
+//! It scans directory bytes for the first live child entry
+//! and validates that end markers and reserved entries match the expected empty-directory shape.
+//!
+//! Its entry points cover first-child scanning and the final empty-directory check.
+//! The data model is the validated directory byte stream
+//! interpreted through exFAT end-marker and child-entry rules.
+//!
+//! This module does not own locking for multi-inode mutation
+//! or later persistence ordering.
+//! Its refusal policy is intentionally conservative:
+//! malformed directory contents or unexpected children stop the mutation
+//! instead of being repaired in place.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6.1, 6.2, and 9.5.
 
 use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};
 use crate::{

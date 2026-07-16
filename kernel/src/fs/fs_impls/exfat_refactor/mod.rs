@@ -1,6 +1,28 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Refactor-owned exFAT runtime pieces.
+//!
+//! This module is the boundary for the in-progress exFAT refactor implementation
+//! inside Asterinas.
+//! It gathers the filesystem owner, on-disk decoders, allocation structures,
+//! inode runtime, and up-case support
+//! without exposing a stable public exFAT API outside the kernel filesystem tree.
+//!
+//! The internal module map is:
+//! `fs` for filesystem lifetime and VFS registration;
+//! `boot`, `fat`, `bitmap`, and `dir_entry_format` for on-disk structures and validation;
+//! `inode` for the inode runtime and mutation paths;
+//! and `upcase` for case-folding support.
+//!
+//! This refactor currently implements only the supported exFAT mount/runtime surface
+//! used by Asterinas.
+//! Unsupported features and malformed on-disk layouts are rejected through local error
+//! constructors rather than compatibility shims.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 2 through 8,
+//! plus the owner module boundaries in `crate::fs::fs_impls::exfat_refactor::fs`
+//! and `crate::fs::fs_impls::exfat_refactor::inode`.
 
 use crate::prelude::*;
 

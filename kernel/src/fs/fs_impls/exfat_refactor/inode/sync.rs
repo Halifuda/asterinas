@@ -2,8 +2,32 @@
 
 //! Owns inode synchronization and the dirty-generation state machine.
 //!
-//! Method groups: dirty transitions, sync-scope classification, pending-sync detection, and VFS
-//! sync dispatch.
+//! This module owns when and how an exFAT inode is considered dirty
+//! and what must be persisted to make it clean again.
+//! It classifies pending data and metadata work,
+//! coordinates regular-file and directory sync scopes,
+//! and dispatches the VFS `sync` surface for mounted exFAT inodes.
+//!
+//! Its entry points cover dirty-state transitions,
+//! pending-sync detection,
+//! sync-scope classification,
+//! and the final device-facing sync operations.
+//! The data model is the inode dirty-generation state machine
+//! paired with the current parent and cluster-map context needed for persistence.
+//!
+//! Lock ordering and device ordering matter here
+//! because sync may need multiple inode guards plus allocation state
+//! before writing data, metadata, or parent entry sets.
+//! Recovery paths keep deferred publication and forced-shutdown policy explicit
+//! when parent identity, writeback, or rewrite assumptions fail.
+//!
+//! This module is limited to synchronization and persistence classification.
+//! It does not own namespace admission or read/write I/O semantics outside sync.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 7.4, 7.6, and 8.1,
+//! plus `aster_block::bio::BioStatus`
+//! and `crate::fs::fs_impls::exfat_refactor::fs::FsState`.
 
 use aster_block::bio::BioStatus;
 
@@ -229,7 +253,7 @@ impl ExfatInode {
         if let Some(parent) = parent.as_ref() {
             guarded_inodes.push(parent.as_ref());
         }
-        let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+        let inode_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
         let guard_for_inode = |inode: &ExfatInode| {
             inode_guards
                 .iter()
@@ -248,6 +272,10 @@ impl ExfatInode {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
+        // Sync revalidates the parent identity after ordered guard acquisition
+        // so it never publishes data or metadata against a stale namespace relationship.
+        // A mismatch is treated as I/O failure,
+        // because the caller can no longer trust which parent image this inode should persist into.
         if !parent_is_revalidated {
             return_errno!(Errno::EIO);
         }
@@ -283,7 +311,7 @@ impl ExfatInode {
             .page_cache
             .get()
             .and_then(|maybe_page_cache| maybe_page_cache.as_ref());
-        let _ = self.current_cluster_map(inode_state, allocation_guard)?;
+        let _ = self.ensure_cluster_map(inode_state, allocation_guard)?;
         let data_length = inode_state
             .page_cache_context()
             .map(|page_cache_context| match page_cache_context {

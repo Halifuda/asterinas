@@ -2,7 +2,29 @@
 
 //! Owns directory cluster-map growth and publication helpers.
 //!
-//! Method groups: directory cluster growth, attachment, and publication.
+//! This child module extends directory storage when namespace mutation runs out of slots.
+//! It plans new directory cluster ranges,
+//! attaches them to the directory stream,
+//! and publishes the grown cluster-map state once allocation and entry-set updates agree.
+//!
+//! Its entry points cover directory cluster-map growth,
+//! directory attachment to parent-visible state,
+//! and the publication helpers used after growth succeeds.
+//! The data model is the directory cluster map plus the allocated ranges and entry-set bytes
+//! needed to make the growth visible.
+//!
+//! Locking and allocation ordering matter because directory growth touches inode state,
+//! allocation bitmap/FAT state,
+//! and later parent-entry persistence.
+//! Recovery paths preserve rollback before publication where possible
+//! and surface stronger failure when a grown directory image can no longer be restored safely.
+//!
+//! This module is limited to directory growth topology and publication.
+//! It does not own rename admission or slot search,
+//! and it assumes the outer mutation path has already selected the growth point.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 4, 5.1, 6, 7.4, 7.6, and 8.1.
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;

@@ -2,7 +2,27 @@
 
 //! Owns directory vacant-slot discovery and slot reservation helpers.
 //!
-//! Method groups: vacant-slot scan and slot reservation.
+//! This child module owns the slot-level planning needed before a directory mutation
+//! can write or relocate entry sets.
+//! It scans directory bytes for vacant spans,
+//! computes how many slots an entry set needs,
+//! and reserves the source and target slot ranges used by higher-level mutation paths.
+//!
+//! Its entry points cover vacant-slot discovery and slot reservation.
+//! The data model is the directory byte stream viewed as ordered 32-byte slots
+//! with validated entry-set spans and end-marker constraints.
+//!
+//! Locking matters because slot reservations are meaningful only relative to the admitted directory state,
+//! and recovery semantics matter because source-before-target and corruption-bound checks
+//! decide whether the mutation can proceed at all.
+//!
+//! This module is limited to slot geometry and reservation.
+//! It does not own directory growth publication,
+//! rename admission,
+//! or persistence ordering after slots are chosen.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6.1, 6.2, 7.4, 7.6, and 7.7.
 
 use super::super::{
     ExfatInode, StreamExtensionDirEntry,

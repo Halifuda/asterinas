@@ -2,7 +2,25 @@
 
 //! Maps regular-file clusters into page-cache I/O ranges and serves cached reads.
 //!
-//! Method groups: cluster-map validation, cluster lookup, and read dispatch.
+//! This module owns the regular-file read path after inode state has been admitted.
+//! It clips read ranges against validated file length,
+//! translates stream clusters into page-cache-visible I/O ranges,
+//! and routes reads through the shared page-cache/backend contract.
+//!
+//! Its entry points cover read dispatch,
+//! regular-file mapping validation,
+//! and cluster lookup for the current read window.
+//! The core data model is the validated regular-file cluster map
+//! plus the page-sized I/O ranges derived from that map.
+//!
+//! Locking matters because read paths may reuse cached mapping state
+//! but must not publish new page-cache context through a read-only admission path.
+//! This module does not own persistence,
+//! and short reads are bounded by the validated stream length and available mapping.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 5.1, 7.6.5, 7.6.6, and 7.6.7,
+//! plus `crate::vm::page_cache::PageCache`.
 
 use ostd::mm::VmIo;
 

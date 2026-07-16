@@ -2,7 +2,31 @@
 
 //! Defines the exFAT inode owner and forwards VFS trait methods to focused submodules.
 //!
-//! Method groups: inode construction and VFS trait dispatch.
+//! This file is the owner boundary for mounted exFAT inodes.
+//! It ties together cached inode identity,
+//! metadata and cluster-map state,
+//! page-cache integration,
+//! and the VFS trait surface that exposes exFAT files and directories to the kernel.
+//!
+//! The child-module map is:
+//! `state` for inode guards and cluster-map state;
+//! `page_backend` for page-cache/BIO integration;
+//! `file_read` and `file_mutation` for regular-file I/O;
+//! `lookup` and `dir_mutation` for directory traversal and namespace updates;
+//! `metadata`, `parent_entry_set`, and `sync` for metadata projection, persistence, and dirty-state handling.
+//!
+//! Locking boundaries are centered on ordered inode-state guards
+//! plus the page-cache context derived from validated cluster maps.
+//! This owner forwards VFS entry points to narrower modules
+//! while preserving the guard and cache boundaries they share.
+//!
+//! The module is limited to inode-local ownership.
+//! Filesystem-global lifecycle remains in `fs.rs`,
+//! and unsupported inode states are rejected instead of bridged through compatibility layers.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.4, 7.6, and 7.7,
+//! plus `crate::fs::vfs::inode::Inode`.
 
 mod dir_mutation;
 mod file_mutation;

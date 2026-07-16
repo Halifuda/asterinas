@@ -4,6 +4,31 @@
 
 This file is the dynamic central blackboard and tracker for the multi-agent exFAT refactor. It tracks the progress of the Top-Down Strict Protocol, ensuring all artifacts are generated in the correct sequence and no concurrency invariants (locks/owner gaps) are violated. Managers and Agents must continuously update this ledger as work progresses.
 
+## Current Active Wave: Comment/Naming Completion
+
+- [ ] **Private Semantic Rename Creator** (`pass_220_comment_naming_rename_creator`)
+  - **Status:** Accepted by main-agent review; GPT-5.4 Creator report and cargo-check status 0 received
+  - **Dispatch:** `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_220_comment_naming_rename_creator_dispatch.md`
+  - **Scope:** Four accepted private families only: `validated_data_lengths`, general `ensure_cluster_map`, `prepare_regular_file_page_cache_boundary_pages`, and paired `inode_*_guards_in_lock_order` helpers. Directory PageCacheContext, root mapping rules, pointer-based lock ordering, and behavior remain unchanged.
+  - **Boundary:** No top docs, why-comments, public API, mapping/PageCache restructuring, tests, or runtime validation. Creator may run only `.agents/tools/checker_run.sh cargo-check --component cross_meso_vfs_to_bio_topology --phase pass_220_comment_naming_rename_creator`.
+- [x] **Comment Completion Creator** (`pass_221_comment_completion_creator`)
+  - **Status:** Accepted after interactive Stage A review, Stage B completion, and bounded reference repair 01; final Reviewer approved
+  - **Dispatch:** `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_221_comment_completion_creator_dispatch.md`
+  - **Scope:** 25 file-level top-doc additions followed by the seven exact why/invariant comments from accepted `pass_219`; comments only.
+  - **Boundary:** No code/behavior/owner/lock changes and no compile, Clippy, runtime, QEMU, xfstests, or filesystem-local test/support work. Stage A must pause for main-agent inspection before Stage B.
+- [x] **Comment Completion Wave** (`pass_221` / `pass_222`)
+  - **Status:** accepted/closed; final Reviewer approved and final Checker skipped
+  - **Artifacts:** `.agents/components/cross_meso_vfs_to_bio_topology/pass_221_comment_completion_creator.md`, `.agents/components/cross_meso_vfs_to_bio_topology/pass_221_comment_completion_creator_repair_01.md`, `.agents/components/cross_meso_vfs_to_bio_topology/pass_222_comment_completion_reviewer.md`
+  - **Result:** Four private rename families accepted with pass220 cargo-check status 0; all 25 module docs completed; seven why comments accepted; 24 applicable authoritative-reference paragraphs repaired with indexed Microsoft exFAT sections and concrete Asterinas paths; `inode/file_mutation/page_cache_growth.rs` correctly remains N/A for references. No comment-stage validation command ran under explicit user direction.
+- [x] **Comment Completion Reviewer** (`pass_222_comment_completion_reviewer`)
+  - **Status:** Accepted/closed after repair 01 follow-up; final verdict approved, final Checker skippable
+  - **Dispatch:** `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_222_comment_completion_reviewer_dispatch.md`
+  - **Scope:** Recheck pass220's four private renames and pass221's 25 top docs plus seven why comments against the accepted pass219 diagnosis.
+  - **Boundary:** No runtime/build commands; no structural redesign; only safe line-level wording edits if strictly necessary, with structural/behavioral findings routed back to Creator.
+  - **Initial Result:** Four rename families and seven why comments accepted. All 25 top-doc authoritative-reference paragraphs rejected as too vague; no code or Reviewer edits were made.
+  - **Repair Dispatch:** `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_221_comment_completion_creator_repair_01_dispatch.md`
+  - **Final Result:** Reviewer reconciled `pass_219`'s `N/A` row for `page_cache_growth.rs`, verified 24 applicable citation paragraphs, and accepted all 25 documentation surfaces, four renames, and seven why comments. No Reviewer edits or commands ran.
+
 ## 1. Macro Topology & Global Status
 <!-- Tracks the foundational Phase 1 architecture. This must be completed and frozen before downstream Meso-Components are processed. -->
 
@@ -502,6 +527,29 @@ This file is the dynamic central blackboard and tracker for the multi-agent exFA
   - **Checker Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_217_full_tree_code_findings_small_repair_checker.md`
   - **Checker Result**: accepted PASS. Cargo-check receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-131543-cross_meso_vfs_to_bio_topology-pass_217_full_tree_code_findings_small_repair_checker_repair02/` records status 0/no warnings; targeted Clippy receipt `.agents/checker-runs/cross_meso_vfs_to_bio_topology/20260716-131555-cross_meso_vfs_to_bio_topology-pass_217_full_tree_code_findings_small_repair_checker_repair02_clippy/` records status 0/no warnings
   - **Closure**: all four pass215 non-documentation code findings are code-side closed; no xfstests or other runtime lane was run
+- [x] **Full-Tree Top-Down Readability And Duplication Census** (`pass_218`)
+  - **Status**: accepted/closed; no pre-documentation structural cleanup required
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_218_full_tree_top_down_readability_and_duplication_reviewer_dispatch.md`
+  - **Scope**: all 25 production Rust files, mandatory per-file top-down readability disposition, complete internal/cross-file duplication census, and smallest existing-owner repair boundaries
+  - **Exclusions**: no comment/documentation completeness, wording, citations, semantic-line-break review, production edit, tests, harnesses, runlists, or execution commands
+  - **Owner Boundary**: prefer existing files; inode cache and all raw/cache `impl ExfatFs` ownership remain in `fs.rs`, with no `impl ExfatFs` proposed for `inode/mod.rs`
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_218_full_tree_top_down_readability_and_duplication_reviewer.md`
+  - **Result**: all 25 production Rust files individually accepted for top-down readability and duplication; five concrete consolidation/order candidates were examined and retracted because they would be cosmetic or hide persistence phase, error precedence, guard lifetime, typed ownership, or stable `fs.rs` owner sections
+  - **Edit Scope**: no edits and no commands; template-complete Reviewer artifact accepted after Revision 01 formatting repair
+  - **Next Gate**: begin the separately planned comment-completion design/census without reopening structural cleanup
+- [x] **Full-Tree Comment And Naming Census** (`pass_219`)
+  - **Status**: accepted/closed; ready for bounded rename-before-comment Creator slicing
+  - **Packet**: `.agents/subagent-tasks/cross_meso_vfs_to_bio_topology/pass_219_full_tree_comment_and_naming_census_reviewer_dispatch.md`
+  - **Scope**: all 25 production Rust files across four dimensions: ext2-depth top docs, why/invariant-only logic comments, semantic naming defects, and module-local redundant symbol prefixes
+  - **Output Contract**: mandatory 25-row top-doc table, exact logic-comment anchors, rename/collision census, qualified-path simplification table, and rename-before-comment implementation plan
+  - **Hard Boundaries**: read-only; no new modules/facades/carriers, behavior/API/persistence/lock changes, inode-cache relocation, tests, harnesses, runlists, or execution commands
+  - **Artifact**: `.agents/components/cross_meso_vfs_to_bio_topology/pass_219_full_tree_comment_and_naming_census_reviewer.md`
+  - **Top-Doc Result**: all 25 files require ext2-style depth additions according to per-file applicability; root `mod.rs` also needs a fuller purpose statement, while leaf modules receive only relevant data/entry/lock/persistence/limit/reference sections
+  - **Logic-Comment Result**: seven exact why/invariant anchors covering cluster-map identity/publication, stable-identity lock ordering, rollback/rewrite escalation, target-before-source persistence, irreversible source phase, and parent revalidation error policy
+  - **Naming Result**: four verified private rename families: `validated_data_lengths`; `ensure_current_cluster_map_and_page_cache_context`; `prepare_regular_file_page_cache_boundary_pages`; and paired `inode_{read,write}_guards_by_stable_identity`
+  - **Redundant-Name Result**: no pure module-local shortening survives. Detached-only debt, `locate_rename_*`, generic `grow`, and directory-prefix-only guard simplifications are retracted as semantically false or ambiguous at inherent-method call sites
+  - **Implementation Order**: private renames first, then 25-file top docs, then seven remaining why-comments, followed by cross-reference review and normal compile/Clippy validation
+  - **Next Gate**: main-agent and user choose Creator/Checker slicing; no implementation is dispatched yet
   - **Validation Boundary**: no xfstests, QEMU, ktests, Reviewer, or other runtime lane is scheduled; runtime disposition remains separate
 - [x] **pass 160 Mapping / Root Readdir Repair Designer** (`pass_160_mapping_and_root_readdir_repair_designer`)
   - **Status**: Accepted after main-agent structural review

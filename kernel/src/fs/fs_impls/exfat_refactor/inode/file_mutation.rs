@@ -2,8 +2,30 @@
 
 //! Implements regular-file writes, resizes, shared entry-set rewrite, and cluster-map growth.
 //!
-//! Method groups: write/resize entry points, shared growth commit, entry-set rewrite,
-//! growth topology helpers, and cluster-level mutation.
+//! This module is the orchestration owner for regular-file mutation.
+//! It admits the inode and filesystem allocation state needed for writes and truncation,
+//! coordinates cluster-map growth with page-cache visibility,
+//! and commits the resulting entry-set and dirty-state updates.
+//!
+//! The child-module map is:
+//! `cluster_io` for mapping validation and cluster-level mutation;
+//! `cluster_map_growth` for contiguous versus fragmented growth planning;
+//! and `page_cache_growth` for the boundary-page preparation seam used during growth.
+//! The main entry points are write and resize operations plus the shared commit helpers they use.
+//!
+//! Locking and publication order are central here.
+//! Allocation, inode-state, and page-cache context must stay aligned
+//! so callback-visible state never describes bytes or clusters that have not been validated.
+//! Recovery paths keep rollback and forced-shutdown decisions local to the exact growth stage
+//! that has already been published.
+//!
+//! This module is limited to regular-file mutation.
+//! It does not own directory namespace policy,
+//! and it rejects unsupported mapping states or invalid size transitions instead of widening behavior.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 7.6.5, 7.6.6, 7.6.7, and 8.1,
+//! plus `crate::vm::page_cache::PageCache`.
 
 mod cluster_io;
 mod cluster_map_growth;
@@ -81,7 +103,7 @@ impl ExfatInode {
                 if let Some(parent) = parent.as_ref() {
                     guarded_inodes.push(parent.as_ref());
                 }
-                let inode_guards = Self::directory_write_guards_by_ino(guarded_inodes);
+                let inode_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
                 let inode_state_guard = inode_guards
                     .iter()
                     .find(|guard| guard.guards_inode(self))
@@ -122,9 +144,9 @@ impl ExfatInode {
                     })?;
                 let mut allocation_guard = fs.allocation_guard()?;
                 let cluster_map_generation =
-                    self.current_cluster_map(inode_state_guard, &allocation_guard)?;
+                    self.ensure_cluster_map(inode_state_guard, &allocation_guard)?;
                 let (data_length, valid_data_length) =
-                    cluster_map_generation.validated_lengths()?;
+                    cluster_map_generation.validated_data_lengths()?;
 
                 let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
                     data_length
@@ -188,7 +210,7 @@ impl ExfatInode {
                             if new_data_length > data_length {
                                 page_cache.resize(new_data_length, data_length)?;
                             }
-                            Self::prepare_regular_file_page_cache_range(
+                            Self::prepare_regular_file_page_cache_boundary_pages(
                                 page_cache,
                                 data_length,
                                 zero_fill_range.clone(),
@@ -196,7 +218,7 @@ impl ExfatInode {
                             if !zero_fill_range.is_empty() {
                                 page_cache.fill_zeros(zero_fill_range.clone())?;
                             }
-                            Self::prepare_regular_file_page_cache_range(
+                            Self::prepare_regular_file_page_cache_boundary_pages(
                                 page_cache,
                                 data_length,
                                 effective_offset..write_end,
@@ -263,9 +285,9 @@ impl ExfatInode {
         }
         let mut allocation_guard = fs.allocation_guard()?;
         let cluster_map_generation =
-            self.current_cluster_map(&inode_state_guard, &allocation_guard)?;
+            self.ensure_cluster_map(&inode_state_guard, &allocation_guard)?;
         let cluster_map = cluster_map_generation.stream_extension();
-        let (data_length, valid_data_length) = cluster_map_generation.validated_lengths()?;
+        let (data_length, valid_data_length) = cluster_map_generation.validated_data_lengths()?;
         if new_size == data_length {
             return Ok(());
         }
@@ -291,7 +313,7 @@ impl ExfatInode {
                             if new_size > data_length {
                                 page_cache.resize(new_size, data_length)?;
                             }
-                            Self::prepare_regular_file_page_cache_range(
+                            Self::prepare_regular_file_page_cache_boundary_pages(
                                 page_cache,
                                 data_length,
                                 zero_fill_range.clone(),

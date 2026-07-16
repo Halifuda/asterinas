@@ -2,8 +2,32 @@
 
 //! Bridges the exFAT inode owner to the shared exFAT page-cache backend.
 //!
-//! Method groups: callback context publication, page read/write BIO callbacks, page count, and
-//! inode page-cache accessors.
+//! This module translates validated exFAT inode mappings
+//! into the page-cache and BIO callback surface expected by the kernel VM layer.
+//! It owns the callback context that pairs a cluster-map generation with boot geometry,
+//! page-count derivation,
+//! and page read/write submission against the underlying block device.
+//!
+//! Its entry points publish or clear page-cache context,
+//! compute page counts from the current mapping,
+//! and service page-cache callbacks that need cluster-to-block translation.
+//! The data model is the page-oriented view of an exFAT stream
+//! layered on top of validated cluster-map generations.
+//!
+//! Locking and ordering matter because callback-visible context must describe a coherent mapping
+//! before page-cache I/O can re-enter the inode.
+//! Completion and error paths preserve whether failure happened during mapping translation,
+//! BIO execution,
+//! or later page-cache completion handling.
+//!
+//! This module is limited to backend translation.
+//! It does not own namespace, metadata, or higher-level write policy,
+//! and it assumes callers publish cluster-map state before exposing page-cache work.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 5.1, 7.6, and 9.5,
+//! plus `crate::vm::page_cache::PageCacheBackend`
+//! and `aster_block::bio::{BioStatus, BioType}`.
 
 use core::{
     ops::Deref,

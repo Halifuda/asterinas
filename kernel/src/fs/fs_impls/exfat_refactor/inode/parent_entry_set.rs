@@ -2,7 +2,29 @@
 
 //! Owns parent-directory entry-set validation, rewrite preparation, and persistence.
 //!
-//! Method groups: validated entry-set lookup, rewrite preparation, and persistence.
+//! This module is the owner for rewriting an inode's file-entry set inside its parent directory.
+//! It validates and re-reads the parent-backed entry-set bytes,
+//! prepares byte mutations that preserve the old and new images,
+//! and persists rename or metadata updates in a controlled order.
+//!
+//! Its entry points cover validated lookup of the current parent entry set,
+//! preparation of rewrite carriers,
+//! and persistence helpers for ordinary updates and rename-specific phases.
+//! The core data model is the parent-directory byte span that represents one inode's entry set
+//! together with the prepared old/new bytes used for recovery-aware persistence.
+//!
+//! Locking and recovery are central here.
+//! Callers supply ordered inode guards,
+//! while this module preserves the target-before-source and rollback-versus-rewrite policy
+//! required for namespace coherence and forced-shutdown decisions.
+//!
+//! This module is limited to parent-entry-set persistence.
+//! It does not own namespace admission,
+//! slot discovery,
+//! or cluster allocation by itself.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.4, 7.6, 7.7, and 8.1.
 
 use core::ops::Range;
 
@@ -605,6 +627,10 @@ impl ExfatInode {
         };
         let mut persist_error = None;
         if let Err(error) = apply_result {
+            // `RollbackAllowed` means we still trust the old bytes as the authoritative image.
+            // If restoring those bytes fails,
+            // we escalate to rewriting the intended new image,
+            // and if even that cannot reestablish one coherent image we latch forced shutdown.
             if recovery == PersistenceRecovery::RollbackAllowed {
                 let start_page = slot_byte_range.start / PAGE_SIZE;
                 let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
@@ -719,6 +745,9 @@ impl ExfatInode {
             })?;
         let start_page = slot_byte_range.start / PAGE_SIZE;
         let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
+        // Rename persists the target entry set before it invalidates the source entry set.
+        // We flush the target only while its page-cache image is still known coherent,
+        // because later source handling depends on a durable destination image already existing.
         let apply_result = {
             let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
             page_cache
@@ -822,6 +851,10 @@ impl ExfatInode {
         let mut persist_error = None;
         let mut image_coherent = true;
         if let Err(error) = apply_result {
+            // After the rename target is durable,
+            // the source phase has no rollback-to-old-bytes path without violating the published rename.
+            // A failed rewrite here therefore preserves the first error,
+            // and loss of one coherent source image escalates to forced shutdown.
             let rewrite_result = {
                 let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
                 page_cache

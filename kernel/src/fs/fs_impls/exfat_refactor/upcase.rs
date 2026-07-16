@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Loads the exFAT up-case table and provides case-folded name comparison helpers.
+//!
+//! This module owns the validated exFAT up-case table used for case-insensitive name lookup.
+//! It decodes the on-disk compressed table representation,
+//! verifies checksum and size-related constraints,
+//! and publishes the Unicode code-unit mapping used by directory scan logic.
+//!
+//! Its entry points load the table from the mounted filesystem,
+//! decode or expand compressed runs,
+//! and perform the case-folded comparisons needed by lookup and rename validation.
+//! The data model is the exFAT up-case mapping table anchored by the dedicated special file.
+//!
+//! Recovery semantics are conservative.
+//! Malformed table contents, checksum mismatches, or impossible encoded runs are rejected
+//! before lookup can depend on them.
+//! This module is limited to exFAT up-case semantics
+//! and does not own broader Unicode normalization policy.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 7.2 and 7.2.5.
 
 use super::{
     boot::BootRegion,

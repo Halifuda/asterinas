@@ -1,6 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Scans, validates, and authors exFAT directory-entry sets as byte-backed records.
+//!
+//! This module is the owner for the exFAT directory-entry-set byte format.
+//! It defines the typed views, mutable writers, scanners, checksums, and slot helpers
+//! that let inode code reason about on-disk entry sets without open-coded byte offsets.
+//!
+//! Its entry points parse and validate file, stream-extension, file-name,
+//! and special entry records,
+//! scan directory byte streams,
+//! and rewrite validated entry sets back into byte buffers for persistence.
+//! The data model here is the authoritative 32-byte exFAT entry layout
+//! and the grouped entry-set invariants built on top of it.
+//!
+//! Recovery semantics are conservative:
+//! malformed records, checksum mismatches, and structurally inconsistent sets are rejected
+//! rather than partially normalized.
+//! Callers use these views when preparing inode metadata rewrites,
+//! namespace mutations,
+//! and mount-time special-file discovery.
+//!
+//! This module does not own inode locking or persistence ordering by itself.
+//! It only defines the record-level format and validation rules those higher layers rely on.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.1, 7.2, 7.4, 7.6, and 7.7.
 
 use alloc::vec;
 

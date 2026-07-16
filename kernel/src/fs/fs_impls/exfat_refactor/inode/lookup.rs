@@ -2,7 +2,28 @@
 
 //! Implements directory lookup, readdir, and child-inode materialization.
 //!
-//! Method groups: name lookup, directory-entry scans, readdir emission, and VFS lookup dispatch.
+//! This module owns directory traversal after the caller has admitted a directory inode.
+//! It scans directory bytes,
+//! performs name lookup with up-case aware comparison,
+//! emits readdir entries,
+//! and materializes child inodes from validated directory-entry sets.
+//!
+//! Its entry points cover VFS lookup and readdir dispatch
+//! plus the supporting scan helpers that search a directory stream.
+//! The data model is the validated directory byte stream
+//! and the file-entry-set views found within it.
+//!
+//! Locking matters because lookup may need ordered inode guards and parent revalidation
+//! while still preserving cache and namespace consistency.
+//! This module does not own persistence;
+//! it is limited to read-side traversal and returns explicit failure on malformed scans,
+//! unsupported names,
+//! or inconsistent directory contents.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 6, 7.2.5, 7.6.3, 7.6.4, and 7.7,
+//! plus `crate::fs::utils::DirentVisitor`
+//! and `crate::fs::vfs::inode::Inode`.
 
 use super::{
     super::{
@@ -272,7 +293,7 @@ impl ExfatInode {
         if let Some(parent) = parent.as_ref() {
             guarded_inodes.push(parent.as_ref());
         }
-        let inode_guards = Self::directory_read_guards_by_stable_identity(guarded_inodes);
+        let inode_guards = Self::inode_read_guards_in_lock_order(guarded_inodes);
         let inode_state_guard = inode_guards
             .iter()
             .find(|guard| guard.guards_inode(self))

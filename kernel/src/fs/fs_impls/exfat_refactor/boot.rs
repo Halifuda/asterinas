@@ -1,6 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Owns Boot-region loading, validation, volume flags, and mount-time root-directory anchors.
+//!
+//! This module decodes the exFAT boot region into validated geometry
+//! that the rest of the filesystem treats as authoritative.
+//! It covers sector and cluster sizing,
+//! FAT placement,
+//! root-directory anchors,
+//! and the volume flags and checksum state needed at mount time.
+//!
+//! Its entry points load boot sectors from the block device,
+//! validate checksum and structural invariants,
+//! and expose the derived layout values used by bitmap, FAT, inode, and up-case owners.
+//! Recovery here means refusing inconsistent geometry before publication;
+//! later modules rely on these fields remaining stable after mount admission.
+//!
+//! The supported surface is the validated exFAT geometry required by this refactor.
+//! Malformed flags, impossible sizes, and unsupported layout combinations are rejected
+//! instead of normalized heuristically.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 2, 3, and 9.1 through 9.4,
+//! plus `aster_block::BlockDevice`.
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;

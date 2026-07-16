@@ -2,7 +2,29 @@
 
 //! Owns regular-file cluster-map growth shape and prepared FAT range linking.
 //!
-//! Method groups: cluster-map growth topology and prepared FAT linking.
+//! This child module plans how a regular-file cluster map grows
+//! once allocation has produced new cluster ranges.
+//! It decides whether the grown file can stay contiguous,
+//! when FAT links must be materialized,
+//! and how a new validated cluster-map generation is assembled before publication.
+//!
+//! Its entry points derive the grown mapping topology
+//! and prepare the FAT updates needed to splice newly allocated ranges into the file.
+//! The data model is the old validated cluster map plus the candidate allocated ranges
+//! measured against the mounted boot geometry.
+//!
+//! Locking and recovery matter because FAT publication must stay coordinated
+//! with allocation accounting and later inode/page-cache publication.
+//! A failed growth step must not leave the caller unable to distinguish
+//! pre-publication rollback from already-published state that requires stronger recovery.
+//!
+//! This module is limited to cluster-map growth topology.
+//! It does not own user-visible write dispatch,
+//! page-cache dirtying,
+//! or entry-set persistence.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 4, 5.1, 7.6.6, and 8.1.
 
 use super::{
     super::{

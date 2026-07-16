@@ -2,7 +2,30 @@
 
 //! Owns regular-file mapping validation, cluster lookup, and direct cluster mutation.
 //!
-//! Method groups: mapping validation, cluster lookup, and cluster-level mutation.
+//! This child module owns the lowest-level regular-file cluster I/O helpers
+//! used by the write path after higher-level admission and growth planning.
+//! It validates that a regular-file mapping shape matches boot geometry,
+//! locates the cluster covering a file offset,
+//! and performs direct cluster reads or writes against the backing device.
+//!
+//! The data model is the validated cluster map plus boot-region geometry
+//! translated into cluster indices and byte ranges.
+//! Allocation and FAT guard assumptions come from the caller,
+//! so this module can focus on mapping correctness and cluster-level mutation.
+//!
+//! Partial-failure handling is conservative:
+//! invalid mapping state is rejected before I/O,
+//! and direct cluster mutation reports device or topology failure
+//! without publishing higher-level metadata changes by itself.
+//!
+//! This module is limited to cluster-local regular-file I/O.
+//! It does not own page-cache publication,
+//! namespace recovery,
+//! or stream-length updates.
+//!
+//! Authoritative references are Microsoft exFAT File System Specification,
+//! Sections 5.1, 7.6.6, 7.6.7, and 8.1,
+//! plus `aster_block::BlockDevice`.
 
 use aster_block::BlockDevice;
 use ostd::mm::VmIo;
@@ -28,7 +51,7 @@ impl ExfatInode {
         cluster_map: &ClusterMap,
         cluster_index: usize,
     ) -> Result<u32> {
-        let (data_length, _) = cluster_map.validated_lengths()?;
+        let (data_length, _) = cluster_map.validated_data_lengths()?;
         let stream_extension = cluster_map.stream_extension();
         if stream_extension.no_fat_chain {
             let cluster_count = data_length.div_ceil(boot_region.cluster_size);
@@ -66,7 +89,7 @@ impl ExfatInode {
             return Ok(());
         }
 
-        let (data_length, _) = cluster_map.validated_lengths()?;
+        let (data_length, _) = cluster_map.validated_data_lengths()?;
         Self::validate_regular_file_mapping_shape(
             boot_region,
             &cluster_map.stream_extension(),
