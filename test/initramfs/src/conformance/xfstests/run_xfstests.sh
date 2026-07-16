@@ -4,6 +4,8 @@
 
 set -eu
 
+# The initramfs substitutes the runtime tool directory before this script runs.
+# Keep the shell strict so setup failures stop before xfstests can misclassify them.
 # RUNTIME_PATH is substituted by the Nix build.
 export PATH=__RUNTIME_PATH__
 
@@ -27,6 +29,7 @@ REAL_FSCK=$(command -v "$FSCK" 2>/dev/null || true)
 REAL_SYSTEM_FSCK=$(command -v fsck 2>/dev/null || true)
 [ -n "$REAL_SYSTEM_FSCK" ] || REAL_SYSTEM_FSCK=$REAL_FSCK
 
+# Keep the two devices distinct before creating wrappers or touching xfstests state.
 if [ "$TEST_DEV" = "$SCRATCH_DEV" ]; then
     echo "TEST_DEV and SCRATCH_DEV must be distinct for xfstests: $TEST_DEV" >&2
     exit 1
@@ -36,6 +39,7 @@ WRAPPER_DIR="$XFSTESTS_DIR/bin"
 mkdir -p "$WRAPPER_DIR"
 export PATH="$WRAPPER_DIR:$PATH"
 
+# Normalize xfstests' mkfs/fsck invocations while retaining the real tools.
 cat > "$WRAPPER_DIR/mkfs.$FSTYP" <<EOF
 #!/bin/sh
 if [ "\${1:-}" = "-t" ] && [ "\${2:-}" = "$FSTYP" ]; then
@@ -78,6 +82,7 @@ for entry in "$TEST_DEV:$XFSTESTS_DIR/test:test" "$SCRATCH_DEV:$XFSTESTS_DIR/scr
     fi
 done
 
+# Generate the guest-local config after validating the device and mount roots.
 cat > "$XFSTESTS_DIR/local.config" <<EOF
 export FSTYP=$FSTYP
 export TEST_DEV=$TEST_DEV
@@ -94,6 +99,7 @@ export XFSTESTS_FSCK_WRAPPER="$WRAPPER_DIR/fsck.$FSTYP"
 export XFSTESTS_SYSTEM_FSCK="$REAL_SYSTEM_FSCK"
 EOF
 
+# Add only the compatibility hooks required by Asterinas' initramfs lane.
 append_common_rc_asterinas_compat()
 {
     cat >> common/rc <<'EOF'
@@ -177,7 +183,7 @@ _check_if_dev_already_mounted()
     [ -n "$mount_rec" ] || return 1
 
     if [ "$mount_rec" != "$dev $mnt" ]; then
-        echo "$devname=$dev is mounted but not on $mntname=$mnt - aborting"
+        echo "dev=$dev is mounted but not on mnt=$mnt - aborting"
         echo "Already mounted result:"
         echo "$mount_rec"
         return 2
