@@ -47,6 +47,7 @@ use super::{
         dir_entry_format::{self as direntry, DIRECTORY_ENTRY_SIZE, FileEntrySetView},
         bitmap::AllocGuard,
         fs::{ExfatFs, FsState},
+        invalid_on_disk_layout,
     },
     ExfatInode, PersistenceRecovery, StreamExtensionDirEntry, UpcaseTable,
     state::InodeStateWriteGuard,
@@ -237,6 +238,17 @@ impl ExfatInode {
                 slot_range,
                 &entry_set,
             )?];
+            let updated_parent_link_count = if type_ == InodeType::Dir {
+                Some(
+                    self_inode_state_guard
+                        .metadata()
+                        .nr_hard_links
+                        .checked_add(1)
+                        .ok_or_else(invalid_on_disk_layout)?,
+                )
+            } else {
+                None
+            };
             match self.persist_directory_page_cache_mutation_classified(
                 &mut fs_state,
                 self_inode_state_guard.metadata(),
@@ -262,6 +274,11 @@ impl ExfatInode {
                     return Err(error);
                 }
             }
+            if let Some(updated_parent_link_count) = updated_parent_link_count {
+                self_inode_state_guard.with_metadata_mut(|metadata| {
+                    metadata.nr_hard_links = updated_parent_link_count;
+                });
+            }
 
             // Phase 5: construct and publish the child inode only after the namespace image exists.
             let child_size = if type_ == InodeType::Dir {
@@ -285,6 +302,7 @@ impl ExfatInode {
                 .inode_state_write_guard()
                 .with_metadata_mut(|child_metadata| {
                     child_metadata.mode = mode;
+                    child_metadata.birth_at = Some(normalized_modify_timestamp);
                     child_metadata.last_access_at = normalized_access_timestamp;
                     child_metadata.last_modify_at = normalized_modify_timestamp;
                     child_metadata.last_meta_change_at = normalized_modify_timestamp;
@@ -735,6 +753,11 @@ impl ExfatInode {
                 &directory_bytes,
                 slot_range,
             )?];
+            let updated_parent_link_count = self_inode_state_guard
+                .metadata()
+                .nr_hard_links
+                .checked_sub(1)
+                .ok_or_else(invalid_on_disk_layout)?;
             let rmdir_primary_error = match self.persist_directory_page_cache_mutation_classified(
                 &mut fs_state,
                 self_inode_state_guard.metadata(),
@@ -745,6 +768,9 @@ impl ExfatInode {
                 Ok(Err(error)) => Some(error),
                 Err(error) => return Err(error),
             };
+            self_inode_state_guard.with_metadata_mut(|metadata| {
+                metadata.nr_hard_links = updated_parent_link_count;
+            });
             let mut rmdir_followup_error = None;
             if let Err(error) = Self::detach_namespace_removed_inode(
                 &mut fs_state,
@@ -1013,6 +1039,19 @@ impl ExfatInode {
             boot_region,
             allocation_guard,
         )?;
+        let updated_parent_link_count = if source_inode_type == InodeType::Dir
+            && replacement.is_some()
+        {
+            Some(
+                self_inode_state_guard
+                    .metadata()
+                    .nr_hard_links
+                    .checked_sub(1)
+                    .ok_or_else(invalid_on_disk_layout)?,
+            )
+        } else {
+            None
+        };
         let replaced_target_slot_range =
             replacement.as_ref().map(|replacement| match replacement {
                 ReplacedTargetCleanup::Immediate { slot_range, .. }
@@ -1108,6 +1147,11 @@ impl ExfatInode {
             &byte_mutations,
             PersistenceRecovery::RollbackAllowed,
         )?;
+        if let Some(updated_parent_link_count) = updated_parent_link_count {
+            self_inode_state_guard.with_metadata_mut(|metadata| {
+                metadata.nr_hard_links = updated_parent_link_count;
+            });
+        }
         let rename_target_removal_state = match &persist_status {
             Ok(()) => RenameTargetRemovalState::Persisted,
             Err(_) => RenameTargetRemovalState::Uncertain,
@@ -1237,6 +1281,30 @@ impl ExfatInode {
             boot_region,
             allocation_guard,
         )?;
+        let updated_source_link_count = if source_inode_type == InodeType::Dir {
+            Some(
+                source_inode_state_guard
+                    .metadata()
+                    .nr_hard_links
+                    .checked_sub(1)
+                    .ok_or_else(invalid_on_disk_layout)?,
+            )
+        } else {
+            None
+        };
+        let updated_target_link_count = if source_inode_type == InodeType::Dir
+            && replacement.is_none()
+        {
+            Some(
+                target_inode_state_guard
+                    .metadata()
+                    .nr_hard_links
+                    .checked_add(1)
+                    .ok_or_else(invalid_on_disk_layout)?,
+            )
+        } else {
+            None
+        };
         let replaced_target_slot_range =
             replacement.as_ref().map(|replacement| match replacement {
                 ReplacedTargetCleanup::Immediate { slot_range, .. }
@@ -1327,15 +1395,29 @@ impl ExfatInode {
             )?;
 
         // Phase 5: invalidate the source only after the target side has either persisted or failed.
+        let mut namespace_image_coherent = false;
         if target_image_coherent {
-            let (source_status, _source_image_coherent) =
+            let (source_status, source_image_coherent) =
                 self.persist_rename_source_entry_set_classified(
                     fs_state,
                     source_inode_state_guard.metadata(),
                     prepared_source_write,
                 )?;
+            namespace_image_coherent = source_image_coherent;
             if persist_status.is_ok() {
                 persist_status = source_status;
+            }
+        }
+        if namespace_image_coherent {
+            if let Some(updated_source_link_count) = updated_source_link_count {
+                source_inode_state_guard.with_metadata_mut(|metadata| {
+                    metadata.nr_hard_links = updated_source_link_count;
+                });
+            }
+            if let Some(updated_target_link_count) = updated_target_link_count {
+                target_inode_state_guard.with_metadata_mut(|metadata| {
+                    metadata.nr_hard_links = updated_target_link_count;
+                });
             }
         }
 

@@ -50,7 +50,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-    time::clocks::RealTimeCoarseClock,
+    time::clocks::{RealTimeClock, RealTimeCoarseClock},
 };
 
 #[derive(Clone, Copy)]
@@ -220,7 +220,7 @@ impl ExfatInode {
     ) -> Result<()> {
         let (inode_type, _first_cluster, data_length, _no_fat_chain) =
             entry_view.child_metadata(boot_region)?;
-        let _create_at = Self::decoded_exfat_timestamp(
+        let create_at = Self::decoded_exfat_timestamp(
             entry_view.create_timestamp().timestamp_bytes(),
             entry_view.create_timestamp().ten_ms_increment(),
             entry_view.create_timestamp().utc_offset_byte(),
@@ -245,6 +245,7 @@ impl ExfatInode {
             if !entry_view.is_read_only() {
                 metadata.mode |= writable_bits;
             }
+            metadata.birth_at = Some(create_at);
             metadata.last_access_at = last_access_at;
             metadata.last_meta_change_at = last_modify_at;
             metadata.last_modify_at = last_modify_at;
@@ -389,6 +390,119 @@ impl ExfatInode {
 
     pub(super) fn set_atime_impl(&self, time: Duration) {
         self.rewrite_timestamp(InodeTimestampField::Accessed, time);
+    }
+
+    pub(super) fn update_atime_after_eligible_read(&self) {
+        let Some(fs) = self.fs.upgrade() else {
+            return;
+        };
+        let mut fs_state = fs.fs_state.write();
+        let Some(mount_state) = fs_state.mount_state.as_ref() else {
+            return;
+        };
+        if mount_state.forced_shutdown
+            || mount_state.volume_flags.clear_to_zero
+            || mount_state.volume_flags.media_failure
+            || mount_state.options.fs_flags.contains(FsFlags::RDONLY)
+        {
+            return;
+        }
+        let operation_time = RealTimeClock::get().read_time();
+        let (discovered_type, is_root_directory, parent) = {
+            let inode_state_guard = self.inode_state_read_guard();
+            (
+                inode_state_guard.metadata().type_,
+                inode_state_guard.dir_entry_stream().data_length.is_none(),
+                inode_state_guard.parent(),
+            )
+        };
+        if !matches!(discovered_type, InodeType::Dir | InodeType::File) {
+            return;
+        }
+        if discovered_type == InodeType::Dir && is_root_directory {
+            let inode_state_guard = self.inode_state_write_guard();
+            if inode_state_guard.metadata().type_ == InodeType::Dir
+                && inode_state_guard.dir_entry_stream().data_length.is_none()
+            {
+                inode_state_guard
+                    .with_metadata_mut(|metadata| metadata.last_access_at = operation_time);
+            }
+            return;
+        }
+
+        let mut guarded_inodes = vec![self];
+        if let Some(parent) = parent.as_ref() {
+            guarded_inodes.push(parent.as_ref());
+        }
+        let inode_guards = Self::inode_write_guards_in_lock_order(guarded_inodes);
+        let Some(self_inode_state_guard) =
+            inode_guards.iter().find(|guard| guard.guards_inode(self))
+        else {
+            return;
+        };
+        if !matches!(
+            self_inode_state_guard.metadata().type_,
+            InodeType::Dir | InodeType::File
+        ) || (self_inode_state_guard.metadata().type_ == InodeType::Dir
+            && self_inode_state_guard
+                .dir_entry_stream()
+                .data_length
+                .is_none())
+        {
+            return;
+        }
+        self_inode_state_guard
+            .with_metadata_mut(|metadata| metadata.last_access_at = operation_time);
+
+        let Some(parent) = parent.as_ref() else {
+            return;
+        };
+        if !self_inode_state_guard
+            .parent()
+            .is_some_and(|admitted_parent| Arc::ptr_eq(&admitted_parent, parent))
+        {
+            return;
+        }
+        let Some(parent_inode_state_guard) = inode_guards
+            .iter()
+            .find(|guard| guard.guards_inode(parent.as_ref()))
+        else {
+            return;
+        };
+        let Ok(_allocation_guard) = fs.allocation_read_guard() else {
+            return;
+        };
+        let boot_region = fs.immutable_boot_region();
+        let rewrite_result = (|| {
+            fs.publish_dirty_admission(&mut fs_state)?;
+            self.rewrite_inode_entry_set_with_guards(
+                &mut fs_state,
+                self_inode_state_guard,
+                parent_inode_state_guard,
+                &boot_region,
+                |entry_view| {
+                    let (timestamp_bytes, _ten_ms_increment, encoded_utc_offset_byte) =
+                        Self::encoded_exfat_timestamp_fields(
+                            operation_time,
+                            entry_view.last_accessed_timestamp().utc_offset_byte(),
+                        )?;
+                    let mut mutable_entry_set = entry_view.to_mutable();
+                    mutable_entry_set.set_last_accessed_timestamp(FileEntryTimestamp::new(
+                        timestamp_bytes,
+                        None,
+                        encoded_utc_offset_byte,
+                    ));
+                    Ok(Some(mutable_entry_set.into_bytes()))
+                },
+                |metadata| metadata.last_access_at = operation_time,
+            )
+        })();
+        if rewrite_result.is_err() {
+            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+        }
+        if rewrite_result.is_ok_and(|updated| updated) {
+            self.mark_metadata_dirty(self_inode_state_guard);
+        }
     }
 
     pub(super) fn set_mtime_impl(&self, time: Duration) {

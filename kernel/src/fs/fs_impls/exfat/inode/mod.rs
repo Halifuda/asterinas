@@ -54,7 +54,8 @@ use self::{
     sync::InodeSyncScope,
 };
 use super::{
-    dir_entry_format::DirEntrySlotRange,
+    boot::BootRegion,
+    dir_entry_format::{self as direntry, DirEntrySlotRange},
     fs::ExfatFs,
     invalid_on_disk_layout,
     upcase::UpcaseTable,
@@ -141,9 +142,15 @@ impl ExfatInode {
             fs,
             metadata,
             root_stream,
-            Some(root_cluster_map),
+            Some(root_cluster_map.clone()),
             Weak::new(),
         );
+        root_inode.reconstruct_directory_link_count(
+            &fs.immutable_boot_region(),
+            root_cluster_map,
+            allocated_size,
+            direntry::DirectoryScanMode::Root,
+        )?;
         ExfatFs::publish_cached_inode(&mut fs.fs_state.write(), root_ino, &root_inode);
         Ok(root_inode)
     }
@@ -180,6 +187,46 @@ impl ExfatInode {
             cluster_map,
             parent,
         )
+    }
+
+    fn reconstruct_directory_link_count(
+        &self,
+        boot_region: &BootRegion,
+        cluster_map: Arc<ClusterMap>,
+        logical_end: usize,
+        scan_mode: direntry::DirectoryScanMode,
+    ) -> Result<()> {
+        let metadata = self.inode_state_read_guard().metadata();
+        let directory_bytes =
+            self.read_directory_snapshot_from_page_cache(metadata, cluster_map, logical_end)?;
+        let mut nr_hard_links = 2usize;
+        let mut entry_index = 0usize;
+        loop {
+            match direntry::scan_dir_entry(scan_mode, &directory_bytes, entry_index)? {
+                direntry::ScannedDirEntry::EndOfDirectory { .. } => break,
+                direntry::ScannedDirEntry::Vacant(slot_range) => {
+                    entry_index = slot_range.next_entry_index()?;
+                }
+                direntry::ScannedDirEntry::File(entry_view) => {
+                    let (inode_type, _, _, _) = entry_view.child_metadata(boot_region)?;
+                    if inode_type == InodeType::Dir {
+                        nr_hard_links = nr_hard_links
+                            .checked_add(1)
+                            .ok_or_else(invalid_on_disk_layout)?;
+                    }
+                    entry_index = entry_view.slot_range().next_entry_index()?;
+                }
+                direntry::ScannedDirEntry::Issue { kind, slot_range } => {
+                    if kind != direntry::DirEntryIssueKind::BenignUnrecognizedEntrySet {
+                        return Err(invalid_on_disk_layout());
+                    }
+                    entry_index = slot_range.next_entry_index()?;
+                }
+            }
+        }
+        self.inode_state_write_guard()
+            .with_metadata_mut(|metadata| metadata.nr_hard_links = nr_hard_links);
+        Ok(())
     }
 
     pub(super) fn entry_set_location_hint(&self) -> Result<Option<DirEntrySlotRange>> {
@@ -382,10 +429,7 @@ impl Inode for ExfatInode {
     }
 
     fn read_link(&self) -> Result<SymbolicLink> {
-        if self.type_() == InodeType::Dir {
-            return_errno!(Errno::EISDIR);
-        }
-        return_errno!(Errno::EOPNOTSUPP);
+        return_errno!(Errno::EINVAL);
     }
 
     fn write_link(&self, _target: &str) -> Result<()> {
