@@ -23,7 +23,8 @@
 //! It does not own directory admission or cluster allocation policy,
 //! and it rejects invalid on-disk metadata encodings rather than synthesizing replacements.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 7.4 and 7.6,
 //! plus `crate::fs::vfs::inode::Metadata`.
 
@@ -494,9 +495,8 @@ impl ExfatInode {
         };
         // TODO: These timestamp setters still admit through the generic mounted-mutation gate and
         // reuse the currently stored exFAT UTC-offset byte because `MountOptions` does not
-        // yet own explicit `allow_utime` / timezone policy. Once the later `meso_09`
-        // mount-policy follow-up exposes that owner-local policy under `ExfatFs`, remove this
-        // seam and route timestamp admission plus UTC-offset selection through that dedicated path.
+        // yet own explicit `allow_utime` / timezone policy. Once `MountOptions` exposes that
+        // policy under `ExfatFs`, route timestamp admission and UTC-offset selection through it.
         let mut fs_state = fs.fs_state.write();
         let Some(mount_state) = fs_state.mount_state.as_ref() else {
             return;

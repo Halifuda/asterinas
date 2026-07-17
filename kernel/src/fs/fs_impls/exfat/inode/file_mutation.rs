@@ -23,7 +23,8 @@
 //! It does not own directory namespace policy,
 //! and it rejects unsupported mapping states or invalid size transitions instead of widening behavior.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 7.6.5, 7.6.6, 7.6.7, and 8.1,
 //! plus `crate::vm::page_cache::PageCache`.
 

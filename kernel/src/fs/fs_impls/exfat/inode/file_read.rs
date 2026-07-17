@@ -18,7 +18,8 @@
 //! This module does not own persistence,
 //! and short reads are bounded by the validated stream length and available mapping.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 5.1, 7.6.5, 7.6.6, and 7.6.7,
 //! plus `crate::vm::page_cache::PageCache`.
 

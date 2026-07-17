@@ -21,7 +21,8 @@
 //! rename admission,
 //! or persistence ordering after slots are chosen.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6.1, 6.2, 7.4, 7.6, and 7.7.
 
 use super::super::{

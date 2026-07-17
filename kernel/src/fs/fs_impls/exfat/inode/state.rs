@@ -25,7 +25,8 @@
 //! This module does not own namespace policy or direct BIO submission.
 //! It only supplies the validated state and guard machinery required by those higher layers.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 7.4, 7.6, 8.1, and 9.5,
 //! plus `crate::fs::fs_impls::exfat::inode::page_backend::PageCacheContext`.
 

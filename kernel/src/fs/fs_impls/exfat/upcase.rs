@@ -18,7 +18,8 @@
 //! This module is limited to exFAT up-case semantics
 //! and does not own broader Unicode normalization policy.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 7.2 and 7.2.5.
 
 use super::{

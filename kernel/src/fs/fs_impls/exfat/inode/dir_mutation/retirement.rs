@@ -24,7 +24,8 @@
 //! slot mutation,
 //! or the initial namespace decision.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 5.1, 7.4, 7.6, and 8.1.
 
 use aster_block::BlockDevice;

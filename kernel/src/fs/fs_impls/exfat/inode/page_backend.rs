@@ -24,7 +24,8 @@
 //! It does not own namespace, metadata, or higher-level write policy,
 //! and it assumes callers publish cluster-map state before exposing page-cache work.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 5.1, 7.6, and 9.5,
 //! plus `crate::vm::page_cache::PageCacheBackend`
 //! and `aster_block::bio::{BioStatus, BioType}`.
@@ -209,8 +210,8 @@ impl ExfatFilePageBackend {
             )
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
         let page_offset_within_cluster = page_offset % cluster_size;
-        // TODO: Lift this frozen limitation when exFAT can map sub-page clusters or
-        // cross-cluster cached-page I/O without reintroducing shared BIO slice support.
+        // TODO: Support cached pages that span non-contiguous clusters by using sub-page BIO
+        // segments or an exFAT bounce buffer. Mount validation currently prevents this case.
         if page_offset_within_cluster
             .checked_add(PAGE_SIZE)
             .is_none_or(|page_end_within_cluster| page_end_within_cluster > cluster_size)

@@ -23,7 +23,8 @@
 //! This module does not own inode locking or persistence ordering by itself.
 //! It only defines the record-level format and validation rules those higher layers rely on.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6, 7.1, 7.2, 7.4, 7.6, and 7.7.
 
 use alloc::vec;

@@ -23,7 +23,8 @@
 //! page-cache dirtying,
 //! or entry-set persistence.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 4, 5.1, 7.6.6, and 8.1.
 
 use super::{

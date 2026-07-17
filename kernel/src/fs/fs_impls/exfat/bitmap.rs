@@ -23,7 +23,8 @@
 //! It does not own namespace policy,
 //! and it rejects malformed bitmap extents or impossible range requests.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 5.1, 7.1, and 8.1,
 //! plus the mounted owner/runtime boundaries in
 //! `crate::fs::fs_impls::exfat::fs::ExfatFs`.

@@ -15,11 +15,12 @@
 //! Recovery here means refusing inconsistent geometry before publication;
 //! later modules rely on these fields remaining stable after mount admission.
 //!
-//! The supported surface is the validated exFAT geometry required by this refactor.
+//! The supported surface is the validated geometry used by this implementation.
 //! Malformed flags, impossible sizes, and unsupported layout combinations are rejected
 //! instead of normalized heuristically.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 2, 3, and 9.1 through 9.4,
 //! plus `aster_block::BlockDevice`.
 
@@ -157,8 +158,8 @@ impl BootRegion {
         if cluster_size == 0 || cluster_size > MAX_CLUSTER_SIZE {
             return Err(invalid_on_disk_layout());
         }
-        // TODO: Lift this frozen limitation once exFAT can do smaller-than-page cached I/O
-        // without depending on shared BIO slice support.
+        // TODO: Support clusters smaller than `PAGE_SIZE`. A cached page can then span
+        // non-contiguous clusters, requiring sub-page BIO segments or an exFAT bounce buffer.
         if cluster_size < PAGE_SIZE {
             return Err(invalid_on_disk_layout());
         }

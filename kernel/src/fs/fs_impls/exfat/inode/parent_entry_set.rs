@@ -23,7 +23,8 @@
 //! slot discovery,
 //! or cluster allocation by itself.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6, 7.4, 7.6, 7.7, and 8.1.
 
 use core::ops::Range;

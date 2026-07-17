@@ -18,7 +18,8 @@
 //! Unsupported features and malformed on-disk layouts are rejected through local error
 //! constructors rather than compatibility shims.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 2 through 8,
 //! plus the owner module boundaries in `crate::fs::fs_impls::exfat::fs`
 //! and `crate::fs::fs_impls::exfat::inode`.

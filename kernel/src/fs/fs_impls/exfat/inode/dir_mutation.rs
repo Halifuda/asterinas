@@ -25,7 +25,8 @@
 //! It does not change the owner placement of child logic,
 //! and it rejects malformed directory state or unsupported namespace cases explicitly.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6, 7.4, 7.6, 7.7, 8.1, and 9.5,
 //! plus `crate::fs::vfs::inode::Inode`.
 

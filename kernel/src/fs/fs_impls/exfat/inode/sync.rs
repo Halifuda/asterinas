@@ -24,7 +24,8 @@
 //! This module is limited to synchronization and persistence classification.
 //! It does not own namespace admission or read/write I/O semantics outside sync.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 7.4, 7.6, and 8.1,
 //! plus `aster_block::bio::BioStatus`
 //! and `crate::fs::fs_impls::exfat::fs::FsState`.

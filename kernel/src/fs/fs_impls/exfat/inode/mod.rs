@@ -24,7 +24,8 @@
 //! Filesystem-global lifecycle remains in `fs.rs`,
 //! and unsupported inode states are rejected instead of bridged through compatibility layers.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6, 7.4, 7.6, and 7.7,
 //! plus `crate::fs::vfs::inode::Inode`.
 

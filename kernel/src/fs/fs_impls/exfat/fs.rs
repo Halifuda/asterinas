@@ -27,7 +27,8 @@
 //! It does not duplicate inode-local policy,
 //! and it rejects unsupported or inconsistent images at mount boundaries.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 3, 7.1, 7.2, and 8.1,
 //! plus `crate::fs::vfs::file_system::FileSystem`
 //! and `crate::fs::vfs::file_system::SuperBlock`.

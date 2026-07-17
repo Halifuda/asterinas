@@ -17,7 +17,8 @@
 //! malformed directory contents or unexpected children stop the mutation
 //! instead of being repaired in place.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6.1, 6.2, and 9.5.
 
 use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};

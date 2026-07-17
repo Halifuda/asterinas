@@ -23,7 +23,8 @@
 //! It does not own higher-level inode or namespace policy,
 //! and it rejects impossible cluster values or malformed chains instead of guessing.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 4, 5.1, and 8.1,
 //! plus `aster_block::BlockDevice`.
 

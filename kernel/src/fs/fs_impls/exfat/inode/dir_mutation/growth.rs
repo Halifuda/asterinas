@@ -23,7 +23,8 @@
 //! It does not own rename admission or slot search,
 //! and it assumes the outer mutation path has already selected the growth point.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 4, 5.1, 6, 7.4, 7.6, and 8.1.
 
 use aster_block::BlockDevice;

@@ -20,7 +20,8 @@
 //! unsupported names,
 //! or inconsistent directory contents.
 //!
-//! Authoritative references are Microsoft exFAT File System Specification,
+//! Authoritative references are Microsoft's
+//! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 6, 7.2.5, 7.6.3, 7.6.4, and 7.7,
 //! plus `crate::fs::utils::DirentVisitor`
 //! and `crate::fs::vfs::inode::Inode`.
