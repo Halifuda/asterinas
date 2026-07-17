@@ -26,17 +26,16 @@
 //! Sections 6.1, 6.2, 7.4, 7.6, and 7.7.
 
 use super::super::{
-    ExfatInode, StreamExtensionDirEntry,
-    parent_entry_set::DirectoryByteMutation,
+    ExfatInode, StreamExtensionDirEntry, parent_entry_set::DirectoryByteMutation,
     state::InodeStateWriteGuard,
 };
 use crate::{
     fs::exfat::{
-        dir_entry_format::{
-            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, MutableDirEntrySlotSpan,
-            DirectoryScanMode, ScannedDirEntry,
-        },
         bitmap::AllocGuard,
+        dir_entry_format::{
+            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntrySlotRange, DirectoryScanMode,
+            MutableDirEntrySlotSpan, ScannedDirEntry,
+        },
         fs::{ExfatFs, FsState},
         invalid_on_disk_layout, invalid_operation_input,
     },

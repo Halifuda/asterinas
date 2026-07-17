@@ -27,14 +27,12 @@
 //! [exFAT File System Specification](https://learn.microsoft.com/en-us/windows/win32/fileio/exfat-specification),
 //! Sections 4, 5.1, 7.6.6, and 8.1.
 
-use super::{
+use super::super::{
     super::{
-        super::{
-            bitmap::ClusterRange, boot::BootRegion, fat::FatReader,
-            inconsistent_bitmap_accounting, invalid_on_disk_layout, invalid_operation_input,
-        },
-        ClusterMap, ExfatInode, StreamExtensionDirEntry,
+        bitmap::ClusterRange, boot::BootRegion, fat::FatReader, inconsistent_bitmap_accounting,
+        invalid_on_disk_layout, invalid_operation_input,
     },
+    ClusterMap, ExfatInode, StreamExtensionDirEntry,
 };
 use crate::prelude::*;
 

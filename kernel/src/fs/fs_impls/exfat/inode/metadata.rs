@@ -78,10 +78,10 @@ impl ExfatInode {
         let date = Date::from_calendar_date(encoded_year, month, encoded_day)
             .map_err(|_| invalid_on_disk_layout())?;
         let encoded_time = u16::from_le_bytes([timestamp_bytes[0], timestamp_bytes[1]]);
-        let hour = u8::try_from((encoded_time >> 11) & 0x1f)
-            .map_err(|_| invalid_on_disk_layout())?;
-        let minute = u8::try_from((encoded_time >> 5) & 0x3f)
-            .map_err(|_| invalid_on_disk_layout())?;
+        let hour =
+            u8::try_from((encoded_time >> 11) & 0x1f).map_err(|_| invalid_on_disk_layout())?;
+        let minute =
+            u8::try_from((encoded_time >> 5) & 0x3f).map_err(|_| invalid_on_disk_layout())?;
         let mut seconds = u8::try_from(encoded_time & 0x1f)
             .map_err(|_| invalid_on_disk_layout())?
             .checked_mul(2)
@@ -150,8 +150,8 @@ impl ExfatInode {
                 date_time.millisecond(),
             ),
         };
-        let date = ((u16::try_from(encoded_year - 1980)
-            .map_err(|_| Error::new(Errno::EINVAL))?) << 9)
+        let date = ((u16::try_from(encoded_year - 1980).map_err(|_| Error::new(Errno::EINVAL))?)
+            << 9)
             | (u16::from(encoded_month) << 5)
             | u16::from(encoded_day);
         let time = (u16::from(encoded_hour) << 11)

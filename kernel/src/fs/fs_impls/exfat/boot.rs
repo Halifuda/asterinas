@@ -127,8 +127,7 @@ impl BootRegion {
         block_device
             .read_bytes(0, &mut sector_header)
             .map_err(|_| device_io())?;
-        if &sector_header
-            [FILE_SYSTEM_NAME_OFFSET..FILE_SYSTEM_NAME_OFFSET + FILE_SYSTEM_NAME_WIDTH]
+        if &sector_header[FILE_SYSTEM_NAME_OFFSET..FILE_SYSTEM_NAME_OFFSET + FILE_SYSTEM_NAME_WIDTH]
             != b"EXFAT   "
         {
             return Err(invalid_on_disk_layout());
@@ -287,8 +286,7 @@ impl BootRegion {
 
     pub(super) fn is_valid_cluster(&self, cluster: u32) -> bool {
         cluster >= FIRST_DATA_CLUSTER
-            && cluster
-                <= self.cluster_count.saturating_add(FIRST_DATA_CLUSTER - 1)
+            && cluster <= self.cluster_count.saturating_add(FIRST_DATA_CLUSTER - 1)
     }
 
     pub(super) fn validate_stream_data(&self, first_cluster: u32, data_length: u64) -> Result<()> {
@@ -328,8 +326,7 @@ impl BootRegion {
         if !self.is_valid_cluster(self.root_dir_cluster) {
             return Err(invalid_on_disk_layout());
         }
-        let sector_size =
-            u64::try_from(self.sector_size).map_err(|_| invalid_on_disk_layout())?;
+        let sector_size = u64::try_from(self.sector_size).map_err(|_| invalid_on_disk_layout())?;
         let data_sectors = u64::from(self.cluster_count)
             .checked_mul(
                 u64::try_from(self.sectors_per_cluster).map_err(|_| invalid_on_disk_layout())?,

@@ -219,7 +219,12 @@ impl ExfatFs {
             Self::mark_mount_dirty_after_failure(fs_state);
             return Err(error);
         }
-        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
+        if self
+            .block_device
+            .sync()
+            .map_err(|_| Error::new(Errno::EIO))?
+            != BioStatus::Complete
+        {
             Self::mark_mount_dirty_after_failure(fs_state);
             return_errno!(Errno::EIO);
         }
@@ -247,7 +252,12 @@ impl ExfatFs {
             Self::mark_mount_dirty_after_failure(fs_state);
             return Err(error);
         }
-        if self.block_device.sync().map_err(|_| Error::new(Errno::EIO))? != BioStatus::Complete {
+        if self
+            .block_device
+            .sync()
+            .map_err(|_| Error::new(Errno::EIO))?
+            != BioStatus::Complete
+        {
             Self::mark_mount_dirty_after_failure(fs_state);
             return_errno!(Errno::EIO);
         }
@@ -405,10 +415,7 @@ impl ExfatFs {
 
 // ---- Superblock ----
 impl ExfatFs {
-    pub(super) fn publish_dirty_admission(
-        &self,
-        fs_state: &mut FsState,
-    ) -> Result<()> {
+    pub(super) fn publish_dirty_admission(&self, fs_state: &mut FsState) -> Result<()> {
         let current_flags = fs_state
             .mount_state
             .as_ref()
@@ -472,7 +479,6 @@ impl ExfatFs {
             container_dev_id: self.block_device.id(),
         })
     }
-
 }
 
 impl ExfatFs {
@@ -503,17 +509,10 @@ impl Drop for ExfatFs {
 // ---- Inode cache ----
 impl ExfatFs {
     pub(super) fn peek_cached_inode(fs_state: &FsState, ino: u64) -> Option<Arc<ExfatInode>> {
-        fs_state
-            .inode_cache
-            .get(&ino)
-            .and_then(Weak::upgrade)
+        fs_state.inode_cache.get(&ino).and_then(Weak::upgrade)
     }
 
-    pub(super) fn publish_cached_inode(
-        fs_state: &mut FsState,
-        ino: u64,
-        inode: &Arc<ExfatInode>,
-    ) {
+    pub(super) fn publish_cached_inode(fs_state: &mut FsState, ino: u64, inode: &Arc<ExfatInode>) {
         fs_state.inode_cache.insert(ino, Arc::downgrade(inode));
     }
 
@@ -539,13 +538,15 @@ impl ExfatFs {
 
     fn live_cached_inodes(fs_state: &mut FsState) -> Vec<Arc<ExfatInode>> {
         let mut live_inodes = Vec::with_capacity(fs_state.inode_cache.len());
-        fs_state.inode_cache.retain(|_, inode| match inode.upgrade() {
-            Some(inode) => {
-                live_inodes.push(inode);
-                true
-            }
-            None => false,
-        });
+        fs_state
+            .inode_cache
+            .retain(|_, inode| match inode.upgrade() {
+                Some(inode) => {
+                    live_inodes.push(inode);
+                    true
+                }
+                None => false,
+            });
         live_inodes
     }
 }

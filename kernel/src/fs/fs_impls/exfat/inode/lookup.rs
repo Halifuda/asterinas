@@ -30,8 +30,8 @@ use super::{
     super::{
         boot::BootRegion,
         dir_entry_format::{
-            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, DirectoryScanMode,
-            DirEntrySlotRange, FileEntrySetView, ScannedDirEntry,
+            self as direntry, DIRECTORY_ENTRY_SIZE, DirEntryIssueKind, DirEntrySlotRange,
+            DirectoryScanMode, FileEntrySetView, ScannedDirEntry,
         },
         fs::MountOptions,
         invalid_on_disk_layout, invalid_operation_input,
@@ -70,11 +70,7 @@ impl ExfatInode {
             );
         let child_cluster_map = (inode_type == InodeType::Dir)
             .then(|| {
-                Self::resolve_cluster_map(
-                    &fs.immutable_block_device(),
-                    boot_region,
-                    child_stream,
-                )
+                Self::resolve_cluster_map(&fs.immutable_block_device(), boot_region, child_stream)
             })
             .transpose()?
             .map(Arc::new);
@@ -83,7 +79,9 @@ impl ExfatInode {
             parent.weak_self(),
             child_ino,
             inode_type,
-            child_stream.data_length.ok_or_else(invalid_on_disk_layout)?,
+            child_stream
+                .data_length
+                .ok_or_else(invalid_on_disk_layout)?,
             child_stream,
             child_cluster_map.clone(),
         );
@@ -91,7 +89,9 @@ impl ExfatInode {
             child_inode.reconstruct_directory_link_count(
                 boot_region,
                 child_cluster_map,
-                child_stream.data_length.ok_or_else(invalid_on_disk_layout)?,
+                child_stream
+                    .data_length
+                    .ok_or_else(invalid_on_disk_layout)?,
                 DirectoryScanMode::Ordinary,
             )?;
         }
@@ -117,7 +117,10 @@ impl ExfatInode {
         let mut name = Vec::new();
         for character in normalized_name.chars() {
             if character <= '\u{001F}'
-                || matches!(character, '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|')
+                || matches!(
+                    character,
+                    '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|'
+                )
             {
                 return_errno_with_message!(Errno::EINVAL, "invalid exFAT name");
             }
@@ -345,12 +348,14 @@ impl ExfatInode {
             if next_offset == 1 {
                 let dotdot_next_offset = DIRECTORY_ENTRY_SIZE;
                 let parent_ino = match parent.as_ref() {
-                    Some(parent) => inode_guards
-                        .iter()
-                        .find(|guard| guard.guards_inode(parent.as_ref()))
-                        .ok_or_else(|| Error::new(Errno::EINVAL))?
-                        .metadata()
-                        .ino,
+                    Some(parent) => {
+                        inode_guards
+                            .iter()
+                            .find(|guard| guard.guards_inode(parent.as_ref()))
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?
+                            .metadata()
+                            .ino
+                    }
                     None => directory_ino,
                 };
                 if let Err(error) =
@@ -388,7 +393,9 @@ impl ExfatInode {
                     &directory_bytes,
                     entry_index,
                 )? {
-                    ScannedDirEntry::EndOfDirectory { entry_index: end_entry_index } => {
+                    ScannedDirEntry::EndOfDirectory {
+                        entry_index: end_entry_index,
+                    } => {
                         next_offset = Self::readdir_cookie_for_entry_index(end_entry_index)?;
                         break;
                     }
@@ -425,9 +432,8 @@ impl ExfatInode {
                         kind: DirEntryIssueKind::BenignUnrecognizedEntrySet,
                         slot_range,
                     } => {
-                        next_offset = Self::readdir_cookie_for_entry_index(
-                            slot_range.next_entry_index()?,
-                        )?;
+                        next_offset =
+                            Self::readdir_cookie_for_entry_index(slot_range.next_entry_index()?)?;
                         entry_index = slot_range.next_entry_index()?;
                     }
                     ScannedDirEntry::Issue { .. } => {
@@ -450,7 +456,10 @@ impl ExfatInode {
             .upgrade()
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let mut fs_state = fs.fs_state.write();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         let inode_state_guard = self.inode_state_read_guard();
         if inode_state_guard.metadata().type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
@@ -472,7 +481,11 @@ impl ExfatInode {
             return Ok(parent);
         }
         let _allocation_guard = fs.allocation_read_guard()?;
-        let upcase_table = fs_state.upcase_table.as_ref().ok_or_else(super::super::not_mounted)?.clone();
+        let upcase_table = fs_state
+            .upcase_table
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?
+            .clone();
         let lookup_name = Self::validate_name(name, &mount_state.options)?;
         let lookup_name_hash = upcase_table.name_hash(&lookup_name);
         let child_inode = self.lookup_child_by_name(

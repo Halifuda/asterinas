@@ -91,11 +91,7 @@ impl<'a> InodeStateReadGuard<'a> {
     }
 
     pub(super) fn page_cache_context(&self) -> Option<super::page_backend::PageCacheContext> {
-        self.inode
-            .page_backend
-            .page_cache_context
-            .read()
-            .clone()
+        self.inode.page_backend.page_cache_context.read().clone()
     }
 }
 
@@ -157,11 +153,7 @@ impl<'a> InodeStateWriteGuard<'a> {
     }
 
     pub(super) fn page_cache_context(&self) -> Option<super::page_backend::PageCacheContext> {
-        self.inode
-            .page_backend
-            .page_cache_context
-            .read()
-            .clone()
+        self.inode.page_backend.page_cache_context.read().clone()
     }
 
     pub(super) fn replace_page_cache_context(
@@ -389,13 +381,11 @@ impl ClusterMap {
             return_errno!(Errno::EINVAL);
         }
 
-        let (range_index, cluster_index_in_range) =
-            self.mapped_range_frontier(cluster_index)?;
+        let (range_index, cluster_index_in_range) = self.mapped_range_frontier(cluster_index)?;
         self.cluster_ranges[range_index]
             .start_cluster
             .checked_add(
-                u32::try_from(cluster_index_in_range)
-                    .map_err(|_| Error::new(Errno::EINVAL))?,
+                u32::try_from(cluster_index_in_range).map_err(|_| Error::new(Errno::EINVAL))?,
             )
             .ok_or_else(|| Error::new(Errno::EINVAL))
     }
@@ -412,16 +402,18 @@ impl ClusterMap {
     }
 
     pub(super) fn allocated_byte_length(&self, boot_region: &BootRegion) -> Result<usize> {
-        self.cluster_ranges.iter().try_fold(0usize, |length, range| {
-            length
-                .checked_add(
-                    range
-                        .cluster_count
-                        .checked_mul(boot_region.cluster_size)
-                        .ok_or_else(|| Error::new(Errno::EINVAL))?,
-                )
-                .ok_or_else(|| Error::new(Errno::EINVAL))
-        })
+        self.cluster_ranges
+            .iter()
+            .try_fold(0usize, |length, range| {
+                length
+                    .checked_add(
+                        range
+                            .cluster_count
+                            .checked_mul(boot_region.cluster_size)
+                            .ok_or_else(|| Error::new(Errno::EINVAL))?,
+                    )
+                    .ok_or_else(|| Error::new(Errno::EINVAL))
+            })
     }
 
     pub(super) fn terminal_cluster(&self, boot_region: &BootRegion) -> Result<Option<u32>> {
@@ -432,8 +424,8 @@ impl ClusterMap {
             .cluster_ranges
             .last()
             .ok_or_else(|| Error::new(Errno::EINVAL))?;
-        let last_offset = u32::try_from(last_range.cluster_count - 1)
-            .map_err(|_| Error::new(Errno::EINVAL))?;
+        let last_offset =
+            u32::try_from(last_range.cluster_count - 1).map_err(|_| Error::new(Errno::EINVAL))?;
         let terminal_cluster = last_range
             .start_cluster
             .checked_add(last_offset)
@@ -455,7 +447,6 @@ impl ExfatInode {
     ) -> InodeStateWriteGuard<'_> {
         InodeStateWriteGuard::new(self, self.inode_state.write())
     }
-
 }
 
 // ---- Cluster map resolution ----
@@ -499,11 +490,7 @@ impl ExfatInode {
                     FatChainStep::End => break,
                 }
             }
-            return ClusterMap::from_stream_and_ranges(
-                boot_region,
-                cluster_map,
-                cluster_ranges,
-            );
+            return ClusterMap::from_stream_and_ranges(boot_region, cluster_map, cluster_ranges);
         };
         let Some(valid_data_length) = cluster_map.valid_data_length else {
             return_errno!(Errno::EINVAL);
@@ -724,7 +711,6 @@ impl ExfatInode {
         let _ = inode_state_guard.replace_page_cache_context(page_cache_context);
         previous_generation.clone()
     }
-
 }
 
 impl ExfatInode {

@@ -24,9 +24,9 @@
 use super::super::{ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard};
 use crate::{
     fs::exfat::{
+        bitmap::AllocGuard,
         boot::BootRegion,
         dir_entry_format::{self as direntry, DirectoryScanMode, ScannedDirEntry},
-        bitmap::AllocGuard,
         invalid_on_disk_layout,
     },
     prelude::*,

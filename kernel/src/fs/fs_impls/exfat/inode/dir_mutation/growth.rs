@@ -32,12 +32,10 @@ use ostd::mm::VmIo;
 
 use super::super::{
     ClusterMap, ExfatInode, PersistenceRecovery, StreamExtensionDirEntry,
-    parent_entry_set::PreparedEntrySetWrite,
-    state::InodeStateWriteGuard,
+    parent_entry_set::PreparedEntrySetWrite, state::InodeStateWriteGuard,
 };
 use crate::{
     fs::{
-        file::InodeType,
         exfat::{
             bitmap::{AllocGuard, ClusterRange},
             boot::BootRegion,
@@ -46,6 +44,7 @@ use crate::{
             fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
+        file::InodeType,
     },
     prelude::*,
 };

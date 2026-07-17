@@ -22,10 +22,7 @@ use core::ops::Range;
 use ostd::mm::io::util::HasVmReaderWriter;
 
 use super::super::ExfatInode;
-use crate::{
-    prelude::*,
-    vm::page_cache::PageCache,
-};
+use crate::{prelude::*, vm::page_cache::PageCache};
 
 impl ExfatInode {
     pub(super) fn prepare_regular_file_page_cache_boundary_pages(

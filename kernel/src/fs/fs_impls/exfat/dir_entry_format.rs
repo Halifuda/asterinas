@@ -198,7 +198,11 @@ impl StreamExtensionDirEntry {
             return Err(invalid_operation_input());
         }
         stream_entry[STREAM_FLAGS_OFFSET] = STREAM_FLAG_ALLOCATION_POSSIBLE
-            | if self.no_fat_chain { STREAM_FLAG_NO_FAT_CHAIN } else { 0 };
+            | if self.no_fat_chain {
+                STREAM_FLAG_NO_FAT_CHAIN
+            } else {
+                0
+            };
         stream_entry[STREAM_VALID_DATA_LENGTH_OFFSET..STREAM_VALID_DATA_LENGTH_OFFSET + 8]
             .copy_from_slice(
                 &u64::try_from(valid_data_length)
@@ -450,7 +454,11 @@ pub(super) fn encode_file_entry_set_for_creation(
     let stream_entry_offset = DIRECTORY_ENTRY_SIZE;
     entry_set[stream_entry_offset] = STREAM_EXTENSION_ENTRY_TYPE;
     entry_set[stream_entry_offset + 1] = STREAM_FLAG_ALLOCATION_POSSIBLE
-        | if stream_entry.no_fat_chain { STREAM_FLAG_NO_FAT_CHAIN } else { 0 };
+        | if stream_entry.no_fat_chain {
+            STREAM_FLAG_NO_FAT_CHAIN
+        } else {
+            0
+        };
     entry_set[stream_entry_offset + 3] =
         u8::try_from(name.len()).map_err(|_| invalid_operation_input())?;
     entry_set[stream_entry_offset + 4..stream_entry_offset + 6]

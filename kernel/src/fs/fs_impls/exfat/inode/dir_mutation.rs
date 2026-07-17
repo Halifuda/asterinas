@@ -37,15 +37,16 @@ mod slots;
 mod validation;
 
 use aster_block::BlockDevice;
+
 use self::{
     admission::{AdmittedRenameChild, FinalRenameAdmission, RenameNames},
     retirement::{RenameTargetRemovalState, ReplacedTargetCleanup},
 };
 use super::{
     super::{
+        bitmap::AllocGuard,
         boot::BootRegion,
         dir_entry_format::{self as direntry, DIRECTORY_ENTRY_SIZE, FileEntrySetView},
-        bitmap::AllocGuard,
         fs::{ExfatFs, FsState},
         invalid_on_disk_layout,
     },
@@ -267,7 +268,8 @@ impl ExfatInode {
                     create_primary_error = Some(error);
                 }
                 Err(error) => {
-                    if allocated_directory_cluster.is_some() && allocation_guard.rollback_allocation()?
+                    if allocated_directory_cluster.is_some()
+                        && allocation_guard.rollback_allocation()?
                     {
                         ExfatFs::disable_unsupported_discard_after_release(&mut fs_state);
                     }
@@ -428,9 +430,7 @@ impl ExfatInode {
                 None => None,
             };
             let cached_child_inode_state_guard = match cached_child_inode.as_ref() {
-                Some(cached_child_inode) => {
-                    Some(guard_for_inode_fn(cached_child_inode.as_ref())?)
-                }
+                Some(cached_child_inode) => Some(guard_for_inode_fn(cached_child_inode.as_ref())?),
                 None => None,
             };
             let mut allocation_guard = fs.allocation_guard()?;
@@ -743,11 +743,8 @@ impl ExfatInode {
                 &boot_region,
             )?;
 
-            let allocated_cluster_ranges = Self::allocated_cluster_ranges(
-                &block_device,
-                &boot_region,
-                child_cluster_map,
-            )?;
+            let allocated_cluster_ranges =
+                Self::allocated_cluster_ranges(&block_device, &boot_region, child_cluster_map)?;
             fs.publish_dirty_admission(&mut fs_state)?;
             let byte_mutations = vec![Self::prepare_invalidated_slot_mutation(
                 &directory_bytes,
@@ -1039,19 +1036,18 @@ impl ExfatInode {
             boot_region,
             allocation_guard,
         )?;
-        let updated_parent_link_count = if source_inode_type == InodeType::Dir
-            && replacement.is_some()
-        {
-            Some(
-                self_inode_state_guard
-                    .metadata()
-                    .nr_hard_links
-                    .checked_sub(1)
-                    .ok_or_else(invalid_on_disk_layout)?,
-            )
-        } else {
-            None
-        };
+        let updated_parent_link_count =
+            if source_inode_type == InodeType::Dir && replacement.is_some() {
+                Some(
+                    self_inode_state_guard
+                        .metadata()
+                        .nr_hard_links
+                        .checked_sub(1)
+                        .ok_or_else(invalid_on_disk_layout)?,
+                )
+            } else {
+                None
+            };
         let replaced_target_slot_range =
             replacement.as_ref().map(|replacement| match replacement {
                 ReplacedTargetCleanup::Immediate { slot_range, .. }
@@ -1292,19 +1288,18 @@ impl ExfatInode {
         } else {
             None
         };
-        let updated_target_link_count = if source_inode_type == InodeType::Dir
-            && replacement.is_none()
-        {
-            Some(
-                target_inode_state_guard
-                    .metadata()
-                    .nr_hard_links
-                    .checked_add(1)
-                    .ok_or_else(invalid_on_disk_layout)?,
-            )
-        } else {
-            None
-        };
+        let updated_target_link_count =
+            if source_inode_type == InodeType::Dir && replacement.is_none() {
+                Some(
+                    target_inode_state_guard
+                        .metadata()
+                        .nr_hard_links
+                        .checked_add(1)
+                        .ok_or_else(invalid_on_disk_layout)?,
+                )
+            } else {
+                None
+            };
         let replaced_target_slot_range =
             replacement.as_ref().map(|replacement| match replacement {
                 ReplacedTargetCleanup::Immediate { slot_range, .. }
@@ -1397,8 +1392,8 @@ impl ExfatInode {
         // Phase 5: invalidate the source only after the target side has either persisted or failed.
         let mut namespace_image_coherent = false;
         if target_image_coherent {
-            let (source_status, source_image_coherent) =
-                self.persist_rename_source_entry_set_classified(
+            let (source_status, source_image_coherent) = self
+                .persist_rename_source_entry_set_classified(
                     fs_state,
                     source_inode_state_guard.metadata(),
                     prepared_source_write,

@@ -32,11 +32,14 @@
 
 use aster_block::bio::BioStatus;
 
-use super::super::{
-    bitmap::AllocGuard,
-    fs::{ExfatFs, FsState},
+use super::{
+    super::{
+        bitmap::AllocGuard,
+        fs::{ExfatFs, FsState},
+    },
+    ExfatInode,
+    state::InodeStateWriteGuard,
 };
-use super::{ExfatInode, state::InodeStateWriteGuard};
 use crate::prelude::*;
 
 /// Classifies which dirty portions of an inode still need persistence.
@@ -82,7 +85,10 @@ impl InodeDirtyState {
     }
 
     pub(super) fn needs_sync_data(self) -> bool {
-        matches!(self.dirty_level(), DirtyLevel::Data | DirtyLevel::DataAndMetadata)
+        matches!(
+            self.dirty_level(),
+            DirtyLevel::Data | DirtyLevel::DataAndMetadata
+        )
     }
 
     pub(super) fn needs_sync_all(self) -> bool {
@@ -303,9 +309,7 @@ impl ExfatInode {
             return Ok(());
         }
 
-        if has_cached_file_range
-            && let Some(page_cache) = page_cache
-        {
+        if has_cached_file_range && let Some(page_cache) = page_cache {
             page_cache.flush_range(0..data_length)?;
         }
 

@@ -44,9 +44,7 @@ use ostd::mm::{Segment, VmIo, io::util::HasVmReaderWriter};
 
 use super::{
     super::{
-        boot::BootRegion,
-        dir_entry_format::DIRECTORY_ENTRY_SIZE,
-        fs::MountRuntimeProjection,
+        boot::BootRegion, dir_entry_format::DIRECTORY_ENTRY_SIZE, fs::MountRuntimeProjection,
         invalid_on_disk_layout,
     },
     ClusterMap, ExfatInode,
@@ -92,16 +90,9 @@ impl ExfatFilePageBackend {
     }
 
     fn active_page_cache_context(&self) -> Result<PageCacheContext> {
-        self
-            .page_cache_context
-            .read()
-            .clone()
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EIO,
-                    "exFAT page-cache context is not published",
-                )
-            })
+        self.page_cache_context.read().clone().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "exFAT page-cache context is not published")
+        })
     }
 
     fn planned_page_io(
@@ -110,7 +101,8 @@ impl ExfatFilePageBackend {
         idx: usize,
         bio_type: BioType,
     ) -> Result<(usize, PageIoRange)> {
-        let (cluster_map, logical_end, initialized_limit, mount_runtime) = match page_cache_context {
+        let (cluster_map, logical_end, initialized_limit, mount_runtime) = match page_cache_context
+        {
             PageCacheContext::RegularFile {
                 cluster_map,
                 data_length,

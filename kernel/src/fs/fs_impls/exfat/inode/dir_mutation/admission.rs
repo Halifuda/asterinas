@@ -30,13 +30,13 @@
 use super::super::{ExfatInode, StreamExtensionDirEntry, UpcaseTable, state::InodeStateWriteGuard};
 use crate::{
     fs::{
-        file::InodeType,
         exfat::{
             boot::BootRegion,
-            dir_entry_format::{DirectoryScanMode, DirEntrySlotRange, FileEntrySetView},
+            dir_entry_format::{DirEntrySlotRange, DirectoryScanMode, FileEntrySetView},
             fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
+        file::InodeType,
     },
     prelude::*,
 };

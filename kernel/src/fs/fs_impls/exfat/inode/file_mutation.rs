@@ -40,12 +40,14 @@ use ostd::mm::VmIo;
 
 use super::{
     super::{
-        bitmap::ClusterRange, boot::BootRegion, fat::FatReader,
-        bitmap::AllocGuard,
+        bitmap::{AllocGuard, ClusterRange},
+        boot::BootRegion,
+        fat::FatReader,
         fs::{ExfatFs, FsState},
         inconsistent_bitmap_accounting, invalid_on_disk_layout,
     },
-    ClusterMap, ExfatInode, StreamExtensionDirEntry, state::InodeStateWriteGuard,
+    ClusterMap, ExfatInode, StreamExtensionDirEntry,
+    state::InodeStateWriteGuard,
     sync::InodeSyncScope,
 };
 use crate::{
@@ -76,7 +78,10 @@ impl ExfatInode {
             let mut fs_state = fs.fs_state.write();
             let block_device = fs.immutable_block_device();
             let boot_region = fs.immutable_boot_region();
-            let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+            let mount_state = fs_state
+                .mount_state
+                .as_ref()
+                .ok_or_else(super::super::not_mounted)?;
             if mount_state.forced_shutdown
                 || mount_state.volume_flags.clear_to_zero
                 || mount_state.volume_flags.media_failure
@@ -127,7 +132,8 @@ impl ExfatInode {
                     None => None,
                 };
                 if sync_scope.is_some() {
-                    let parent_is_revalidated = match (parent.as_ref(), inode_state_guard.parent()) {
+                    let parent_is_revalidated = match (parent.as_ref(), inode_state_guard.parent())
+                    {
                         (Some(discovered_parent), Some(admitted_parent)) => {
                             Arc::ptr_eq(discovered_parent, &admitted_parent)
                         }
@@ -173,13 +179,12 @@ impl ExfatInode {
                     Err((error, staged_len)) if staged_len != 0 => (staged_len, Some(error)),
                     Err((error, _)) => return Err(error.into()),
                 };
-                let write_len = if staging_error.is_some()
-                    && status_flags.contains(StatusFlags::O_DIRECT)
-                {
-                    staged_len / boot_region.sector_size * boot_region.sector_size
-                } else {
-                    staged_len
-                };
+                let write_len =
+                    if staging_error.is_some() && status_flags.contains(StatusFlags::O_DIRECT) {
+                        staged_len / boot_region.sector_size * boot_region.sector_size
+                    } else {
+                        staged_len
+                    };
                 if write_len == 0 {
                     if let Some(error) = staging_error {
                         return Err(error.into());
@@ -189,8 +194,7 @@ impl ExfatInode {
                 let write_end = effective_offset
                     .checked_add(write_len)
                     .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                let mut staged_reader =
-                    VmReader::from(&staged_bytes[..write_len]).to_fallible();
+                let mut staged_reader = VmReader::from(&staged_bytes[..write_len]).to_fallible();
                 let new_data_length = data_length.max(write_end);
                 let new_valid_data_length = valid_data_length.max(write_end);
                 let timestamp = RealTimeCoarseClock::get().read_time();
@@ -267,7 +271,10 @@ impl ExfatInode {
         let mut fs_state = fs.fs_state.write();
         let block_device = fs.immutable_block_device();
         let boot_region = fs.immutable_boot_region();
-        let mount_state = fs_state.mount_state.as_ref().ok_or_else(super::super::not_mounted)?;
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
         if mount_state.forced_shutdown
             || mount_state.volume_flags.clear_to_zero
             || mount_state.volume_flags.media_failure
@@ -458,12 +465,10 @@ impl ExfatInode {
                     return_errno!(Errno::EINVAL);
                 }
             } else {
-                boot_region
-                    .validate_stream_data(
-                        next_cluster_map.first_cluster,
-                        u64::try_from(new_size).map_err(|_| Error::new(Errno::EINVAL))?,
-                    )
-                    ?;
+                boot_region.validate_stream_data(
+                    next_cluster_map.first_cluster,
+                    u64::try_from(new_size).map_err(|_| Error::new(Errno::EINVAL))?,
+                )?;
             }
             let allocated_sectors = retained_clusters
                 .checked_mul(boot_region.sectors_per_cluster)
@@ -608,14 +613,13 @@ impl ExfatInode {
                 new_data_length,
                 allocated_ranges,
             )?);
-            previous_page_cache_context = inode_state_guard.replace_page_cache_context(
-                self.page_cache_context_for_mapping(
+            previous_page_cache_context =
+                inode_state_guard.replace_page_cache_context(self.page_cache_context_for_mapping(
                     inode_state_guard.metadata(),
                     next_cluster_map_generation.clone(),
                     new_data_length,
                     current_valid_data_length,
-                )?,
-            );
+                )?);
             apply_growth_fn(next_cluster_map_generation.as_ref(), zero_fill_range)?;
             let next_cluster_map = StreamExtensionDirEntry {
                 valid_data_length: Some(new_valid_data_length),
@@ -640,12 +644,10 @@ impl ExfatInode {
                     return_errno!(Errno::EINVAL);
                 }
             } else {
-                boot_region
-                    .validate_stream_data(
-                        next_cluster_map.first_cluster,
-                        u64::try_from(new_data_length).map_err(|_| Error::new(Errno::EINVAL))?,
-                    )
-                    ?;
+                boot_region.validate_stream_data(
+                    next_cluster_map.first_cluster,
+                    u64::try_from(new_data_length).map_err(|_| Error::new(Errno::EINVAL))?,
+                )?;
             }
             let allocated_clusters = if new_data_length == 0 {
                 0
@@ -668,8 +670,7 @@ impl ExfatInode {
                 let mut fat_reader = FatReader::new(block_device.as_ref(), boot_region);
                 if current_allocated_clusters == 0 {
                     if allocated_ranges.len() != 1 {
-                        Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
-                            ?;
+                        Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)?;
                     }
                 } else if !cluster_map.no_fat_chain
                     || allocated_ranges.len() != 1
@@ -678,26 +679,19 @@ impl ExfatInode {
                             .map_err(|_| invalid_on_disk_layout())?,
                     ) != Some(first_new_cluster)
                 {
-                    Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)
-                        ?;
+                    Self::link_allocated_cluster_ranges(&mut fat_reader, allocated_ranges)?;
                     if cluster_map.no_fat_chain {
-                        fat_reader
-                            .link_contiguous_chain_to_prepared_cluster(
-                                cluster_map.first_cluster,
-                                current_allocated_clusters,
-                                first_new_cluster,
-                            )
-                            ?;
+                        fat_reader.link_contiguous_chain_to_prepared_cluster(
+                            cluster_map.first_cluster,
+                            current_allocated_clusters,
+                            first_new_cluster,
+                        )?;
                     } else {
                         let current_tail_cluster = cluster_map_generation
                             .terminal_cluster(boot_region)?
                             .ok_or_else(|| Error::new(Errno::EINVAL))?;
                         exposure_error = fat_reader
-                            .link_prepared_chain_to_tail(
-                                current_tail_cluster,
-                                first_new_cluster,
-                            )
-                            ?
+                            .link_prepared_chain_to_tail(current_tail_cluster, first_new_cluster)?
                             .err();
                     }
                 }
@@ -731,5 +725,4 @@ impl ExfatInode {
         }
         result
     }
-
 }

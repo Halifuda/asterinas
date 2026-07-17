@@ -46,13 +46,8 @@ use core::{
 
 use spin::Once;
 
-pub(in crate::fs::fs_impls::exfat) use self::state::{
-    ClusterMap, StreamExtensionDirEntry,
-};
-use self::{
-    state::InodeState,
-    sync::InodeSyncScope,
-};
+pub(in crate::fs::fs_impls::exfat) use self::state::{ClusterMap, StreamExtensionDirEntry};
+use self::{state::InodeState, sync::InodeSyncScope};
 use super::{
     boot::BootRegion,
     dir_entry_format::{self as direntry, DirEntrySlotRange},
@@ -67,8 +62,8 @@ use crate::{
         vfs::{
             file_system::FileSystem,
             inode::{
-                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RevalidationPolicy,
-                RenameMode, SymbolicLink,
+                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
+                RevalidationPolicy, SymbolicLink,
             },
         },
     },
@@ -166,27 +161,21 @@ impl ExfatInode {
     ) -> Arc<Self> {
         let cluster_size = fs.immutable_boot_region().cluster_size;
         let mut metadata = match inode_type {
-                InodeType::Dir => Metadata::new_dir(
-                    ino,
-                    mkmod!(u+rwx, g+rx, o+rx),
-                    cluster_size,
-                    fs.container_device_id(),
-                ),
-                _ => Metadata::new_file(
-                    ino,
-                    mkmod!(u+rw, g+r, o+r),
-                    cluster_size,
-                    fs.container_device_id(),
-                ),
-            };
+            InodeType::Dir => Metadata::new_dir(
+                ino,
+                mkmod!(u+rwx, g+rx, o+rx),
+                cluster_size,
+                fs.container_device_id(),
+            ),
+            _ => Metadata::new_file(
+                ino,
+                mkmod!(u+rw, g+r, o+r),
+                cluster_size,
+                fs.container_device_id(),
+            ),
+        };
         metadata.size = size;
-        Self::new(
-            fs,
-            metadata,
-            child_stream,
-            cluster_map,
-            parent,
-        )
+        Self::new(fs, metadata, child_stream, cluster_map, parent)
     }
 
     fn reconstruct_directory_link_count(

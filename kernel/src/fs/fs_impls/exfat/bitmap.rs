@@ -99,24 +99,21 @@ impl AllocGuard<'_> {
         if requested_clusters == 0 || self.allocated_ranges.is_some() {
             return Err(invalid_operation_input());
         }
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
+        let allocation_bitmap = self.allocation_state.as_mut().ok_or_else(not_mounted)?;
         allocation_bitmap.release_lazy_reclaimed_clusters(self.boot_region)?;
         let allocated_ranges = allocation_bitmap.find_free_ranges(
             self.boot_region,
             requested_clusters,
             preferred_start_cluster,
         )?;
-        let allocated_cluster_count = allocated_ranges.iter().try_fold(
-            0usize,
-            |total_clusters, range| {
-                total_clusters
-                    .checked_add(range.cluster_count)
-                    .ok_or_else(inconsistent_bitmap_accounting)
-            },
-        )?;
+        let allocated_cluster_count =
+            allocated_ranges
+                .iter()
+                .try_fold(0usize, |total_clusters, range| {
+                    total_clusters
+                        .checked_add(range.cluster_count)
+                        .ok_or_else(inconsistent_bitmap_accounting)
+                })?;
         if allocated_cluster_count != requested_clusters {
             return Err(inconsistent_bitmap_accounting());
         }
@@ -158,10 +155,7 @@ impl AllocGuard<'_> {
     }
 
     pub(super) fn free_clusters(&mut self, ranges: &[ClusterRange]) -> Result<()> {
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
+        let allocation_bitmap = self.allocation_state.as_mut().ok_or_else(not_mounted)?;
         allocation_bitmap.apply_cluster_ranges(self.boot_region, ranges, BitmapOp::Free)?;
         Ok(())
     }
@@ -171,10 +165,7 @@ impl AllocGuard<'_> {
         cluster_map: Arc<ClusterMap>,
         ranges: Vec<ClusterRange>,
     ) -> Result<()> {
-        let allocation_bitmap = self
-            .allocation_state
-            .as_mut()
-            .ok_or_else(not_mounted)?;
+        let allocation_bitmap = self.allocation_state.as_mut().ok_or_else(not_mounted)?;
         allocation_bitmap.lazy_reclaim_clusters(cluster_map, ranges);
         Ok(())
     }
@@ -342,9 +333,9 @@ impl AllocationBitmap {
         let effective_start_index = boot_region.cluster_index(effective_start_cluster)?;
 
         let scan_window_fn = |scan_start_index: usize,
-                           scan_end_index: usize,
-                           requested_clusters_remaining: &mut usize,
-                           ranges: &mut Vec<ClusterRange>|
+                              scan_end_index: usize,
+                              requested_clusters_remaining: &mut usize,
+                              ranges: &mut Vec<ClusterRange>|
          -> Result<()> {
             if *requested_clusters_remaining == 0 || scan_start_index >= scan_end_index {
                 return Ok(());
@@ -692,7 +683,8 @@ impl AllocationBitmap {
                             cluster_offset
                                 .checked_add(intra_cluster_offset)
                                 .ok_or_else(inconsistent_bitmap_accounting)?,
-                            &self.resident_bitmap[dirty_byte_start..dirty_byte_start + bytes_to_write],
+                            &self.resident_bitmap
+                                [dirty_byte_start..dirty_byte_start + bytes_to_write],
                         )
                         .map_err(|_| device_io())?;
                     dirty_byte_start += bytes_to_write;

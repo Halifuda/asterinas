@@ -36,16 +36,15 @@ use super::{
 };
 use crate::{
     fs::{
-        file::InodeType,
         exfat::{
-            bitmap::ClusterRange,
+            bitmap::{AllocGuard, ClusterRange},
             boot::BootRegion,
             dir_entry_format::{DirEntrySlotRange, FileEntrySetView},
             fat::{ChainVisitControl, FatReader},
-            bitmap::AllocGuard,
             fs::{ExfatFs, FsState},
             invalid_on_disk_layout,
         },
+        file::InodeType,
     },
     prelude::*,
 };
@@ -187,11 +186,8 @@ impl ExfatInode {
                 ranges: detached_regular_file_reclaim.1,
             }));
         }
-        let replaced_target_ranges = Self::allocated_cluster_ranges(
-            block_device,
-            boot_region,
-            target_view.cluster_map()?,
-        )?;
+        let replaced_target_ranges =
+            Self::allocated_cluster_ranges(block_device, boot_region, target_view.cluster_map()?)?;
         Ok(Some(ReplacedTargetCleanup::Immediate {
             slot_range: target_slot_range,
             ranges: replaced_target_ranges,
@@ -308,8 +304,7 @@ impl ExfatInode {
         if matches!(
             rename_target_removal_state,
             RenameTargetRemovalState::Persisted
-        )
-            && finalization_error.is_none()
+        ) && finalization_error.is_none()
             && let Err(error) = Self::cleanup_replaced_target_ranges(
                 fs_state,
                 allocation_guard,
