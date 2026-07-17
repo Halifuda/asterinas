@@ -115,14 +115,6 @@ struct Utimbuf {
     modtime: i64,
 }
 
-fn explicit_timestamp_or_epoch_floor(time: timespec_t) -> Result<Duration> {
-    if time.sec < 0 {
-        return Ok(Duration::ZERO);
-    }
-
-    Duration::try_from(time)
-}
-
 fn vfs_utimes(path: &Path, times: Option<TimeSpecPair>) -> Result<SyscallReturn> {
     let (atime, mtime, ctime) = match times {
         Some(times) => {
@@ -135,14 +127,14 @@ fn vfs_utimes(path: &Path, times: Option<TimeSpecPair>) -> Result<SyscallReturn>
             } else if times.atime.is_utime_now() {
                 now
             } else {
-                explicit_timestamp_or_epoch_floor(times.atime)?
+                Duration::try_from(times.atime)?
             };
             let mtime = if times.mtime.is_utime_omit() {
                 path.mtime()
             } else if times.mtime.is_utime_now() {
                 now
             } else {
-                explicit_timestamp_or_epoch_floor(times.mtime)?
+                Duration::try_from(times.mtime)?
             };
             (atime, mtime, now)
         }
@@ -223,19 +215,14 @@ fn do_futimesat(
         let (autime, mutime) = read_time_from_user::<timeval_t>(timeval_ptr, ctx)?;
         if autime.usec >= 1000000
             || autime.usec < 0
+            || autime.sec < 0
             || mutime.usec >= 1000000
             || mutime.usec < 0
+            || mutime.sec < 0
         {
             return_errno_with_message!(Errno::EINVAL, "invalid time");
         }
-        let autime = timespec_t {
-            sec: autime.sec,
-            nsec: autime.usec * 1_000,
-        };
-        let mutime = timespec_t {
-            sec: mutime.sec,
-            nsec: mutime.usec * 1_000,
-        };
+        let (autime, mutime) = (timespec_t::from(autime), timespec_t::from(mutime));
         Some(TimeSpecPair {
             atime: autime,
             mtime: mutime,

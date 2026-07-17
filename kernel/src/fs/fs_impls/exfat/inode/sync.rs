@@ -184,41 +184,6 @@ impl ExfatInode {
         inode_state_guard.set_dirty_file_retention(None);
     }
 
-    fn has_pending_regular_file_sync(
-        &self,
-        inode_state_guard: &InodeStateWriteGuard<'_>,
-        scope: InodeSyncScope,
-    ) -> bool {
-        if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
-            return false;
-        }
-
-        let dirty_state = inode_state_guard.dirty_state();
-        if scope.needs_device_sync(dirty_state) {
-            return true;
-        }
-
-        let data_length = if let Some(page_cache_context) = inode_state_guard.page_cache_context() {
-            match page_cache_context {
-                super::page_backend::PageCacheContext::RegularFile { data_length, .. } => {
-                    data_length
-                }
-                super::page_backend::PageCacheContext::Directory { .. } => return false,
-            }
-        } else {
-            let Some(data_length) = inode_state_guard.dir_entry_stream().data_length else {
-                return false;
-            };
-            data_length
-        };
-        self.page_cache
-            .get()
-            .and_then(|maybe_page_cache| maybe_page_cache.as_ref())
-            .is_some_and(|page_cache| {
-                data_length != 0 && page_cache.has_dirty_pages(0..data_length)
-            })
-    }
-
     pub(super) fn sync_regular_file(&self, scope: InodeSyncScope) -> Result<()> {
         let fs = self
             .fs
@@ -290,11 +255,7 @@ impl ExfatInode {
             inode_state,
             parent_inode_state,
             &mut allocation_guard,
-        )?;
-        if self.has_pending_regular_file_sync(inode_state, scope) {
-            return_errno!(Errno::EIO);
-        }
-        Ok(())
+        )
     }
 
     pub(super) fn sync_regular_file_with_proofs(
@@ -327,10 +288,8 @@ impl ExfatInode {
 
         let dirty_state_snapshot = inode_state.dirty_state();
         let is_detached_regular_file = inode_state.parent().is_none();
-        let needs_page_writeback = page_cache.is_some_and(|page_cache| {
-            data_length != 0 && page_cache.has_dirty_pages(0..data_length)
-        });
-        if is_detached_regular_file && !needs_page_writeback {
+        let has_cached_file_range = page_cache.is_some() && data_length != 0;
+        if is_detached_regular_file && !has_cached_file_range {
             if dirty_state_snapshot.needs_sync_all() {
                 self.clear_detached_regular_file_publish_debt_with_guard(inode_state);
             }
@@ -339,11 +298,11 @@ impl ExfatInode {
 
         let needs_device_sync = scope.needs_device_sync(dirty_state_snapshot);
         let needs_regular_file_publish = dirty_state_snapshot.has_deferred_regular_file_publish();
-        if !needs_page_writeback && !needs_device_sync {
+        if !has_cached_file_range && !needs_device_sync {
             return Ok(());
         }
 
-        if needs_page_writeback
+        if has_cached_file_range
             && let Some(page_cache) = page_cache
         {
             page_cache.flush_range(0..data_length)?;

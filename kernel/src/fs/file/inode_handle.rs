@@ -7,8 +7,8 @@ use core::{fmt::Display, sync::atomic::Ordering};
 use aster_rights::Rights;
 
 use super::{
-    file_table::FdFlags, flock::FlockItem, AccessMode, AtomicStatusFlags, CreationFlags, FileLike,
-    InodeType, Mappable, StatusFlags,
+    AccessMode, AtomicStatusFlags, CreationFlags, FileLike, InodeType, Mappable, StatusFlags,
+    file_table::FdFlags, flock::FlockItem,
 };
 use crate::{
     events::IoEvents,
@@ -19,7 +19,7 @@ use crate::{
             inode::{FallocMode, FileOps},
             inode_ext::InodeExt,
             path::Path,
-            range_lock::{FileRange, RangeLockItem, RangeLockType, OFFSET_MAX},
+            range_lock::{FileRange, OFFSET_MAX, RangeLockItem, RangeLockType},
         },
     },
     prelude::*,

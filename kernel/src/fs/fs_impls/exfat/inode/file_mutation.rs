@@ -477,13 +477,7 @@ impl ExfatInode {
                     page_cache
                         .read(new_size, &mut writer)
                         .map_err(Error::from)?;
-                    let page_idx = new_size / PAGE_SIZE;
-                    let page_start = page_idx
-                        .checked_mul(PAGE_SIZE)
-                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                    let page_end = page_start.saturating_add(PAGE_SIZE).min(page_cache.size());
-                    let was_dirty = page_cache.has_dirty_pages(page_start..page_end);
-                    partial_page_rollback = Some((page_idx, old_bytes, was_dirty));
+                    partial_page_rollback = Some(old_bytes);
                 }
                 page_cache.resize(new_size, data_length)?;
             }
@@ -497,16 +491,11 @@ impl ExfatInode {
                     if let Some(page_cache) = page_cache {
                         let rollback_result: Result<()> = (|| {
                             page_cache.resize(data_length, new_size)?;
-                            if let Some((page_idx, old_bytes, was_dirty)) =
-                                partial_page_rollback.as_ref()
-                            {
-                                page_cache.restore_prefaulted_pages([(
-                                    *page_idx,
-                                    (new_size % PAGE_SIZE)
-                                        ..(new_size % PAGE_SIZE + old_bytes.len()),
-                                    old_bytes.as_slice(),
-                                    *was_dirty,
-                                )])?;
+                            if let Some(old_bytes) = partial_page_rollback.as_ref() {
+                                let mut reader = VmReader::from(old_bytes.as_slice()).to_fallible();
+                                page_cache
+                                    .write(new_size, &mut reader)
+                                    .map_err(Error::from)?;
                             }
                             Ok(())
                         })();

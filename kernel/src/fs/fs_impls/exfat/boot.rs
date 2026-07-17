@@ -157,6 +157,11 @@ impl BootRegion {
         if cluster_size == 0 || cluster_size > MAX_CLUSTER_SIZE {
             return Err(invalid_on_disk_layout());
         }
+        // TODO: Lift this frozen limitation once exFAT can do smaller-than-page cached I/O
+        // without depending on shared BIO slice support.
+        if cluster_size < PAGE_SIZE {
+            return Err(invalid_on_disk_layout());
+        }
 
         let volume_length_sectors = u64::from_le_bytes([
             sector_header[VOLUME_LENGTH_OFFSET],

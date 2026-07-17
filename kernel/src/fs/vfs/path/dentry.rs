@@ -777,6 +777,7 @@ impl DirDentry<'_> {
                 return_errno_with_message!(Errno::EBUSY, "new_name is . or ..");
             }
         }
+
         let old_dir_inode = self.inode();
         let new_dir_inode = new_dir.inode();
 

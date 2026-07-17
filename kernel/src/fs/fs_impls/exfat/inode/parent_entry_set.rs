@@ -47,7 +47,6 @@ pub(super) struct PreparedEntrySetWrite {
     slot_range: direntry::DirEntrySlotRange,
     entry_set_bytes: Vec<u8>,
     old_entry_set_bytes: Vec<u8>,
-    page_dirty_states: Vec<(usize, bool)>,
 }
 
 pub(super) struct DirectoryByteMutation {
@@ -154,17 +153,6 @@ impl ExfatInode {
             }
         }
 
-        let page_dirty_states = touched_pages
-            .iter()
-            .map(|page_idx| {
-                let page_start = page_idx
-                    .checked_mul(PAGE_SIZE)
-                    .ok_or_else(invalid_operation_input)?;
-                let page_end = page_start.saturating_add(PAGE_SIZE).min(cache_size);
-                Ok((*page_idx, page_cache.has_dirty_pages(page_start..page_end)))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let apply_result = (|| {
             for mutation in byte_mutations {
                 let byte_range = mutation.byte_range();
@@ -180,43 +168,18 @@ impl ExfatInode {
         let mut result_error = None;
         if let Err(error) = apply_result {
             if recovery == PersistenceRecovery::RollbackAllowed {
-                let mut page_restores = Vec::new();
-                for mutation in byte_mutations {
-                    let byte_range = mutation.byte_range();
-                    let old_bytes = mutation.old_bytes();
-                    let mut old_byte_offset = 0usize;
-                    let start_page = byte_range.start / PAGE_SIZE;
-                    let end_page = (byte_range.end - 1) / PAGE_SIZE;
-                    for page_idx in start_page..=end_page {
-                        let page_start = page_idx
-                            .checked_mul(PAGE_SIZE)
-                            .ok_or_else(invalid_operation_input)?;
-                        let page_end = page_start.saturating_add(PAGE_SIZE);
-                        let segment_start = byte_range.start.max(page_start);
-                        let segment_end = byte_range.end.min(page_end);
-                        let segment_len = segment_end
-                            .checked_sub(segment_start)
-                            .ok_or_else(invalid_operation_input)?;
-                        let was_dirty = page_dirty_states
-                            .iter()
-                            .find_map(|(captured_page_idx, was_dirty)| {
-                                (*captured_page_idx == page_idx).then_some(*was_dirty)
-                            })
-                            .ok_or_else(invalid_operation_input)?;
-                        let old_byte_end = old_byte_offset
-                            .checked_add(segment_len)
-                            .ok_or_else(invalid_operation_input)?;
-                        page_restores.push((
-                            page_idx,
-                            (segment_start - page_start)..(segment_end - page_start),
-                            &old_bytes[old_byte_offset..old_byte_end],
-                            was_dirty,
-                        ));
-                        old_byte_offset = old_byte_end;
+                let rollback_result: Result<()> = (|| {
+                    for mutation in byte_mutations {
+                        let byte_range = mutation.byte_range();
+                        let old_bytes = mutation.old_bytes();
+                        let mut reader = VmReader::from(old_bytes).to_fallible();
+                        page_cache
+                            .write(byte_range.start, &mut reader)
+                            .map_err(Error::from)?;
                     }
-                }
-
-                match page_cache.restore_prefaulted_pages(page_restores) {
+                    Ok(())
+                })();
+                match rollback_result {
                     Ok(()) => return Err(error),
                     Err(_restore_error) => {
                         let rewrite_result: Result<()> = (|| {
@@ -331,22 +294,10 @@ impl ExfatInode {
         if prefaulted_old_bytes != old_entry_set_bytes {
             return Err(invalid_operation_input());
         }
-        let start_page = slot_byte_range.start / PAGE_SIZE;
-        let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
-        let page_dirty_states = (start_page..=end_page)
-            .map(|page_idx| {
-                let page_start = page_idx
-                    .checked_mul(PAGE_SIZE)
-                    .ok_or_else(invalid_operation_input)?;
-                let page_end = page_start.saturating_add(PAGE_SIZE).min(page_cache.size());
-                Ok((page_idx, page_cache.has_dirty_pages(page_start..page_end)))
-            })
-            .collect::<Result<Vec<_>>>()?;
         Ok(PreparedEntrySetWrite {
             slot_range,
             entry_set_bytes,
             old_entry_set_bytes,
-            page_dirty_states,
         })
     }
 
@@ -579,22 +530,10 @@ impl ExfatInode {
         if prefaulted_old_bytes != old_entry_set_bytes {
             return Err(invalid_operation_input());
         }
-        let start_page = slot_byte_range.start / PAGE_SIZE;
-        let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
-        let page_dirty_states = (start_page..=end_page)
-            .map(|page_idx| {
-                let page_start = page_idx
-                    .checked_mul(PAGE_SIZE)
-                    .ok_or_else(invalid_operation_input)?;
-                let page_end = page_start.saturating_add(PAGE_SIZE).min(page_cache.size());
-                Ok((page_idx, page_cache.has_dirty_pages(page_start..page_end)))
-            })
-            .collect::<Result<Vec<_>>>()?;
         Ok(Some(PreparedEntrySetWrite {
             slot_range,
             entry_set_bytes,
             old_entry_set_bytes,
-            page_dirty_states,
         }))
     }
 
@@ -610,7 +549,6 @@ impl ExfatInode {
             slot_range,
             entry_set_bytes,
             old_entry_set_bytes,
-            page_dirty_states,
         } = prepared_entry_set_write;
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = parent_inode
@@ -632,38 +570,13 @@ impl ExfatInode {
             // we escalate to rewriting the intended new image,
             // and if even that cannot reestablish one coherent image we latch forced shutdown.
             if recovery == PersistenceRecovery::RollbackAllowed {
-                let start_page = slot_byte_range.start / PAGE_SIZE;
-                let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
-                let mut old_byte_offset = 0usize;
-                let mut page_restores = Vec::new();
-                for page_idx in start_page..=end_page {
-                    let page_start = page_idx
-                        .checked_mul(PAGE_SIZE)
-                        .ok_or_else(invalid_operation_input)?;
-                    let page_end = page_start.saturating_add(PAGE_SIZE);
-                    let segment_start = slot_byte_range.start.max(page_start);
-                    let segment_end = slot_byte_range.end.min(page_end);
-                    let segment_len = segment_end
-                        .checked_sub(segment_start)
-                        .ok_or_else(invalid_operation_input)?;
-                    let was_dirty = page_dirty_states
-                        .iter()
-                        .find_map(|(captured_page_idx, was_dirty)| {
-                            (*captured_page_idx == page_idx).then_some(*was_dirty)
-                        })
-                        .ok_or_else(invalid_operation_input)?;
-                    let old_byte_end = old_byte_offset
-                        .checked_add(segment_len)
-                        .ok_or_else(invalid_operation_input)?;
-                    page_restores.push((
-                        page_idx,
-                        (segment_start - page_start)..(segment_end - page_start),
-                        &old_entry_set_bytes[old_byte_offset..old_byte_end],
-                        was_dirty,
-                    ));
-                    old_byte_offset = old_byte_end;
-                }
-                match page_cache.restore_prefaulted_pages(page_restores) {
+                let rollback_result = {
+                    let mut reader = VmReader::from(old_entry_set_bytes.as_slice()).to_fallible();
+                    page_cache
+                        .write(slot_byte_range.start, &mut reader)
+                        .map_err(Error::from)
+                };
+                match rollback_result {
                     Ok(()) => return Err(error),
                     Err(_restore_error) => {
                         let rewrite_result = {
@@ -734,7 +647,6 @@ impl ExfatInode {
             slot_range,
             entry_set_bytes,
             old_entry_set_bytes,
-            page_dirty_states,
         } = prepared_entry_set_write;
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = self
@@ -757,36 +669,13 @@ impl ExfatInode {
         let mut persist_error = None;
         let mut image_coherent = true;
         if let Err(error) = apply_result {
-            let mut old_byte_offset = 0usize;
-            let mut page_restores = Vec::new();
-            for page_idx in start_page..=end_page {
-                let page_start = page_idx
-                    .checked_mul(PAGE_SIZE)
-                    .ok_or_else(invalid_operation_input)?;
-                let page_end = page_start.saturating_add(PAGE_SIZE);
-                let segment_start = slot_byte_range.start.max(page_start);
-                let segment_end = slot_byte_range.end.min(page_end);
-                let segment_len = segment_end
-                    .checked_sub(segment_start)
-                    .ok_or_else(invalid_operation_input)?;
-                let was_dirty = page_dirty_states
-                    .iter()
-                    .find_map(|(captured_page_idx, was_dirty)| {
-                        (*captured_page_idx == page_idx).then_some(*was_dirty)
-                    })
-                    .ok_or_else(invalid_operation_input)?;
-                let old_byte_end = old_byte_offset
-                    .checked_add(segment_len)
-                    .ok_or_else(invalid_operation_input)?;
-                page_restores.push((
-                    page_idx,
-                    (segment_start - page_start)..(segment_end - page_start),
-                    &old_entry_set_bytes[old_byte_offset..old_byte_end],
-                    was_dirty,
-                ));
-                old_byte_offset = old_byte_end;
-            }
-            match page_cache.restore_prefaulted_pages(page_restores) {
+            let rollback_result = {
+                let mut reader = VmReader::from(old_entry_set_bytes.as_slice()).to_fallible();
+                page_cache
+                    .write(slot_byte_range.start, &mut reader)
+                    .map_err(Error::from)
+            };
+            match rollback_result {
                 Ok(()) => return Err(error),
                 Err(_restore_error) => {
                     let rewrite_result = {

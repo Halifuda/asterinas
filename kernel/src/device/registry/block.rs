@@ -17,7 +17,7 @@ use crate::{
     prelude::*,
     process::signal::{PollHandle, Pollable},
     thread::kernel_thread::ThreadOptions,
-    util::ioctl::{dispatch_ioctl, RawIoctl},
+    util::ioctl::{RawIoctl, dispatch_ioctl},
 };
 
 pub(super) fn init_in_first_kthread() {
@@ -206,7 +206,7 @@ impl PerOpenFileOps for OpenBlockFile {
     }
 
     fn seek_end(&self) -> Result<Option<usize>> {
-        Ok(self.0.metadata().nr_sectors.checked_mul(SECTOR_SIZE))
+        Ok(Some(self.0.metadata().nr_sectors * SECTOR_SIZE))
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {

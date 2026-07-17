@@ -78,9 +78,7 @@ pub(super) struct ExfatFilePageBackend {
 }
 
 struct PageIoRange {
-    page_offset_bytes: usize,
     disk_offset_bytes: usize,
-    len_bytes: usize,
 }
 
 impl ExfatFilePageBackend {
@@ -110,7 +108,7 @@ impl ExfatFilePageBackend {
         page_cache_context: &PageCacheContext,
         idx: usize,
         bio_type: BioType,
-    ) -> Result<(usize, Vec<PageIoRange>)> {
+    ) -> Result<(usize, PageIoRange)> {
         let (cluster_map, logical_end, initialized_limit, mount_runtime) = match page_cache_context {
             PageCacheContext::RegularFile {
                 cluster_map,
@@ -159,14 +157,15 @@ impl ExfatFilePageBackend {
             .min(logical_end);
         let initialized_len = page_end.min(initialized_limit).saturating_sub(page_offset);
         if initialized_len == 0 {
-            return Ok((0, Vec::new()));
+            return Ok((
+                0,
+                PageIoRange {
+                    disk_offset_bytes: 0,
+                },
+            ));
         }
 
         let cluster_size = self.boot_region.cluster_size;
-        let transfer_len = initialized_len
-            .div_ceil(self.boot_region.sector_size)
-            .checked_mul(self.boot_region.sector_size)
-            .ok_or_else(|| Error::new(Errno::EINVAL))?;
         let allocated_clusters = logical_end.div_ceil(cluster_size);
         let cluster_ranges = cluster_map.cluster_ranges();
         let materialized_clusters =
@@ -200,76 +199,37 @@ impl ExfatFilePageBackend {
             }
         }
 
-        let mut cluster_offset = page_offset % cluster_size;
-        let mut page_range_offset = 0usize;
-        let mut remaining = transfer_len;
-        let mut ranges: Vec<PageIoRange> = Vec::new();
-
-        while remaining != 0 {
-            let range = cluster_ranges
-                .get(range_index)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let current_cluster = range
-                .start_cluster
-                .checked_add(
-                    u32::try_from(cluster_index_in_range)
-                        .map_err(|_| Error::new(Errno::EINVAL))?,
-                )
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let chunk_len = remaining.min(cluster_size - cluster_offset);
-            let chunk_offset = self
-                .boot_region
-                .cluster_offset(current_cluster)
-                ?
-                .checked_add(cluster_offset)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-
-            if let Some(last_range) = ranges.last_mut()
-                && last_range
-                    .page_offset_bytes
-                    .checked_add(last_range.len_bytes)
-                    .zip(
-                        last_range
-                            .disk_offset_bytes
-                            .checked_add(last_range.len_bytes),
-                    )
-                    == Some((page_range_offset, chunk_offset))
-            {
-                last_range.len_bytes = last_range
-                    .len_bytes
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            } else {
-                ranges.push(PageIoRange {
-                    page_offset_bytes: page_range_offset,
-                    disk_offset_bytes: chunk_offset,
-                    len_bytes: chunk_len,
-                });
-            }
-
-            page_range_offset = page_range_offset
-                .checked_add(chunk_len)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            remaining -= chunk_len;
-            cluster_index_in_range += 1;
-            if remaining != 0 && cluster_index_in_range == range.cluster_count {
-                range_index += 1;
-                cluster_index_in_range = 0;
-            }
-            cluster_offset = 0;
-        }
-
-        if ranges.is_empty() {
+        let range = cluster_ranges
+            .get(range_index)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let current_cluster = range
+            .start_cluster
+            .checked_add(
+                u32::try_from(cluster_index_in_range).map_err(|_| Error::new(Errno::EINVAL))?,
+            )
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        let page_offset_within_cluster = page_offset % cluster_size;
+        // TODO: Lift this frozen limitation when exFAT can map sub-page clusters or
+        // cross-cluster cached-page I/O without reintroducing shared BIO slice support.
+        if page_offset_within_cluster
+            .checked_add(PAGE_SIZE)
+            .is_none_or(|page_end_within_cluster| page_end_within_cluster > cluster_size)
+        {
             return_errno!(Errno::EINVAL);
         }
-        Ok((initialized_len, ranges))
+        let disk_offset_bytes = self
+            .boot_region
+            .cluster_offset(current_cluster)?
+            .checked_add(page_offset_within_cluster)
+            .ok_or_else(|| Error::new(Errno::EINVAL))?;
+        Ok((initialized_len, PageIoRange { disk_offset_bytes }))
     }
 
     fn submit_page_io(
         &self,
         locked_page: LockedCachePage,
         initialized_len: usize,
-        page_ranges: Vec<PageIoRange>,
+        page_range: PageIoRange,
         io_batch: &mut IoBatch,
         bio_type: BioType,
     ) -> Result<()> {
@@ -279,36 +239,20 @@ impl ExfatFilePageBackend {
             BioType::Flush => return_errno!(Errno::EINVAL),
         };
         let page_segment: ostd::mm::USegment = Segment::from(locked_page.deref().clone()).into();
-        let pending_bios = page_ranges.len();
-        let page_io =
-            FragmentedPageIo::new(locked_page, pending_bios, bio_type, initialized_len);
-
-        for (range_index, page_range) in page_ranges.into_iter().enumerate() {
-            let page_end = page_range
-                .page_offset_bytes
-                .checked_add(page_range.len_bytes)
-                .ok_or_else(|| Error::new(Errno::EINVAL))?;
-            let bio_segment = BioSegment::new_from_segment_slice(
-                page_segment.clone(),
-                page_range.page_offset_bytes..page_end,
-                bio_direction,
-            );
-            let completion_io = page_io.clone();
-            let complete_fn: aster_block::bio::BioCompleteFn =
-                Box::new(move |status| completion_io.complete(status));
-            let bio = aster_block::bio::Bio::new(
-                bio_type,
-                aster_block::id::Sid::from_offset(page_range.disk_offset_bytes),
-                vec![bio_segment],
-                Some(complete_fn),
-            );
-            if let Err(error) = bio.submit(self.block_device.as_ref(), io_batch) {
-                let unsubmitted_bios = pending_bios
-                    .checked_sub(range_index)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                page_io.fail_unsubmitted(unsubmitted_bios);
-                return Err(Error::from(error));
-            }
+        let page_io = FragmentedPageIo::new(locked_page, 1, bio_type, initialized_len);
+        let bio_segment = BioSegment::new_from_segment(page_segment, bio_direction);
+        let completion_io = page_io.clone();
+        let complete_fn: aster_block::bio::BioCompleteFn =
+            Box::new(move |status| completion_io.complete(status));
+        let bio = aster_block::bio::Bio::new(
+            bio_type,
+            aster_block::id::Sid::from_offset(page_range.disk_offset_bytes),
+            vec![bio_segment],
+            Some(complete_fn),
+        );
+        if let Err(error) = bio.submit(self.block_device.as_ref(), io_batch) {
+            page_io.fail_unsubmitted(1);
+            return Err(Error::from(error));
         }
 
         Ok(())
@@ -372,7 +316,7 @@ impl FragmentedPageIo {
 
         if self.failed.load(Ordering::Acquire) {
             self.page.set_dirty();
-            ostd::error!("exFAT writeback failed for a fragmented cached page; data may be lost");
+            ostd::error!("exFAT writeback failed for a cached page; data may be lost");
         }
         self.page.clear_writing_back();
     }
@@ -386,7 +330,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         io_batch: &mut IoBatch,
     ) -> Result<()> {
         let page_cache_context = self.active_page_cache_context()?;
-        let (initialized_len, page_ranges) =
+        let (initialized_len, page_range) =
             self.planned_page_io(&page_cache_context, idx, BioType::Read)?;
         if initialized_len == 0 {
             locked_page.writer().fill_zeros(PAGE_SIZE);
@@ -397,7 +341,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         self.submit_page_io(
             locked_page,
             initialized_len,
-            page_ranges,
+            page_range,
             io_batch,
             BioType::Read,
         )
@@ -410,7 +354,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         io_batch: &mut IoBatch,
     ) -> Result<()> {
         let page_cache_context = self.active_page_cache_context()?;
-        let (initialized_len, page_ranges) =
+        let (initialized_len, page_range) =
             self.planned_page_io(&page_cache_context, idx, BioType::Write)?;
         if initialized_len == 0 {
             locked_page.set_up_to_date();
@@ -424,7 +368,7 @@ impl PageCacheBackend for ExfatFilePageBackend {
         self.submit_page_io(
             locked_page,
             initialized_len,
-            page_ranges,
+            page_range,
             io_batch,
             BioType::Write,
         )
