@@ -429,10 +429,20 @@ impl Inode for ExfatInode {
     }
 
     fn sync_all(&self) -> Result<()> {
+        if self.type_() == InodeType::Dir {
+            // Directory entry sets are write-through; sync_directory() only
+            // supplies the device barrier, not regular-file writeback.
+            return self.sync_directory();
+        }
         self.sync_regular_file(InodeSyncScope::All)
     }
 
     fn sync_data(&self) -> Result<()> {
+        if self.type_() == InodeType::Dir {
+            // Directory entry sets are write-through; sync_directory() only
+            // supplies the device barrier, not regular-file writeback.
+            return self.sync_directory();
+        }
         self.sync_regular_file(InodeSyncScope::Data)
     }
 

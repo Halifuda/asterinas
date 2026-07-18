@@ -157,6 +157,8 @@ impl ExfatInode {
     pub(super) fn mark_content_dirty(&self, inode_state_guard: &InodeStateWriteGuard<'_>) {
         inode_state_guard.with_dirty_state_mut(InodeDirtyState::mark_content_dirty);
         if inode_state_guard.metadata().type_ != crate::fs::file::InodeType::File {
+            // Directory entry-set mutations write through their touched
+            // PageCache pages, so only regular files retain deferred content.
             return;
         }
         if !inode_state_guard.has_dirty_file_retention() {
@@ -166,6 +168,9 @@ impl ExfatInode {
 
     pub(super) fn mark_metadata_dirty(&self, inode_state_guard: &InodeStateWriteGuard<'_>) {
         if inode_state_guard.metadata().type_ == crate::fs::file::InodeType::Dir {
+            // Directory entry-set mutations flush their touched PageCache pages
+            // before returning, so directories do not accumulate deferred inode
+            // metadata debt. Directory sync still supplies the device barrier.
             return;
         }
         inode_state_guard.with_dirty_state_mut(InodeDirtyState::mark_metadata_dirty);
@@ -198,6 +203,37 @@ impl ExfatInode {
             .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
         let mut fs_state = fs.fs_state.write();
         self.sync_regular_file_with_fs_guard(fs.as_ref(), &mut fs_state, scope)
+    }
+
+    pub(super) fn sync_directory(&self) -> Result<()> {
+        let fs = self
+            .fs
+            .upgrade()
+            .ok_or_else(|| Error::with_message(Errno::EIO, "exFAT filesystem is not mounted"))?;
+        let mut fs_state = fs.fs_state.write();
+        let mount_state = fs_state
+            .mount_state
+            .as_ref()
+            .ok_or_else(super::super::not_mounted)?;
+        if mount_state.forced_shutdown
+            || mount_state.volume_flags.clear_to_zero
+            || mount_state.volume_flags.media_failure
+        {
+            return_errno!(Errno::EIO);
+        }
+
+        let flush_status = match fs.immutable_block_device().sync() {
+            Ok(status) => status,
+            Err(_) => {
+                ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                return_errno!(Errno::EIO);
+            }
+        };
+        if flush_status != BioStatus::Complete {
+            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+            return_errno!(Errno::EIO);
+        }
+        Ok(())
     }
 
     pub(in crate::fs::fs_impls::exfat) fn sync_regular_file_with_fs_guard(
@@ -252,6 +288,8 @@ impl ExfatInode {
             return_errno!(Errno::EIO);
         }
         if inode_state.metadata().type_ != crate::fs::file::InodeType::File {
+            // Directory entry sets are already write-through; their direct
+            // sync path supplies the device barrier instead of file writeback.
             return Ok(());
         }
         let mut allocation_guard = fs.allocation_guard()?;
