@@ -152,8 +152,7 @@ impl ExfatInode {
                 let mut allocation_guard = fs.allocation_guard()?;
                 let cluster_map_generation =
                     self.ensure_cluster_map(inode_state_guard, &allocation_guard)?;
-                let (data_length, valid_data_length) =
-                    cluster_map_generation.validated_data_lengths()?;
+                let (data_length, _) = cluster_map_generation.validated_data_lengths()?;
 
                 let effective_offset = if status_flags.contains(StatusFlags::O_APPEND) {
                     data_length
@@ -170,87 +169,162 @@ impl ExfatInode {
                     return_errno!(Errno::EINVAL);
                 }
 
-                let mut staged_bytes = vec![0; requested_write_len];
                 let mut staged_source = reader.clone();
-                let (staged_len, staging_error) = match staged_source
-                    .read_fallible(&mut VmWriter::from(staged_bytes.as_mut_slice()))
-                {
-                    Ok(staged_len) => (staged_len, None),
-                    Err((error, staged_len)) if staged_len != 0 => (staged_len, Some(error)),
-                    Err((error, _)) => return Err(error.into()),
+                let timestamp = RealTimeCoarseClock::get().read_time();
+                let staging_capacity = if status_flags.contains(StatusFlags::O_DIRECT) {
+                    PAGE_SIZE / boot_region.sector_size * boot_region.sector_size
+                } else {
+                    PAGE_SIZE
                 };
-                let write_len =
-                    if staging_error.is_some() && status_flags.contains(StatusFlags::O_DIRECT) {
+                if staging_capacity == 0 {
+                    return_errno!(Errno::EINVAL);
+                }
+                let mut staged_bytes = vec![0; staging_capacity];
+                let mut source_fault = None;
+                while staged_source.has_remain() {
+                    let slice_len = staged_source.remain().min(staging_capacity);
+                    let (staged_len, staging_error) = match staged_source.read_fallible(
+                        &mut VmWriter::from(&mut staged_bytes[..slice_len]),
+                    ) {
+                        Ok(staged_len) => (staged_len, None),
+                        Err((error, staged_len)) => (staged_len, Some(error.into())),
+                    };
+                    let committable_len = if staging_error.is_some()
+                        && status_flags.contains(StatusFlags::O_DIRECT)
+                    {
                         staged_len / boot_region.sector_size * boot_region.sector_size
                     } else {
                         staged_len
                     };
-                if write_len == 0 {
-                    if let Some(error) = staging_error {
-                        return Err(error.into());
+                    if committable_len == 0 {
+                        if completed_write_len == 0 {
+                            if let Some(error) = staging_error {
+                                return Err(error);
+                            }
+                            return_errno!(Errno::EIO);
+                        }
+                        break;
                     }
-                    return_errno!(Errno::EIO);
+
+                    let write_offset = match effective_offset.checked_add(completed_write_len) {
+                        Some(write_offset) => write_offset,
+                        None if completed_write_len == 0 => {
+                            return Err(Error::new(Errno::EINVAL));
+                        }
+                        None => {
+                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                            break;
+                        }
+                    };
+                    let write_end = match write_offset.checked_add(committable_len) {
+                        Some(write_end) => write_end,
+                        None if completed_write_len == 0 => {
+                            return Err(Error::new(Errno::EINVAL));
+                        }
+                        None => {
+                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                            break;
+                        }
+                    };
+                    let cluster_map_generation =
+                        match self.ensure_cluster_map(inode_state_guard, &allocation_guard) {
+                        Ok(cluster_map_generation) => cluster_map_generation,
+                        Err(error) if completed_write_len == 0 => return Err(error),
+                        Err(_) => {
+                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                            break;
+                        }
+                    };
+                    let (data_length, valid_data_length) =
+                        match cluster_map_generation.validated_data_lengths() {
+                        Ok(lengths) => lengths,
+                        Err(error) if completed_write_len == 0 => return Err(error),
+                        Err(_) => {
+                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                            break;
+                        }
+                    };
+                    let new_data_length = data_length.max(write_end);
+                    let new_valid_data_length = valid_data_length.max(write_end);
+                    let mut staged_reader =
+                        VmReader::from(&staged_bytes[..committable_len]).to_fallible();
+                    let slice_result = (|| {
+                        fs.publish_dirty_admission(&mut fs_state)?;
+                        self.grow_and_commit_regular_file(
+                            inode_state_guard,
+                            &mut fs_state,
+                            &mut allocation_guard,
+                            &block_device,
+                            &boot_region,
+                            &cluster_map_generation,
+                            write_offset,
+                            new_data_length,
+                            new_valid_data_length,
+                            timestamp,
+                            |_cluster_map, zero_fill_range| {
+                                if new_data_length > data_length {
+                                    page_cache.resize(new_data_length, data_length)?;
+                                }
+                                Self::prepare_regular_file_page_cache_boundary_pages(
+                                    page_cache,
+                                    data_length,
+                                    zero_fill_range.clone(),
+                                )?;
+                                if !zero_fill_range.is_empty() {
+                                    page_cache.fill_zeros(zero_fill_range.clone())?;
+                                }
+                                Self::prepare_regular_file_page_cache_boundary_pages(
+                                    page_cache,
+                                    data_length,
+                                    write_offset..write_end,
+                                )?;
+                                page_cache
+                                    .write(write_offset, &mut staged_reader)
+                                    .map_err(Error::from)?;
+                                Ok(())
+                            },
+                            || {
+                                if new_data_length > data_length {
+                                    let _ = page_cache.resize(data_length, new_data_length);
+                                }
+                            },
+                        )
+                    })();
+                    if let Err(error) = slice_result {
+                        if completed_write_len == 0 {
+                            return Err(error);
+                        }
+                        ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                        break;
+                    }
+                    completed_write_len = completed_write_len
+                        .checked_add(committable_len)
+                        .ok_or_else(|| Error::new(Errno::EINVAL))?;
+                    source_fault = staging_error;
+                    if source_fault.is_some() {
+                        break;
+                    }
                 }
-                let write_end = effective_offset
-                    .checked_add(write_len)
-                    .ok_or_else(|| Error::new(Errno::EINVAL))?;
-                let mut staged_reader = VmReader::from(&staged_bytes[..write_len]).to_fallible();
-                let new_data_length = data_length.max(write_end);
-                let new_valid_data_length = valid_data_length.max(write_end);
-                let timestamp = RealTimeCoarseClock::get().read_time();
-                let write_result = (|| {
-                    fs.publish_dirty_admission(&mut fs_state)?;
-                    self.grow_and_commit_regular_file(
-                        inode_state_guard,
-                        &mut fs_state,
-                        &mut allocation_guard,
-                        &block_device,
-                        &boot_region,
-                        &cluster_map_generation,
-                        effective_offset,
-                        new_data_length,
-                        new_valid_data_length,
-                        timestamp,
-                        |_cluster_map, zero_fill_range| {
-                            if new_data_length > data_length {
-                                page_cache.resize(new_data_length, data_length)?;
-                            }
-                            Self::prepare_regular_file_page_cache_boundary_pages(
-                                page_cache,
-                                data_length,
-                                zero_fill_range.clone(),
-                            )?;
-                            if !zero_fill_range.is_empty() {
-                                page_cache.fill_zeros(zero_fill_range.clone())?;
-                            }
-                            Self::prepare_regular_file_page_cache_boundary_pages(
-                                page_cache,
-                                data_length,
-                                effective_offset..write_end,
-                            )?;
-                            page_cache
-                                .write(effective_offset, &mut staged_reader)
-                                .map_err(Error::from)?;
-                            Ok(())
-                        },
-                        || {
-                            if new_data_length > data_length {
-                                let _ = page_cache.resize(data_length, new_data_length);
-                            }
-                        },
-                    )
-                })();
-                write_result?;
-                completed_write_len = write_len;
+                if completed_write_len == 0 {
+                    if let Some(error) = source_fault {
+                        return Err(error);
+                    }
+                }
                 if let Some(sync_scope) = sync_scope {
-                    self.sync_regular_file_with_proofs(
+                    let sync_result = self.sync_regular_file_with_proofs(
                         fs.as_ref(),
                         &mut fs_state,
                         sync_scope,
                         inode_state_guard,
                         parent_inode_state_guard,
                         &mut allocation_guard,
-                    )?;
+                    );
+                    if let Err(error) = sync_result {
+                        if completed_write_len == 0 {
+                            return Err(error);
+                        }
+                        ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                    }
                 }
                 Ok(())
             })();
