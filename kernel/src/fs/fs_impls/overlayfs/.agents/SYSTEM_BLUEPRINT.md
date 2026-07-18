@@ -15,7 +15,7 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
 ## 2. Meso-Component Pipeline Index
 
 | Meso-Component | 1. Architect Map | 2. Designer Contract | 3. Creator Passes | 4. Checker Passes | 5. Integration Pass | 6. Reviewer | Overall Status |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| :------------- | :--------------: | :------------------: | :---------------: | :---------------: | :-----------------: | :---------: | :------------- |
 
 _Meso-components will be registered here once the Architect establishes the Macro/Meso/Micro hierarchy from the staged priors._
 
