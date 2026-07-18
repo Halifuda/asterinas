@@ -1,0 +1,4 @@
+interface:
+  display_name: "filesystem Subagent Flow"
+  short_description: "Packet rules for non-Architect filesystem roles"
+  default_prompt: "Use $fs-subagent-workflow to execute a Designer, Creator, Checker, or Reviewer filesystem packet."

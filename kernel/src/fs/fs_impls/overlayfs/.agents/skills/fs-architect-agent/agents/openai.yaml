@@ -1,0 +1,4 @@
+interface:
+  display_name: "Filesystem Architect Agent"
+  short_description: "Architect packets for filesystem lock topology and mapping"
+  default_prompt: "Use $fs-architect-agent to execute an filesystem Architect dispatch stub."

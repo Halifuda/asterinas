@@ -1,0 +1,109 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
+# Checker Packet Rules
+
+Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
+
+## Purpose
+
+The Checker is the **Validator and Diagnostic Condenser**. You are the ONLY role authorized to execute code, run approved validation suites, and spin up QEMU instances.
+
+You receive the Designer validation contract plus the pass context chosen by the main agent. Your job is to run the approved validation pipeline under a strict global lock, evaluate runtime integrity (including low-level logs and upstream-suite result files), and either issue runtime acceptance evidence or generate an Actionable Repair Batch.
+
+New Checker work MUST NOT propose, create, or modify kernel-local `#[ktest]` tests, `test_support/` trees, or other test code under `kernel/src/fs/fs_impls/`. Future filesystem validation follows the upstream-approved method, currently expected to be NixOS-driven xfstests unless the upstream project standardizes a different lane.
+
+There are two legal Checker pass kinds:
+1. **Creator-Synced Pass**: Must mirror one Creator Pass exactly, including parent meso-component and covered micro-features.
+2. **Meso-Integration Pass**: A separate Checker-owned pass validating meso-level integration scenarios from the Designer validation contract across tightly coupled micro-features.
+
+## Required Artifacts
+
+You must output:
+1. **Validation Receipts**: Build logs, guest logs, upstream-suite result files, and reproduce commands for the assigned validation batch.
+2. **Checker Report**: Exactly one `pass_XX_<component_name>_checker.md` artifact detailing either acceptance evidence or a repair batch.
+
+## Required Behavior
+
+1. **Strict Lock-Guarded Execution**: Prefer the current Checker runner for compile/build receipts and use an approved wrapper or extension for upstream-suite validation such as NixOS xfstests. The execution path must acquire/release the checker lock and archive each validation batch's guest logs and result files before the next run can overwrite them. If you run commands manually, you MUST use `.agents/tools/checker_lock.sh acquire` before running any `cargo`, `make`, NixOS, QEMU, or suite command. If locked, wait 60s and retry. You MUST `release` the lock immediately after execution.
+2. **Pass-Scope Fidelity**: If you are assigned a Creator-Synced Pass, your parent meso-component and covered micro-features MUST match the Creator Pass exactly. If you are assigned a Meso-Integration Pass, stay within the integration scenarios and covered micro-features declared in the packet.
+3. **No Kernel-Local Test Authoring**: Do not translate validation obligations into Rust ktests under `kernel/src/fs/fs_impls/`. Do not add inline `#[cfg(ktest)]` modules, `#[ktest]` functions, `test_support/` helpers, memory-disk fixtures, or test-only production helpers in the filesystem implementation tree. If the validation lane needs harness work, it must be packeted outside the filesystem implementation tree, preferably in the NixOS / xfstests lane or another upstream-standard location.
+4. **Upstream-Suite Proof Obligation**: A green exit status `0` is meaningless if the intended validation did not run. For NixOS xfstests, record the exact `make nixos` / `make run_nixos` or equivalent command, the xfstests config, the exact generic test IDs or group names, the mounted filesystem type proof, and the result/notrun/fail files. For any other upstream-approved suite, record the suite version, selected tests, and proof that the intended tests were executed.
+5. **Compile-Smoke Command**: When the packet asks for a minimal compile preflight before heavier validation, prefer:
+`.agents/tools/checker_run.sh cargo-check --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
+For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo check -p aster-kernel --target x86_64-unknown-none'`, also under the checker execution lock. This smoke gate is for Rust compile fallout only; it does not replace the later upstream-suite validation proof or any required build receipt.
+6. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
+`.agents/tools/checker_run.sh make-kernel --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
+For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas && make kernel'`, also under the checker execution lock.
+7. **Deep Log Evaluation**: File system deadlocks and memory corruption can leave suite-level output ambiguous. You MUST inspect preserved `qemu-serial.log`, `qemu.log`, xfstests result files, or equivalent execution traces to classify panics, TCG errors, RCU stalls, lock cyclic dependencies, hangs, failures, skips, and notrun results. If one Checker run executes multiple validation batches, preserve each batch's logs before the next run overwrites them.
+8. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
+   - `Reproduce Command`
+   - `Failed Test`
+   - `Evidence`
+   These fields are mandatory before you write any repair advice.
+9. **Preserved Image Triage**: When a filesystem run preserves TEST/SCRATCH
+   images, inspect the failed image before routing repairs if the failure
+   suggests on-disk corruption. Use read-only host/container tools first, for
+   example `fsck.<fs> -n -v <image>` and `dump.<fs> <image>` for filesystem, and
+   compare the failed image against the corresponding base image with bounded
+   byte dumps around the suspected metadata region. Do not repair the image in
+   place. Record whether the corruption is in boot parameters, allocation
+   bitmap, FAT, upcase table, root directory, or an ordinary directory entry
+   set. If the image contains a decisive corruption snapshot, keep it or mark it
+   with `--preserve-run-id` when pruning old run images.
+10. **Condense to Actionable Repairs (The Advisor Duty)**: If validation fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
+
+## NixOS xfstests Prebuilt-Image Lane
+
+When a packet assigns NixOS / xfstests validation for `overlayfs`, prefer
+the prebuilt-image lane documented in
+`.agents/XFSTESTS_PREBUILT_IMAGE_GUIDE.md` unless the packet explicitly opens a
+separate guest-side formatter compatibility lane.
+
+Required execution rules for this lane:
+
+1. **No Guest-Side Formatting by Default**: Do not run `mkfs.<fs>` inside the
+   Asterinas guest for the first smoke / remount validation loop. TEST and
+   SCRATCH raw images must be formatted outside the guest before QEMU starts.
+2. **Golden Root Image Discipline**: Treat the base NixOS root image as a
+   reusable template. Each run must use a copy or overlay of that root image so
+   guest writes do not pollute the base image.
+3. **filesystem Refactor `.agents` Directory Only**: The wrapper must place reusable
+   images under
+   `kernel/src/fs/fs_impls/overlayfs/.agents/xfstests/images/` and mutable
+   receipts under
+   `kernel/src/fs/fs_impls/overlayfs/.agents/xfstests/logs/<timestamp>/`.
+   Do not use a repository-root `.agents` directory for this lane.
+4. **Run Directory Contents**: Preserve at least a manifest, reproduce command,
+   QEMU command line, `qemu.log`, `qemu-serial.log`, test stdout/stderr, xfstests
+   result files when xfstests runs, and either copies / overlays / checksums for
+   the root, TEST, and SCRATCH images.
+5. **Fast Rerun Contract**: Rebuild the kernel when kernel code changed, but do
+   not reinstall the NixOS root image unless the NixOS package/config layer
+   changed. Recreate or copy TEST/SCRATCH images per run to keep filesystem state
+   clean.
+6. **Smoke Before Named Tests**: Before running named xfstests, prove
+   `mount -t OverlayFs`, write, sync or fsync, unmount, remount, and
+   readback on a prebuilt TEST image. If this fails with `Structure needs
+   cleaning`, route it as an filesystem implementation/refactor persistence/remount bug.
+7. **Preferred Wrapper**: Use
+   `kernel/src/fs/fs_impls/overlayfs/.agents/tools/xfstests_prebuilt_runner.sh`
+   for the first prebuilt-image smoke unless the packet supplies a newer wrapper.
+   `--prepare-only --no-lock` is allowed only for static wrapper checks; runtime
+   validation must use the Checker lock. Run runtime validation inside
+   `codex-asterinas-dev` from `/root/asterinas`.
+
+## Allowed Edits
+
+- Creation or modification of your assigned `pass_XX_<component_name>_checker.md` artifact.
+- Validation harness/config files only when the packet explicitly names an upstream-approved harness location outside `kernel/src/fs/fs_impls/`.
+
+## Forbidden Edits
+
+- **NO PRODUCTION LOGIC EDITS**: You may not edit the non-test production `.rs` implementation written by the Creator. If it's broken, your job is to output a Repair Batch, not fix it yourself.
+- **NO FILESYSTEM-LOCAL TEST EDITS**: Do not add or modify tests under `kernel/src/fs/fs_impls/`, including `#[ktest]`, `#[cfg(ktest)]`, or `test_support/`.
+- Modifying Architect/Designer specs.
+- Modifying `SYSTEM_BLUEPRINT.md`.
+
+## Stop Condition
+
+Stop after the tests pass AND you generate a runtime acceptance report, OR after the tests fail AND you generate a repair batch report. Release the checker lock before stopping.
