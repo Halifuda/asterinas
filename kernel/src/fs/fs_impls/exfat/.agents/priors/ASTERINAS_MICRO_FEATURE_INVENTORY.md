@@ -562,7 +562,7 @@ Populate it incrementally from the Linux verification notes and Asterinas integr
 | `Trigger / Entry Surface` | `bmap` / `get_block` resolving a logical file block into backing storage sectors. |
 | `Primary State / Objects` | Logical block index, stream `NoFatChain` state, `start_clu`, FAT chain traversal state, and mapped backing sectors/clusters. |
 | `Required Invariant / Guarantee` | When a stream is still marked `NoFatChain`, logical-block translation may compute the mapped cluster arithmetically from the starting cluster and offset. Once the stream is FAT-chained, mapping must walk the FAT instead of pretending arithmetic contiguity still holds. |
-| `Failure / Edge Conditions` | Treating a FAT-chained stream as still contiguous would mis-map reads and writes to the wrong sectors. |
+| `Failure / Edge Conditions` | Treating a FAT-chained stream as still contiguous would direct reads and writes to the wrong sectors. |
 | `Mount / Policy Sensitivity` | Not mount-option-driven. |
 | `Primary Source Anchors` | `.agents/priors/linux-exFAT-implementation-summary.md` -> `1.4 Page Cache Block Translation`; `.agents/priors/Microsoft-exFAT-spec-index.md` -> `##### 7.6.2.2 NoFatChain Field`, `#### 7.6.6 FirstCluster Field` |
 | `Ownership Notes` | Reserved. This is a mapping behavior fact only. |

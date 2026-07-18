@@ -183,9 +183,9 @@ impl ExfatInode {
                 let mut source_fault = None;
                 while staged_source.has_remain() {
                     let slice_len = staged_source.remain().min(staging_capacity);
-                    let (staged_len, staging_error) = match staged_source.read_fallible(
-                        &mut VmWriter::from(&mut staged_bytes[..slice_len]),
-                    ) {
+                    let (staged_len, staging_error) = match staged_source
+                        .read_fallible(&mut VmWriter::from(&mut staged_bytes[..slice_len]))
+                    {
                         Ok(staged_len) => (staged_len, None),
                         Err((error, staged_len)) => (staged_len, Some(error.into())),
                     };
@@ -228,22 +228,22 @@ impl ExfatInode {
                     };
                     let cluster_map_generation =
                         match self.ensure_cluster_map(inode_state_guard, &allocation_guard) {
-                        Ok(cluster_map_generation) => cluster_map_generation,
-                        Err(error) if completed_write_len == 0 => return Err(error),
-                        Err(_) => {
-                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
-                            break;
-                        }
-                    };
+                            Ok(cluster_map_generation) => cluster_map_generation,
+                            Err(error) if completed_write_len == 0 => return Err(error),
+                            Err(_) => {
+                                ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                                break;
+                            }
+                        };
                     let (data_length, valid_data_length) =
                         match cluster_map_generation.validated_data_lengths() {
-                        Ok(lengths) => lengths,
-                        Err(error) if completed_write_len == 0 => return Err(error),
-                        Err(_) => {
-                            ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
-                            break;
-                        }
-                    };
+                            Ok(lengths) => lengths,
+                            Err(error) if completed_write_len == 0 => return Err(error),
+                            Err(_) => {
+                                ExfatFs::mark_mount_dirty_after_failure(&mut fs_state);
+                                break;
+                            }
+                        };
                     let new_data_length = data_length.max(write_end);
                     let new_valid_data_length = valid_data_length.max(write_end);
                     let mut staged_reader =
@@ -305,10 +305,10 @@ impl ExfatInode {
                         break;
                     }
                 }
-                if completed_write_len == 0 {
-                    if let Some(error) = source_fault {
-                        return Err(error);
-                    }
+                if completed_write_len == 0
+                    && let Some(error) = source_fault
+                {
+                    return Err(error);
                 }
                 if let Some(sync_scope) = sync_scope {
                     let sync_result = self.sync_regular_file_with_proofs(

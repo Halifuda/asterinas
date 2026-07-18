@@ -682,7 +682,7 @@ impl ExfatInode {
             return;
         };
 
-        let normalized_time = Cell::new(None);
+        let normalized_modify_time = Cell::new(None);
         let rewrite_result = (|| {
             fs.publish_dirty_admission(&mut fs_state)?;
 
@@ -700,12 +700,6 @@ impl ExfatInode {
                                     time,
                                     entry_view.last_accessed_timestamp().utc_offset_byte(),
                                 )?;
-                            let normalized_timestamp = Self::decoded_exfat_timestamp(
-                                timestamp_bytes,
-                                None,
-                                encoded_utc_offset_byte,
-                            )?;
-                            normalized_time.set(Some(normalized_timestamp));
                             mutable_entry_set.set_last_accessed_timestamp(FileEntryTimestamp::new(
                                 timestamp_bytes,
                                 None,
@@ -723,7 +717,7 @@ impl ExfatInode {
                                 Some(ten_ms_increment),
                                 encoded_utc_offset_byte,
                             )?;
-                            normalized_time.set(Some(normalized_timestamp));
+                            normalized_modify_time.set(Some(normalized_timestamp));
                             mutable_entry_set.set_last_modified_timestamp(FileEntryTimestamp::new(
                                 timestamp_bytes,
                                 Some(ten_ms_increment),
@@ -735,11 +729,13 @@ impl ExfatInode {
                 },
                 |metadata| match field_kind {
                     InodeTimestampField::Accessed => {
-                        metadata.last_access_at = normalized_time.get().unwrap_or(time);
+                        // Keep live atime precise; exFAT's durable access timestamp is two-second
+                        // granular and has no 10ms increment field.
+                        metadata.last_access_at = time;
                     }
                     InodeTimestampField::Modified => {
                         metadata.last_meta_change_at = time;
-                        metadata.last_modify_at = normalized_time.get().unwrap_or(time);
+                        metadata.last_modify_at = normalized_modify_time.get().unwrap_or(time);
                     }
                 },
             )
