@@ -30,7 +30,7 @@ This role is intentionally separate from the ordinary subagent flow because it o
    - do not specify dynamic lock orchestration
    - do not prescribe helper layouts
    - do not write `.rs` files
-6. If the packet permits scoped Asterinas code inspection, prefer `.agents/tools/ra_code_nav.py` for rust-analyzer / LSP symbol lookup before broad file search. This is read-only semantic navigation and does not widen the packet's authorized context.
+6. If the packet permits scoped Asterinas code inspection, prefer the `ra-code-nav` skill (LSIF index + `jq`) for rust-analyzer symbol lookup before broad file search. This is read-only semantic navigation and does not widen the packet's authorized context.
 
 ## Phase model
 

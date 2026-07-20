@@ -29,7 +29,7 @@ For Architect packets, send the task to `$fs-architect-agent`.
    - archive every dispatch under `.agents/subagent-tasks/<component-id>/`
    - use the dispatch template in `.agents/protocol/templates/[level]_[XX]_[component]_[role]_dispatch_TEMPLATE.md`
    - packets are pointer routes, not replayed design summaries
-   - remind agents to use `.agents/tools/ra_code_nav.py` when they need packet-scoped Rust symbol / LSP navigation
+   - remind agents to use the `ra-code-nav` skill (LSIF index + `jq`) when they need packet-scoped Rust symbol navigation
 5. Keep execution serialized:
    - Checker owns build and test commands
    - Checker should use the repo-approved execution lane for compile/build receipts and upstream-approved filesystem validation; the expected validation route is NixOS xfstests unless upstream standardizes a different lane; for early `overlayfs` smoke, prefer the repo-local prebuilt-image lane documented at `kernel/src/fs/fs_impls/overlayfs/.agents/XFSTESTS_PREBUILT_IMAGE_GUIDE.md` and any workspace-local wrapper the packet explicitly names
@@ -69,8 +69,8 @@ Do not paraphrase large prior bodies into packets when direct file paths are eno
   Existing Checker compile/build wrapper. It may be extended or wrapped for upstream-approved validation lanes such as NixOS xfstests; validation runs must preserve guest logs and suite result files before they can be overwritten.
 - `.agents/tools/checker_lock.sh`
   Low-level checker execution lock used by the runner and by any rare manual Checker command sequence.
-- `.agents/tools/ra_code_nav.py`
-  Preferred read-only Rust code navigation helper for agents that need scoped Asterinas code lookup. It uses `rust-analyzer` for symbol search, file symbols, definition, references, implementation, and hover queries. It is symbol/LSP semantic navigation, not natural-language embedding search, and does not widen a packet's authorized file scope.
+- `ra-code-nav` skill (repository-root `.agents/skills/ra-code-nav/`)
+  Preferred read-only Rust code navigation helper for agents that need scoped Asterinas code lookup. It queries a pre-generated rust-analyzer LSIF index with shell + `jq` for symbol search, definition, references, hover, and document symbols. It is semantic navigation, not natural-language embedding search, and does not widen a packet's authorized file scope.
 
 ## Delegation rule
 

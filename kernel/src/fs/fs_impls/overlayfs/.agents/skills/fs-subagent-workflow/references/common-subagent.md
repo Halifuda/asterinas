@@ -27,6 +27,6 @@ Use this note together with the archived packet and the role-specific note.
 
 ## Code navigation
 
-- When scoped Rust code inspection is allowed by the packet, prefer `.agents/tools/ra_code_nav.py` before broad `rg` / file search.
-- Use `ra_code_nav.py symbols <Name>` for workspace symbol lookup, `file-symbols <path>` for item outlines, `definition <path> <line> <col>` for jump-to-definition, and `references <path> <line> <col>` for call/reference discovery.
+- When scoped Rust code inspection is allowed by the packet, prefer the `ra-code-nav` skill (LSIF index + `jq`) before broad `rg` / file search.
+- Use the skill's recipes: workspace symbol search by moniker identifier, goto-definition by moniker, find-references by moniker, hover by moniker, and document symbols by file URI. See `.agents/skills/ra-code-nav/SKILL.md` for copy-paste recipes.
 - This is read-only LSP semantic navigation. It does not expand the packet's authorized context and does not replace role-specific reasoning.

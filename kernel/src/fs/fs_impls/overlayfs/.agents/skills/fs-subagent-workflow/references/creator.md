@@ -18,7 +18,7 @@ Implement exactly one Designer-specified pass or one Checker-produced repair bat
 ## Guardrails
 
 - Creator work is command-free unless the packet explicitly authorizes a compile-only exception.
-- If scoped code lookup is needed, prefer `.agents/tools/ra_code_nav.py` for symbols, definitions, and references rather than broad file search.
+- If scoped code lookup is needed, prefer the `ra-code-nav` skill (LSIF index + `jq`) for symbols, definitions, and references rather than broad file search.
 - Do not revise the public interface, lock topology, or meso boundary.
 - Do not add filesystem-local `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixture, or test-only helper code under `kernel/src/fs/fs_impls/`.
 - Do not rewrite Architect or Designer artifacts.

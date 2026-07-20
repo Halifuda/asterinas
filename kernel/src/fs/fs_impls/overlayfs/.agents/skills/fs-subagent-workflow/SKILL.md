@@ -23,7 +23,7 @@ If the packet is an Architect packet or the work is about `macro_00_global_topol
    - `kernel/src/fs/fs_impls/overlayfs/.agents/protocol/CHECKER.md`
    - `kernel/src/fs/fs_impls/overlayfs/.agents/protocol/REVIEWER.md`
 5. If the packet allows checker execution or validation-harness work, also open `references/testing-guide.md`.
-6. If the packet permits scoped Asterinas code inspection, prefer `.agents/tools/ra_code_nav.py` for rust-analyzer / LSP symbol navigation before broad `rg` / file search. It does not authorize reading outside packet scope.
+6. If the packet permits scoped Asterinas code inspection, prefer the `ra-code-nav` skill (LSIF index + `jq`) for rust-analyzer symbol navigation before broad `rg` / file search. It does not authorize reading outside packet scope.
 7. Stay inside the packet boundary. If required input is missing, stop and report the gap instead of widening scope.
 8. For structural-cleanup packets, do not assume only newly introduced entities are in scope. If the packet names surviving helpers, thin endian wrappers, or legacy test-only support layout as review/cleanup targets, audit that full surface directly.
 
