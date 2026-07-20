@@ -40,6 +40,24 @@ export HOST_OPTIONS="$XFSTESTS_CONFIG"
 # shellcheck source=/dev/null
 . "$XFSTESTS_PREPARE"
 
+append_common_rc_asterinas_compat()
+{
+    local common_rc=common/rc
+    local compat_file="$XFSTESTS_FS_DIR/common_rc_asterinas_compat.sh"
+
+    if [ ! -f "$compat_file" ]; then
+        echo "Missing Asterinas xfstests compatibility file: $compat_file" >&2
+        exit 1
+    fi
+
+    # common/rc invokes init_rc at the end of the file. Move that call after
+    # the overrides so directory-backed overlay mounts pass init_rc checks.
+    sed '/^init_rc$/d' "$common_rc" > common/rc.runtime
+    cat "$compat_file" >> common/rc.runtime
+    printf '%s\n' 'init_rc' >> common/rc.runtime
+    mv common/rc.runtime "$common_rc"
+}
+
 RUNLIST_FILE=""
 TEST_ARGS=""
 
@@ -91,4 +109,11 @@ fi
 # Word-splitting is intentional here: TEST_ARGS contains only test names
 # and the -E flag, none of which contain whitespace or shell metacharacters.
 # shellcheck disable=SC2086
-./check $TEST_ARGS
+if [ "$XFSTESTS_FS_TYPE" = overlay ]; then
+    # Use xfstests' overlay mode so block devices are retained as OVL_BASE_*
+    # variables and the runner creates the lower/upper/work directories.
+    append_common_rc_asterinas_compat
+    ./check -overlay $TEST_ARGS
+else
+    ./check $TEST_ARGS
+fi

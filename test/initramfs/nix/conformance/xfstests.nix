@@ -16,11 +16,13 @@ let
     util-linux
     bc
     kmod
+    attr
     xfsprogs
     e2fsprogs
+    exfatprogs
   ];
 
-  sbinDeps = with pkgs; [ util-linux kmod xfsprogs e2fsprogs ];
+  sbinDeps = with pkgs; [ util-linux kmod xfsprogs e2fsprogs exfatprogs ];
 
   runtimePath = lib.makeBinPath runtimeDeps + ":"
     + lib.concatMapStringsSep ":" (package: "${package}/sbin") sbinDeps

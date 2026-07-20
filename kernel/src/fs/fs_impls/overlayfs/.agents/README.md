@@ -30,14 +30,14 @@ The adopting workspace may keep a legacy filesystem module active while building
 
 ## Codex Skills
 
-Three reusable Codex skills mirror the stable workflow rules for this workspace:
+The reusable Codex entry points live at the repository root:
 
-- `$fs-main-agent`
+- `$ovfs-main`
   Use when acting as the scheduler for `overlayfs`: resuming the board, shaping waves, curating packets, updating `SYSTEM_BLUEPRINT.md`, or writing main-agent handoffs.
-- `$fs-subagent-workflow`
-  Use for ordinary delegated architect, designer, creator, checker, and reviewer work.
-- `$fs-architect-agent`
-  Use for Architect packets that own the heavy-prior intake and the static topology.
+- `$ovfs-subagent`
+  Use for bounded Architect, Designer, Creator, Checker, and Reviewer packets. Pass the role protocol explicitly; Architect packets own heavy-prior intake and static topology.
+- `$ovfs-checker`
+  Use for authorized overlayfs xfstests validation in `codex-asterinas-dev`, including artifact preservation and result classification.
 
 ## Role Model
 
@@ -65,9 +65,8 @@ Three reusable Codex skills mirror the stable workflow rules for this workspace:
 - `PASS_SLICING.md`: Main-agent-owned pass-slicing ledger that records how meso-level Designer contracts are split into Creator, Checker, Reviewer, and integration passes.
 - `protocol/`: Scoped documents forwarded to subagents (`ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, `REVIEWER.md`).
 - `subagent-tasks/`: Task packets grouped by `<component-id>`. Packets are lightweight dispatch stubs rather than heavy prose, avoiding context bloat and preventing Creator overreach.
-- `components/`: Subagent artifact outputs. Specs, evaluations, constraints are placed under exact `<component-id>` folders.
-- `checker-runs/`: Checker execution receipts grouped by parent meso-component.
-- `tools/`: Workflow helpers expected by the protocol; see `tools/README.md`.
+- `components/<component-id>/`: Subagent artifacts and Checker execution receipts grouped by parent meso-component.
+- Runtime helper scripts are intentionally not vendored in this workspace; use the top-level `ovfs-checker` command lane and record its evidence under the matching component directory.
 - `SYSTEM_BLUEPRINT.md`: The scheduler-owned active global blueprint and traceability matrix.
 - `protocol/templates/`: Required handoff formats.
 - `main-agent/`: Main-agent checkpoint notes. Maintain one live handoff file per active tenure and update it in place.

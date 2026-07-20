@@ -1,0 +1,4 @@
+interface:
+  display_name: "OVFS Subagent"
+  short_description: "Bounded Designer, Creator, Checker, and Reviewer protocol"
+  default_prompt: "Use $ovfs-subagent to execute the archived overlayfs packet for the assigned role."

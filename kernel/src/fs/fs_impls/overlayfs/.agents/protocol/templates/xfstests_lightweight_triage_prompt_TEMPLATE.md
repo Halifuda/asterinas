@@ -2,7 +2,7 @@
 
 # Lightweight xfstests Triage Prompt: `{phase}`
 
-Use the temporary xfstests lightweight triage protocol:
+Use the temporary xfstests lightweight triage protocol and `$ovfs-checker`:
 `kernel/src/fs/fs_impls/overlayfs/.agents/protocol/XFSTESTS_LIGHTWEIGHT_TRIAGE.md`.
 
 ## Scope
@@ -20,13 +20,17 @@ Use the temporary xfstests lightweight triage protocol:
 Run only this command shape, adjusting only explicitly bracketed placeholders:
 
 ```sh
-kernel/src/fs/fs_impls/overlayfs/.agents/tools/xfstests_run.sh {case_or_batch_or_direct} {case_args} --phase {phase} {extra_harness_args}
+docker exec -w /root/asterinas codex-asterinas-dev \
+  make run_kernel AUTO_TEST=conformance RELEASE=1 MEM=12G \
+  CONFORMANCE_TEST_SUITE=xfstests XFSTESTS_FS_TYPE=overlay \
+  XFSTESTS_DISK_SIZE=6G \
+  XFSTESTS_RUNLIST=/opt/xfstests/overlay/run_list/{run_list}
 ```
 
-Do not hand-write the long `make run_kernel` command. Do not widen the case
-list. Do not edit official scheduler state. If production logging is authorized,
-edit only the named logging files and do not change logic, state, lock behavior,
-allocation policy, error mapping, or validation semantics.
+Do not widen the case list or run outside `codex-asterinas-dev`. Do not edit
+official scheduler state. If production logging is authorized, edit only the
+named logging files and do not change logic, state, lock behavior, allocation
+policy, error mapping, or validation semantics.
 
 ## Work Steps
 

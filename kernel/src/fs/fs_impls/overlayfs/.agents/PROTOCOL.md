@@ -8,8 +8,9 @@ It defines what the main agent controls: delegation, gates, parallel scheduling,
 Use the surrounding documents as follows:
 - `README.md`: workspace map and project framing
 - `PASS_SLICING.md`: durable main-agent-owned pass boundary decisions
-- `$fs-main-agent`: preferred Codex entry point for main-agent tasks
-- `$fs-subagent-workflow`: preferred Codex entry point for delegated subagent tasks
+- `$ovfs-main`: preferred Codex entry point for main-agent tasks
+- `$ovfs-subagent`: preferred Codex entry point for delegated Architect, Designer, Creator, Checker, and Reviewer tasks
+- `$ovfs-checker`: preferred Codex entry point for authorized overlayfs xfstests validation
 - `protocol/`: source-text role rules mirrored by the subagent skills
 
 ## 0. Core Terms

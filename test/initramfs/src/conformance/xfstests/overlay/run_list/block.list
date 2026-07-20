@@ -1,0 +1,2 @@
+# Keep this file for overlay cases that are proven unsafe or permanently
+# incompatible with the old Asterinas overlayfs implementation.

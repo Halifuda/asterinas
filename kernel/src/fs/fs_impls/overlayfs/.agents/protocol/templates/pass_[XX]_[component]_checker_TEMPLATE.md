@@ -32,7 +32,7 @@
 
 ## 3. Lock-Guarded Evaluation Result
 
-*Document the results from the Checker Execution Lock stage. For compile/build receipts, prefer `.agents/tools/checker_run.sh`; for filesystem behavior validation, record the exact upstream-approved command sequence, currently expected to be NixOS xfstests unless superseded by upstream. If running manually, include the explicit container command executed in `codex-asterinas-dev` or the exact NixOS/QEMU command.*
+*Document the results from the serialized Checker execution stage. For compile/build receipts, record the exact container command; for filesystem behavior validation, record the exact upstream-approved xfstests command. Include the explicit command executed in `codex-asterinas-dev` and the preserved evidence paths.*
 
 - **Reproduce Command**: [Exact checker runner, NixOS xfstests, or upstream-approved suite command.]
 - **Execution Proof**: [For xfstests, show suite version/config, filesystem type proof, exact generic test IDs or groups executed, and decisive pass/fail/notrun result files. For `cargo-check` or `make-kernel`, show the compile/build command and decisive success/failure lines.]

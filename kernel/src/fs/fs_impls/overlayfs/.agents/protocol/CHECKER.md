@@ -24,16 +24,12 @@ You must output:
 
 ## Required Behavior
 
-1. **Strict Lock-Guarded Execution**: Prefer the current Checker runner for compile/build receipts and use an approved wrapper or extension for upstream-suite validation such as NixOS xfstests. The execution path must acquire/release the checker lock and archive each validation batch's guest logs and result files before the next run can overwrite them. If you run commands manually, you MUST use `.agents/tools/checker_lock.sh acquire` before running any `cargo`, `make`, NixOS, QEMU, or suite command. If locked, wait 60s and retry. You MUST `release` the lock immediately after execution.
+1. **Strict Serialized Execution**: Use `$ovfs-checker` for the container command lane, confirm that no live QEMU job is running, and do not start competing QEMU jobs. Preserve each validation batch's guest logs and result files before the next run can overwrite them. If a packet supplies an external checker lock, acquire and release it around the command; otherwise the single authorized Checker lane is the serialization boundary.
 2. **Pass-Scope Fidelity**: If you are assigned a Creator-Synced Pass, your parent meso-component and covered micro-features MUST match the Creator Pass exactly. If you are assigned a Meso-Integration Pass, stay within the integration scenarios and covered micro-features declared in the packet.
 3. **No Kernel-Local Test Authoring**: Do not translate validation obligations into Rust ktests under `kernel/src/fs/fs_impls/`. Do not add inline `#[cfg(ktest)]` modules, `#[ktest]` functions, `test_support/` helpers, memory-disk fixtures, or test-only production helpers in the filesystem implementation tree. If the validation lane needs harness work, it must be packeted outside the filesystem implementation tree, preferably in the NixOS / xfstests lane or another upstream-standard location.
 4. **Upstream-Suite Proof Obligation**: A green exit status `0` is meaningless if the intended validation did not run. For NixOS xfstests, record the exact `make nixos` / `make run_nixos` or equivalent command, the xfstests config, the exact generic test IDs or group names, the mounted filesystem type proof, and the result/notrun/fail files. For any other upstream-approved suite, record the suite version, selected tests, and proof that the intended tests were executed.
-5. **Compile-Smoke Command**: When the packet asks for a minimal compile preflight before heavier validation, prefer:
-`.agents/tools/checker_run.sh cargo-check --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
-For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo check -p aster-kernel --target x86_64-unknown-none'`, also under the checker execution lock. This smoke gate is for Rust compile fallout only; it does not replace the later upstream-suite validation proof or any required build receipt.
-6. **Full Compile Command**: When the packet requires a full compile receipt, prefer:
-`.agents/tools/checker_run.sh make-kernel --component <PARENT_MESO_COMPONENT> --phase <PASS_OR_CHECKER_PHASE>`.
-For manual execution, run it in the same verified container with `docker exec codex-asterinas-dev bash -lc 'cd /root/asterinas && make kernel'`, also under the checker execution lock.
+5. **Compile-Smoke Command**: When the packet asks for a minimal compile preflight before heavier validation, run `docker exec -w /root/asterinas codex-asterinas-dev bash -lc 'cd /root/asterinas/kernel && cargo check -p aster-kernel --target x86_64-unknown-none'` in the verified container. This smoke gate is for Rust compile fallout only; it does not replace the later upstream-suite validation proof or any required build receipt.
+6. **Full Compile Command**: When the packet requires a full compile receipt, run `docker exec -w /root/asterinas codex-asterinas-dev make kernel` in the verified container.
 7. **Deep Log Evaluation**: File system deadlocks and memory corruption can leave suite-level output ambiguous. You MUST inspect preserved `qemu-serial.log`, `qemu.log`, xfstests result files, or equivalent execution traces to classify panics, TCG errors, RCU stalls, lock cyclic dependencies, hangs, failures, skips, and notrun results. If one Checker run executes multiple validation batches, preserve each batch's logs before the next run overwrites them.
 8. **Failure Receipt Is Mandatory**: On every failure, regardless of pass kind, your report MUST explicitly contain:
    - `Reproduce Command`
@@ -52,12 +48,11 @@ For manual execution, run it in the same verified container with `docker exec co
    with `--preserve-run-id` when pruning old run images.
 10. **Condense to Actionable Repairs (The Advisor Duty)**: If validation fails or a deadlock occurs, do NOT just dump the raw stack trace back to the main agent. You must act as the diagnostic authority: formulate a clear, step-by-step **Repair Batch** instructing the responsible Creator Pass(es) on exactly which Rust line, RAII scope, or logical condition caused the failure so the follow-up repair can be executed blindly.
 
-## NixOS xfstests Prebuilt-Image Lane
+## Overlayfs xfstests Container Lane
 
-When a packet assigns NixOS / xfstests validation for `overlayfs`, prefer
-the prebuilt-image lane documented in
-`.agents/XFSTESTS_PREBUILT_IMAGE_GUIDE.md` unless the packet explicitly opens a
-separate guest-side formatter compatibility lane.
+When a packet assigns xfstests validation for `overlayfs`, use the verified
+container lane documented by `$ovfs-checker` unless the packet explicitly
+opens a separate formatter compatibility lane.
 
 Required execution rules for this lane:
 
@@ -85,12 +80,9 @@ Required execution rules for this lane:
    `mount -t OverlayFs`, write, sync or fsync, unmount, remount, and
    readback on a prebuilt TEST image. If this fails with `Structure needs
    cleaning`, route it as an filesystem implementation/refactor persistence/remount bug.
-7. **Preferred Wrapper**: Use
-   `kernel/src/fs/fs_impls/overlayfs/.agents/tools/xfstests_prebuilt_runner.sh`
-   for the first prebuilt-image smoke unless the packet supplies a newer wrapper.
-   `--prepare-only --no-lock` is allowed only for static wrapper checks; runtime
-   validation must use the Checker lock. Run runtime validation inside
-   `codex-asterinas-dev` from `/root/asterinas`.
+7. **Preferred Command**: Run the verified overlay command from `$ovfs-checker`
+   inside `codex-asterinas-dev` from `/root/asterinas`; preserve its logs and
+   result evidence under the packet-authorized component directory.
 
 ## Allowed Edits
 

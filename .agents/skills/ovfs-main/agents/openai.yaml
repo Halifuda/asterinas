@@ -1,0 +1,4 @@
+interface:
+  display_name: "OVFS Main Agent"
+  short_description: "Overlayfs scheduler, workflow, and acceptance gate"
+  default_prompt: "Use $ovfs-main to resume or schedule the overlayfs multi-agent workflow."

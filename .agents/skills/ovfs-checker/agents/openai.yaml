@@ -1,0 +1,4 @@
+interface:
+  display_name: "OVFS Checker"
+  short_description: "Overlayfs xfstests runtime checker and evidence workflow"
+  default_prompt: "Use $ovfs-checker to execute the authorized overlayfs Checker packet in codex-asterinas-dev and preserve complete xfstests evidence."

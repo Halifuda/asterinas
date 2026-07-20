@@ -30,8 +30,8 @@ Qwen-27b-Dense-class models. The prompt must be small and evidence-shaped.
 
 Lightweight triage agents may:
 
-- run `.agents/tools/xfstests_run.sh` with a packeted case, batch, or direct
-  diagnostic command;
+- run the packet-authorized `$ovfs-checker` container command with a bounded
+  case or run list;
 - add production logging when the packet explicitly authorizes logging edits
   and names the files;
 - inspect preserved `qemu.log`, `qemu-serial.log`, xfstests result files,
@@ -58,20 +58,22 @@ step requires non-logging logic changes, escalate out of the lightweight lane.
 
 ## 3. Harness Rule
 
-Use `.agents/tools/xfstests_run.sh` unless the packet explicitly says
-otherwise.
+Use the verified `$ovfs-checker` container command unless the packet
+explicitly says otherwise. For a bounded case or batch, provide a packeted
+run list through `XFSTESTS_RUNLIST`.
 
-Required short command shapes:
+Required command shape:
 
 ```sh
-.agents/tools/xfstests_run.sh case generic/694 --phase <phase> --disk 8G
-.agents/tools/xfstests_run.sh batch --tests generic/124,generic/247 --phase <phase>
-.agents/tools/xfstests_run.sh direct --cmd-file <file> --phase <phase>
+docker exec -w /root/asterinas codex-asterinas-dev \
+  make run_kernel AUTO_TEST=conformance RELEASE=1 MEM=12G \
+  CONFORMANCE_TEST_SUITE=xfstests XFSTESTS_FS_TYPE=overlay \
+  XFSTESTS_DISK_SIZE=6G \
+  XFSTESTS_RUNLIST=/opt/xfstests/overlay/run_list/<packet-run-list>
 ```
 
-The harness owns the long `make run_kernel` environment, checker lock, runlist
-generation, and receipt archive. Do not hand-write the long xfstests command
-unless debugging the harness itself.
+The Checker owns the serialized command lane, exact runlist, and receipt
+archive. Do not widen the case list or run outside `codex-asterinas-dev`.
 
 ## 4. Result Buckets
 

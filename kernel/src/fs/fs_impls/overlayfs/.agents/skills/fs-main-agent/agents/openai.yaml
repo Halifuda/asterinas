@@ -1,4 +1,0 @@
-interface:
-  display_name: "Filesystem Main Agent"
-  short_description: "Scheduler and protocol gate for filesystem implementation/refactor"
-  default_prompt: "Use $fs-main-agent to resume or schedule the filesystem implementation/refactor main-agent workflow."

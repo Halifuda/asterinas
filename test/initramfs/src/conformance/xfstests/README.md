@@ -18,6 +18,23 @@ xfstests/
 |       `-- full.list        # Broader manual or scheduled run list
 |-- tmpfs/
 |   `-- ...
+|-- exfat/                   # Configuration for XFSTESTS_FS_TYPE=exfat
+|   |-- config/
+|   |   |-- build_config.mk
+|   |   `-- xfstests.config
+|   |-- prepare.sh
+|   `-- run_list/
+|       |-- block.list
+|       `-- short.list       # PR3603's 55-case exFAT list
+|-- overlay/                # Configuration for XFSTESTS_FS_TYPE=overlay
+|   |-- config/
+|   |   |-- build_config.mk
+|   |   `-- xfstests.config  # ext2 base devices for common/overlay
+|   |-- prepare.sh
+|   `-- run_list/
+|       |-- block.list
+|       |-- short.list       # Small old-overlayfs smoke run
+|       `-- full.list        # All packaged overlay cases
 `-- template/                # Starting point for a new filesystem
 ```
 
@@ -39,6 +56,11 @@ make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests \
 make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests \
     XFSTESTS_FS_TYPE=ext2 \
     XFSTESTS_RUNLIST=/opt/xfstests/ext2/run_list/full.list
+
+# Run the old Asterinas overlayfs smoke list on ext2 base filesystems
+make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests \
+    XFSTESTS_FS_TYPE=overlay XFSTESTS_DISK_SIZE=6G \
+    XFSTESTS_RUNLIST=/opt/xfstests/overlay/run_list/short.list
 ```
 
 To run one or a few cases locally, create a run list under `<fs>/run_list/` and pass its guest path with `XFSTESTS_RUNLIST`:
@@ -61,6 +83,12 @@ For block-based filesystems, the build creates test and scratch disk images befo
 make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests \
     XFSTESTS_DISK_SIZE=2G
 ```
+
+Overlayfs is not backed by its own block device. Its two generated images are
+mounted as ext2 base filesystems, and upstream xfstests creates the overlay
+lower, upper, work, and mount directories below those base mounts. Use at
+least 6 GiB per image for exploratory overlay runs; larger cases may need
+more.
 
 ## Configuration
 

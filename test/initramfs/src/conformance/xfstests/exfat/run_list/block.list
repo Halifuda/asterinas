@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: MPL-2.0
+
+# Keep the PR3603 case list runnable; failures are reported by xfstests.
