@@ -760,6 +760,126 @@ Legend for tags:
 
 ---
 
+## xfstests overlay Test Mapping
+
+This section maps `xfstests/tests/overlay/` test numbers to the micro-features
+they validate. The Designer uses this to write validation contracts; the
+Checker uses it to select test subsets per pass. Tests requiring features not
+yet implemented will `_notrun` automatically (via `_require_scratch_overlay_features`),
+so running the full `overlay` group is safe at any implementation stage — only
+the tests for implemented features will actually execute.
+
+**Test source**: https://github.com/kdave/xfstests/tree/master/tests/overlay
+**Run command**: `./check -overlay -g auto` (or `-g quick` for fast subset)
+
+### P0 — Mandatory Core (read-only mount + stat + readdir)
+
+| Tests | Micro-features covered | Notes |
+| :--- | :--- | :--- |
+| `001` | P0-01, P0-02, P0-04, P0-05 | Basic mount + stat |
+| `002` | P0-04, P0-08, P0-09 | Basic lookup + merged dir |
+| `003` | P0-11 | Basic whiteout (char dev 0/0) |
+| `004` | P0-08, P0-09, P0-10 | Lookup with opaque/whiteout |
+| `005` | P0-08, P0-09, P0-14 | Lookup + readdir dedup |
+| `007` | P0-14, P0-15 | Merged dir readdir + d_ino |
+| `017` | P0-12, P0-15 | Inode number consistency across copy-up (stat) |
+| `019` | P0-12, P0-14 | stat + readdir consistency |
+| `021` | P0-02, P0-03, P0-05 | Mount with workdir |
+| `035` | P0-02, P0-18 | Read-only mount (no upperdir) |
+| `077` | P0-14, P0-15 | Readdir cache invalidation, stale entries |
+
+### P1 — Basic Usability (writable overlay + file ops + permissions)
+
+| Tests | Micro-features covered | Notes |
+| :--- | :--- | :--- |
+| `006` | P1-02, P1-25, P1-26 | Whiteout after rename (copy-up + whiteout) |
+| `008` | P1-22, P1-23, P1-24 | File ownership over whiteout (create-over-whiteout) |
+| `009` | P1-04, P1-06 | Copy-up + xattr |
+| `010` | P1-25, P1-27 | Remove dir with whiteout from lower |
+| `011` | P1-26 | Hardlink over whiteout |
+| `012` | P1-26 | Stale upper dentry on unlink |
+| `013` | P1-04, P1-21 | Copy-up + create in upper |
+| `014` | P1-04, P1-06 | Multi-lower copy-up |
+| `015` | P1-22, P1-24, P1-18 | SGID bit inheritance over whiteout (perms) |
+| `016` | P1-18, P1-24 | SGID inheritance on create |
+| `018` | P1-04, P1-28, P1-31 | Inode/nlink consistency across copy-up + hardlink |
+| `020` | P1-24, P1-26, P1-31 | Basic create + unlink + cache invalidation |
+| `023` | P1-03, P1-34 | Workdir ACL cleanup on mount |
+| `024` | P1-04, P1-07 | Copy-up with origin FH |
+| `025` | P1-04, P1-16 | Copy-up + setattr |
+| `026` | P1-04, P1-32 | Copy-up symlink |
+| `027` | P1-04, P1-21 | Copy-up + create upper |
+| `028` | P1-04, P1-28 | Copy-up + hardlink |
+| `029` | P1-08, P1-10 | Nested overlay file access (read delegation) |
+| `031` | P1-25, P1-26 | Whiteout exposure after remount |
+| `032` | P1-29, P1-30 | Rename within same dir |
+| `033` | P1-29, P1-30 | Rename + copy-up |
+| `034` | P1-29, P1-30 | Rename + whiteout |
+| `037` | P1-04, P1-31 | Copy-up + readdir cache invalidation |
+| `039` | P1-08, P1-10, P1-12 | mmap of lower file (MAP_SHARED divergence) |
+| `040` | P1-08, P1-13 | fsync delegation |
+| `078` | P1-18 | Mount option validation (perms) |
+
+### P2 — POSIX Completeness (xino, redirect_dir, ACL, fileattr, nlink)
+
+| Tests | Micro-features covered | Notes |
+| :--- | :--- | :--- |
+| `017` | P2-02 | redirect_dir (inode number across rename) |
+| `030` | P2-06 | immutable/append files (fileattr) |
+| `038` | P2-01 | xino d_ino consistency (samefs) |
+| `041` | P2-01 | xino d_ino consistency (nonsamefs) |
+| `042` | P2-01 | xino st_ino consistency |
+| `043` | P2-01, P2-02 | xino + redirect_dir |
+| `044` | P2-07 | nlink preservation (without index) |
+| `057` | P2-02 | redirect_dir rename |
+| `075` | P2-06 | immutable dirs in lower (fileattr) |
+| `076` | P2-06 | chattr on overlay dirs (fileattr deadlock) |
+| `078` | P2-11, P2-12 | Mount option validation (uuid, fsync) |
+| `081` | P2-11 | UUID/fsid modes |
+| `083` | P2-13 | userxattr namespace |
+| `084` | P2-13, P2-14 | xattr escape + userxattr (nested) |
+| `109` | P2-01, P2-13 | unionmount-testsuite (xino, nonsamefs) |
+
+### P3 — Advanced Extensions (index, nfs_export, metacopy, verity, nested)
+
+| Tests | Micro-features covered | Notes |
+| :--- | :--- | :--- |
+| `022` | P3-08 | Disallow overlay as upperdir (trap) |
+| `045`~`048` | P3-09 | fsck.overlay (requires `fsck.overlay` tool) |
+| `050`~`055` | P3-01, P3-02 | index + nfs_export (file handle encode/decode) |
+| `058`~`064` | P3-01, P3-02, P3-03 | index + nfs_export + metacopy |
+| `060`~`064` | P3-03 | metacopy (metadata-only copy-up) |
+| `065`~`067` | P3-01 | Mount error cases (index, overlapping layers) |
+| `068`~`071` | P3-01, P3-02, P3-08 | Nested overlay + nfs_export + index |
+| `073` | P3-01 | Whiteout inode sharing (index) |
+| `079` | P3-03, P3-04 | metacopy + data-only layers |
+| `080` | P3-03, P3-05 | metacopy + verity |
+| `085` | P3-03, P3-04 | metacopy + data-only (lazy follow) |
+| `088` | P3-03, P3-05 | metacopy + verity (lazy data) |
+| `089` | P3-03, P3-05 | metacopy + verity (I/O error) |
+| `111`~`117` | P3-01, P3-08 | unionmount-testsuite nested (index, xino, samefs/nonsamefs) |
+
+### Test Selection Strategy per Wave
+
+- **After P0 wave**: run `overlay/001 002 003 004 005 007 017 019 021 035 077`.
+  These validate read-only mount, lookup, readdir, stat, whiteout detection.
+- **After P1 wave**: add `overlay/006 008 009 010 011 012 013 014 015 016 018 020 023 024 025 026 027 028 029 031 032 033 034 037 039 040 078`.
+  These validate copy-up, create/unlink/rename, permissions, file ops.
+- **After P2 wave**: add xino/redirect_dir/fileattr/nlink/userxattr tests.
+- **After P3 wave**: add index/nfs_export/metacopy/verity/nested tests.
+- Tests requiring unimplemented features will `_notrun` automatically, so
+  `./check -overlay -g auto` is safe at any stage — it self-filters.
+
+### unionmount-testsuite (supplementary)
+
+The standalone unionmount-testsuite (https://github.com/amir73il/unionmount-testsuite)
+is integrated into xfstests via `overlay/109`~`117`. It provides systematic
+correctness verification for core union semantics. Run directly:
+`./run --ov --verify`. The xfstests integration parameterizes it with
+`--samefs`/`--xino`/`--ovov` (nested) variants.
+
+---
+
 ## Coverage Summary
 
 | Tier      |  Count | Milestone                                                                                                                                                                       |
