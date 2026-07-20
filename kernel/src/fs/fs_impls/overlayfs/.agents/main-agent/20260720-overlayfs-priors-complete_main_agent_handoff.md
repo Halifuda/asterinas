@@ -1,17 +1,31 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Main-Agent Handoff — 2026-07-20
+# Main-Agent Handoff — 2026-07-20 (CLOSED)
+
+**Status:** `CLOSED`
 
 ## Session Summary
 
-Completed step 0 (agent workflow bootstrap) and step 1 (priors layer staging)
-for the overlayfs refactor workspace. The branch `codex/overlayfs-refactor` is
-based on `upstream/main` (2b34b1051) and contains 4 commits:
+The overlayfs refactor workspace bootstrap, priors staging, multi-filesystem
+xfstests scaffold, PR3603 exFAT runlist integration, old-overlayfs validation
+lane, and temporary local agent workflow are complete. The branch
+`codex/overlayfs-refactor` is based on `upstream/main` (2b34b1051), contains
+the following 8 commits, and is published at
+`origin/codex/overlayfs-refactor`:
 
 - `b2d0df22a` Bootstrap overlayfs refactor multi-agent workspace (step 0)
 - `f03ef716b` Populate overlayfs priors layer (step 1)
 - `45362e19f` Add ra-code-nav skill (LSIF + jq), retire ra_code_nav.py
 - `ff1c00a2f` Map xfstests overlay tests to micro-features
+- `678d56da4` Support multi file systems for `xfstests`
+- `6ee780aa3` Integrate `tmpfs` into CI
+- `c51d9a302` Refactor exFAT implementation
+- `6e33e132c` Add temporary filesystem xfstests scaffolding
+
+The xfstests, `.agents/`, and `.gitignore` changes are temporary development
+and production-validation scaffolding. They are not the final refactor
+design and must be removed or replaced with a reviewed, maintainable version
+before the final PR.
 
 ## State of Priors
 
@@ -141,9 +155,10 @@ GiB free scratch space and is therefore not part of the smoke expectation.
 The six-case smoke list started and reached xfstests: 3 cases passed and 3
 reported old-overlayfs output mismatches. The packaged full overlay list has
 80 cases; a full run reached `overlay/011` before the legacy overlayfs hung.
-That run must be classified with preserved QEMU/guest logs and not treated as
-a startup failure. Cases marked not-run because of missing `fsgqa`, loopback
-support, or scratch-space requirements are expected capability skips.
+This proves startup and partial execution, but is not a full-suite acceptance
+claim. Cases marked not-run because of missing `fsgqa`, loopback support, or
+scratch-space requirements are capability results that must remain distinct
+from filesystem failures.
 
 The old-overlayfs evidence is preserved under
 `.agents/components/old-ovfs-baseline-test/`. It contains the raw
@@ -152,8 +167,13 @@ and the Asterinas compatibility shim. The generated 8 GiB TEST and SCRATCH
 images remain at `test/initramfs/build/xfstests_test.img` and
 `test/initramfs/build/xfstests_scratch.img`; their sizes and SHA-256 values
 are recorded in that directory's README rather than copying 16 GiB into Git.
+The `components/` directory is intentionally Git-ignored and remains local
+evidence for the next Checker wave.
 
-## Lock Topology (for Architect to finalize)
+## Architecture Inputs for Refactor Design
+
+The following lock findings are staged inputs for the real refactor design;
+they are not yet an accepted Architect topology or Designer contract.
 
 7 lock domains identified (6 from Linux + 1 new for Asterinas):
 
@@ -167,30 +187,29 @@ are recorded in that directory's README rather than copying 16 GiB into Git.
 | `UPPER` | via underlying fs ops    | Yes         | Implicitly acquired through upper fs calls                                                        |
 | `VFS`   | —                        | —           | Linux holds this; Asterinas does NOT. Replaced by `DIR`.                                          |
 
-Static hierarchy: `DIR` > `INODE` > `WL` > `UPPER`; `CUL` orthogonal to all;
+Candidate hierarchy: `DIR` > `INODE` > `WL` > `UPPER`; `CUL` orthogonal to all;
 `IU` orthogonal (mount-time only). Rename needs dual-`DIR` ordering
 (by `Arc::as_ptr()`).
 
-## Next Main-Agent Tasks
+## Next Action for Successor
 
-1. **Use the preserved old-overlayfs baseline** for comparison. New xfstests
-   receipts belong under `.agents/components/<component-id>/`; retain the
-   exact command, runlist, guest log, result files, and hang location before
-   any rerun overwrites the default artifacts.
-2. **Run existing ktests + regression tests on old overlayfs** to establish
-   current-state baseline (16 ktests in QEMU, 2 user-space regression tests).
-3. **Schedule Architect handoff**: dispatch an Architect packet through
-   `$ovfs-subagent` with role `Architect` to internalize the staged priors and
-   produce the Global Static Lock Topology + Bi-Directional Traceability
-   Matrix. The `protocol/templates/macro_00_global_topology_TEMPLATE.md`
-   template is ready.
-4. **Decision on scope**: confirm P0+P1 as first wave scope (81 micro-features
-   total, 55 in P0+P1). P2/P3 deferred to later waves.
+1. **Confirm old-overlayfs xfstests case by case.** Use `$ovfs-checker` and
+   the exact overlay runlists to build a case matrix with `PASS`, `FAIL`,
+   `NOTRUN`, and `HANG/TIMEOUT` results. Start from the preserved smoke and
+   full-run evidence, then rerun individual cases when the aggregate run
+   cannot distinguish their outcomes. Preserve every new log and result under
+   the local ignored `components/<component-id>/` directory.
+2. **Begin the real refactor design after the case matrix is complete.**
+   Dispatch the Architect role through `$ovfs-subagent` to turn the staged
+   priors and candidate lock hierarchy into an accepted Global Static Lock
+   Topology and Bi-Directional Traceability Matrix. Only then open Designer
+   contracts and implementation passes.
+3. **Create a new live handoff for the design wave.** This file closes the
+   bootstrap/scaffold phase and must not be reused as the active handoff.
 
-## Unresolved / Open Questions
+## Closure
 
-- The old-overlayfs xfstests baseline has been started; the remaining question
-  is how to preserve and schedule its receipts alongside Architect work.
-- The `DIR` lock domain needs to be specified at the meso level by Architect.
-  Should the Architect do this before or after the Bi-Directional Traceability
-  Matrix?
+This handoff is closed with no unresolved scheduling decisions. The successor
+main agent owns the ordered case-by-case validation and subsequent refactor
+design actions above; those actions belong in a new handoff and new component
+receipts.
