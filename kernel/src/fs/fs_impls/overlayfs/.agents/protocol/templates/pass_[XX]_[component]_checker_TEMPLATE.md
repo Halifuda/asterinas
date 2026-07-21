@@ -16,13 +16,13 @@
 
 ## 2. Validation Obligations Executed
 
-**Validation Scenarios Executed from `_designer_validation.md` (using the upstream-approved lane, currently expected to be NixOS xfstests unless superseded by upstream):**
+**External Validation Mappings Executed from `_designer_validation.md` (using the upstream-approved lane, currently expected to be NixOS xfstests unless superseded by upstream):**
 - `{scenario_name}`: [e.g., generic/XXX against mounted filesystem image, with result/notrun/fail receipt path]
 - `{integration_or_concurrency_scenario}`: [e.g., xfstests group or explicit upstream suite scenario covering Bio handoff behavior]
 
 ## 2.1 Validation Harness Surface Record
 
-*Required whenever Checker created or edited upstream-approved validation harness/config files outside `kernel/src/fs/fs_impls/`. Filesystem-local `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixture, or test-only helper changes under `kernel/src/fs/fs_impls/` are forbidden for new work.*
+*Required whenever Checker created or edited explicitly packeted upstream xfstests harness/config files outside `kernel/src/fs/fs_impls/`. Any creation, modification, or growth of `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, `test_support/`, memory-disk fixtures, or other ktest-based validation anywhere in the repository is forbidden for this refactor.*
 
 - **Touched Validation Harness Surface:** [List touched upstream-approved harness/config files outside `kernel/src/fs/fs_impls/`, or say `None` if Checker reused existing harness only.]
 - **Existing Legacy Filesystem-Local Test Surface In Scope:** [Only list packeted pre-existing legacy surfaces if the task explicitly named them for cleanup/audit; otherwise say `None`.]
@@ -40,7 +40,7 @@
 
 ## 4. Conclusion (Accepted OR Repair Batch)
 
-*(Select ONE outcome and delete the other)*
+*(Select ONE outcome and delete the other. Do not infer one-to-one micro-feature coverage from a black-box test count.)*
 
 ### OUTCOME A: VERIFIED ACCEPTANCE
 - **Status:** **PASS**

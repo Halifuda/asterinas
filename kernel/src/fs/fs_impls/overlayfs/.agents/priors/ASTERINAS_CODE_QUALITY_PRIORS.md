@@ -6,6 +6,12 @@ This document is the absolute, objective checklist of coding standards for the A
 
 Under the Top-Down Strict Protocol, this file serves as the strict operational boundary for Creators (when writing code) and Reviewers (when auditing). It contains NO agent-workflow meta-instructions or role-profile slicing.
 
+For the overlayfs refactor, the validation-method rule overrides any generic
+testing guidance below: this refactor is xfstests-only and must not create,
+modify, or grow any ktest-based validation surface. The testing notes below do
+not authorize `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules,
+`test_support/`, or memory-disk fixture changes in this workspace.
+
 ## CORE CODING STANDARDS & RUST HYGIENE
 
 ### 1. Unsafe Code
@@ -57,4 +63,6 @@ Under the Top-Down Strict Protocol, this file serves as the strict operational b
 ### 9. Testing & Review
 - Test user-visible behavior through public APIs, not internals.
 - Clean up resources after every test.
-- Keep test-only helpers in `mod tests` or test-only support modules (`#[cfg(ktest)]`).
+- For this overlayfs refactor, do not add or modify kernel-mode test-only
+  helpers; validate through the packeted upstream xfstests lane instead of
+  ktest modules.

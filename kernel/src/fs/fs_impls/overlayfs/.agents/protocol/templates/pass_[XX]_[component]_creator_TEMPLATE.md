@@ -53,12 +53,12 @@
 |------------|-----------------|-----------------------------------|
 | `impl FileSystem for Filesystem` | `name`, `source`, `sync`, `root_inode`, `sb`, `flags`, `set_fs_flags` | Required trait surface; grouped here instead of listed one-by-one |
 
-### 4.3 Filesystem-Local Test Growth Check
+### 4.3 Ktest Change Check
 
 | Forbidden Surface Type | Introduced In This Pass? | Evidence / Notes |
 |------------------------|--------------------------|------------------|
-| `#[ktest]` / `#[cfg(ktest)]` under `kernel/src/fs/fs_impls/` | `No` | `New filesystem-local ktests are forbidden.` |
-| `test_support/`, memory-disk fixtures, or test-only helpers under `kernel/src/fs/fs_impls/` | `No` | `New validation harness work belongs outside the filesystem implementation tree.` |
+| Any `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, or other ktest surface anywhere in the repository | `No` | `This refactor is xfstests-only; no ktest surface may be created or modified.` |
+| Kernel-mode `test_support/`, memory-disk fixtures, or kernel-mode test-only helpers anywhere in the repository | `No` | `The Creator writes production code only; validation is owned by the packeted xfstests Checker lane.` |
 
 ### 4.4 Entity Rejection Table
 

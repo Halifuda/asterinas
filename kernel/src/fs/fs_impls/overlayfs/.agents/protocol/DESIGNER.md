@@ -8,13 +8,13 @@ Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
 
 The Designer translates the Architect's static boundaries, feature map, and topology into a clear, implementable dynamic execution specification. It solves "Dynamic Lock Orchestration" within the strict constraints of the Architect's "Global Lock Topology".
 
-You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a companion validation specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features. Your job is to define the semantic boundary and behavioral obligations of the meso, not to freeze concrete Rust signature spelling, carrier family names, dispatcher type names, or filesystem-local test mechanisms.
+You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a minimal companion external-evidence specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features. Your job is to define the semantic boundary and behavioral obligations of the meso, not to freeze concrete Rust signature spelling, carrier family names, dispatcher type names, or validation-harness mechanisms. The evidence artifact maps those obligations to upstream xfstests; it is not a plan for internal tests. This refactor uses xfstests as its sole validation lane and must not create, modify, or imply any ktest or other internal test surface.
 
 ## Required Artifacts
 
 You must output exactly two files for your assigned Meso-Component:
 1. `meso_XX_<component_name>_designer_spec.md`: The unified dynamic execution and lock specification.
-2. `meso_XX_<component_name>_designer_validation.md`: The upstream-approved validation obligations for the Checker.
+2. `meso_XX_<component_name>_designer_validation.md`: The upstream-approved external-validation mapping and integration obligations for the Checker.
 
 ## Structure of `_designer_spec.md`
 
@@ -37,15 +37,44 @@ When a branch, invariant, or hazard only applies to specific micro-features, nam
 
 ## Structure of `_designer_validation.md`
 
-- **Creator-Synced Validation Obligations**: Describe externally observable behaviors that a Creator-synced Checker Pass must validate for a covered micro set using the upstream-approved validation lane. Label the related micro-features explicitly.
-- **Invariant / Rollback Observations**: Describe the state, result files, guest logs, or filesystem images that must prove data structures and memory boundaries remain valid after operations and rollbacks. Label the related micro-features explicitly.
-- **Meso-Level Integration Validation**: Describe validation scenarios that involve tightly coupled micro-features and therefore must run as a separate integration Checker pass. Every integration scenario must explain `Setup`, `Execution Chain`, and `Assertion`, but should remain at a high level rather than line-by-line pseudocode.
-  - **Success Path**: Mandatory whenever an integration scenario exists.
-  - **Failure-Maintenance Path**: Optional, depending on complexity.
-  - **Idempotence / Repeated-Call Path**: Optional, depending on complexity.
-  - **Concurrency Path**: Optional, depending on complexity.
-  For each optional path you omit, explicitly say why it is unnecessary.
-  The current expected validation lane is NixOS-driven xfstests unless the upstream project standardizes a different filesystem-validation route.
+### 1. External Validation Mapping
+
+Map every assigned micro-feature to the upstream-approved xfstests case or
+group that is expected to exercise it. The mapping is many-to-many: one test
+may cover several micro-features, and one micro-feature may require several
+tests. For each row, record the expected observation and classify the evidence
+as `direct`, `combined`, `not-run/unsupported`, or `no upstream coverage` when
+the suite cannot isolate or exercise the feature. Record an upstream coverage
+gap as a limitation; do not invent another validation lane to compensate for
+it.
+
+### 2. Pass-Scoped Checker Obligations
+
+State which mapped xfstests are relevant to a Creator-synced Checker for its
+exact Creator Pass scope. The Checker must preserve the scope boundary even
+when a selected test exercises neighboring micro-features. Require reporting
+of the actual test IDs, result files, guest logs, and any `PASS`, `FAIL`, or
+`NOTRUN` classification; do not require or imply a separate test per
+micro-feature.
+
+### 3. Invariant and Integration Observations
+
+Describe externally observable invariant, rollback, remount, persistence, or
+deadlock observations that xfstests can provide. Treat logs and suite results
+as runtime evidence, not as a proof of memory safety or internal
+implementation correctness. Describe tightly coupled
+meso-level scenarios as separate integration Checker passes. Each scenario
+must explain `Setup`, `Execution Chain`, and `Assertion`, but remain high-level
+rather than line-by-line pseudocode. Include a success path whenever the meso
+has non-trivial cross-feature interaction. Add failure-maintenance,
+idempotence, or concurrency paths only when an upstream test exists; otherwise
+state that the upstream lane provides no such scenario and leave the gap
+explicit.
+
+The current and sole validation lane is NixOS-driven xfstests unless the
+upstream project standardizes a different external filesystem-validation
+route. If an obligation has no upstream coverage, record that limitation;
+do not add an internal test lane.
 
 ## Forbidden Behaviors
 
@@ -53,7 +82,7 @@ When a branch, invariant, or hazard only applies to specific micro-features, nam
 - **NO HELPER FRAGMENTATION**: You must not suggest, design, or define internal private helper functions. The design must be described purely in terms of the single meso boundary and its internal control flow. Exposing logic as separate helper APIs leads to an unmanageable surface area.
 - **NO ARCHITECTURAL REVISIONS**: Do not alter the static lock boundaries, macro-owners, or topology provided by the Architect. Do not skip any assigned micro-features.
 - **NO PASS SLICING**: Do not decide Creator Pass boundaries or say "Pass 1 should implement X and Y." That is owned by the main agent.
-- **NO FILESYSTEM-LOCAL KTESTS**: Do not request, design, or imply new `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixtures, or test-only helpers under `kernel/src/fs/fs_impls/`. Validation must be expressible through upstream-approved external/system-level lanes.
+- **XFSTESTS-ONLY VALIDATION**: Do not request, design, create, modify, or imply any internal unit-test lane, `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest harness anywhere in the repository. Validation must be expressible through the upstream xfstests lane. Any xfstests harness/configuration change must be outside `kernel/src/fs/fs_impls/` and explicitly authorized by the packet.
 - **NO RAII/DROP MICROMANAGEMENT**: Define the locking rules and hazards, but do not dictate exact line-by-line `drop(guard)` statements or attempt to write the Rust syntax for scope blocks. Trust Rust's RAII and the Creator to implement the specified constraints.
 - **NO PRODUCTION CODE**: Do not write `.rs` files.
 

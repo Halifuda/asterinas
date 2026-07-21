@@ -26,7 +26,26 @@ The main question is whether agents can do filesystem engineering without losing
 
 The adopting workspace may keep a legacy filesystem module active while building a new implementation or a major refactor in parallel. Stage the authoritative filesystem specification and one or more reference implementations as priors before opening Architect work.
 
-**Top-Down Strict Protocol**: Concurrency, locks, and system states are static and dynamic laws determined upfront by the Architect and Designer before the Creator writes a single line of code. Architect and Designer artifacts stay at the Meso level; the main agent later slices that Meso contract into one or more implementation passes for the Creator and synchronized Checker.
+**Top-Down Strict Protocol**: Concurrency, locks, and system states are static and dynamic laws determined upfront by the Architect and Designer before the Creator writes a single line of code. Macro/Meso/Micro are architecture, ownership, traceability, and scheduling levels, not test granularity levels. The global lock topology is a macro-level artifact; per-component Architect and Designer artifacts are meso-scoped; the main agent later slices each meso contract into implementation passes for the Creator and synchronized Checker. External xfstests provide many-to-many behavioral evidence. This refactor is xfstests-only and must not create, modify, or grow any ktest-based validation.
+
+## Why Macro and Meso Both Exist
+
+- **Macro-Owner / Macro topology** answers who owns durable state, lifetime, and
+  cross-component invariants, and establishes the global lock ordering. It
+  prevents independently designed components from acquiring locks in
+  incompatible orders or creating competing owners for the same state.
+- **Meso-Component** answers where one coherent semantic operation lives: its
+  boundary, preconditions and postconditions, static lock inlet/outlet state,
+  blocking hazards, and integration obligations. It is the stable parent scope
+  for Creator and Checker passes.
+- **Micro-Feature** answers whether each requirement from the staged priors is
+  assigned and eventually implemented. It is a traceability unit, not a test
+  unit.
+
+The xfstests matrix is deliberately separate from this hierarchy. A black-box
+case may exercise several micro-features, and a micro-feature may need several
+cases. Removing ktests therefore removes a validation mechanism, not the need
+for ownership, lock, semantic-boundary, or traceability structure.
 
 ## Codex Skills
 
@@ -46,11 +65,11 @@ The reusable Codex entry points live at the repository root:
 - **Architect (The Planner & System Mapper):**
   Defines the system by internalizing heavy priors. Produces the Global Static Lock Topology, the Bi-Directional Traceability Matrix (mapping all features/specs to the macro-meso-micro hierarchy), and establishes static lock boundaries.
 - **Designer (The Dynamic Path & Lock Orchestrator):**
-  Takes the Architect's static boundaries and dictates the dynamic execution process. Sets lock interaction contracts and path boundary restraints while also emitting Creator-synced and meso-level integration validation obligations for upstream-approved validation lanes.
+  Takes the Architect's static boundaries and dictates the dynamic execution process. Sets lock interaction contracts and path boundary restraints while also emitting pass-scoped xfstests mappings and meso-level integration obligations for upstream-approved validation lanes.
 - **Creator (The Unconditional Executor):**
   Blindly follows the Designer's blueprints inside a main-agent-defined Creator Pass. Each pass names one parent meso-component and an explicit covered-micro set; the Creator implements only that slice and records it in the pass report.
 - **Checker (The Validator & Condenser):**
-  Validates behavior through upstream-approved external/system-level validation, evaluates preserved guest logs and suite results for execution evidence, and records actionable repair batches. Creator-synced Checker passes must mirror the Creator pass exactly; meso-level integration validation is scheduled as a separate Checker-owned pass. New Checker work must not add filesystem-local ktests or `test_support/` under `kernel/src/fs/fs_impls/`. *Owns lock-guarded execution.*
+  Validates behavior through upstream-approved external/system-level validation, evaluates preserved guest logs and suite results for execution evidence, and records actionable repair batches. Creator-synced Checker passes must mirror the Creator pass exactly for scope and report many-to-many xfstests coverage; meso-level integration validation is scheduled as a separate Checker-owned pass. This refactor must not create, modify, or grow any `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest harness anywhere in the repository. *Owns lock-guarded execution.*
 - **Reviewer (The Quality Gate):**
   Performs static code-quality reviews on stabilized implementation passes and may directly edit in-scope code to enforce formatting, naming, and style priors before final acceptance.
 

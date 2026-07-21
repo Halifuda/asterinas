@@ -66,7 +66,7 @@
 
 ### 2.5 Validation-Harness Boundary Gate
 
-*Required when validation harness/config code is packeted for review. New filesystem-local `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixture, or test-only helper code under `kernel/src/fs/fs_impls/` must be rejected. Upstream-approved harness code must remain outside the filesystem implementation tree.*
+*Required when validation harness/config code is packeted for review. Any creation, modification, or growth of `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, kernel-mode test-only helpers, `test_support/`, memory-disk fixtures, or other ktest-based validation must be rejected anywhere in the repository. Only explicitly packeted upstream xfstests harness/configuration code outside the filesystem implementation tree may be reviewed.*
 
 | Validation Surface | Current Location | Approved Lane? | Boundary Judgment | Action |
 |--------------------|------------------|----------------|-------------------|--------|

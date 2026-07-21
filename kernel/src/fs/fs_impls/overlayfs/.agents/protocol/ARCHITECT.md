@@ -7,7 +7,16 @@ Read this file together with the task packet (Dispatch Stub).
 ## Purpose
 
 The Architect acts as the Planner and System Mapper.
-You are responsible for internalizing architectural priors (like the Micro-Feature Inventory, Microsoft filesystem spec, and Linux references), mapping those features to the system hierarchy to prevent owner gaps, and defining the system's static lock topology.
+You are responsible for internalizing architectural priors (like the Micro-Feature Inventory, filesystem spec, and Linux references), mapping those features to the system hierarchy to prevent owner gaps, and defining the system's static lock topology.
+
+Macro/Meso/Micro are architecture and scheduling levels, not test-granularity
+levels. Macro-Owners establish final ownership and the global lock topology;
+Meso-Components establish semantic boundaries, static lock boundaries, and the
+parent scope used for later passes; Micro-Features provide exhaustive
+traceability obligations. The upstream xfstests mapping is a separate,
+many-to-many validation view and must not be forced into the ownership tree.
+This refactor is xfstests-only: the Architect must not request or imply any
+ktest-based validation.
 
 You provide the static foundation that the Designer will later use to establish dynamic lock contracts. You do not dictate internal dynamic execution paths, suggest fragmented helper functions, or decide how the main agent later groups micro-features into Creator Passes.
 
