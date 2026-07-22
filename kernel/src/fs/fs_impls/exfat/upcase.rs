@@ -201,7 +201,7 @@ impl UpcaseTable {
         let mut hash = 0u16;
         for code_unit in name {
             for byte in self.upcase_code_unit(*code_unit).to_le_bytes() {
-                hash = ((hash & 1) << 15) + (hash >> 1) + u16::from(byte);
+                hash = hash.rotate_right(1).wrapping_add(u16::from(byte));
             }
         }
         hash
