@@ -8,7 +8,7 @@ Read this file together with the task packet (Dispatch Stub) and `PROTOCOL.md`.
 
 The Designer translates the Architect's static boundaries, feature map, and topology into a clear, implementable dynamic execution specification. It solves "Dynamic Lock Orchestration" within the strict constraints of the Architect's "Global Lock Topology".
 
-You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a minimal companion external-evidence specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features. Your job is to define the semantic boundary and behavioral obligations of the meso, not to freeze concrete Rust signature spelling, carrier family names, dispatcher type names, or validation-harness mechanisms. The evidence artifact maps those obligations to upstream xfstests; it is not a plan for internal tests. This refactor uses xfstests as its sole validation lane and must not create, modify, or imply any ktest or other internal test surface.
+You must merge the functionality, modularity, and concurrency requirements into a **single comprehensive spec file** and provide a minimal companion external-evidence specification. You focus on the *Meso-Component* level. The main agent will later slice your meso-level contract into Creator Passes, so your artifacts must stay meso-scoped and explicitly traceable back to named micro-features. Your job is to define the semantic boundary and behavioral obligations of the meso, not to freeze concrete Rust signature spelling, carrier family names, dispatcher type names, or validation-harness mechanisms. A Designer task may be an initial contract or a bounded revision continuation; a revision may substantially rewrite both artifacts while preserving the parent Meso, covered Micro set, and accepted Architect topology. If the static owner or lock topology is wrong, report it for Architect repair instead of changing it silently. The evidence artifact maps those obligations to upstream xfstests; it is not a plan for internal tests. This refactor uses xfstests as its sole validation lane and must not create, modify, or imply any ktest or other internal test surface.
 
 ## Required Artifacts
 
@@ -34,6 +34,23 @@ When a branch, invariant, or hazard only applies to specific micro-features, nam
 - **Inlet/Outlet Lock State**: Inherit the "Expected Inlet State" from the Architect. State what locks must be held upon entry and what the state should be upon return.
 - **Acquisition Order**: If new locks must be acquired, specify the acceptable acquisition order to strictly comply with the Architect's global lock topology.
 - **Concurrency & Non-blocking Hazards**: Identify potential blocking points or non-blocking handoffs (e.g., executing requests via `Bio` interfaces). State the high-level concurrency constraints (e.g., "Lock X must not be held across a block I/O boundary to prevent deadlocks, and internal state must be re-validated after the Bio operation completes"), but rely on the Creator and Rust's RAII to handle the exact implementation of guards.
+
+### 4. Representation and Complexity Guidance
+
+*This section is advisory and must not freeze Rust type names or Creator Pass
+boundaries. When the packet requests it, record the expected owner/carrier
+shape, relevant lock or publication coordinators, and a small complexity
+baseline for the Meso.*
+
+- **Stable Invariant Carriers Allowed:** [State the owner, lock, persistence,
+  or lifetime invariant that justifies a carrier and its guard boundary.]
+- **Carrier / Helper Boundaries:** [State which temporary or thin helpers are
+  rejected and which stable protocol objects may remain.]
+- **Complexity Baseline / Budget:** [Record advisory counts for new entities,
+  long-parameter functions, temporary carriers, coordination objects, or
+  repeated specification text. Explain deliberate budget overruns.]
+- **Revision Disposition:** [For a revision continuation, list changed
+  obligations, preserved obligations, and any Architect escalation.]
 
 ## Structure of `_designer_validation.md`
 

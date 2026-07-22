@@ -7,12 +7,17 @@
 ## 1. Pass Identity
 
 **Checker Pass ID:** `pass_XX_{component_name}`
+**Task ID:** `task_{id}`
+**Risk Tier:** `[Low | Normal | High]`
+**Continuation Event:** `[N/A or event_id]`
 **Pass Kind:** `[Creator-Synced | Meso-Integration]`
 **Parent Meso-Component:** `meso_YY_{component_name}`
 **Covered Micro-Features:**
 - 
 **Creator Pass Artifact(s):**
 - `path/to/pass_creator.md` *(or `N/A` for a pure integration pass if no single creator receipt applies)*
+**Validation Run IDs:**
+- `run_{id}`
 
 ## 2. Validation Obligations Executed
 
@@ -37,6 +42,16 @@
 - **Reproduce Command**: [Exact checker runner, NixOS xfstests, or upstream-approved suite command.]
 - **Execution Proof**: [For xfstests, show suite version/config, filesystem type proof, exact generic test IDs or groups executed, and decisive pass/fail/notrun result files. For `cargo-check` or `make-kernel`, show the compile/build command and decisive success/failure lines.]
 - **Guest / Suite Log Scan**: [Required for QEMU-backed validation. Inspect preserved `qemu-serial.log`, `qemu.log`, xfstests result files, or equivalent traces for panics, TCG errors, stalls, deadlocks, failures, skips, and notrun classifications. If this pass only ran `cargo-check` or `make-kernel`, say `Not applicable`.]
+
+### 3.1 Validation Run Ledger
+
+*Record one row per isolated compile, runtime, rerun, or suffix execution. Do
+not create a new formal pass when the scope and validation objective are
+unchanged.*
+
+| Run ID | Mode | Exact Command / Test Set | Status | Evidence / Pollution Disposition |
+|--------|------|--------------------------|--------|----------------------------------|
+| `run_{id}` | `compile | xfstests | rerun | suffix` |  |  |  |
 
 ## 4. Conclusion (Accepted OR Repair Batch)
 

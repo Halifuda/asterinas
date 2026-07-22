@@ -7,6 +7,9 @@
 ## 1. Pass Identity & Write-Set
 
 **Creator Pass ID:** `pass_XX_{component_name}`
+**Task ID:** `task_{id}`
+**Risk Tier:** `[Low | Normal | High]`
+**Continuation Event:** `[N/A or event_id]`
 **Parent Meso-Component:** `meso_YY_{component_name}`
 **Covered Micro-Features:**
 - 
@@ -38,7 +41,9 @@
 
 ## 4. Generated Entity Census
 
-*You MUST list every introduced production entity in the assigned write-set. This includes each new `struct`, `enum`, local type alias, module, and non-trait helper function. Trait-required methods may be grouped explicitly under an impl block instead of listed one-by-one. New filesystem-local test-only entities are forbidden; if the packet explicitly names legacy test-only surfaces for cleanup/audit, disposition them in the user-named surface table instead of growing them.*
+*Declare the census mode selected by the task risk and write-set. A complete census is mandatory for any introduced production entity, High-risk task, owner/lock/persistence change, structural cleanup/full-surface audit, or user-named surface. A Low-risk pass with no new production entities may state `No new production entities`, but must still account for the exact owner, scope, write-set, contract, and deviations. New filesystem-local test-only entities are forbidden; if the packet explicitly names legacy test-only surfaces for cleanup/audit, disposition them in the user-named surface table instead of growing them.*
+
+**Entity Census Mode:** `[Full | No new production entities]`
 
 ### 4.1 Production Entity Census
 

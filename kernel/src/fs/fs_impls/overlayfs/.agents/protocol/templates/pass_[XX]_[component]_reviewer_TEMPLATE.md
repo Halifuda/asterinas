@@ -7,6 +7,11 @@
 ## 1. Pass Identity & Line-Level Quality Enforcement Log
 
 **Reviewer Pass ID:** `pass_XX_{component_name}`
+**Task ID:** `task_{id}`
+**Risk Tier:** `[Low | Normal | High]`
+**Review Scope:** `[Single stabilized pass | Bounded Meso review wave]`
+**Implementation Pass IDs:**
+- `pass_XX_{component_name}`
 **Parent Meso-Component:** `meso_YY_{component_name}`
 **Covered Micro-Features:**
 - 
@@ -25,7 +30,7 @@
 
 ## 2. Independent Entity Census & Helper Legality Sign-Off
 
-*You must independently inspect the code and compare it against the Creator census. Evaluate every introduced production entity against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C) and against its claimed owner/module boundary. For full-surface structural-audit packets, this table MUST also include surviving in-scope production `struct`s, `enum`s, carriers, and non-trait helpers even when they predate the current pass.*
+*You must independently inspect the code and compare it against the Creator census. Evaluate every introduced production entity against the `CREATOR.md` Entity Generation Whitelist rules (Rule A, Rule B, Rule C, Rule D) and against its claimed owner/module boundary. For full-surface structural-audit packets, this table MUST also include surviving in-scope production `struct`s, `enum`s, carriers, and non-trait helpers even when they predate the current pass.*
 
 | Handled Symbol | Found By Reviewer? | Listed By Creator? | Claimed Owner / Boundary | Whitelist Judgment | Action Taken |
 |----------------|--------------------|--------------------|--------------------------|--------------------|--------------|

@@ -90,6 +90,14 @@ Record only active or recently changed passes here. Durable slicing rationale be
   runtime/integration evidence, and record missing upstream coverage. They do
   not request or imply internal unit tests, ktests, or filesystem-local test
   substitutes.
+- Protocol simplification from the exFAT cross-workspace report is absorbed
+  without importing exFAT-specific disk or diagnostic assumptions: task kinds
+  are orthogonal to the Architect/Designer/Creator/Checker/Reviewer roles;
+  stable task boundaries may contain continuation events and isolated
+  validation runs; risk tiers select receipt depth; and stable invariant
+  carriers may be retained with explicit proof. These changes reduce repeated
+  dispatch/handoff/receipt prose but do not relax owner, lock, persistence,
+  rollback, failure-evidence, or xfstests-only gates.
 - The accepted Macro topology now includes a non-semantic Rust representation
   supplement: owner names are responsibility and traceability keys, not a
   one-to-one requirement for top-level Rust structs. Creators may merge,

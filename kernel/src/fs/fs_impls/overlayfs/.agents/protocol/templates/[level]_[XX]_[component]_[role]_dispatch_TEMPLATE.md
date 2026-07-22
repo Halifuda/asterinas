@@ -4,9 +4,16 @@
 
 **Role ID:** [ARCHITECT | DESIGNER | CREATOR | CHECKER | REVIEWER]
 **Pass Kind:** [Macro Backbone | Meso Mapping | Meso Spec | Creator-Synced Pass | Meso Integration Pass | Reviewer Pass]
+**Task ID:** [Stable task identifier]
+**Task Kind:** [design | implementation | diagnosis | validation | review]
+**Risk Tier:** [Low | Normal | High]
+**Workspace Root:** [Workspace-relative alias or canonical root]
 **Component/Task Group:** [e.g., EXR-WRITEAT-P02]
 **Parent Meso-Component:** [e.g., `meso_03_write_at` or `N/A` for macro backbone]
 **Covered Micro-Features:** [Exact names, one per bullet if multiple, or `N/A`]
+**Continuation / Parent Task:** [Existing task/event ID, or `N/A`]
+**Write-Set:** [Exact files/directories the role may modify, or `Read-only`]
+**Capabilities:** [Explicitly granted capabilities, e.g. `can_edit`, `can_compile`, `can_runtime_test`, `can_create_continuation`]
 
 ---
 
@@ -29,3 +36,11 @@
 - [For full-surface legacy test audits, explicitly enumerate every in-scope pre-existing filesystem-local test module, test helper family, and test-support file; do not rely on generic wording like "check the tests".]
 - [For Checker packets, state the approved validation lane and required receipts, e.g., NixOS xfstests config, exact generic test IDs/groups, filesystem type proof, result/notrun/fail files, and preserved guest logs.]
 - [e.g., "Checker: Lock required before running NixOS xfstests", or "Integration Pass: validate only the meso-level integration scenarios", or "None"]
+
+## 4. Manifest Contract
+
+- **Acceptance:** [Exact acceptance conditions for this task]
+- **Escalation:** [Exact escalation trigger and recipient]
+- **Expected Outputs:** [Artifact paths, validation run IDs, or `None`]
+- **Run Policy:** [If validation, state how reruns/suffixes/compile preflights
+  reuse this task boundary and receive distinct `run_id` values.]
