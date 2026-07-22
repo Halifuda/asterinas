@@ -515,7 +515,11 @@ impl<'a> MutableDirEntrySlotSpan<'a> {
 }
 
 pub(super) fn invalidate_entry_set(slot_span: &mut MutableDirEntrySlotSpan<'_>) -> Result<()> {
-    for entry in slot_span.bytes_mut().chunks_exact_mut(DIRECTORY_ENTRY_SIZE) {
+    for entry in slot_span
+        .bytes_mut()
+        .as_chunks_mut::<DIRECTORY_ENTRY_SIZE>()
+        .0
+    {
         entry[0] &= !ENTRY_TYPE_IN_USE_BIT;
     }
     Ok(())
@@ -881,7 +885,7 @@ fn file_name(entry_set: &[u8], secondary_count: usize, stream_entry: &[u8]) -> R
         if name_entry[0] != FILE_NAME_ENTRY_TYPE {
             return Err(invalid_on_disk_layout());
         }
-        for code_unit_bytes in name_entry[2..].chunks_exact(2) {
+        for code_unit_bytes in name_entry[2..].as_chunks::<2>().0 {
             if candidate_name.len() == name_length {
                 break;
             }

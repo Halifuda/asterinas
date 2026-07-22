@@ -314,8 +314,8 @@ impl BootRegion {
         block_device
             .read_bytes(checksum_region_len, &mut checksum_sector)
             .map_err(|_| device_io())?;
-        for chunk in checksum_sector.chunks_exact(size_of::<u32>()) {
-            if u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) != expected_checksum {
+        for chunk in checksum_sector.as_chunks::<{ size_of::<u32>() }>().0 {
+            if u32::from_le_bytes(*chunk) != expected_checksum {
                 return Err(invalid_on_disk_layout());
             }
         }
@@ -379,13 +379,14 @@ impl BootRegion {
         let mut bitmap = None;
         let mut upcase_entry = None;
         fat_reader.walk_cluster_chain(boot_region.root_dir_cluster, |_, cluster_bytes| {
-            for entry in cluster_bytes.chunks_exact(32) {
+            for entry in cluster_bytes.as_chunks::<32>().0 {
                 match entry[0] {
                     END_OF_DIRECTORY_ENTRY_TYPE => return Ok(ChainVisitControl::Stop),
                     ALLOCATION_BITMAP_ENTRY_TYPE => bitmap = Some(AllocationBitmap::parse(entry)?),
                     UPCASE_TABLE_ENTRY_TYPE => {
                         upcase_entry = Some(
-                            <[u8; 32]>::try_from(entry).map_err(|_| invalid_on_disk_layout())?,
+                            <[u8; 32]>::try_from(&entry[..])
+                                .map_err(|_| invalid_on_disk_layout())?,
                         );
                     }
                     _ => (),

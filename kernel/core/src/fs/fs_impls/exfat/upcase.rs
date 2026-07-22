@@ -112,17 +112,18 @@ impl UpcaseTable {
     fn decode_mapping(table_bytes: &[u8]) -> Result<Vec<u16>> {
         let mapping = if table_bytes.len() == Self::UNCOMPRESSED_TABLE_BYTE_LEN {
             let mut mapping = Vec::with_capacity(Self::TABLE_CODE_UNIT_COUNT);
-            for word in table_bytes.chunks_exact(2) {
+            for word in table_bytes.as_chunks::<2>().0 {
                 mapping.push(u16::from_le_bytes([word[0], word[1]]));
             }
             mapping
         } else {
-            let mut words = table_bytes.chunks_exact(2);
-            if !words.remainder().is_empty() {
+            let (words, remainder) = table_bytes.as_chunks::<2>();
+            if !remainder.is_empty() {
                 return Err(invalid_on_disk_layout());
             }
 
             let mut mapping = Vec::with_capacity(Self::TABLE_CODE_UNIT_COUNT);
+            let mut words = words.iter();
             while let Some(word) = words.next() {
                 let value = u16::from_le_bytes([word[0], word[1]]);
                 if value != u16::MAX {
@@ -201,7 +202,7 @@ impl UpcaseTable {
         let mut hash = 0u16;
         for code_unit in name {
             for byte in self.upcase_code_unit(*code_unit).to_le_bytes() {
-                hash = ((hash & 1) << 15) + (hash >> 1) + u16::from(byte);
+                hash = hash.rotate_right(1).wrapping_add(u16::from(byte));
             }
         }
         hash

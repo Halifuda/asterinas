@@ -132,13 +132,13 @@ impl FileSystem for ExfatFs {
         mount_state.flags
     }
 
-    fn set_fs_flags(&self, flags: FsFlags, data: Option<CString>, _ctx: &Context) -> Result<()> {
+    fn set_fs_flags(&self, flags: FsFlags, data: Option<&str>, _ctx: &Context) -> Result<()> {
         let mut fs_state = self.fs_state.write();
         let (current_flags, current_options) = {
             let mount_state = fs_state.mount_state.as_ref().ok_or_else(not_mounted)?;
             (mount_state.flags, mount_state.options.clone())
         };
-        let next_options = match data.as_deref() {
+        let next_options = match data {
             Some(args) => MountOptions::parse(flags, Some(args))?,
             None => current_options.with_flags(flags),
         };
