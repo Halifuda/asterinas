@@ -17,6 +17,42 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
 
 ## Current Pass Slicing Decisions
 
+- **`stage_d_scope_classification_20260730`**
+  - **Kind**: Design-scope classification; not a Creator, Checker, Reviewer,
+    or implementation pass.
+  - **Parent**: `N/A` (global Stage-D decision across the accepted seven-Meso
+    topology).
+  - **Covered micro-features**: All 81 formal Micro IDs in
+    `priors/MICRO_FEATURE_INVENTORY.md`.
+  - **Decision**: `需要实现` contains all P0/P1 IDs plus `P2-01 xino` (56
+    total). `暂不实现` contains `P2-02..P2-17` and `P3-01..P3-09` (25
+    total).
+  - **Rationale**: Stage D defines the basic implementation commitment as the
+    complete P0/P1 foundation plus core xino identity projection. Every other
+    P2/P3 item remains a deliberately mapped future insertion point, even when
+    its dependency chain is high priority after the basic implementation.
+  - **Explicit boundary**: This decision authorizes no Designer, Creator,
+    Checker, Reviewer, build, test, or runtime work and creates no pass slices.
+    Future pass slicing must be recorded only after an explicit Designer wave
+    under the seven accepted Meso boundaries.
+
+- **`topology_reset_20260730_reframed_architect`**
+  - **Kind**: Architect design/reset wave; not an implementation, Creator,
+    Checker, Reviewer, or pass-slicing pass.
+  - **Parent**: `N/A` (fresh global decomposition).
+  - **Covered micro-features**: All 81 formal Micro IDs in
+    `priors/MICRO_FEATURE_INVENTORY.md`.
+  - **Write-set**: Delete the superseded Architect/Meso/Designer dispatch
+    artifacts; create one fresh Macro artifact and seven fresh Meso
+    architecture maps under `components/architect-reframed-topology/`.
+  - **Result**: Accepted after structural audit. Each formal Micro ID has one
+    primary Meso owner; the new topology is `DIR -> CUL -> INODE -> WL ->
+    UPPER` with out-of-band `IU` mount claims.
+  - **Explicit boundary**: No Designer spec/validation, Creator/Checker/
+    Reviewer packet, implementation pass, test, build, or runtime work is
+    authorized by this decision. A future Designer wave must be separately
+    dispatched against the seven new Meso boundaries.
+
 - **`pass_00_old_ovfs_baseline_test`**
   - **Kind**: Pre-design legacy baseline Checker pass using the authorized overlay xfstests lane.
   - **Parent**: `legacy_overlayfs_baseline_validation` (temporary validation parent; not an accepted Architect meso-component).
@@ -28,4 +64,7 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
 
 **Deferred / Exit Notes:**
 
-- The baseline Checker report now preserves execution evidence for all target cases. The Architect wave is eligible for separate scheduling, but was not dispatched automatically by this baseline task.
+- The baseline Checker report preserves execution evidence for all target
+  cases. The original Architect wave was not dispatched automatically by that
+  baseline task; it was later superseded by the explicitly dispatched
+  `topology_reset_20260730_reframed_architect` wave above.

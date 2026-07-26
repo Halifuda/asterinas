@@ -33,5 +33,7 @@
         "**/.svn": false,
         "**/CVS": false,
         "**/Thumbs.db": false
-    }
+    },
+    "notebook.globalToolbar": false,
+    "notebook.insertToolbarLocation": "hidden"
 }

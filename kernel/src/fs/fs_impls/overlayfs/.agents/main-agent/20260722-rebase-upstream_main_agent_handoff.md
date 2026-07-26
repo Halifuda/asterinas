@@ -2,7 +2,10 @@
 
 # Main-Agent Handoff - 2026-07-22 Upstream Rebase
 
-**Status:** `OPEN / HANDOFF`
+**Status:** `CLOSED / SUPERSEDED`
+
+This handoff was superseded on 2026-07-24 by the interactive design-only
+tracking tenure in `20260724-p0-p1-design-tracking_main_agent_handoff.md`.
 
 ## 1. Global State
 
