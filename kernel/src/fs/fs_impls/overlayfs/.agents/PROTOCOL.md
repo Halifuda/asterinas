@@ -26,7 +26,7 @@ Use the surrounding documents as follows:
 - **Creator Pass**: A main-agent-defined implementation slice that sits between a Meso-Component and its Micro-Features. Each Creator Pass names exactly one parent meso-component and one explicit covered-micro set.
 - **Checker Pass**: A validation slice. For implementation work it MUST mirror the Creator Pass exactly; meso-level integration validation is scheduled as an independent Checker-only pass with its own covered-micro set. This refactor uses xfstests as its only validation method and must not create, modify, or grow any ktest-based validation surface.
 - **Global Lock Topology**: The absolute static hierarchy and holding states of synchronization primitives in the system.
-- **Information Funnel & Dispatch Stubs**: Heavy priors are internalized by higher roles (Architect). Lower roles (Creator) receive minimal context via Dispatch Stubs to prevent architectural overreach.
+- **Information Funnel & Dispatch Stubs**: Heavy priors and the workspace design documents are internalized by the higher design roles (Architect, Designer). Lower roles (Creator) receive minimal context via Dispatch Stubs to prevent architectural overreach.
 - **Task**: A durable work boundary with a stable `task_id`, role, task kind,
   risk tier, scope, write-set, acceptance rule, and escalation rule.
 - **Task Kind**: An operational classification orthogonal to role: `design`,
@@ -45,7 +45,30 @@ Use the surrounding documents as follows:
   receipt may aggregate several continuation events or validation runs without
   copying every event log into the current status file.
 
+## 0.5 Adopted Workflow: Design Documents as the Design Root
+
+The original protocol intent was an agent-fully-responsible pipeline that
+minimizes human intervention from Architect to Reviewer. This overlayfs wave
+deliberately departs from that intent: it is **design-document-driven**. The
+workspace design documents under `.agents/designdoc/` (the Stage A-F drafts and
+any future synthesis) are the authoritative design source, produced and
+confirmed interactively with the user. The design documents are already
+exhaustive at the semantic level, so the Designer's value-add is the **Rust
+code-form mapping**: turning the design documents and the accepted Architect
+topology into concrete meso-level Rust structure — module layout, structs,
+enums, carrier types, and helper signatures. This amends every clause below
+that treated Designer output as purely semantic or forbade signature design.
+
+Because the Designer now designs signatures, all signature/type/helper output
+MUST follow the Asterinas coding guidelines:
+`priors/ASTERINAS_CODE_QUALITY_PRIORS.md` (naming, visibility, error handling,
+types/functions, helper and owner-placement rules) and
+`book/src/to-contribute/coding-guidelines/` (five personas; the
+for-maintainability and for-development indexes are the primary checklists for
+signature shape, naming, layout, and concurrency).
+
 ## 1. Scheduler Rules
+
 
 ### 1.1 Task Lifecycle and Evidence Model
 
@@ -101,7 +124,7 @@ task
 5. **Checker Synchronization & Integration Separation**: Every Creator Pass must have a matching Creator-synced Checker Pass with the same parent meso-component and covered micro-feature set; this is a scope and failure-attribution boundary, not a requirement that xfstests isolate each micro-feature. A selected upstream test may cover several related micro-features, and the Checker must report the mapped and actually observed coverage. A validation task may contain multiple isolated runs under that unchanged scope, including compile preflight, rerun, or suffix runs. Meso-level integration validation from the Designer validation contract is never folded into Creator-synced Checker passes; it is scheduled as a separate Checker-owned pass only after the relevant implementation passes exist.
 6. **Strict Information Funnel & Artifact Layout**: Packets MUST be saved under `subagent-tasks/<component-id>/`, use `protocol/templates/[level]_[XX]_[component]_[role]_dispatch_TEMPLATE.md`, and remain pointer routes rather than design summaries. Subagent artifacts MUST be written under `.agents/components/<component-id>/`; mixed artifact directories are forbidden. Allowed context by role:
    - **Architect**: workspace-staged filesystem spec summaries, reference implementation summaries, micro-feature inventories, and relevant Asterinas priors.
-   - **Designer**: accepted Architect topology plus local component context.
+   - **Designer**: the authoritative design documents under `designdoc/` (Stage A-F drafts and future synthesis), the accepted Architect topology, the coding guidelines (`priors/ASTERINAS_CODE_QUALITY_PRIORS.md` and `book/src/to-contribute/coding-guidelines/`), and local component context.
    - **Creator**: Designer contract, main-agent-selected covered micro set, `priors/ASTERINAS_CODE_QUALITY_PRIORS.md`, and only stable pre-existing kernel interfaces required to typecheck. NEVER provide heavy filesystem specs, reference implementation source dumps, or legacy implementation files to Creator.
    - **Checker (Creator-Synced)**: Designer external-validation mapping, the matching Creator Pass report, and pass write-set / code paths.
    - **Checker (Meso Integration)**: Designer validation contract, accepted Creator reports covering the target micro-features, and pass write-set / code paths.
@@ -121,7 +144,15 @@ task
 
 - **Main agent**: Owns scheduling, acceptance, packet curation, task-board updates, and stale-lock decisions.
 - **Architect**: Generates the Bi-Directional Traceability Matrix across the Macro/Meso/Micro hierarchy, defines Global Lock Topology, and establishes static boundaries for micro-features.
-- **Designer**: Translates static boundaries into dynamic execution paths. Emits one meso-level spec and one xfstests-only external-validation contract containing pass-scoped test mappings and integration obligations. It must not design or imply ktest validation.
+- **Designer**: Maps the authoritative design documents and the accepted
+  Architect topology into dynamic execution paths and a concrete Rust code form
+  for its Meso-Component. It MUST define the meso-level Rust surface — module
+  layout, structs, enums, carrier types, and helper signatures — following the
+  coding guidelines in `priors/ASTERINAS_CODE_QUALITY_PRIORS.md` and
+  `book/src/to-contribute/coding-guidelines/` (see §0.5). It emits one meso-level
+  spec and one xfstests-only external-validation contract containing pass-scoped
+  test mappings and integration obligations. It must not design or imply ktest
+  validation.
 - **Creator**: Translates the Designer's blueprints into Rust implementations one Creator Pass at a time, as sliced by the main agent.
 - **Checker**: Validates behavior in synchronized Creator/Checker passes through xfstests, owns independent meso-level integration passes, evaluates preserved guest logs and upstream-suite results for runtime failures, and directly reports actionable repair instructions. It must not create or modify ktest validation.
 - **Reviewer**: Performs post-checker static review on stabilized implementation passes, enforcing both line-level code quality and structural helper / owner-placement quality.
@@ -141,7 +172,7 @@ Planned -> Architected -> Specified
 
 Gate rules:
 1. `Architected` means the Traceability Matrix and Static Lock Topology are established.
-2. `Specified` means all Designer artifacts exist, explicitly covering dynamic lock behavior, the xfstests-only external validation mapping, and meso-level integration obligations without any ktest requirement.
+2. `Specified` means all Designer artifacts exist, explicitly covering dynamic lock behavior, the meso-level Rust code-form signature design (module layout, struct/enum/carrier/helper signatures per the coding guidelines), the xfstests-only external validation mapping, and meso-level integration obligations without any ktest requirement.
 3. The main agent must declare Creator Pass coverage before any implementation starts.
 4. Creator-synced Checker passes must retain the covered micro set of their matching Creator Pass. Their xfstests evidence may span multiple mapped micro-features and must distinguish mapped, observed, and not-run coverage.
 5. Reviewer evaluates static code quality only after implementation and runtime validation stabilize.

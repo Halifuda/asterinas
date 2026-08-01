@@ -85,7 +85,7 @@
 
 ## 5. Contract Deviations & Boundary Notes
 
-*The Designer's spec is strict, but Rust's borrow checker is stricter. If you had to slightly adjust lifetimes, bounds, or signatures from the pseudo-code to make it compile, record it explicitly here.*
+*The Designer's signature design is strict, but Rust's borrow checker is stricter. If you had to slightly adjust lifetimes, bounds, or signatures from the Designer's frozen signatures to make it compile, record the deviation explicitly here (structural changes must be escalated, not silently applied).*
 
 - **Incidental Supporting Edits Outside Covered Micro-Features:** *(None, or explain)*
 - **Deviations:** *(None, or explain)*

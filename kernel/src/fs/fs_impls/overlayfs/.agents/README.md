@@ -65,7 +65,7 @@ The reusable Codex entry points live at the repository root:
 - **Architect (The Planner & System Mapper):**
   Defines the system by internalizing heavy priors. Produces the Global Static Lock Topology, the Bi-Directional Traceability Matrix (mapping all features/specs to the macro-meso-micro hierarchy), and establishes static lock boundaries.
 - **Designer (The Dynamic Path & Lock Orchestrator):**
-  Takes the Architect's static boundaries and dictates the dynamic execution process. Sets lock interaction contracts and path boundary restraints while also emitting pass-scoped xfstests mappings and meso-level integration obligations for upstream-approved validation lanes.
+  Takes the authoritative design documents (`designdoc/`) and the Architect's static boundaries and dictates the dynamic execution process, mapping them into a concrete meso-level Rust code form (module layout, structs, enums, carrier types, helper signatures) per the coding guidelines. Sets lock interaction contracts and path boundary restraints while also emitting pass-scoped xfstests mappings and meso-level integration obligations for upstream-approved validation lanes. See `PROTOCOL.md` §0.5.
 - **Creator (The Unconditional Executor):**
   Blindly follows the Designer's blueprints inside a main-agent-defined Creator Pass. Each pass names one parent meso-component and an explicit covered-micro set; the Creator implements only that slice, records it in the pass report, and supplies a repository-entry compile receipt when the packet grants `compile_preflight`.
 - **Checker (The Validator & Condenser):**

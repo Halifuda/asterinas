@@ -68,3 +68,32 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
   cases. The original Architect wave was not dispatched automatically by that
   baseline task; it was later superseded by the explicitly dispatched
   `topology_reset_20260730_reframed_architect` wave above.
+
+- **`stage_d_scope_amendment_20260801_p2_11_uuid`**
+  - **Kind**: Scope amendment to `stage_d_scope_classification_20260730`;
+    not a Creator/Checker/Reviewer pass.
+  - **Decision**: `P2-11 UUID modes` is promoted from `暂不实现` to `需要实现`
+    in `mount_resource_policy` (user decision 2026-08-01). The overlay UUID and
+    the upper/workdir claim token are unified as one 64-bit entity: when uuid
+    policy is effective the same value is the persisted `overlay.uuid` and the
+    claim token; otherwise only a fresh per-mount claim token exists.
+  - **Resulting classification**: 57 `需要实现` / 24 `暂不实现`.
+  - **Explicit boundary**: No pass slices are created by this amendment;
+    pass slicing still awaits accepted Designer contracts.
+
+- **`mount_validation_deferral_20260801`**
+  - **Kind**: Scheduling decision; not a pass.
+  - **Parent**: `mount_resource_policy` (Meso 01).
+  - **Decision**: The Creator-synced RUNTIME Checker for meso 01 is deferred.
+    Acceptance of the meso 01 Creator pass = structural acceptance + compile
+    preflight only. Runtime xfstests validation of the mount group becomes a
+    meso-integration obligation scheduled after `visibility_projection_identity`
+    provides the root carrier and a minimal read path (mount -> root ->
+    lookup/stat/readdir), because `FsType::create` cannot complete without the
+    root-carrier seam (construction step 10) and most cases additionally need
+    sibling-Meso lookup/readdir/IO behavior.
+  - **Boundary**: No ktest/other lane is substituted; the validation contract's
+    mapping table remains the target evidence contract; the failure-path
+    subset may be reported at integration time only for cases that provably
+    run without a successful baseline mount (Checker confirms from suite
+    source).

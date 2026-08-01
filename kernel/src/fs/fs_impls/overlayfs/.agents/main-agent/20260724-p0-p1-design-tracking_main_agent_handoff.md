@@ -1,5 +1,18 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
+> ## SUPERSEDED — Historical Context Only
+>
+> This handoff is **no longer live**. The current live main-agent handoff is
+> `20260801-state-cleanup-designer-prep_main_agent_handoff.md` (created
+> 2026-08-01). Its Stage A-F design drafts, topology-reset record, and Stage-D
+> scope classification remain valid design inputs, but no session should treat
+> this file as the active board or continue any work named in it. The
+> lock-topology discussion that followed this tenure is closed with `UPPER`
+> (and possibly `WL`) marked `可能清理` and deferred to Designer/Creator
+> stages. See the live handoff for current state and next actions.
+
+---
+
 # Main-Agent Handoff - 2026-07-24 P0/P1 Design Tracking
 
 **Date / Time:** 2026-07-30

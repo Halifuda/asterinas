@@ -43,8 +43,11 @@ artifacts required by the Architect packet, following
 ### Designer
 
 Produce exactly one meso-level dynamic specification and one validation
-contract. Keep them semantic and meso-scoped: no new Rust signature design,
-private-helper design, pass slicing, or filesystem-local tests.
+contract. Map the authoritative design documents into a concrete meso-level
+Rust code form (module layout, struct/enum/carrier/helper signatures) following
+the coding guidelines (`priors/ASTERINAS_CODE_QUALITY_PRIORS.md` and
+`book/src/to-contribute/coding-guidelines/`); see `PROTOCOL.md` §0.5. No pass
+slicing and no filesystem-local tests.
 
 ### Creator
 

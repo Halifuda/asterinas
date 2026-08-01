@@ -24,31 +24,56 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
   - **Dispatch**: `subagent-tasks/architect-reframed-topology/architect_reframed_topology_dispatch.md`
   - **Accepted Artifacts**: `components/architect-reframed-topology/macro_00_global_topology.md` and 7 Meso architecture maps
   - **Acceptance Evidence**: 81 formal Micro IDs occur exactly once as primary owners; all maps contain the required architecture sections; the fresh `DIR -> CUL -> INODE -> WL -> UPPER` topology and Asterinas BIO/re-entry constraints are explicit; no implementation or test artifact was created
-  - **Scope Classification**: 56 Micro IDs are `需要实现` (all P0/P1 plus
-    `P2-01 xino`); 25 are `暂不实现` (`P2-02..P2-17` and `P3-01..P3-09`).
+  - **Scope Classification**: 57 Micro IDs are `需要实现` (all P0/P1 plus
+    `P2-01 xino` and `P2-11 UUID modes`); 24 are `暂不实现`
+    (`P2-02..P2-17` minus `P2-11`, and `P3-01..P3-09`). Amended 2026-08-01:
+    `P2-11` promoted to `需要实现` in `mount_resource_policy`, with the claim
+    token unified with the 64-bit overlay UUID (single entity).
+    Amended 2026-08-02 (user-directed topology): `P1-07` ownership moves from
+    `persistent_association_export` (meso 07) to `visibility_projection_identity`
+    (meso 02) — the origin/lower-id record is identity-domain, no runtime owner;
+    meso 07 becomes deferred-only (0/4), and the future index feature is
+    recorded as a separate small copy-up-adjacent module concept.
     Deferred IDs remain mapped future insertion points and are not
     implementation commitments in this wave.
 
-- [ ] **Phase 3: Designer Contracts** (per new Meso-component)
-  - **Status**: Not started; intentionally reset and no Designer artifact has been generated
+- [x] **Phase 3: Designer Contracts** (per new Meso-component)
+  - **Status**: **Complete (2026-08-02)** — 6 basic-wave Designer contracts
+    `Specified` (meso 01-06); meso 07 deferred-only (0/4). Phase 4 (pass
+    slicing + Creator/Checker loops) is next.
   - **Prerequisite**: Accepted Phase 2 reframed topology
-  - **Expected Artifacts**: None in this wave. Any future Designer work requires a new explicit dispatch under the 7 new Meso boundaries
-  - **Boundary**: Do not reconstruct the deleted 13-Meso specs/validation contracts or create replacement Designer artifacts during this topology reset. The 56/25 classification is a design-scope decision only; it does not start Designer work.
+  - **Progress (2026-08-02)**: Designer wave **COMPLETE** — 6 basic-wave
+    contracts are `Specified` (`mount_resource_policy` 9/6,
+    `visibility_projection_identity` 12/2, `merged_directory_index` 4/1
+    revision 01, `copyup_authority_file_views` 17/6 revision 01,
+    `metadata_security_xattr_policy` 4/4 revision 01,
+    `namespace_mutation_whiteout` 11/1 revision 01), all with validation
+    deferred to meso-integration. meso 07 is **deferred-only (0/4)** (P1-07
+    moved to meso 02 as the lower-id record; future index/export/nlink/
+    offline-detection deferred, index recorded as a separate copy-up-adjacent
+    module concept). Bounded meso-01 revisions (default_permissions
+    publication; can_mknod_char + whiteout capability gate) closed the
+    meso-05/06 consumption gaps. Designer contracts preserve the 57/24 scope
+    labels and carry the `UPPER`/`WL` `可能清理` marker.
+  - **Expected Artifacts**: designer spec/validation artifacts for meso 01-06
+    (under `.agents/components/<component-id>/`; the tree is gitignored) plus
+    the meso 07 deferred-only disposition; packets under `.agents/subagent-tasks/`.
+  - **Boundary**: Do not reconstruct the deleted 13-Meso specs/validation contracts or create replacement Designer artifacts during this topology reset. The 57/24 classification is a design-scope decision only; it does not start Designer work.
 
 ## 2. Meso-Component Pipeline Index
 
 | Meso-Component | Current Scope | 1. Architect Map | 2. Designer Contract | 3. Creator Passes | 4. Checker Passes | 5. Integration Pass | 6. Reviewer | Overall Status |
 | :------------- | :----------: | :-------------: | :------------------: | :---------------: | :---------------: | :-----------------: | :---------: | :------------- |
-| `mount_resource_policy` | 8 / 7 | Accepted | Not started | - | - | - | - | Architected |
-| `visibility_projection_identity` | 11 / 2 | Accepted | Not started | - | - | - | - | Architected |
-| `merged_directory_index` | 4 / 1 | Accepted | Not started | - | - | - | - | Architected |
-| `copyup_authority_file_views` | 17 / 6 | Accepted | Not started | - | - | - | - | Architected |
-| `metadata_security_xattr_policy` | 4 / 4 | Accepted | Not started | - | - | - | - | Architected |
-| `namespace_mutation_whiteout` | 11 / 1 | Accepted | Not started | - | - | - | - | Architected |
-| `persistent_association_export` | 1 / 4 | Accepted | Not started | - | - | - | - | Architected |
+| `mount_resource_policy` | 9 / 6 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `visibility_projection_identity` | 12 / 2 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `merged_directory_index` | 4 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `copyup_authority_file_views` | 17 / 6 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `metadata_security_xattr_policy` | 4 / 4 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `namespace_mutation_whiteout` | 11 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `persistent_association_export` | 0 / 4 | Accepted | **Deferred-only** (2026-08-02; P1-07 moved to meso 02; no basic-wave Designer contract) | - | - | - | - | Deferred |
 
 `Current Scope` is shown as `需要实现 / 暂不实现`; the seven rows sum to
-`56 / 25` across the complete 81-Micro inventory.
+`57 / 24` across the complete 81-Micro inventory (amended 2026-08-01).
 
 _The old 13-Meso topology and its Designer dispatch/specification artifacts are
 discarded. No implementation, Creator, Checker, Reviewer, or pass-slicing work
@@ -102,10 +127,23 @@ Record only active or recently changed passes here. Durable slicing rationale be
   inode-owned `Extension` runtime lease and a persistent xattr reservation.
   Neither is treated as an existing Asterinas capability or frozen API.
 - Stage-D scope is now classified explicitly: implement all P0/P1 Micro IDs and
-  `P2-01 xino` (56 total); defer `P2-02..P2-17` and `P3-01..P3-09` (25 total).
+  `P2-01 xino` and `P2-11 UUID modes` (57 total); defer `P2-02..P2-17` minus `P2-11`, and `P3-01..P3-09` (24 total).
   The deferred set remains visible in the seven architecture maps for future
   Designer decisions, but no deferred Micro is part of the current
   implementation promise.
 - This classification does not create Creator/Checker/Reviewer passes. Phase 3
   remains `Not started`, and any future Designer wave must use the seven Meso
   boundaries and preserve the same scope labels.
+- **Lock-topology discussion closed (2026-08-01):** The five operation-path
+  locks were verified against `/home/ayd/linux` (7.2.0-rc3): `DIR` is the
+  Asterinas substitute for the role of Linux's VFS-held parent `i_rwsem`;
+  `INODE`/`WL`/`IU` map to `ovl_inode->lock`/`whiteout_lock`/`I_OVL_INUSE`;
+  `CUL` and `UPPER` have no direct Linux counterpart. `UPPER` (and possibly
+  `WL`) are marked `可能清理` (cleanup candidates) and deferred to the
+  Designer/Creator stages; no convergence list or artifact repair is active.
+  Phase 3 Designer dispatch is the next main-agent action; see the live
+  handoff `main-agent/20260801-state-cleanup-designer-prep_main_agent_handoff.md`.
+- **meso 01 runtime validation deferred (2026-08-01):** the mount group's
+  xfstests evidence moves to a meso-integration obligation after the identity
+  Meso's root carrier + minimal read path exist; the meso 01 Creator pass is
+  accepted on structural + compile-preflight evidence only.
