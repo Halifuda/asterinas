@@ -106,7 +106,7 @@ impl OverlayUuid {
         let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))?;
         let mut value = [0u8; OVERLAY_UUID_SIZE];
-        let mut writer = VmWriter::from(&mut value).to_fallible();
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper_inode.get_xattr(name, &mut writer) {
             Ok(written) if written == OVERLAY_UUID_SIZE => {
                 Ok(Some(Self::try_new(u64::from_le_bytes(value))?))
@@ -128,7 +128,7 @@ impl OverlayUuid {
         let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))?;
         let value = self.value().to_le_bytes();
-        let mut reader = VmReader::from(&value).to_fallible();
+        let mut reader = VmReader::from(value.as_slice()).to_fallible();
         upper_inode.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)
     }
 }
@@ -151,16 +151,10 @@ pub(super) struct InodeClaimGuard {
 impl InodeClaimGuard {
     /// Claims the inode's `OverlayInuseSlot` with `identity` as the token.
     ///
-    /// `EOPNOTSUPP` when the inode hosts no overlay inuse slot; `EBUSY` when
-    /// the slot is already claimed by another holder (spec §3.0.3).
+    /// Returns `EBUSY` when the slot is already claimed by another holder
+    /// (spec §3.0.3).
     pub(super) fn try_claim(inode: Arc<dyn Inode>, identity: OverlayUuid) -> Result<Self> {
-        let slot = inode.overlay_inuse_slot().ok_or_else(|| {
-            Error::with_message(
-                Errno::EOPNOTSUPP,
-                "the inode does not host an overlay inuse slot",
-            )
-        })?;
-        slot.try_claim(identity.value())?;
+        inode.overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
             inode,
             token: identity,
@@ -180,11 +174,11 @@ impl InodeClaimGuard {
 impl Drop for InodeClaimGuard {
     fn drop(&mut self) {
         // Re-resolve the slot from the pinned inode and CAS the token free.
-        // The release is non-blocking and fail-safe: a missing slot or a
-        // stale/wrong token is a no-op (spec §3.0.3).
-        if let Some(slot) = self.inode.overlay_inuse_slot() {
-            slot.release(self.token.value());
-        }
+        // The release is non-blocking and fail-safe: a stale/wrong token is a
+        // no-op (spec §3.0.3).
+        self.inode
+            .overlay_inuse_slot()
+            .release(self.token.value());
     }
 }
 
@@ -198,7 +192,7 @@ impl Drop for InodeClaimGuard {
 /// used as the token for both slots and, when effective, persisted as
 /// `trusted.overlay.uuid`.
 #[derive(Debug)]
-pub(super) struct UpperWorkdirClaim {
+pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     /// Workdir claim; taken second, released first.
     workdir: InodeClaimGuard,
     /// Upper claim; taken first, released last.
@@ -370,8 +364,8 @@ impl UpperWorkdirClaim {
 
     /// Reports whether both slots are still owned by this claim's token.
     ///
-    /// Returns `false` if either slot is missing or claimed by a different
-    /// token (spec §2 exclusivity invariant).
+    /// Returns `false` if either slot is claimed by a different token (spec
+    /// §2 exclusivity invariant).
     #[expect(
         dead_code,
         reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
@@ -381,12 +375,12 @@ impl UpperWorkdirClaim {
             .upper
             .inode
             .overlay_inuse_slot()
-            .is_some_and(|slot| slot.is_claimed_by(self.identity.value()));
+            .is_claimed_by(self.identity.value());
         let workdir_owned = self
             .workdir
             .inode
             .overlay_inuse_slot()
-            .is_some_and(|slot| slot.is_claimed_by(self.identity.value()));
+            .is_claimed_by(self.identity.value());
         upper_owned && workdir_owned
     }
 

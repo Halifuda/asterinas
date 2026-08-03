@@ -45,7 +45,7 @@
 
 use crate::{
     fs::{
-        fs_impls::overlayfs::projection::OverlayInode,
+        fs_impls::overlayfs::{copyup::WorkdirTempRequest, projection::OverlayInode},
         vfs::inode::{Inode, RenameMode},
     },
     prelude::*,
@@ -110,20 +110,22 @@ impl OverlayInode {
     pub(super) fn link_over_whiteout(&self, name: &str, upper_real: &Arc<dyn Inode>) -> Result<()> {
         let fs = self.fs_arc()?;
         let upper_parent = self.upper_parent()?;
-        let temp_name = fs.generate_workdir_temp_name(name, &upper_parent);
-        // The workdir root resolves through the single shared resolver
-        // (`OverlayInode::workdir_root`, wave-4 repair item 11) — the inline
-        // claims block is deleted.
+        let temp = fs.create_workdir_temp(
+            name,
+            &upper_parent,
+            WorkdirTempRequest::Link {
+                source: upper_real.clone(),
+            },
+        )?;
         let workdir = self.workdir_root()?;
         // Step 1 — the hard-link leg: stage the shared source upper real
         // inode as a private workdir hard link under the unique temp name.
-        workdir.link(upper_real, &temp_name)?;
         // Step 2 — atomic rename-over: replace the published whiteout at
         // `name` with the staged hard link (`Replace`; the whiteout is
         // consumed, never re-cached). On failure the staged temp is removed
         // best-effort so no workdir residue outlives the recipe.
-        if let Err(err) = workdir.rename(&temp_name, &upper_parent, name, RenameMode::Replace) {
-            let _ = fs.cleanup_workdir_temp(&temp_name);
+        if let Err(err) = workdir.rename(temp.name(), &upper_parent, name, RenameMode::Replace) {
+            let _ = fs.cleanup_workdir_temp(temp.name());
             return Err(err);
         }
         Ok(())

@@ -23,7 +23,7 @@
 //! overlay inode alive and never forms an `OverlayFs → OverlayInode →
 //! OverlayFs` strong cycle.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{fmt::Debug, sync::atomic::{AtomicU64, Ordering}};
 
 use hashbrown::HashMap;
 
@@ -102,7 +102,7 @@ struct InodeCacheEntry {
     keep_alive: Option<Arc<dyn Inode>>,
 }
 
-impl core::fmt::Debug for InodeCacheEntry {
+impl Debug for InodeCacheEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("InodeCacheEntry")
             .field("carrier", &self.carrier)

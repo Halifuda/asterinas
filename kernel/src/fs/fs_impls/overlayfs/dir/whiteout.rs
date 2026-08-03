@@ -69,7 +69,7 @@
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::mount::OverlayFs,
+        fs_impls::overlayfs::{copyup::WorkdirTempRequest, mount::OverlayFs},
         vfs::{
             inode::{Inode, MknodType, RenameMode},
             xattr::{XattrName, XattrSetFlags},
@@ -285,13 +285,11 @@ impl OverlayFs {
 
     /// Creates one private workdir whiteout temp outside `WL` (BIO-capable).
     ///
-    /// `representation := whiteout_representation()?`; the unique temp name
-    /// comes from the frozen meso-04 naming seam
-    /// [`OverlayFs::generate_workdir_temp_name`] (with the fixed
-    /// `WHITEOUT_TEMP_NAME_COMPONENT` — see the constant's doc; the cached
+    /// `representation := whiteout_representation()?`; the shared
+    /// [`OverlayFs::create_workdir_temp`] entry generates a unique name for
+    /// every attempt using `WHITEOUT_TEMP_NAME_COMPONENT` (the cached
     /// whiteout is a generic workdir resource, not a `(parent, name)` owner).
-    /// `CharDevice` → workdir `mknod(temp_name, mode 0, CharDevice(0))`;
-    /// `Xattr` → workdir `create(temp_name, File, mode 0)` then
+    /// `CharDevice` uses the typed `Mknod` request; `Xattr` uses `Create` then
     /// `set_xattr("trusted.overlay.whiteout", "y", CREATE_OR_REPLACE)` — the
     /// marker write is this Meso's owning operation (spec §5.1; the name is
     /// verified through the meso-05 `OverlayXattrPolicy::is_private`
@@ -306,14 +304,22 @@ impl OverlayFs {
         // (`OverlayFs::workdir_root`, wave-4 round-2 repair item 5) — the
         // inline claims block is deleted.
         let workdir = self.workdir_root()?;
-        let temp_name = self.generate_workdir_temp_name(WHITEOUT_TEMP_NAME_COMPONENT, &workdir);
         match representation {
             WhiteoutRepresentation::CharDevice => {
-                let inode =
-                    workdir.mknod(&temp_name, InodeMode::empty(), MknodType::CharDevice(0))?;
+                let node = MknodType::CharDevice(0);
+                let (workdir_name, inode) = self
+                    .create_workdir_temp(
+                        WHITEOUT_TEMP_NAME_COMPONENT,
+                        &workdir,
+                        WorkdirTempRequest::Mknod {
+                            mode: InodeMode::empty(),
+                            node: &node,
+                        },
+                    )?
+                    .into_parts();
                 Ok(WhiteoutHandle {
                     inode,
-                    workdir_name: temp_name,
+                    workdir_name,
                 })
             }
             WhiteoutRepresentation::Xattr => {
@@ -326,7 +332,14 @@ impl OverlayFs {
                     self.xattr_policy().is_private(WHITEOUT_XATTR_FULL_NAME),
                     "the whiteout marker name must classify as an overlay-private record"
                 );
-                let inode = workdir.create(&temp_name, InodeType::File, InodeMode::empty())?;
+                let temp = self.create_workdir_temp(
+                    WHITEOUT_TEMP_NAME_COMPONENT,
+                    &workdir,
+                    WorkdirTempRequest::Create {
+                        kind: InodeType::File,
+                        mode: InodeMode::empty(),
+                    },
+                )?;
                 let marker_name = XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME)
                     .ok_or_else(|| {
                         Error::with_message(
@@ -335,7 +348,7 @@ impl OverlayFs {
                         )
                     })?;
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
-                if let Err(err) = inode.set_xattr(
+                if let Err(err) = temp.inode().set_xattr(
                     marker_name,
                     &mut marker_reader,
                     XattrSetFlags::CREATE_OR_REPLACE,
@@ -343,12 +356,13 @@ impl OverlayFs {
                     // Best-effort temp cleanup on the pre-publication failure
                     // (spec §7.1 step-5 analog; the P3-09 obligation never
                     // becomes a visible entry).
-                    let _ = self.cleanup_workdir_temp(&temp_name);
+                    let _ = self.cleanup_workdir_temp(temp.name());
                     return Err(err);
                 }
+                let (workdir_name, inode) = temp.into_parts();
                 Ok(WhiteoutHandle {
                     inode,
-                    workdir_name: temp_name,
+                    workdir_name,
                 })
             }
         }

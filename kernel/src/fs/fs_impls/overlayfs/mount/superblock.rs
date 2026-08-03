@@ -21,14 +21,18 @@
 //! `policy()`, `claims()`) to the same ceiling so the `projection` tree can
 //! call them (E0624).
 
-use core::{cell::OnceLock, sync::atomic::AtomicU64};
+use core::sync::atomic::AtomicU64;
 
 use super::{
     OVERLAY_FS_NAME, claims::UpperWorkdirClaim, layers::OverlayLayerStack, policy::MountPolicy,
 };
 use crate::{
     fs::{
-        fs_impls::overlayfs::projection::{BindingCache, IdentityPolicy, InodeCache},
+        fs_impls::overlayfs::{
+            dir::whiteout::WhiteoutCache,
+            metadata_security::xattr::OverlayXattrPolicy,
+            projection::{BindingCache, IdentityPolicy, InodeCache},
+        },
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
@@ -80,11 +84,11 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// The root inode needs the published mount (`fs.layer_stack()` /
     /// `fs.identity()`), but `Weak::upgrade()` is documented-`None` inside
     /// the `Arc::new_cyclic` closure (the strong count stays 0 until the
-    /// closure returns), so the slot is a `OnceLock` filled by `OverlayFs::new`
-    /// immediately after the `Arc` is published. `root_inode()` reads the
-    /// filled slot; the slot is always set for a published mount (the `None`
-    /// arm is a hard invariant failure, never a silent mount-less root).
-    pub(super) root_inode: OnceLock<Arc<dyn Inode>>,
+    /// closure returns). `OverlayFs::new` fills this construction/publication
+    /// slot immediately after the `Arc` is published. `root_inode()` only
+    /// clones the prepared root; a `None` value for a published mount is a
+    /// hard construction invariant failure, never a silent mount-less root.
+    pub(super) root_inode: Mutex<Option<Arc<dyn Inode>>>,
     /// The `MOUNT` level-1 lifecycle domain; phase only, sleep-capable.
     pub(super) lifecycle: Mutex<MountLifecycle>,
     pub(super) fs_event_stats: FsEventSubscriberStats,
@@ -241,23 +245,6 @@ impl OverlayFs {
         self.claims.as_ref()
     }
 
-    /// Returns the `fsid`s of the current mount's lower layers (wave-2 repair
-    /// item 5).
-    ///
-    /// The persisted `trusted.overlay.origin` record's `fsid` is validated
-    /// against this set at the read boundary (`projection/lower_id.rs`):
-    /// `fsid` is a per-mount ordinal assigned by `OverlayLayerStack::assemble`,
-    /// so only a `fsid` that denotes a LOWER layer of the CURRENT mount may be
-    /// projected (a record never legitimately carries the upper's own `fsid`;
-    /// accepting one would let a stale/foreign record publish a colliding
-    /// identity). Hosted here because the underlying `lowers` stack is
-    /// `mount`-private and the projection tree must not reach into it.
-    pub(in crate::fs::fs_impls::overlayfs) fn lower_layer_fsids(
-        &self,
-    ) -> impl Iterator<Item = u64> + '_ {
-        self.layer_stack.lowers.iter().map(|layer| layer.fsid)
-    }
-
     /// Returns the real filesystem that superblock hooks forward to: the upper
     /// filesystem for writable mounts, otherwise the topmost lower layer.
     ///
@@ -288,7 +275,8 @@ impl FileSystem for OverlayFs {
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
-        match self.root_inode.get() {
+        let root_inode = self.root_inode.lock();
+        match root_inode.as_ref() {
             Some(root) => root.clone(),
             // `OverlayFs::new` fills the slot right after publishing the
             // `Arc`, so a published mount always carries its root; a missing

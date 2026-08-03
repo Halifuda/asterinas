@@ -95,7 +95,7 @@ struct CallerOwnerFacts {
     has_cap: bool,
 }
 
-impl Inode for OverlayInode {
+impl OverlayInode {
     // P1-16 chmod: the ownership gate first — Linux `inode_owner_or_capable`
     // + `chmod_common` (owner or `CAP_FOWNER`; `S_ISUID`/`S_ISGID` masked
     // without ownership or `CAP_FSETID`) — then the `AccessType::Mutating`
@@ -106,7 +106,7 @@ impl Inode for OverlayInode {
     // then a creator-credential forward to the current real authority. The
     // projected metadata is fetched once and reused by the two probes (no
     // double fetch, wave-4 round-4 repair item 2).
-    fn set_mode(&self, mode: InodeMode) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
         let metadata = self.metadata();
         let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
         if !facts.is_owner && !facts.has_cap {
@@ -131,7 +131,7 @@ impl Inode for OverlayInode {
     // `CAP_CHOWN`; a no-op chown to the same projected owner is exempt —
     // then the `Permission::empty()` mutating admission (round-4 repair
     // item 1) and a creator-credential forward.
-    fn set_owner(&self, uid: Uid) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
         let metadata = self.metadata();
         if uid != metadata.uid
             && !self.caller_owner_facts(metadata.uid, CapSet::CHOWN).has_cap
@@ -151,7 +151,7 @@ impl Inode for OverlayInode {
     // target-group membership; a no-op chgrp to the same projected group is
     // exempt — then the `Permission::empty()` mutating admission (round-4
     // repair item 1) and a creator-credential forward.
-    fn set_group(&self, gid: Gid) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_group_impl(&self, gid: Gid) -> Result<()> {
         let metadata = self.metadata();
         if gid != metadata.gid {
             let facts = self.caller_owner_facts(metadata.uid, CapSet::CHOWN);
@@ -177,21 +177,21 @@ impl Inode for OverlayInode {
     // the Overlay boundary (the `EROFS`-surfacing gap is the recorded VFS
     // dependency, spec §8 item 2). Read-driven atime updates never reach this
     // entry; they stay with meso-04's `O_NOATIME` delegation (§51.2).
-    fn set_atime(&self, time: Duration) {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_atime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_atime(time));
     }
 
     // P1-17 utimens mtime: best-effort time setter; same shape as
     // `set_atime` (shared `best_effort_time_set` composition, wave-4 repair
     // item 11).
-    fn set_mtime(&self, time: Duration) {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_mtime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_mtime(time));
     }
 
     // P1-17 utimens ctime: best-effort time setter; same shape as
     // `set_atime` (shared `best_effort_time_set` composition, wave-4 repair
     // item 11).
-    fn set_ctime(&self, time: Duration) {
+    pub(in crate::fs::fs_impls::overlayfs) fn set_ctime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_ctime(time));
     }
 }

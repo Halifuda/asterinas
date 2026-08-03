@@ -87,6 +87,11 @@ impl PositiveBinding {
     ) -> Self {
         Self { kind, inode }
     }
+
+    /// Returns the inode carrier bound to this positive name.
+    pub(in crate::fs::fs_impls::overlayfs) fn inode(&self) -> Arc<OverlayInode> {
+        self.inode.clone()
+    }
 }
 
 /// The per-name view classification of a positive binding.

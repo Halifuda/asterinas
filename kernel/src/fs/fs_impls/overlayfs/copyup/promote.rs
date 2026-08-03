@@ -30,18 +30,19 @@
 
 use core::cmp::min;
 
-use super::coordination::{CopyUpPhase, CopyUpTransition};
+use super::{
+    coordination::{CopyUpPhase, CopyUpTransition},
+    workdir::WorkdirTempRequest,
+};
 use crate::{
     fs::{
-        file::{InodeMode, InodeType, StatusFlags},
+        file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
+            metadata_security::xattr::XattrCopyPolicy,
             mount::OverlayFs,
             projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
         },
-        vfs::{
-            inode::{Inode, MknodType, RenameMode, SymbolicLink},
-            xattr::{XattrName, XattrNamespace, XattrSetFlags},
-        },
+        vfs::inode::{Inode, MknodType, RenameMode, SymbolicLink},
     },
     prelude::*,
 };
@@ -52,11 +53,6 @@ use crate::{
 /// bounds each `read_at`/`write_at` pair so a short read still makes bounded
 /// progress. A pure numeric local, not a named entity in the census.
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
-
-/// The upper bound of the workdir-temp `EEXIST` retry (spec §4 `workdir.rs`
-/// comment; the dispatch override homes the bounded retry caller-side in the
-/// recipe).
-const MAX_TEMP_CREATE_ATTEMPTS: usize = 8;
 
 impl OverlayInode {
     /// Runs the winner promotion body for this object (`P1-03`/`P1-04`/
@@ -132,20 +128,23 @@ impl OverlayInode {
                 // of failing `create` with `EEXIST`). No children are copied
                 // (BC-4 §39.3/§39.4).
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = self.create_workdir_temp_with_retry(
-                    &fs,
-                    name,
-                    &upper_dir,
-                    InodeType::Dir,
-                    mode,
-                )?;
+                let (temp_name, temp) = fs
+                    .create_workdir_temp(
+                        name,
+                        &upper_dir,
+                        WorkdirTempRequest::Create {
+                            kind: InodeType::Dir,
+                            mode,
+                        },
+                    )?
+                    .into_parts();
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp)?;
+                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
                         let workdir = self.workdir_root()?;
                         workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
                         marker.commit();
@@ -159,20 +158,23 @@ impl OverlayInode {
                 // metadata/data/xattr transfer, durability, then atomic
                 // publication via rename (BC-4 §38.1).
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = self.create_workdir_temp_with_retry(
-                    &fs,
-                    name,
-                    &upper_dir,
-                    InodeType::File,
-                    mode,
-                )?;
+                let (temp_name, temp) = fs
+                    .create_workdir_temp(
+                        name,
+                        &upper_dir,
+                        WorkdirTempRequest::Create {
+                            kind: InodeType::File,
+                            mode,
+                        },
+                    )?
+                    .into_parts();
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp)?;
+                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
                         self.promote_regular_file(&temp)?;
                         // Durability (fsync=auto default; strict/volatile are
                         // the `P2-12` insertion points): the data file is
@@ -197,20 +199,23 @@ impl OverlayInode {
                 // (BC-4 §38.4.5; only the symlink object itself is copied,
                 // never its target).
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = self.create_workdir_temp_with_retry(
-                    &fs,
-                    name,
-                    &upper_dir,
-                    InodeType::SymLink,
-                    mode,
-                )?;
+                let (temp_name, temp) = fs
+                    .create_workdir_temp(
+                        name,
+                        &upper_dir,
+                        WorkdirTempRequest::Create {
+                            kind: InodeType::SymLink,
+                            mode,
+                        },
+                    )?
+                    .into_parts();
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
                         self.promote_symlink(&temp)?;
-                        self.copy_eligible_xattrs(&temp)?;
+                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
                         let workdir = self.workdir_root()?;
                         workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
                         marker.commit();
@@ -266,17 +271,25 @@ impl OverlayInode {
                         ));
                     }
                 };
-                let temp_name = fs.generate_workdir_temp_name(name, &upper_dir);
                 let mode = lower.real_inode().mode()?;
+                let (temp_name, temp) = fs
+                    .create_workdir_temp(
+                        name,
+                        &upper_dir,
+                        WorkdirTempRequest::Mknod {
+                            mode,
+                            node: &mknod_type,
+                        },
+                    )?
+                    .into_parts();
                 let workdir = self.workdir_root()?;
-                let temp = workdir.mknod(&temp_name, mode, mknod_type)?;
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp)?;
+                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
                         workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
                         marker.commit();
                         let upper_real = self.upper_real_object(&upper_dir, name)?;
@@ -345,42 +358,6 @@ impl OverlayInode {
                 Err(err)
             }
         }
-    }
-
-    /// Creates a private workdir temp with a bounded `EEXIST` retry (`P1-34`
-    /// recipe side).
-    ///
-    /// Each attempt generates a fresh temp name (one saturating serial is
-    /// consumed per [`OverlayFs::generate_workdir_temp_name`] call) and retries
-    /// the single-attempt [`OverlayFs::create_workdir_temp`] up to
-    /// [`MAX_TEMP_CREATE_ATTEMPTS`] times (spec §4 `workdir.rs` comment; the
-    /// dispatch override homes the bounded retry caller-side). Whitelist
-    /// Rule B: the `File`, `SymLink`, and `Dir` recipe arms all stage workdir
-    /// temps (wave-4 repair item 2 adds the `Dir` staging leg).
-    fn create_workdir_temp_with_retry(
-        &self,
-        fs: &Arc<OverlayFs>,
-        target_name: &str,
-        upper_parent: &Arc<dyn Inode>,
-        kind: InodeType,
-        mode: InodeMode,
-    ) -> Result<(String, Arc<dyn Inode>)> {
-        let mut last_eeexist = None;
-        for _ in 0..MAX_TEMP_CREATE_ATTEMPTS {
-            let temp_name = fs.generate_workdir_temp_name(target_name, upper_parent);
-            match fs.create_workdir_temp(&temp_name, kind, mode) {
-                Ok(temp) => return Ok((temp_name, temp)),
-                Err(err) if err.error() == Errno::EEXIST => last_eeexist = Some(err),
-                Err(err) => return Err(err),
-            }
-        }
-        Err(match last_eeexist {
-            Some(err) => err,
-            None => Error::with_message(
-                Errno::EEXIST,
-                "workdir temp creation collided beyond the retry bound",
-            ),
-        })
     }
 
     /// Streams the lower regular file's data into the workdir temp (`P1-04`
@@ -463,84 +440,29 @@ impl OverlayInode {
         Ok(())
     }
 
-    /// Copies the eligible public xattrs of the lower source onto the upper
-    /// object (`P1-06`).
+    /// Copies only `Public` xattrs from the lower source: the
+    /// `User`/`Trusted`/`Security` namespaces are enumerated through
+    /// `OverlayXattrPolicy::copy_eligible_xattrs` with the caller-selected
+    /// [`XattrCopyPolicy`] — the promotion recipe passes the strict
+    /// [`XattrCopyPolicy::Strict`] (the wave-4 baseline); overlay-private
+    /// names and the `System` namespace stay excluded (`P1-06`).
     ///
-    /// The copy enumerates the `User`, `Trusted`, and `Security` namespaces
-    /// (the `System` namespace — `system.posix_acl_*` — is the `P2-05`
-    /// insertion point) and filters overlay-private names through the
-    /// copy-time boundary predicate [`is_overlay_private_xattr_name`]
-    /// (replaced by meso-05's classification seam when it lands).
-    fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>) -> Result<()> {
+    /// The copy-up policy is strict (the wave-4 baseline): a denied source
+    /// read (`EACCES`/`EPERM`) propagates and fails the copy-up rather than
+    /// silently dropping `security.*`/`trusted.*` metadata. The copy travels
+    /// through the mount's creator-credential scope
+    /// (`with_creator_credentials_fn`, meso-01 P1-19); see
+    /// [`OverlayXattrPolicy::copy_eligible_xattrs`] for the credential-seam
+    /// and source-read-policy discussion.
+    fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>, policy: XattrCopyPolicy) -> Result<()> {
         let lower = self.lower_source()?;
-        for namespace in [
-            XattrNamespace::User,
-            XattrNamespace::Trusted,
-            XattrNamespace::Security,
-        ] {
-            let names = self.list_xattr_names(&lower, namespace)?;
-            for full_name in names
-                .split(|&byte| byte == 0)
-                .filter(|name| !name.is_empty())
-            {
-                let Ok(full_name) = core::str::from_utf8(full_name) else {
-                    // The VFS `XattrName` is UTF-8 text; a non-UTF-8 list
-                    // entry cannot be represented and is skipped.
-                    continue;
-                };
-                if is_overlay_private_xattr_name(full_name) {
-                    continue;
-                }
-                let value = self.read_xattr_value(&lower, full_name)?;
-                let name = XattrName::try_from_full_name(full_name).ok_or_else(|| {
-                    Error::with_message(Errno::EINVAL, "invalid xattr name in the copied list")
-                })?;
-                let mut reader = VmReader::from(value.as_slice()).to_fallible();
-                temp.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Lists the xattr names of one namespace on the lower source.
-    ///
-    /// The VFS list convention is probed with a zero-capacity writer (returns
-    /// the required size) and then materialized into an exactly sized buffer
-    /// (ramfs/ext2 precedent; a size change between the two calls surfaces as
-    /// `ERANGE` and propagates). Whitelist Rule B: invoked once per namespace
-    /// (three times per promotion) from [`OverlayInode::copy_eligible_xattrs`].
-    fn list_xattr_names(&self, lower: &RealObject, namespace: XattrNamespace) -> Result<Vec<u8>> {
-        let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
-        let list_len = lower.real_inode().list_xattr(namespace, &mut probe)?;
-        let mut names = vec![0u8; list_len];
-        let mut list_writer = VmWriter::from(names.as_mut_slice()).to_fallible();
-        let written = lower.real_inode().list_xattr(namespace, &mut list_writer)?;
-        names.truncate(written);
-        Ok(names)
-    }
-
-    /// Reads one xattr value from the lower source.
-    ///
-    /// The value length is probed with a zero-capacity writer and the value is
-    /// then materialized into an exactly sized buffer. Whitelist Rule B:
-    /// invoked once per listed name (multiple times per promotion) from
-    /// [`OverlayInode::copy_eligible_xattrs`].
-    fn read_xattr_value(&self, lower: &RealObject, full_name: &str) -> Result<Vec<u8>> {
-        let name = XattrName::try_from_full_name(full_name).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid xattr name in the copied list")
-        })?;
-        let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
-        let value_len = lower.real_inode().get_xattr(name, &mut probe)?;
-        let mut value = vec![0u8; value_len];
-        let mut value_writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-        let written = lower.real_inode().get_xattr(
-            XattrName::try_from_full_name(full_name).ok_or_else(|| {
-                Error::with_message(Errno::EINVAL, "invalid xattr name in the copied list")
-            })?,
-            &mut value_writer,
-        )?;
-        value.truncate(written);
-        Ok(value)
+        let fs = self.fs_arc()?;
+        fs.policy()
+            .credential_policy()
+            .with_creator_credentials_fn(|| {
+                fs.xattr_policy()
+                    .copy_eligible_xattrs(lower.real_inode(), temp, policy)
+            })
     }
 
     /// Publishes the upper authority semantically (`P1-01` plus the `P1-07`
@@ -589,14 +511,11 @@ impl OverlayInode {
         } else {
             old_facts.kind()
         };
-        let new_facts = OverlayObjectFacts::try_new(
-            kind,
-            Some(upper_real),
-            old_facts.lowers().to_vec(),
-        )
-        .ok_or_else(|| {
-            Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
-        })?;
+        let new_facts =
+            OverlayObjectFacts::try_new(kind, Some(upper_real), old_facts.lowers().to_vec())
+                .ok_or_else(|| {
+                    Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
+                })?;
         let carrier = fs.project_new_upper(&self.facts_snapshot());
         carrier.replace_facts(new_facts)?;
         Ok(())
@@ -613,11 +532,7 @@ impl OverlayInode {
     /// repair item 4), so the publication name is passed in — the helper
     /// never re-reads the coordinate (no non-reentrant lock, spec §3.3
     /// Hazard 2).
-    pub(super) fn verify_upper_target(
-        &self,
-        upper_dir: &Arc<dyn Inode>,
-        name: &str,
-    ) -> Result<()> {
+    pub(super) fn verify_upper_target(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<()> {
         let upper_real = self.upper_real_object(upper_dir, name)?;
         let lower = self.lower_source()?;
         if upper_real.real_inode().type_() != lower.real_inode().type_() {
@@ -642,11 +557,7 @@ impl OverlayInode {
     /// Wave-4 repair item 4: the caller holds the `CUL` guard, so the
     /// publication name is passed in — the helper never re-reads the
     /// coordinate (no non-reentrant lock, spec §3.3 Hazard 2).
-    fn upper_real_object(
-        &self,
-        upper_dir: &Arc<dyn Inode>,
-        name: &str,
-    ) -> Result<RealObject> {
+    fn upper_real_object(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<RealObject> {
         let real_inode = upper_dir.lookup(name)?;
         let fs = self.fs_arc()?;
         let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {
@@ -744,22 +655,4 @@ impl CommitMarker {
     pub(in crate::fs::fs_impls::overlayfs) fn is_committed(&self) -> bool {
         self.committed
     }
-}
-
-/// Returns whether `full_name` is an overlay-private xattr that must not be
-/// copied to the upper object (`P1-06`).
-///
-/// Minimal copy-time filter: names under `trusted.overlay.` / `user.overlay.`
-/// (plus the escaped `overlay.overlay.` prefix) are not copied. HANDOFF
-/// (meso-05): the full public/private/escaped CLASSIFICATION seam is meso-05's
-/// `OverlayMetadataPolicy`; this predicate is the copy-time boundary only and
-/// is replaced by the policy seam when meso-05 lands — it is NOT meso-04's own
-/// classification invention.
-fn is_overlay_private_xattr_name(full_name: &str) -> bool {
-    const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
-    const USER_OVERLAY_PREFIX: &str = "user.overlay.";
-    const ESCAPED_OVERLAY_PREFIX: &str = "overlay.overlay.";
-    full_name.starts_with(TRUSTED_OVERLAY_PREFIX)
-        || full_name.starts_with(USER_OVERLAY_PREFIX)
-        || full_name.starts_with(ESCAPED_OVERLAY_PREFIX)
 }

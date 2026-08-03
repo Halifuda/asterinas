@@ -18,13 +18,7 @@ mod options;
 mod policy;
 mod superblock;
 
-pub(super) use claims::{OverlayUuid, UpperWorkdirClaim};
-pub(super) use layers::{OverlayLayer, OverlayLayerStack};
-pub(super) use options::UuidMode;
-pub(super) use policy::{
-    CreatorCredentialPolicy, CredentialSource, MountPolicy, UpperFilesystemCapabilities,
-    WriteAccessAccounting, WriteAccessGuard,
-};
+pub(in crate::fs::fs_impls::overlayfs) use options::XinoMode;
 pub(super) use superblock::OverlayFs;
 
 use crate::{
@@ -46,14 +40,7 @@ pub(super) const OVERLAY_FS_NAME: &str = "overlay";
 
 /// The VFS entry point of the overlay filesystem (mirrors Linux `ovl_fs_type`).
 ///
-/// Registration is deferred until the overlayfs takeover wave:
-/// `overlayfs/mod.rs` still registers `legacy_fs::OverlayFsType`, and this
-/// type — with the whole new `mount` path behind it — is unreachable until
-/// then (wave-1 review `expect-dead-code` fix, item 8).
-#[expect(
-    dead_code,
-    reason = "registration deferred to the overlayfs takeover wave; legacy_fs::OverlayFsType remains the active entry point"
-)]
+/// Registered by [`super::init`] as the active overlay filesystem entry point.
 pub(super) struct OverlayFsType;
 
 impl FsType for OverlayFsType {

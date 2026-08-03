@@ -53,10 +53,7 @@ use super::mount::OverlayFs;
 use crate::{
     fs::{
         fs_impls::overlayfs::readdir_index::ReaddirIndex,
-        vfs::{
-            file_system::FileSystem,
-            inode::{Extension, Inode},
-        },
+        vfs::inode::Extension,
     },
     prelude::*,
 };
@@ -158,23 +155,36 @@ impl OverlayFs {
         let key = RealObjectKey::from_facts(facts);
         let is_directory =
             facts.kind == PositiveKind::Merged || source.real_inode().type_().is_directory();
+        // The visible-source projection is the single conservative fallback
+        // of this block — bound once and reused by every arm, so the
+        // comment's "no duplicated fallback expression" claim holds: the
+        // expression `self.identity().project_object_id(source, is_directory)`
+        // is written exactly once (in the closure) and the closure is invoked
+        // by all four uses below (flattened — no nested match). The `_fn`
+        // suffix marks the binding as callable at every use site.
+        let fallback_fn = || self.identity().project_object_id(source, is_directory);
         let object_id = if source.layer_index() == 0 {
             match self.read_lower_id(source.real_inode()) {
+                // Defensive (pre-wave5 A2): the record was device-validated
+                // at the read boundary, so `None` here is the
+                // absent/ambiguous-device corner; the visible-source
+                // projection is the conservative fallback.
                 Ok(Some(record)) => self
                     .identity()
-                    .project_object_id_from_lower_id(&record, is_directory),
-                Ok(None) => self.identity().project_object_id(source, is_directory),
+                    .project_object_id_from_lower_id(&record, is_directory)
+                    .unwrap_or_else(fallback_fn),
+                Ok(None) => fallback_fn(),
                 Err(err) => {
                     warn!(
                         "failed to read the lower-id record of the upper source; \
                          falling back to the visible-source projection: {:?}",
                         err
                     );
-                    self.identity().project_object_id(source, is_directory)
+                    fallback_fn()
                 }
             }
         } else {
-            self.identity().project_object_id(source, is_directory)
+            fallback_fn()
         };
         let fs = self.self_weak.clone();
         let facts = facts.clone();

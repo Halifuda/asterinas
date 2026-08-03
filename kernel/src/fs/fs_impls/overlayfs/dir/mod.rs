@@ -86,7 +86,7 @@ pub(super) fn mknod_object_type(mknod: &MknodType) -> InodeType {
     }
 }
 
-impl Inode for OverlayInode {
+impl OverlayInode {
     // P1-21/22/23/24: create/mkdir/symlink carry the same VFS entry
     // (`Path::new_fs_child` -> `Dentry::create` -> `Inode::create`, verified
     // `syscall/mkdir.rs:38` and `syscall/symlink.rs:44`); the symlink target
@@ -94,7 +94,12 @@ impl Inode for OverlayInode {
     // parent `DIR`; the P1-23 dispatcher (create.rs) re-derives the fresh
     // binding, runs the upper-only/over-whiteout/opaque recipe and its
     // inline publication, and returns the projected `OverlayInode` (Case 1).
-    fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {
+    pub(in crate::fs::fs_impls::overlayfs) fn create_impl(
+        &self,
+        name: &str,
+        type_: InodeType,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
         // The parent `DIR` domain is established first (frozen §3
         // acquisition order item 1) so the admission's real stage B runs
         // under the held `DIR` (`DIR -> CUL`, item 4); a failed admission
@@ -114,7 +119,12 @@ impl Inode for OverlayInode {
     // admission or side effect (Case 11; Linux `ovl_mknod`, dir.c:746-753);
     // every other `mknod` kind funnels into the same P1-23 dispatcher with
     // the `MknodType` carried in the request.
-    fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Arc<dyn Inode>> {
+    pub(in crate::fs::fs_impls::overlayfs) fn mknod_impl(
+        &self,
+        name: &str,
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Arc<dyn Inode>> {
         if matches!(&type_, MknodType::CharDevice(0)) {
             return_errno_with_message!(
                 Errno::EPERM,
@@ -141,7 +151,7 @@ impl Inode for OverlayInode {
     // the same window ramfs accepts). Thin delegation to the current
     // authority with no promotion: the created symlink is already
     // upper-backed (spec §4; not a redesign of meso-04's `read_link`).
-    fn write_link(&self, target: &str) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn write_link_impl(&self, target: &str) -> Result<()> {
         self.select_real_inode().write_link(target)
     }
 
@@ -154,7 +164,11 @@ impl Inode for OverlayInode {
     // target publication (Cases 2/3/7/10; the publication seams are
     // infallible, so Case 13 is unreachable on this path — recorded in the
     // Creator report §5 item 7).
-    fn link(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn link_impl(
+        &self,
+        old: &Arc<dyn Inode>,
+        name: &str,
+    ) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
@@ -190,7 +204,7 @@ impl Inode for OverlayInode {
         // trap of binding the owned `CurrentTask` locally is gone.
         let source_owned = OverlayInode::current_fsuid()
             .is_some_and(|fsuid| fsuid == source_metadata.uid);
-        if !source_owned && old_overlay.check_permission(Permission::MAY_WRITE).is_err() {
+        if !source_owned && old_overlay.check_permission(AccessType::ReadOnly, Permission::MAY_WRITE).is_err() {
             return Err(Error::with_message(
                 Errno::EPERM,
                 "the link source is not accessible to the caller",
@@ -231,7 +245,7 @@ impl Inode for OverlayInode {
     // (Case 10 ENOENT), the pure-upper direct unlink vs lower-backed
     // whiteout publish, and the inline publication (BindingCache invalidate /
     // HiddenByWhiteout insert + `readdir_index_remove`), Cases 2/10/13.
-    fn unlink(&self, name: &str) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn unlink_impl(&self, name: &str) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.remove_target(name, RemoveKind::Unlink)
@@ -244,7 +258,7 @@ impl Inode for OverlayInode {
     // for lower-backed directories with upper children (Cases 2/9/10/13).
     // The operation kind is the closed `RemoveKind` vocabulary (wave-4
     // repair item 12 — no `is_dir` boolean at the call sites).
-    fn rmdir(&self, name: &str) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn rmdir_impl(&self, name: &str) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.remove_target(name, RemoveKind::Rmdir)
@@ -257,7 +271,7 @@ impl Inode for OverlayInode {
     // (`rename_upper`, rename.rs) which owns per-branch promotion, the
     // physical upper rename (+ source-whiteout compose), the dual-parent
     // inline publication, and the Case-13 reconcile on failure.
-    fn rename(
+    pub(in crate::fs::fs_impls::overlayfs) fn rename_impl(
         &self,
         old_name: &str,
         target: &Arc<dyn Inode>,
@@ -285,8 +299,8 @@ impl Inode for OverlayInode {
         // authoritative over a stale VFS dentry; a negative source is ENOENT
         // (Case 10).
         let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?;
-        let source_inode = match &source_binding {
-            Binding::Positive(positive) => positive.inode.clone(),
+        let _source_inode = match &source_binding {
+            Binding::Positive(positive) => positive.inode(),
             Binding::Negative(_) => return Err(Error::new(Errno::ENOENT)),
         };
         // EXDEV gate (P1-30) before any upper side effect: only a

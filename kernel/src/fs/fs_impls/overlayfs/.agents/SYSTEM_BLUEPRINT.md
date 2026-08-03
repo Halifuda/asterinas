@@ -62,16 +62,16 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     the meso 07 deferred-only disposition; packets under `.agents/subagent-tasks/`.
   - **Boundary**: Do not reconstruct the deleted 13-Meso specs/validation contracts or create replacement Designer artifacts during this topology reset. The 57/24 classification is a design-scope decision only; it does not start Designer work.
 
-- [ ] **Phase 4: Creator Pass Slicing + Implementation** (per Creator Pass)
-  - **Status**: **In progress (2026-08-03)** — pass slicing recorded in
-    `PASS_SLICING.md` (`creator_pass_slicing_20260803`); 7 Creator passes:
-    Wave 1 `pass_01_mount_resource_policy`, Wave 2
-    `pass_02_visibility_projection_identity`, Wave 3
-    `pass_03_shared_carrier_seams` (seam placement, no feature claims),
-    Wave 4 (parallel) `pass_04_merged_directory_index` /
-    `pass_05_copyup_authority_file_views` /
-    `pass_06_metadata_security_xattr_policy` /
-    `pass_07_namespace_mutation_whiteout`. No pass dispatched yet.
+- [x] **Phase 4: Creator Pass Slicing + Implementation** (per Creator Pass)
+  - **Status**: **Complete (2026-08-03)** — all four implementation Waves
+    executed and ACCEPTED under the per-file Creator orchestration: Wave 1
+    `mount/` (9 micros), Wave 2 `projection/` + mount extensions (12 micros),
+    Wave 3 shared-carrier seams (no feature claims), Wave 4 leaf mesos
+    `readdir_index.rs`/`copyup/`/`metadata_security/`/`dir/` (36 micros).
+    Each wave ran the aster-code-review diff-mode gate (3-persona fan-out)
+    with long-lived repair loops; the 57-micro `需要实现` set is fully
+    implemented across 30 new `.rs` files (~10k lines). Stable commits:
+    `e1613f12c` (W1), `77b0d4a49` (W2), `b9b9d6caf` (W3), `43a0747bc` (W4).
   - **Workflow amendment (user-directed 2026-08-03)**: no Creator-synced
     per-pass Checker passes; Reviewer is the only pre-code-completion static
     gate; the single runtime gate is the meso-integration xfstests Checker
@@ -89,17 +89,47 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     `OverlayFsType` registration stays active until takeover. The only
     permitted reference to `legacy_fs.rs` in Creator/Reviewer packets is the
     registration wiring; all other legacy content is off-limits as a source.
+  - **Pre-Wave5 closure gate (2026-08-04, user-directed): ACCEPTED.** The
+    structurally accepted addendum under `components/pre_wave5_closure/` was
+    implemented serially by one Creator and exact-diff accepted by the main
+    agent: the full six-file C2 typed `EEXIST` retry, P3's native origin
+    triplet and unique pair resolution, and all six mechanical repairs.
+    Accepted Rust changes were amended into `7aabd029c`; P1/P2 remain deferred
+    known gaps. Wave5's Checker-owned static compile/lint lane is now open;
+    no Reviewer was introduced for this bounded closure.
+  - **Wave5 static entry final result (2026-08-04): BLOCKED / USER DECISION.**
+    The three exact target-specific Checker runs reduced the compile result
+    from 42 errors / 16 warnings to 15 errors / 1 warning; every authorized
+    mechanical repair is amended at `7aabd029c`. The remaining five categories
+    require explicit authority: a viable root-inode one-shot carrier,
+    trait-implementation ownership/delegation, `FsCreationCtx` task-context
+    access, in-use claim-slot lifecycle, and the source-permission
+    `AccessType`. `make kernel`, `make check`, runtime, and xfstests were not
+    run; no overlayfs-local substitute or further repair is authorized.
+  - **Wave5 five-item code-form reconciliation (2026-08-04): DESIGNER
+    ACCEPTED.** `task_designer_wave5_static_owner_reconciliation_20260804`
+    produced the accepted specification and validation contract under
+    `components/wave_05_static_repair_design/`. They freeze the user-fixed
+    root slot, sole trait owner/forwarders, VFS task context, dedicated inode
+    extension in-use slot, and `ReadOnly` source admission. The VFS production
+    write-set remains exactly `fs_apis/{registry.rs,inode.rs,inode_ext.rs}`;
+    it reuses the existing `Mutex`, Extension/InodeExt pattern, and atomics.
+    No implementation or validation command is authorized by this acceptance.
+  - **Wave5 takeover (2026-08-04, user-directed):** the active registration
+    names `mount::OverlayFsType`; the legacy module is no longer linked,
+    though `legacy_fs.rs` remains an archive. The final static evidence is
+    `components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md`.
 
 ## 2. Meso-Component Pipeline Index
 
 | Meso-Component | Current Scope | 1. Architect Map | 2. Designer Contract | 3. Creator Passes | 4. Checker Passes | 5. Integration Pass | 6. Reviewer | Overall Status |
 | :------------- | :----------: | :-------------: | :------------------: | :---------------: | :---------------: | :-----------------: | :---------: | :------------- |
-| `mount_resource_policy` | 9 / 6 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | **Sliced** `pass_01` (Wave 1) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
-| `visibility_projection_identity` | 12 / 2 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | **Sliced** `pass_02` (Wave 2) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
-| `merged_directory_index` | 4 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_04` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
-| `copyup_authority_file_views` | 17 / 6 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_05` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
-| `metadata_security_xattr_policy` | 4 / 4 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_06` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
-| `namespace_mutation_whiteout` | 11 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_07` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `mount_resource_policy` | 9 / 6 | Accepted | **Accepted** (2026-08-01) | **Done** `pass_01` (Wave 1, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
+| `visibility_projection_identity` | 12 / 2 | Accepted | **Accepted** (2026-08-01) | **Done** `pass_02` (Wave 2, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
+| `merged_directory_index` | 4 / 1 | Accepted | **Accepted** (2026-08-02, revision 01) | **Done** `pass_04` (Wave 4, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
+| `copyup_authority_file_views` | 17 / 6 | Accepted | **Accepted** (2026-08-02, revision 01) | **Done** `pass_05` (Wave 4, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
+| `metadata_security_xattr_policy` | 4 / 4 | Accepted | **Accepted** (2026-08-02, revision 01) | **Done** `pass_06` (Wave 4, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
+| `namespace_mutation_whiteout` | 11 / 1 | Accepted | **Accepted** (2026-08-02, revision 01) | **Done** `pass_07` (Wave 4, accepted) | Not scheduled (workflow amendment) | Pending (integration) | Pending (integration) | **Implemented** |
 | `persistent_association_export` | 0 / 4 | Accepted | **Deferred-only** (2026-08-02; P1-07 moved to meso 02; no basic-wave Designer contract) | - | - | - | - | Deferred |
 
 `pass_03_shared_carrier_seams` (Wave 3) is a cross-meso foundation pass (parent

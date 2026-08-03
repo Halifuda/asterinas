@@ -26,6 +26,12 @@ enum MountOptionKey {
     Uuid,
     /// The `default_permissions` boolean option.
     DefaultPermissions,
+    /// The `xino` option with values `off|auto|on` (`P2-01`).
+    ///
+    /// Pre-wave5 A1: the closed set gains `Xino` (the meso-02 spec §3.5
+    /// item-2 `xino=` publication gap is closed); `P2-12`/`P2-16`/`P2-17`/
+    /// `P3-06`/`P3-07` add keys later.
+    Xino,
 }
 
 /// The UUID/`fsid` policy of an overlay mount (`P2-11`).
@@ -44,6 +50,19 @@ pub(super) enum UuidMode {
     Auto,
 }
 
+/// The `xino=` mode (`P2-01`); moved here from `projection/identity.rs`
+/// (pre-wave5 A1) — the meso-02 spec §3.5 item-2 record says the declaration
+/// "should move to `mount/options.rs` and be consumed from there".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::fs::fs_impls::overlayfs) enum XinoMode {
+    /// xino encoding disabled; non-directories report the underlying dev/ino.
+    Off,
+    /// xino enabled when feasible (this wave's default).
+    Auto,
+    /// xino encoding always enabled.
+    On,
+}
+
 /// Validated construction input for an overlay mount (`P0-01`).
 ///
 /// Fields are immutable after parsing. The struct is constructed once by
@@ -57,8 +76,8 @@ pub(super) enum UuidMode {
 /// The struct and every field are `pub(super)` (visible within the `mount`
 /// module tree only): `parse` is `pub(super)` and the sibling `build.rs`
 /// reads `lower_dirs`/`upper_dir`/`work_dir`/`is_forced_read_only`/
-/// `is_default_permissions`/`uuid_mode` directly as frozen construction
-/// inputs. `MountOptionKey` stays module-private.
+/// `is_default_permissions`/`uuid_mode`/`xino_mode` directly as frozen
+/// construction inputs. `MountOptionKey` stays module-private.
 #[derive(Debug)]
 pub(super) struct OverlayMountOptions {
     /// Lower layer paths in option order; the topmost lower is the rightmost.
@@ -73,15 +92,17 @@ pub(super) struct OverlayMountOptions {
     pub(super) is_default_permissions: bool,
     /// The UUID persistence mode; defaults to [`UuidMode::Auto`] (`P2-11`).
     pub(super) uuid_mode: UuidMode,
+    /// The `xino=` mode; defaults to [`XinoMode::Auto`] (pre-wave5 A1).
+    pub(super) xino_mode: XinoMode,
 }
 
 impl OverlayMountOptions {
     /// Parses the mount option string and mirror flags into validated options.
     ///
-    /// Recognized keys are `lowerdir`, `upperdir`, `workdir`, `uuid`, and
-    /// `default_permissions`. Unknown keys, malformed `key=value` tokens,
-    /// duplicate keys, missing `lowerdir`, empty values, and invalid `uuid`
-    /// values all fail with `EINVAL` before any layer state is created.
+    /// Recognized keys are `lowerdir`, `upperdir`, `workdir`, `uuid`, `xino`,
+    /// and `default_permissions`. Unknown keys, malformed `key=value` tokens,
+    /// duplicate keys, missing `lowerdir`, empty values, and invalid `uuid`/
+    /// `xino` values all fail with `EINVAL` before any layer state is created.
     pub(super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
         let mut lower_dirs = Vec::new();
         let mut upper_dir = None;
@@ -92,6 +113,10 @@ impl OverlayMountOptions {
         // seen-markers because they are assigned at most once. `uuid` needs a
         // dedicated marker because `UuidMode::Auto` is also the default value.
         let mut saw_uuid = false;
+        // `xino` needs a dedicated marker because `XinoMode::Auto` is also
+        // the default value (same discipline as `uuid`; pre-wave5 A1).
+        let mut xino_mode = XinoMode::Auto;
+        let mut saw_xino = false;
 
         let Some(args) = args else {
             return_errno_with_message!(
@@ -112,6 +137,7 @@ impl OverlayMountOptions {
                 "upperdir" => MountOptionKey::UpperDir,
                 "workdir" => MountOptionKey::WorkDir,
                 "uuid" => MountOptionKey::Uuid,
+                "xino" => MountOptionKey::Xino,
                 "default_permissions" => MountOptionKey::DefaultPermissions,
                 _ => {
                     return_errno_with_message!(Errno::EINVAL, "unknown overlay mount option");
@@ -214,6 +240,32 @@ impl OverlayMountOptions {
                         }
                     };
                 }
+                MountOptionKey::Xino => {
+                    if saw_xino {
+                        return_errno_with_message!(
+                            Errno::EINVAL,
+                            "duplicate overlay mount option `xino`"
+                        );
+                    }
+                    saw_xino = true;
+                    let Some(value) = value else {
+                        return_errno_with_message!(
+                            Errno::EINVAL,
+                            "the `xino` mount option requires a value"
+                        );
+                    };
+                    xino_mode = match value {
+                        "off" => XinoMode::Off,
+                        "auto" => XinoMode::Auto,
+                        "on" => XinoMode::On,
+                        _ => {
+                            return_errno_with_message!(
+                                Errno::EINVAL,
+                                "invalid `xino` mount option value"
+                            );
+                        }
+                    };
+                }
                 MountOptionKey::DefaultPermissions => {
                     if is_default_permissions {
                         return_errno_with_message!(
@@ -252,6 +304,7 @@ impl OverlayMountOptions {
             is_forced_read_only: fs_flags.contains(FsFlags::RDONLY),
             is_default_permissions,
             uuid_mode,
+            xino_mode,
         })
     }
 }

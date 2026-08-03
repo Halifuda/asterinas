@@ -21,27 +21,32 @@
 //! Revision 07 adds the `P1-07` consumption seam
 //! [`IdentityPolicy::project_object_id_from_lower_id`]: the durable lower-id
 //! record is projected through the SAME frozen matrix with the record's
-//! `(fsid, real_ino)` as the identity input — constant `st_ino` across
-//! copy-up (authority-continuity invariant). It is a new input to the
-//! existing projection, never a replacement of `RealObjectKey`/the xino
-//! matrix.
+//! `(container_dev_id, lower_layer_root_ino, real_ino)` as the identity input
+//! — constant `st_ino` across copy-up (authority-continuity invariant). P3
+//! binds the durable device to the configured lower root and resolves the
+//! pair to a per-mount `fsid` from the immutable `lower_layer_devs` snapshot.
+//! It is a new input to the existing projection, never a replacement of
+//! `RealObjectKey`/the xino matrix.
 //!
 //! # Locking
 //!
 //! [`IdentityPolicy`] is immutable policy inside `OverlayFs::identity`; the
 //! only mutable state is the genuinely independent saturating
-//! `fallback_ino_allocator` counter (priors `careful-atomics`), and
-//! `layer_devs` is policy input, not runtime state and not a lock. The
-//! projection functions are pure, lock-free transforms; they are called from
-//! inode creation under the caller's `DIR` transaction (or lock-free at stat
-//! time) and hold no Overlay lock (spec §3.3, §4 Lock Carriers).
+//! `fallback_ino_allocator` counter (priors `careful-atomics`). Construction
+//! consumes the all-layer input and retains only the immutable lower snapshot;
+//! neither is runtime state or a lock. The projection functions are pure,
+//! lock-free transforms; they are called from inode creation under the
+//! caller's `DIR` transaction (or lock-free at stat time) and hold no Overlay
+//! lock (spec §3.3, §4 Lock Carriers).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use device_id::DeviceId;
 
 use super::{entry::RealObject, lower_id::LowerIdRecord};
-use crate::prelude::*;
+// pre-wave5 A1: `XinoMode` moved from this module to `mount/options.rs`
+// (the meso-02 spec §3.5 item-2 recorded exit-plan) and is consumed here.
+use crate::{fs::fs_impls::overlayfs::mount::XinoMode, prelude::*};
 
 /// The published `st_dev`/`st_ino` identity of one overlay object
 /// (`P2-01`/`P0-12`).
@@ -61,32 +66,11 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectId {
     pub(in crate::fs::fs_impls::overlayfs) ino: u64,
 }
 
-/// The `xino=` mount-option mode (`Off`/`Auto`/`On`).
-///
-/// Dependency note (spec §4 Enums + §3.5 item 2): the frozen spec places this
-/// enum on meso-01's `OverlayMountOptions` surface and consumes it via the
-/// (unpublished) `MountPolicy::xino_mode()` accessor. That publication is a
-/// **recorded contract gap** — meso-01 does not define the type this wave —
-/// so this declaration lives in the identity projection's own module and
-/// [`IdentityPolicy::xino_mode`] is fixed to `Auto`. When meso-01 publishes
-/// the accessor, this declaration should move to `mount/options.rs` and be
-/// consumed from there (exit-plan condition, see the Creator report).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum XinoMode {
-    /// xino encoding disabled; non-directories report the underlying dev/ino.
-    #[expect(
-        dead_code,
-        reason = "frozen xino=off variant (spec §4); unreachable this wave — the xino= option publication gap (spec §3.5 item 2) fixes the policy to Auto"
-    )]
-    Off,
-    /// xino enabled when feasible; this wave's fixed mode (recorded gap).
-    Auto,
-    /// xino encoding always enabled.
-    #[expect(
-        dead_code,
-        reason = "frozen xino=on variant (spec §4); unreachable this wave — the xino= option publication gap (spec §3.5 item 2) fixes the policy to Auto"
-    )]
-    On,
+#[derive(Debug)]
+struct LowerLayerIdentity {
+    fsid: u64,
+    container_dev_id: DeviceId,
+    lower_layer_root_ino: u64,
 }
 
 /// The immutable per-mount dev/ino projection policy (`P2-01`/`P0-12`).
@@ -94,15 +78,16 @@ pub(super) enum XinoMode {
 /// Invariants: `xino_shift <= 63` (enforced by [`IdentityPolicy::new`]);
 /// `fallback_ino_allocator` never wraps (saturating, see
 /// [`IdentityPolicy::allocate_fallback_ino`]); `is_all_layers_same_fs` is
-/// fixed at construction; `layer_devs` is fixed at construction, fsid-sorted,
-/// with one entry per published layer — never re-probed at runtime. Owner/
-/// guard: immutable policy inside `OverlayFs::identity`; the allocator is a
-/// genuinely independent counter (priors `careful-atomics`); `layer_devs` is
-/// policy input, not runtime state and not a lock.
+/// fixed at construction; `lower_layer_devs` is an fsid-sorted immutable
+/// snapshot with one entry per configured lower — never re-probed at runtime.
+/// Owner/guard: immutable policy inside `OverlayFs::identity`; the allocator
+/// is a genuinely independent counter (priors `careful-atomics`); the
+/// construction-local all-layer input is discarded after deriving this state.
 #[derive(Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct IdentityPolicy {
-    /// The `xino=` mode; fixed to `Auto` this wave (recorded meso-01
-    /// publication gap, spec §3.5 item 2).
+    /// The `xino=` mode; consumed from the mount policy at construction
+    /// (pre-wave5 A1 — the meso-02 spec §3.5 item-2 publication gap is
+    /// closed; `mount/build.rs` passes `policy.xino_mode()`).
     xino_mode: XinoMode,
     /// The overlay's own `st_dev` (`AnonDeviceId`), acquired in the extended
     /// `OverlayFs::new` (spec §3.5 item 1).
@@ -113,9 +98,8 @@ pub(in crate::fs::fs_impls::overlayfs) struct IdentityPolicy {
     /// Whether every layer shares one underlying filesystem (`P0-12` fast
     /// path); derived at construction from the published layer dev ids.
     is_all_layers_same_fs: bool,
-    /// fsid → origin-layer device table (`P1-07` revision 07); built at
-    /// construction from the published layer snapshot, immutable.
-    layer_devs: Box<[(u64, DeviceId)]>,
+    /// Immutable LOWER-only identity snapshot for durable origin records.
+    lower_layer_devs: Box<[LowerLayerIdentity]>,
     /// Saturating fallback ino allocator for directories / anon inos when
     /// xino is not applicable.
     fallback_ino_allocator: AtomicU64,
@@ -126,16 +110,27 @@ impl IdentityPolicy {
     /// snapshot (`P2-01`/`P0-12`/`P1-07`).
     ///
     /// `overlay_dev_id` is the overlay `AnonDeviceId` acquired in the extended
-    /// `OverlayFs::new` (spec §3.5 item 1); `layer_devs` carries one
-    /// `(fsid, container_dev_id)` entry per published layer, from the same
-    /// snapshot that feeds `is_all_layers_same_fs` (recorded dependency 7 of
-    /// the revision-07 ledger), and is normalized to fsid order here so the
-    /// frozen "fsid-sorted" invariant holds regardless of caller order.
-    /// `xino_mode` is fixed to `Auto` this wave (the `xino=` option /
-    /// `MountPolicy::xino_mode()` publication is a recorded meso-01 contract
-    /// gap, spec §3.5 item 2). The frozen invariant `xino_shift <= 63` is
-    /// enforced at construction: a violating shift is a mount-policy
-    /// programming error and is rejected instead of building a broken policy.
+    /// `OverlayFs::new` (spec §3.5 item 1); the construction-local
+    /// `layer_devs` input carries one `(fsid, container_dev_id,
+    /// lower_layer_root_ino)` entry per published layer, from the same
+    /// snapshot that feeds `is_all_layers_same_fs`. Only the derived
+    /// same-fs state and fsid-sorted lower snapshot survive construction.
+    /// `upper_layer_dev_index` is the position of the upper's entry in
+    /// `layer_devs` (the builder pushes the upper first when present; `None`
+    /// on a read-only mount): the LOWER-only view is derived by excluding
+    /// exactly that entry, so origin-record pair resolution never lets the
+    /// upper's entry participate. The exclusion is by position, not by value
+    /// — an upper sharing an underlying filesystem with a lower must keep the
+    /// lower's entry. `xino_mode` is consumed from the mount policy at
+    /// construction
+    /// (pre-wave5 A1: `mount/build.rs` passes `policy.xino_mode()`; the
+    /// meso-02 spec §3.5 item-2 publication gap is closed — the handoff's
+    /// route "`projection/identity.rs` consumes `fs.policy().xino_mode()`"
+    /// is realized at construction so the policy stays immutable and no
+    /// `Weak<OverlayFs>` back-reference is added). The frozen invariant
+    /// `xino_shift <= 63` is enforced at construction: a violating shift is a
+    /// mount-policy programming error and is rejected instead of building a
+    /// broken policy.
     ///
     /// Construction surface note: the frozen spec freezes no constructor
     /// signature for this private-field carrier while §3.5 item 1 mandates its
@@ -146,44 +141,83 @@ impl IdentityPolicy {
     /// extension packet can invoke it. See the Creator report §5.
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         overlay_dev_id: DeviceId,
-        layer_devs: Box<[(u64, DeviceId)]>,
+        layer_devs: Box<[(u64, DeviceId, u64)]>,
+        upper_layer_dev_index: Option<usize>,
         xino_shift: u32,
+        // pre-wave5 A1 adds `xino_mode`; pre-wave5 A2 adds the
+        // `upper_layer_dev_index` upper-exclusion index.
+        xino_mode: XinoMode,
     ) -> Result<Self> {
         if xino_shift > 63 {
             return_errno_with_message!(Errno::EINVAL, "invalid overlay xino shift");
         }
-        let mut layer_devs = layer_devs;
-        layer_devs.sort_by_key(|(fsid, _)| *fsid);
-        let is_all_layers_same_fs = layer_devs
-            .first()
-            .is_some_and(|(_, first_dev)| layer_devs.iter().all(|(_, dev)| dev == first_dev));
+        let is_all_layers_same_fs = layer_devs.first().is_some_and(|(_, first_dev, _)| {
+            layer_devs
+                .iter()
+                .all(|(_, container_dev_id, _)| container_dev_id == first_dev)
+        });
+        let mut lower_layer_devs: Vec<LowerLayerIdentity> = layer_devs
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != upper_layer_dev_index)
+            .map(
+                |(_, (fsid, container_dev_id, lower_layer_root_ino))| LowerLayerIdentity {
+                    fsid,
+                    container_dev_id,
+                    lower_layer_root_ino,
+                },
+            )
+            .collect();
+        lower_layer_devs.sort_by_key(|layer| layer.fsid);
         Ok(Self {
-            xino_mode: XinoMode::Auto,
+            xino_mode,
             overlay_dev_id,
             xino_shift,
             is_all_layers_same_fs,
-            layer_devs,
+            lower_layer_devs: lower_layer_devs.into_boxed_slice(),
             fallback_ino_allocator: AtomicU64::new(0),
         })
     }
 
     /// Returns whether the xino encoding branch of the frozen matrix applies
-    /// (`P2-01`).
+    /// (`P2-01`; pre-wave5 A1 — the input now reflects the parsed `xino=`
+    /// option, closing the meso-02 spec §3.5 item-2 publication gap).
     ///
     /// Same-fs passthrough takes precedence: when every layer shares one
     /// underlying filesystem, raw underlying dev/ino is already uniform, so
     /// xino is not effective (the frozen matrix's first branch is selected
-    /// before this check at the call sites). Otherwise `Auto`+feasible or
-    /// `On` is effective; `Off` is not. Feasibility for `Auto` gates on every
+    /// before this check at the call sites). Otherwise `Auto`/`On` is
+    /// effective and `Off` is not. Feasibility for `Auto` gates on every
     /// underlying filesystem providing persistent inode identity — Asterinas
     /// has no export-style FH surface this wave (recorded absence, spec
     /// [RELY]), so no feasibility probe exists and `Auto` is treated as
-    /// feasible (spec §3.5 item 2: this wave always uses `Auto` semantics).
-    pub(super) fn is_xino_effective(&self) -> bool {
+    /// feasible (frozen table, meso-02 §3.5/RELY).
+    pub(in crate::fs::fs_impls::overlayfs) fn is_xino_effective(&self) -> bool {
+        // Frozen matrix branch 1 precedence: same-fs passthrough wins first.
         if self.is_all_layers_same_fs {
             return false;
         }
+        // pre-wave5 A1 frozen table:
+        //   Off  -> false            (encoded-ino branch disabled; branches 3/4)
+        //   Auto -> true             (feasible-by-default: no export-FH probe
+        //                             exists, recorded absence, meso-02 §3.5/RELY)
+        //   On   -> true             (forced; per-object overflow still falls
+        //                             back to branch 4 — frozen matrix, unchanged)
         matches!(self.xino_mode, XinoMode::Auto | XinoMode::On)
+    }
+
+    /// Returns whether every layer shares one underlying filesystem (`P0-12`
+    /// fast path; the frozen matrix's branch-1 predicate).
+    ///
+    /// Derived at construction from the published layer dev ids and
+    /// immutable thereafter. Ceiling-visible: consumed by the sibling
+    /// `readdir_index.rs` through `OverlayFs::identity()` — the `..` route
+    /// short-circuits on a multi-fs xino-off mount, and the record arm skips
+    /// the layer-id resolution on an all-same-fs stack (branch 1 needs no
+    /// layer id).
+    pub(in crate::fs::fs_impls::overlayfs) fn is_all_layers_same_fs(&self) -> bool {
+        self.is_all_layers_same_fs
     }
 
     /// Projects the dev/ino identity of the visible-metadata source
@@ -207,27 +241,32 @@ impl IdentityPolicy {
     }
 
     /// Projects the dev/ino identity from the durable lower-id record
-    /// (`P1-07` revision 07 consumption).
+    /// (`P1-07` pre-wave5 A2 consumption).
     ///
-    /// The SAME frozen matrix as [`IdentityPolicy::project_object_id`]
-    /// (implemented once in the shared [`IdentityPolicy::project`] helper)
-    /// with the record's `(fsid, real_ino)` as the identity input and the
-    /// origin-layer dev resolved from the immutable `layer_devs` table.
-    /// Consumed on copied-up objects so `st_ino` stays constant across
-    /// copy-up (authority-continuity invariant, spec §2 Case 10). The record
-    /// is layer-validated before consumption (`read_lower_id`, wave-2 review
-    /// item 5), so `layer_dev` never sees a foreign `fsid` on this path.
+    /// The SAME frozen matrix as [`IdentityPolicy::project_object_id`] (one
+    /// shared [`IdentityPolicy::project`] helper) with the record's
+    /// `(container_dev_id, lower_layer_root_ino, real_ino)` as the identity
+    /// input. It resolves the origin pair before selecting any matrix branch,
+    /// so same-fs and xino-off projections validate foreign or ambiguous
+    /// evidence too. [`IdentityPolicy::resolve_layer_id_for_record`] returns
+    /// the unique current lower `fsid`; `None` when the pair does not resolve
+    /// uniquely leaves the caller on the visible-source fallback (never
+    /// silently wrong).
     pub(in crate::fs::fs_impls::overlayfs) fn project_object_id_from_lower_id(
         &self,
         lower_id: &LowerIdRecord,
         is_directory: bool,
-    ) -> OverlayObjectId {
-        self.project(
-            lower_id.fsid(),
+    ) -> Option<OverlayObjectId> {
+        let layer_id = self.resolve_layer_id_for_record(
+            lower_id.container_dev_id(),
+            lower_id.lower_layer_root_ino(),
+        )?;
+        Some(self.project(
+            layer_id,
             lower_id.real_ino(),
-            self.layer_dev(lower_id.fsid()),
+            lower_id.container_dev_id(),
             is_directory,
-        )
+        ))
     }
 
     /// Runs the frozen four-branch dev/ino projection matrix (spec §2 Case 8
@@ -271,25 +310,23 @@ impl IdentityPolicy {
         // Frozen matrix branch 2: xino effective with a fitting real ino AND
         // a fitting layer id (the layer id must fit the `xino_shift`-bit
         // layer-id space; higher bits would be silently dropped by the
-        // encode — wave-2 review item 6).
-        if self.is_xino_effective() {
+        // encode — the fit test is the shared
+        // [`IdentityPolicy::xino_fits`] helper, used by the branch-2 encode
+        // and the readdir `..` determinism gate).
+        if self.is_xino_effective() && self.xino_fits(layer_id, real_ino) {
             let payload_bits = 64 - self.xino_shift;
-            if payload_bits == 64
-                || (real_ino >> payload_bits == 0 && layer_id >> self.xino_shift == 0)
-            {
-                let encoded_ino = if payload_bits == 64 {
-                    real_ino
-                } else {
-                    (layer_id << payload_bits) | real_ino
-                };
-                return OverlayObjectId {
-                    dev: self.overlay_dev_id,
-                    ino: encoded_ino,
-                };
-            }
-            // Per-object overflow (real ino and/or layer id does not fit):
-            // fall through to the explicit fallback.
+            let encoded_ino = if payload_bits == 64 {
+                real_ino
+            } else {
+                (layer_id << payload_bits) | real_ino
+            };
+            return OverlayObjectId {
+                dev: self.overlay_dev_id,
+                ino: encoded_ino,
+            };
         }
+        // Per-object overflow (real ino and/or layer id does not fit) or
+        // xino off: fall through to the explicit fallback below.
         // Frozen matrix branches 3/4: xino off (or per-object overflow
         // fallback): dirs get the overlay dev + an allocated ino; non-dirs
         // report the origin dev/ino.
@@ -306,45 +343,90 @@ impl IdentityPolicy {
         }
     }
 
+    /// Returns whether the `(layer_id, real_ino)` pair fits the xino-encoded
+    /// ino space (frozen matrix branch-2 precondition; the fit test is
+    /// extracted so the branch-2 encode and the determinism gate below share
+    /// one implementation — the readdir `..` route gates on it before
+    /// projecting, so `d_ino("..")` stays stable across calls). Checked
+    /// arithmetic: the `payload_bits == 64` short-circuit skips the
+    /// degenerate `xino_shift == 0` case and never shifts by the full bit
+    /// width.
+    fn xino_fits(&self, layer_id: u64, real_ino: u64) -> bool {
+        let payload_bits = 64 - self.xino_shift;
+        payload_bits == 64 || (real_ino >> payload_bits == 0 && layer_id >> self.xino_shift == 0)
+    }
+
+    /// Returns whether projecting the `(layer_id, real_ino)` pair as a
+    /// directory is deterministic — same-fs passthrough (branch 1) or a
+    /// fitting xino encode (branch 2) — i.e. the frozen matrix does NOT take
+    /// the xino-off/overflow directory branch that allocates a fresh fallback
+    /// ino per call (the readdir `..` route gates on this before projecting,
+    /// so `d_ino("..")` stays stable across calls). Ceiling-visible: consumed
+    /// by the sibling `readdir_index.rs` through `OverlayFs::identity()`.
+    pub(in crate::fs::fs_impls::overlayfs) fn is_directory_projection_deterministic(
+        &self,
+        layer_id: u64,
+        real_ino: u64,
+    ) -> bool {
+        if self.is_all_layers_same_fs {
+            return true;
+        }
+        self.is_xino_effective() && self.xino_fits(layer_id, real_ino)
+    }
+
     /// Allocates a fallback ino for directories / anon objects when xino is
     /// not applicable.
     ///
     /// Saturating by construction (spec §4 invariant: the counter never
-    /// wraps): [`AtomicU64::fetch_update`] commits `saturating_add(1)` and
+    /// wraps): [`AtomicU64::try_update`] commits `saturating_add(1)` and
     /// retries on contention, so the committed counter converges to and stays
     /// at `u64::MAX`; the returned value is the newly committed counter. The
     /// first allocation returns `1` (ino 0 is not handed out).
     fn allocate_fallback_ino(&self) -> u64 {
-        match self.fallback_ino_allocator.fetch_update(
+        match self.fallback_ino_allocator.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |current| Some(current.saturating_add(1)),
         ) {
-            // The closure never returns `None`, so `fetch_update` always
+            // The closure never returns `None`, so `try_update` always
             // succeeds; this arm is defensive and unreachable.
             Ok(previous) => previous.saturating_add(1),
             Err(_) => u64::MAX,
         }
     }
 
-    /// Resolves the origin-layer device for `fsid` from the immutable policy
-    /// table (`P1-07` revision 07; the xino-off non-samefs branch).
+    /// Resolves the unique per-mount layer id (fsid) for a durable origin
+    /// record's `(container_dev_id, lower_layer_root_ino)` pair among the
+    /// CURRENT LOWER layers.
     ///
-    /// The table is built at construction from the same published layer
-    /// snapshot the fsids come from (one entry per layer). The persisted
-    /// lower-id `fsid` is layer-validated at the read boundary
-    /// (`read_lower_id`, wave-2 review item 5) before this table is ever
-    /// consulted, so a miss is a programming error, not a runtime condition;
-    /// the defensive fallback reports the null device instead of fabricating
-    /// an identity (never silently wrong).
-    fn layer_dev(&self, fsid: u64) -> DeviceId {
-        match self
-            .layer_devs
-            .iter()
-            .find(|(candidate, _)| *candidate == fsid)
-        {
-            Some((_, dev)) => *dev,
-            None => DeviceId::null(),
+    /// The LOWER-only `lower_layer_devs` table is consulted: origin records
+    /// only ever come from lower sources, so the upper's entry never
+    /// participates — an upper sharing `st_dev` with a lower must not make a
+    /// valid record read as ambiguous. Returns the unique fsid when exactly
+    /// one DISTINCT lower fsid matches the pair; repeated matching entries
+    /// with that same fsid remain usable. An absent pair or multiple matching
+    /// fsids returns `None`, conservatively preserving the visible-source
+    /// fallback rather than attributing a record to the wrong layer.
+    /// Ceiling-visible: consumed by the sibling `readdir_index.rs` record
+    /// arm and by [`IdentityPolicy::project_object_id_from_lower_id`]
+    /// through `OverlayFs::identity()`.
+    pub(in crate::fs::fs_impls::overlayfs) fn resolve_layer_id_for_record(
+        &self,
+        container_dev_id: DeviceId,
+        lower_layer_root_ino: u64,
+    ) -> Option<u64> {
+        let mut matched_fsid: Option<u64> = None;
+        for layer in self.lower_layer_devs.iter() {
+            if layer.container_dev_id == container_dev_id
+                && layer.lower_layer_root_ino == lower_layer_root_ino
+            {
+                match matched_fsid {
+                    None => matched_fsid = Some(layer.fsid),
+                    Some(existing) if existing == layer.fsid => {}
+                    Some(_) => return None,
+                }
+            }
         }
+        matched_fsid
     }
 }

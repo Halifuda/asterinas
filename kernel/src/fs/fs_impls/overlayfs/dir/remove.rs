@@ -49,8 +49,11 @@ use crate::{
     fs::{
         file::{InodeType, Permission},
         fs_impls::overlayfs::{
-            metadata_security::xattr::{OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME},
             AccessType,
+            copyup::WorkdirTempRequest,
+            metadata_security::xattr::{
+                OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME, XattrCopyPolicy,
+            },
             projection::{Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode},
         },
         vfs::{
@@ -130,13 +133,6 @@ impl OverlayInode {
     ///
     /// # Recorded deviations and ambiguity resolutions (Creator report §5)
     ///
-    /// - The frozen §7.2a prose "xattrs/metadata copied" is realized as the
-    ///   metadata copy (owner/group/mode/times, the meso-04
-    ///   `transfer_metadata` precedent) only; the transient opaque temp is
-    ///   whiteout-hidden in the same transaction, so the full xattr buffer
-    ///   copy is skipped (Linux copies xattrs for permanent-replacement
-    ///   rename paths that do not exist in this pass). See the report §5
-    ///   item 3.
     /// - A directory target is refused with `Err(EISDIR)` on the `unlink`
     ///   entry (Case 12's `EISDIR` for `P1-26`; the ramfs precedent): the
     ///   Asterinas VFS routes `unlink` on a directory into the fs, so
@@ -252,21 +248,45 @@ impl OverlayInode {
             Some(_) => Some(target_type),
             None => None,
         };
-        // The workdir temp name is generated up front (the meso-04 seam is
-        // uniqueness-based, not lock-based) so the pre-publication failure
-        // arm can best-effort clean the temp regardless of which leg created
-        // it; cleaning a never-created name is an ignored `ENOENT`.
-        let temp_name = fs.generate_workdir_temp_name(name, &upper_parent);
+        let clear_empty_temp = if kind == RemoveKind::Rmdir {
+            match target_facts.upper() {
+                Some(upper_obj) => {
+                    let mut upper_names = Vec::new();
+                    upper_obj.real_inode().readdir_at(0, &mut upper_names)?;
+                    upper_names.retain(|entry| !is_dot_or_dotdot(entry));
+                    if upper_names.is_empty() {
+                        None
+                    } else {
+                        let mode = upper_obj.real_inode().mode()?;
+                        Some(fs.create_workdir_temp(
+                            name,
+                            &upper_parent,
+                            WorkdirTempRequest::Create {
+                                kind: InodeType::Dir,
+                                mode,
+                            },
+                        )?)
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let staged_temp_name = match &clear_empty_temp {
+            Some(temp) => Some(temp.name()),
+            None => None,
+        };
         // The shared recipe scaffold (wave-4 round-2 repair item 2): the
         // commit marker is flipped at each physical upper commit point and
         // the Case-13 reconcile / pre-publication cleanup classification is
         // owned by `run_recipe` (spec §5.3/§7.2 step 5).
         self.run_recipe(
             &fs,
-            Some(&temp_name),
+            staged_temp_name,
             || self.invalidate_stale_cache(&[(self, name)]),
             |marker| {
-                if kind == RemoveKind::Rmdir {
+                if let Some(temp) = clear_empty_temp.as_ref() {
                     // Clear-empty probe (spec §7.2 step 4): the upper directory
                     // of a lower-backed directory may hold entries that the
                     // merged view hides (whiteouts — the emptiness gate has
@@ -274,99 +294,122 @@ impl OverlayInode {
                     // leak and would defeat `publish_whiteout`'s displaced-dir
                     // workdir cleanup (`ENOTEMPTY`), so the §7.2a clear-empty
                     // path replaces the upper dir first.
-                    if let Some(upper_obj) = target_facts.upper() {
-                        let mut upper_names = Vec::new();
-                        upper_obj.real_inode().readdir_at(0, &mut upper_names)?;
-                        upper_names.retain(|entry| !is_dot_or_dotdot(entry));
-                        if !upper_names.is_empty() {
-                            // §7.2a — clear-empty: the upper dir is replaced by
-                            // a workdir-prepared opaque temp dir (atomic
-                            // exchange); the old upper dir is cleaned up in the
-                            // workdir; the whiteout is then published at the
-                            // name by the recipe's common publish step below.
-                            // The temp is never a visible source (BC-6 §57
-                            // item 5).
-                            let old_upper_dir = upper_obj.real_inode().clone();
-                            let mode = old_upper_dir.mode()?;
-                            let temp = fs.create_workdir_temp(&temp_name, InodeType::Dir, mode)?;
-                            // The opaque marker is part of the replacement
-                            // directory's complete preparation: it keeps the
-                            // name a lower-search barrier at every instant of
-                            // the swap (crash window included), gated by the
-                            // meso-01 private-xattr capability (spec §5.1).
-                            let can_store_private_xattr = fs
-                                .policy()
-                                .upper_capabilities()
-                                .is_some_and(|caps| caps.can_store_private_xattr());
-                            if !can_store_private_xattr {
-                                return Err(Error::with_message(
-                                    Errno::EOPNOTSUPP,
-                                    "the upper filesystem cannot store the opaque marker \
+                    let Some(upper_obj) = target_facts.upper() else {
+                        return Err(Error::with_message(
+                            Errno::EIO,
+                            "the clear-empty workdir temp has no upper directory",
+                        ));
+                    };
+                    // §7.2a — clear-empty: the upper dir is replaced by
+                    // a workdir-prepared opaque temp dir (atomic exchange);
+                    // the old upper dir is cleaned up in the workdir; the
+                    // whiteout is then published at the name by the recipe's
+                    // common publish step below. The temp is never a visible
+                    // source (BC-6 §57 item 5).
+                    let old_upper_dir = upper_obj.real_inode().clone();
+                    // The opaque marker is part of the replacement
+                    // directory's complete preparation: it keeps the
+                    // name a lower-search barrier at every instant of
+                    // the swap (crash window included), gated by the
+                    // meso-01 private-xattr capability (spec §5.1).
+                    let can_store_private_xattr = fs
+                        .policy()
+                        .upper_capabilities()
+                        .is_some_and(|caps| caps.can_store_private_xattr());
+                    if !can_store_private_xattr {
+                        return Err(Error::with_message(
+                            Errno::EOPNOTSUPP,
+                            "the upper filesystem cannot store the opaque marker \
                                      required for the clear-empty directory exchange",
-                                ));
-                            }
-                            let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME)
-                                .ok_or_else(|| {
-                                    Error::with_message(
-                                        Errno::EINVAL,
-                                        "invalid overlay opaque marker xattr name",
-                                    )
-                                })?;
-                            let mut marker_reader =
-                                VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
-                            temp.set_xattr(
-                                marker_name,
-                                &mut marker_reader,
-                                XattrSetFlags::CREATE_OR_REPLACE,
-                            )?;
-                            // Metadata copy (spec §7.2a "xattrs/metadata
-                            // copied"): owner/group/mode/times from the old
-                            // upper dir onto the temp — the meso-04
-                            // `transfer_metadata` precedent. The full xattr
-                            // buffer copy is a recorded deviation (see the
-                            // method doc / report §5 item 3).
-                            temp.set_owner(old_upper_dir.owner()?)?;
-                            temp.set_group(old_upper_dir.group()?)?;
-                            temp.set_mode(old_upper_dir.mode()?)?;
-                            temp.set_atime(old_upper_dir.atime());
-                            temp.set_mtime(old_upper_dir.mtime());
-                            temp.set_ctime(old_upper_dir.ctime());
-                            // Atomic exchange: the opaque temp becomes the upper
-                            // object at `name` and the old upper dir moves to
-                            // the workdir temp name. From this point the visible
-                            // upper namespace has changed (Case 13 reconcile
-                            // applies on any later failure).
-                            // The workdir root resolves through the single shared
-                            // resolver (`OverlayInode::workdir_root`, wave-4 repair
-                            // item 11) — the inline claims block is deleted.
-                            let workdir = self.workdir_root()?;
-                            workdir.rename(&temp_name, &upper_parent, name, RenameMode::Exchange)?;
-                            marker.commit();
-                            // Clean the displaced old upper dir in the workdir:
-                            // every remaining entry is a whiteout (the emptiness
-                            // gate refused visible children), so unlink each and
-                            // rmdir the dir. Best-effort: a cleanup failure is
-                            // the recorded P3-09 workdir-cleanup obligation and
-                            // never becomes a visible namespace entry — the
-                            // whiteout publish below proceeds with the opaque
-                            // temp at `name` (BC-6 §57/§60.2).
-                            let mut displaced_names = Vec::new();
-                            if old_upper_dir.readdir_at(0, &mut displaced_names).is_ok() {
-                                for entry in displaced_names {
-                                    if !is_dot_or_dotdot(&entry) {
-                                        let _ = old_upper_dir.unlink(&entry);
-                                    }
-                                }
-                            }
-                            if let Err(cleanup_err) = workdir.rmdir(&temp_name) {
-                                warn!(
-                                    "overlay clear-empty: workdir cleanup of the displaced \
-                                     directory {:?} failed (P3-09 residue, never a visible \
-                                     source): {:?}",
-                                    temp_name, cleanup_err
-                                );
+                        ));
+                    }
+                    let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME)
+                        .ok_or_else(|| {
+                            Error::with_message(
+                                Errno::EINVAL,
+                                "invalid overlay opaque marker xattr name",
+                            )
+                        })?;
+                    let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
+                    temp.inode().set_xattr(
+                        marker_name,
+                        &mut marker_reader,
+                        XattrSetFlags::CREATE_OR_REPLACE,
+                    )?;
+                    // The xattr buffer copy runs BEFORE the owner/group/
+                    // mode are applied, while the temp is still owned
+                    // by the caller (the creating task), so a
+                    // non-owner rmdir of a directory carrying xattrs
+                    // does not fail `EACCES` on the temp `set_xattr`.
+                    // `XattrName::try_from_full_name` failure in the copy
+                    // helper is `EINVAL` before its policy branch and
+                    // propagates. The remaining VFS list/read/write failures
+                    // use the BEST-EFFORT `XattrCopyPolicy::BestEffort`
+                    // variant (the `ClearEmpty` path): because the displaced
+                    // upper dir is being deleted, they degrade to warn-and-
+                    // skip and the non-owner rmdir succeeds (restoring the
+                    // pre-C3 success path; the base skipped the copy
+                    // entirely). See
+                    // `OverlayXattrPolicy::copy_eligible_xattrs`
+                    // for the credential-seam and failure-policy
+                    // discussion. The copy is filtered through the
+                    // meso-05 OverlayXattrPolicy (private / escaped /
+                    // reserved names never copy; the temp's own
+                    // markers are written explicitly by the recipe).
+                    fs.policy()
+                        .credential_policy()
+                        .with_creator_credentials_fn(|| {
+                            fs.xattr_policy().copy_eligible_xattrs(
+                                &old_upper_dir,
+                                temp.inode(),
+                                XattrCopyPolicy::BestEffort,
+                            )
+                        })?;
+                    // Metadata copy (spec §7.2a "xattrs/metadata
+                    // copied"): owner/group/mode/times from the old
+                    // upper dir onto the temp — the meso-04
+                    // `transfer_metadata` precedent.
+                    temp.inode().set_owner(old_upper_dir.owner()?)?;
+                    temp.inode().set_group(old_upper_dir.group()?)?;
+                    temp.inode().set_mode(old_upper_dir.mode()?)?;
+                    temp.inode().set_atime(old_upper_dir.atime());
+                    temp.inode().set_mtime(old_upper_dir.mtime());
+                    temp.inode().set_ctime(old_upper_dir.ctime());
+                    // Atomic exchange: the opaque temp becomes the upper
+                    // object at `name` and the old upper dir moves to
+                    // the workdir temp name. From this point the visible
+                    // upper namespace has changed (Case 13 reconcile
+                    // applies on any later failure).
+                    // The workdir root resolves through the single shared
+                    // resolver (`OverlayInode::workdir_root`, wave-4 repair
+                    // item 11) — the inline claims block is deleted.
+                    let workdir = self.workdir_root()?;
+                    workdir.rename(temp.name(), &upper_parent, name, RenameMode::Exchange)?;
+                    marker.commit();
+                    // Clean the displaced old upper dir in the workdir:
+                    // every remaining entry is a whiteout (the emptiness
+                    // gate refused visible children), so unlink each and
+                    // rmdir the dir. Best-effort: a cleanup failure is
+                    // the recorded P3-09 workdir-cleanup obligation and
+                    // never becomes a visible namespace entry — the
+                    // whiteout publish below proceeds with the opaque
+                    // temp at `name` (BC-6 §57/§60.2).
+                    let mut displaced_names = Vec::new();
+                    if old_upper_dir.readdir_at(0, &mut displaced_names).is_ok() {
+                        for entry in displaced_names {
+                            if !is_dot_or_dotdot(&entry) {
+                                let _ = old_upper_dir.unlink(&entry);
                             }
                         }
+                    }
+                    if let Err(cleanup_err) = workdir.rmdir(temp.name()) {
+                        warn!(
+                            "overlay clear-empty: workdir cleanup of the displaced \
+                                     directory {:?} failed (P3-09 residue, never a visible \
+                                     source): {:?}",
+                            temp.name(),
+                            cleanup_err
+                        );
                     }
                 }
                 // The whiteout publish (sibling `dir/whiteout.rs`, P1-25): a
@@ -390,7 +433,9 @@ impl OverlayInode {
                 let evidence = HiddenEvidence::new(0, whiteout_inode);
                 fs.bindings().insert(
                     BindingKey::new(self.key(), String::from(name)),
-                    Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(evidence))),
+                    Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(
+                        evidence,
+                    ))),
                 );
                 self.readdir_index_remove(name);
                 Ok(())

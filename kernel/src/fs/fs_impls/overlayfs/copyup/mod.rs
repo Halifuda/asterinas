@@ -7,13 +7,15 @@
 //! `OverlayFs`-extension impl block (the `workdir_temp_serial` unique-naming
 //! accessor, P1-34), the `OverlayInode` delegation helpers
 //! (`select_real_inode`, `fs_arc`, `record_copyup_transition`), and the VFS
-//! delegation impls `FileOps for OverlayInode` (`read_at`/`write_at`, P1-10)
-//! and `Inode for OverlayInode` (`open` P1-08, `seek_end` P1-11,
-//! `resize` P1-02, `fallocate` P1-14, `sync_all`/`sync_data` P1-13,
-//! `read_link` P1-32, `page_cache` P1-37). The real control flow lives in the
-//! sibling files created in parallel from the same frozen spec: `trigger.rs`
-//! (winner/waiter protocol + top-down ancestor walk), `promote.rs` (object-kind
-//! promotion body and publication), `workdir.rs` (temp lifecycle).
+//! helper bodies called by the canonical `FileOps`/`Inode` trait impls in
+//! `projection/inode.rs`: `read_at_impl`/`write_at_impl` (P1-10), `open_impl`
+//! (P1-08), `seek_end_impl` (P1-11), `resize_impl` (P1-02),
+//! `fallocate_impl` (P1-14), `sync_all_impl`/`sync_data_impl` (P1-13), and
+//! `read_link_impl`/`page_cache_impl` (P1-32/P1-37). The real control flow
+//! lives in the sibling files created in parallel from the same frozen spec:
+//! `trigger.rs` (winner/waiter protocol + top-down ancestor walk),
+//! `promote.rs` (object-kind promotion body and publication), `workdir.rs`
+//! (temp lifecycle).
 //!
 //! Visibility: `coordination` is declared `pub(super)` — read through the
 //! spec's overlayfs-ceiling audit as `pub(in crate::fs::fs_impls::overlayfs)` —
@@ -35,14 +37,14 @@
 
 use core::sync::atomic::Ordering;
 
-use super::coordination::{CopyUpTransition, CopyUpPhase};
+use self::coordination::{CopyUpTransition, CopyUpPhase};
 use crate::{
     fs::{
         file::{AccessMode, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
             mount::OverlayFs, projection::OverlayInode, AccessType,
         },
-        vfs::inode::{FallocMode, FileOps, Inode, SymbolicLink},
+        vfs::inode::{FallocMode, Inode, SymbolicLink},
     },
     prelude::*,
     vm::page_cache::PageCache,
@@ -54,6 +56,8 @@ mod promote;
 mod trigger;
 mod workdir;
 
+pub(in crate::fs::fs_impls::overlayfs) use workdir::WorkdirTempRequest;
+
 impl OverlayFs {
     /// Returns the next saturating workdir temp serial (P1-34).
     ///
@@ -61,7 +65,7 @@ impl OverlayFs {
     /// lifecycle; the consuming `generate_workdir_temp_name` (frozen sibling
     /// pass, `copyup/workdir.rs`) composites it as
     /// `#{target_name}#{parent_ino}#{serial}` (spec §4 `workdir.rs`). The
-    /// fetch is saturating — `AtomicU64::fetch_update` commits
+    /// fetch is saturating — `AtomicU64::try_update` commits
     /// `saturating_add(1)` and retries on contention, so the counter converges
     /// to and stays at `u64::MAX` (the same pattern as
     /// `IdentityPolicy::allocate_fallback_ino`) — and never gates I/O.
@@ -69,12 +73,12 @@ impl OverlayFs {
     /// per-mount serial); no lock is held (spec §3.0: workdir temp naming is
     /// uniqueness-based, not lock-based).
     pub(super) fn workdir_temp_serial(&self) -> u64 {
-        match self.workdir_temp_serial.fetch_update(
+        match self.workdir_temp_serial.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |current| Some(current.saturating_add(1)),
         ) {
-            // The closure never returns `None`, so `fetch_update` always
+            // The closure never returns `None`, so `try_update` always
             // succeeds; this arm is defensive and unreachable.
             Ok(previous) => previous.saturating_add(1),
             Err(_) => u64::MAX,
@@ -153,14 +157,14 @@ impl OverlayInode {
     }
 }
 
-impl FileOps for OverlayInode {
+impl OverlayInode {
     // P1-10 read delegation: per-call authority re-resolution; a lower-backed
     // read passes `O_NOATIME` (P1-08 §19a) so a read never updates the lower
     // atime. The two brief facts snapshots (here and inside
     // `select_real_inode`) may observe an authority advance between them,
     // which is benign (Hazard 7); no Overlay lock is held across any
     // underlying call (spec §4).
-    fn read_at(
+    pub(in crate::fs::fs_impls::overlayfs) fn read_at_impl(
         &self,
         offset: usize,
         writer: &mut VmWriter,
@@ -181,7 +185,7 @@ impl FileOps for OverlayInode {
     // applied from the passed status flags (offset := real size) as the
     // packet-ruled defense (spec §3.4 item 6). Write-capable fds are upper by
     // construction (I5), so delegation never bypasses the trigger.
-    fn write_at(
+    pub(in crate::fs::fs_impls::overlayfs) fn write_at_impl(
         &self,
         offset: usize,
         reader: &mut VmReader,
@@ -197,13 +201,13 @@ impl FileOps for OverlayInode {
     }
 }
 
-impl Inode for OverlayInode {
+impl OverlayInode {
     // P1-08: directory opens are served by the merged readdir path (meso-03)
     // and read-only opens take no side effect; only writable opens reach the
     // EROFS gate (I10) and the write-intent promotion trigger (P1-12
     // anchoring). The VFS handle uses this inode's own `FileOps`, so the
     // successful path returns `None`; failures surface as `Some(Err)`.
-    fn open(
+    pub(in crate::fs::fs_impls::overlayfs) fn open_impl(
         &self,
         access_mode: AccessMode,
         _status_flags: StatusFlags,
@@ -231,7 +235,7 @@ impl Inode for OverlayInode {
     }
 
     // P1-11: the end position of the current authority's real inode.
-    fn seek_end(&self) -> Option<usize> {
+    pub(in crate::fs::fs_impls::overlayfs) fn seek_end_impl(&self) -> Option<usize> {
         self.select_real_inode().seek_end()
     }
 
@@ -241,7 +245,7 @@ impl Inode for OverlayInode {
     // meso-05 two-stage admission BEFORE any side effect, including the
     // copy-up promotion), then the promotion trigger and delegation to the
     // (upper) current authority.
-    fn resize(&self, new_size: usize) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn resize_impl(&self, new_size: usize) -> Result<()> {
         if self.fs_arc()?.policy().is_effective_read_only() {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
@@ -255,7 +259,12 @@ impl Inode for OverlayInode {
     // so the meso-05 admission runs here too rather than relying on the fd
     // path alone), then the promotion trigger and delegation to the (upper)
     // current authority.
-    fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn fallocate_impl(
+        &self,
+        mode: FallocMode,
+        offset: usize,
+        len: usize,
+    ) -> Result<()> {
         if self.fs_arc()?.policy().is_effective_read_only() {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
@@ -266,25 +275,25 @@ impl Inode for OverlayInode {
 
     // P1-13: pure delegation to the current authority; no promotion (durability
     // policy = auto, P2-12 note).
-    fn sync_all(&self) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn sync_all_impl(&self) -> Result<()> {
         self.select_real_inode().sync_all()
     }
 
     // P1-13: same delegation as `sync_all`; durability policy = auto (P2-12
     // note).
-    fn sync_data(&self) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn sync_data_impl(&self) -> Result<()> {
         self.select_real_inode().sync_data()
     }
 
     // P1-32: pure delegation to the current authority; no promotion.
-    fn read_link(&self) -> Result<SymbolicLink> {
+    pub(in crate::fs::fs_impls::overlayfs) fn read_link_impl(&self) -> Result<SymbolicLink> {
         self.select_real_inode().read_link()
     }
 
     // P1-37: pure forwarder to the current authority's real page cache (upper
     // after promotion; the lower source for lower-backed read views). Never
     // promotes: the parameterless seam carries no write intent (§4.3).
-    fn page_cache(&self) -> Option<PageCache> {
+    pub(in crate::fs::fs_impls::overlayfs) fn page_cache_impl(&self) -> Option<PageCache> {
         self.select_real_inode().page_cache()
     }
 }

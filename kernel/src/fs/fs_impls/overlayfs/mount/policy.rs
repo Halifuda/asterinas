@@ -24,13 +24,14 @@
 //! `upper_capabilities`, `can_store_private_xattr`, `can_mknod_char`) are
 //! published at the overlayfs ceiling.
 
+use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use aster_rights::ReadDupOp;
 
 use super::{
     claims::{OVERLAY_UUID_SIZE, OverlayUuid},
-    options::UuidMode,
+    options::{UuidMode, XinoMode},
 };
 use crate::{
     fs::{
@@ -107,14 +108,19 @@ pub(in crate::fs::fs_impls::overlayfs) struct MountPolicy {
     /// Whether the mount was created with the `default_permissions` option
     /// (`P0-01`; the frozen option value meso-05's stage-B skip consumes).
     is_default_permissions: bool,
+    /// The frozen `xino=` option value (`P2-01`); single representation,
+    /// sourced from the parsed `OverlayMountOptions::xino_mode`
+    /// (pre-wave5 A1).
+    xino_mode: XinoMode,
 }
 
 impl MountPolicy {
     /// Assembles the immutable policy snapshot.
     ///
-    /// The single assembly point (spec §4); the seven parameters are exactly
+    /// The single assembly point (spec §4); the eight parameters are exactly
     /// the published snapshot's constituents — the one deliberate >3-param
-    /// exception in the complexity baseline. Called once from `OverlayFs::new`
+    /// exception in the complexity baseline, extended to its 8th constituent
+    /// by pre-wave5 A1 (`xino_mode`). Called once from `OverlayFs::new`
     /// (sibling `build.rs`) after all fallible constituents exist.
     pub(super) fn assemble(
         is_effective_read_only: bool,
@@ -124,6 +130,7 @@ impl MountPolicy {
         upper_capabilities: Option<UpperFilesystemCapabilities>,
         write_access: Option<WriteAccessAccounting>,
         is_default_permissions: bool,
+        xino_mode: XinoMode, // pre-wave5 A1: 8th parameter
     ) -> Self {
         Self {
             is_effective_read_only,
@@ -133,6 +140,7 @@ impl MountPolicy {
             write_access,
             upper_capabilities,
             is_default_permissions,
+            xino_mode,
         }
     }
 
@@ -152,6 +160,12 @@ impl MountPolicy {
     /// semantics are meso-05's (spec §1 item 4).
     pub(in crate::fs::fs_impls::overlayfs) fn is_default_permissions(&self) -> bool {
         self.is_default_permissions
+    }
+
+    /// Returns the frozen `xino=` mode (`P2-01`; meso-02 spec §3.5 item-2
+    /// consumption contract `MountPolicy::xino_mode()`).
+    pub(in crate::fs::fs_impls::overlayfs) fn xino_mode(&self) -> XinoMode {
+        self.xino_mode
     }
 
     /// Returns the frozen UUID/fsid mode (`P2-11`).
@@ -357,12 +371,12 @@ impl UpperFilesystemCapabilities {
         // re-mounts of an upper with a persisted uuid into a
         // deterministic `ERANGE` failure).
         let mut value = [0u8; OVERLAY_UUID_SIZE];
-        let mut writer = VmWriter::from(&mut value).to_fallible();
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper_inode.get_xattr(name, &mut writer) {
-            Ok(_) => true,
-            Err(err) if err.error() == Errno::ENODATA => true,
-            Err(err) if err.error() == Errno::ERANGE => true,
-            Err(err) if err.error() == Errno::EOPNOTSUPP => false,
+            Ok(_) => Ok(true),
+            Err(err) if err.error() == Errno::ENODATA => Ok(true),
+            Err(err) if err.error() == Errno::ERANGE => Ok(true),
+            Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(false),
             Err(err) => return Err(err),
         }
     }
@@ -522,7 +536,7 @@ impl WriteAccessAccounting {
         }
         let _ =
             self.active_write_users
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                     Some(count.saturating_add(1))
                 });
         Ok(WriteAccessGuard { accounting: self })
@@ -563,7 +577,7 @@ pub(super) struct WriteAccessGuard<'a> {
 
 impl Drop for WriteAccessGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.accounting.active_write_users.fetch_update(
+        let _ = self.accounting.active_write_users.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |count| Some(count.saturating_sub(1)),

@@ -9,8 +9,13 @@
 //! Wave-3 `OverlayFs::xattr_policy` field, initialized in `mount/build.rs`),
 //! its [`XattrClass`] classification result, the module-private known
 //! private-name table and prefix constants, the `classify`/`is_private`/
-//! `filter_private_names` methods, and the four `Inode`-trait xattr entries
-//! (`get_xattr`/`set_xattr`/`list_xattr`/`remove_xattr`).
+//! `filter_private_names` methods, the shared classification-aware xattr
+//! copy [`OverlayXattrPolicy::copy_eligible_xattrs`] (the single
+//! classification-aware copy loop of the overlayfs tree, shared by the
+//! copy-up and clear-empty paths through the [`XattrCopyPolicy`] failure
+//! policy), and the four
+//! `Inode`-trait xattr entries (`get_xattr`/`set_xattr`/`list_xattr`/
+//! `remove_xattr`).
 //!
 //! Classification semantics (frozen, BC-5 §50.1): a name under the
 //! `trusted.overlay.`/`user.overlay.` private namespace is `Private` when its
@@ -22,8 +27,9 @@
 //! authority. `is_private` is the judgment method and the meso-04 §7
 //! supersession seam: it returns `true` exactly for the `Private`/`Escaped`/
 //! `Reserved` classes — the same name set the meso-04 copy-time predicate
-//! `copyup/promote.rs::is_overlay_private_xattr_name` excluded — so copy
-//! behavior is preserved while the classification authority moves here.
+//! `is_overlay_private_xattr_name` (removed by pre-wave5 repair item 8)
+//! excluded — so copy behavior is preserved while the classification
+//! authority moves here.
 //!
 //! Entry contract (spec §2 Case 4/6, §4 classification-ordering note): the
 //! classification stage runs **before** `check_permission` for
@@ -142,6 +148,68 @@ pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_XATTR_FULL_NAME: &str =
 /// the first byte `b'y'`).
 pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
 
+/// The xattr-copy failure policy of the shared xattr copy
+/// ([`OverlayXattrPolicy::copy_eligible_xattrs`]) — a small closed enum
+/// (never a bool) selecting whether a source read or temp write that fails
+/// (a denied access, a resource/I-O error, ...) aborts the copy (strict) or
+/// degrades to warn-and-skip (best-effort).
+///
+/// The variants are named for the behavior they select; the two copy paths
+/// map onto them as follows:
+/// - [`XattrCopyPolicy::BestEffort`] (`P1-27` clear-empty path): the source
+///   is the displaced upper directory of a clear-empty exchange, which is
+///   being deleted, so its xattrs are moot — every copy error degrades and
+///   the non-owner rmdir succeeds.
+/// - [`XattrCopyPolicy::Strict`] (`P1-06` copy-up path): the copied object
+///   is persisted, so a denied source read must fail the copy-up rather than
+///   silently drop `security.*`/`trusted.*` metadata.
+///
+/// The list/read race (`ENODATA`/`ERANGE` — a concurrent xattr mutation
+/// between the probe and the materialized read) always degrades to a skip;
+/// it is a transient mutation, not a failure, under both policies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::fs::fs_impls::overlayfs) enum XattrCopyPolicy {
+    /// Best-effort source reads and temp writes: EVERY xattr-copy error — a
+    /// denied source read or temp write (`EACCES`/`EPERM`), the transient
+    /// list/read race (`ENODATA`/`ERANGE`), and resource/I-O failures
+    /// (`ENOSPC`/`EIO`, ...) alike — degrades to warn-and-skip and the
+    /// operation continues. Used by the clear-empty recipe (`ClearEmpty`
+    /// path), whose source directory is about to be deleted: a pure rmdir
+    /// must never abort on the xattr fidelity copy.
+    BestEffort,
+    /// Strict source reads and temp writes: a denied source read or a
+    /// temp-write error (`EACCES`/`EPERM`, `ENOSPC`, `EIO`, ...) propagates
+    /// and fails the copy — the wave-4 baseline for copy-up — so no
+    /// `security.*`/`trusted.*` xattr is ever silently dropped. Only the
+    /// transient list/read race (`ENODATA`/`ERANGE`) degrades to a skip.
+    Strict,
+}
+
+/// Returns whether a SOURCE-read error of the shared xattr copy is skippable
+/// under `policy` (the single source-read skip decision of
+/// [`OverlayXattrPolicy::copy_eligible_xattrs`]; one helper for the
+/// namespace-list and value-read arms, so the predicate can never diverge).
+///
+/// The list/read race (`ENODATA`/`ERANGE` — the source list/value changed
+/// between the probe and the materialized read) is a transient mutation and
+/// skips under BOTH policies. Under the best-effort
+/// [`XattrCopyPolicy::BestEffort`] (the `ClearEmpty` path) EVERY source-read
+/// error — a permission-denied read (`EACCES`/`EPERM`, the no-op
+/// creator-credential seam, `mount/policy.rs`) as well as resource/I-O
+/// failures (`ENOSPC`/`EIO`, ...) — degrades to warn-and-skip, because the
+/// doomed source directory's xattr fidelity copy must never abort the pure
+/// rmdir. Under the strict [`XattrCopyPolicy::Strict`] (`CopyUp` path) only
+/// the transient race skips and every other error propagates (no silent
+/// `security.*`/`trusted.*` loss on the persisted copy). Whitelist Rule B:
+/// the exact predicate is executed by the two source-error arms of
+/// `copy_eligible_xattrs` inside this meso. A free pure function rather than
+/// an owner-local method: it reads no `self` state (pure `errno` × `policy`
+/// decision), so an unused `&self` receiver would add noise without an
+/// invariant to guard.
+fn is_skippable_source_error(err: &Error, policy: XattrCopyPolicy) -> bool {
+    policy == XattrCopyPolicy::BestEffort || matches!(err.error(), Errno::ENODATA | Errno::ERANGE)
+}
+
 impl OverlayXattrPolicy {
     /// Classifies an xattr full name into the four-way
     /// `Public`/`Private`/`Escaped`/`Reserved` classes (frozen, BC-5 §50.1).
@@ -177,10 +245,9 @@ impl OverlayXattrPolicy {
     /// XattrClass::Public)` — `true` exactly for the `Private`/`Escaped`/
     /// `Reserved` classes, the same name set the meso-04 copy-time predicate
     /// excluded. This is the meso-04 §7 supersession seam: the copy-time
-    /// boundary filter that replaces
-    /// `copyup/promote.rs::is_overlay_private_xattr_name` (the meso-04 local
-    /// predicate is to be replaced by this seam call; no duplicated predicate
-    /// survives).
+    /// boundary filter that replaced the meso-04 local predicate
+    /// `is_overlay_private_xattr_name` (removed when the classification
+    /// authority moved here; no duplicated predicate survives).
     pub(in crate::fs::fs_impls::overlayfs) fn is_private(&self, full_name: &str) -> bool {
         !matches!(self.classify(full_name), XattrClass::Public)
     }
@@ -210,8 +277,8 @@ impl OverlayXattrPolicy {
             if name_bytes.is_empty() {
                 continue;
             }
-            let is_private = core::str::from_utf8(name_bytes)
-                .is_ok_and(|name| self.is_private(name));
+            let is_private =
+                core::str::from_utf8(name_bytes).is_ok_and(|name| self.is_private(name));
             if is_private {
                 continue;
             }
@@ -221,9 +288,213 @@ impl OverlayXattrPolicy {
         }
         Ok(bytes_written)
     }
+
+    /// Copies the eligible public xattrs of `source` onto `temp` (`P1-06`
+    /// copy-up / `P1-27` clear-empty) — the single shared
+    /// classification-aware xattr copy of the overlayfs tree.
+    ///
+    /// Enumerates the `User`, `Trusted`, and `Security` namespaces — the
+    /// `System` namespace (`system.posix_acl_*`) is the `P2-05` ACL insertion
+    /// point and stays excluded on every copy path — and filters
+    /// overlay-private names through [`OverlayXattrPolicy::is_private`] (the
+    /// meso-04 §7 supersession seam: the same name set the former copy-time
+    /// predicate `is_overlay_private_xattr_name` excluded, so copy behavior
+    /// is preserved while the classification authority lives here; the
+    /// clear-empty recipe writes the temp's own `trusted.overlay.opaque`
+    /// marker explicitly, so copying the displaced upper dir's marker would
+    /// double-mark and is excluded by the same rule).
+    ///
+    /// The failure policy is selected by the caller through the closed
+    /// [`XattrCopyPolicy`] enum:
+    /// - **Best-effort source reads** ([`XattrCopyPolicy::BestEffort`],
+    ///   `ClearEmpty` path): the source is the displaced upper directory of
+    ///   a clear-empty exchange, which is being deleted, so its xattrs are
+    ///   moot. EVERY source-read error — a denied read (`EACCES`/`EPERM` on
+    ///   the namespace list or the value) as well as resource/I-O failures
+    ///   (`ENOSPC`/`EIO`, ...) — degrades to "warn + skip" and the operation
+    ///   continues, restoring the pre-C3 success path for a non-owner rmdir
+    ///   of an owner-only xattr-carrying directory and keeping a pure rmdir
+    ///   independent of the doomed directory's xattr fidelity copy.
+    /// - **Strict source reads** ([`XattrCopyPolicy::Strict`], `CopyUp`
+    ///   path): the copied object is persisted, so `EACCES`/`EPERM` on the
+    ///   source namespace list or the value read PROPAGATES and the copy-up
+    ///   fails — the wave-4 baseline — with NO silent
+    ///   `security.*`/`trusted.*` loss.
+    /// - **Race degradation (both policies):** a concurrent xattr mutation
+    ///   between the probe and the materialized read surfaces as
+    ///   `ENODATA`/`ERANGE` and degrades to "skip this xattr" (value read) or
+    ///   "skip this namespace" (list probe), each with a `warn!`, never an
+    ///   abort of the operation.
+    /// - **Best-effort temp writes ([`XattrCopyPolicy::BestEffort`],
+    ///   `ClearEmpty` path):** the temp `set_xattr` is part of the same
+    ///   best-effort exchange — the displaced upper dir is being deleted and
+    ///   the opaque temp is whiteouted — so ANY temp-write failure (a denied
+    ///   write `EACCES`/`EPERM`, e.g. the temp's mode lacks owner-write for a
+    ///   `user.*` xattr; the transient `ENODATA`/`ERANGE`; or a resource/I-O
+    ///   error `ENOSPC`/`EIO`) degrades to "warn + skip this xattr" and the
+    ///   clear-empty rmdir succeeds (the pre-C3 success path). Under the
+    ///   strict [`XattrCopyPolicy::Strict`] a temp-write error still
+    ///   propagates and fails the persisted copy.
+    ///
+    /// Recorded divergence (§3.0.5 item 4): the underlying source reads run
+    /// under the CALLER's credentials because `with_creator_credentials_fn`
+    /// is a documented no-op seam (`mount/policy.rs`); Linux copies under
+    /// the creator's credentials and preserves these xattrs. The strict
+    /// copy-up policy refuses the silent loss by propagating the denial —
+    /// Linux's successful non-owner copy requires the §3.0.5 item-4
+    /// credential-swap VFS seam; its landing is the full closure. Genuine
+    /// xattr errors (an invalid name in the copied list) still hard-fail and
+    /// abort the exchange before the rename.
+    pub(in crate::fs::fs_impls::overlayfs) fn copy_eligible_xattrs(
+        &self,
+        source: &Arc<dyn Inode>,
+        temp: &Arc<dyn Inode>,
+        policy: XattrCopyPolicy,
+    ) -> Result<()> {
+        for namespace in [
+            XattrNamespace::User,
+            XattrNamespace::Trusted,
+            XattrNamespace::Security,
+        ] {
+            // A source LIST error follows the selected policy: best-effort
+            // degrades EVERY error to "skip this namespace's copy" with a
+            // `warn!` (the clear-empty source is being deleted, so a pure
+            // rmdir must never abort on the fidelity copy); strict
+            // propagates every error except the list/read race (a persisted
+            // copy must not lose the namespace). The list/read race
+            // (`ENODATA`/`ERANGE` — the list grew between the probe and the
+            // materialized read) degrades to "skip this namespace" under
+            // BOTH policies (a transient mutation, never an abort).
+            let names = match Self::list_xattr_names(source, namespace) {
+                Ok(names) => names,
+                Err(err) if is_skippable_source_error(&err, policy) => {
+                    warn!(
+                        "overlay xattr copy: source xattr list unavailable for {:?}; \
+                         skipping this namespace: {:?}",
+                        namespace, err
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            for full_name in names
+                .split(|&byte| byte == 0)
+                .filter(|name| !name.is_empty())
+            {
+                let Ok(full_name) = core::str::from_utf8(full_name) else {
+                    // The VFS `XattrName` is UTF-8 text; a non-UTF-8 list
+                    // entry cannot be represented and is skipped.
+                    continue;
+                };
+                if self.is_private(full_name) {
+                    continue;
+                }
+                // The name is validated exactly once per copied xattr and the
+                // validated `XattrName` is threaded through the value read and
+                // the temp write — no re-validation of `full_name` and no
+                // duplicated EINVAL error literal.
+                let name = XattrName::try_from_full_name(full_name).ok_or_else(|| {
+                    Error::with_message(Errno::EINVAL, "invalid xattr name in the copied list")
+                })?;
+                // Source value-read failures: the documented list/read race
+                // (`ENODATA`/`ERANGE` — value removed or resized between the
+                // probe and the materialized read) degrades to "skip this
+                // xattr" under BOTH policies; under best-effort
+                // ([`XattrCopyPolicy::BestEffort`], `ClearEmpty` path) EVERY
+                // source value-read error — a denied read (`EACCES`/`EPERM`,
+                // the no-op creator-credential seam, `mount/policy.rs`) as
+                // well as resource/I-O failures (`ENOSPC`/`EIO`, ...) —
+                // skips with a `warn!` (the clear-empty source being
+                // deleted); strict propagates every error but the race (no
+                // silent security-metadata loss on the persisted copy-up).
+                let value = match Self::read_xattr_value(source, &name) {
+                    Ok(value) => value,
+                    Err(err) if is_skippable_source_error(&err, policy) => {
+                        warn!("overlay xattr copy: skipping {}: {:?}", full_name, err);
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                let mut reader = VmReader::from(value.as_slice()).to_fallible();
+                // Best-effort temp writes (pre-wave5 round-7 repair; the
+                // round-6 arm already covered `EACCES`/`EPERM`/`ENODATA`/
+                // `ERANGE`): the displaced upper dir is being deleted and
+                // the opaque temp is whiteouted, so ANY failed temp
+                // `set_xattr` — a denied write (`EACCES`/`EPERM`, e.g. the
+                // temp's mode lacks owner-write for a `user.*` xattr), the
+                // transient race (`ENODATA`/`ERANGE`), or a resource/I-O
+                // failure (`ENOSPC`/`EIO`, ...) — degrades to warn + skip
+                // THIS xattr instead of aborting the whole clear-empty
+                // exchange (a pure rmdir must never abort on the fidelity
+                // copy). Strict keeps the wave-4 baseline: the persisted
+                // object must not lose metadata, so every temp-write error
+                // still hard-fails.
+                match temp.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
+                    Err(err) if policy == XattrCopyPolicy::BestEffort => {
+                        warn!(
+                            "overlay xattr copy: skipping {} on temp: {:?}",
+                            full_name, err
+                        );
+                        continue;
+                    }
+                    result => result?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists the xattr names of one namespace on `source`.
+    ///
+    /// The VFS list convention is probed with a zero-capacity writer (returns
+    /// the required size) and then materialized into an exactly sized buffer
+    /// (ramfs/ext2 precedent; a size change between the two calls surfaces as
+    /// `ERANGE`, which the caller treats as the documented list/read race and
+    /// skips that namespace — never an abort). Whitelist Rule B: invoked once
+    /// per namespace (three times per copy call) from
+    /// [`OverlayXattrPolicy::copy_eligible_xattrs`].
+    fn list_xattr_names(source: &Arc<dyn Inode>, namespace: XattrNamespace) -> Result<Vec<u8>> {
+        let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
+        let list_len = source.list_xattr(namespace, &mut probe)?;
+        let mut names = vec![0u8; list_len];
+        let mut list_writer = VmWriter::from(names.as_mut_slice()).to_fallible();
+        let written = source.list_xattr(namespace, &mut list_writer)?;
+        names.truncate(written);
+        Ok(names)
+    }
+
+    /// Reads one xattr value from `source`.
+    ///
+    /// The value length is probed with a zero-capacity writer and the value is
+    /// then materialized into an exactly sized buffer. `XattrName` is not
+    /// `Copy` and carries no `Clone` (frozen VFS surface), so each `get_xattr`
+    /// call takes its own owned view; both views are re-borrowed from the
+    /// caller's already-validated name (validated exactly once in the copy
+    /// loop), so the helper carries no validation and no error site of its own
+    /// — the single `ok_or_else` lives in the copy loop. Whitelist Rule B:
+    /// invoked once per listed name (multiple times per copy call) from
+    /// [`OverlayXattrPolicy::copy_eligible_xattrs`].
+    fn read_xattr_value(source: &Arc<dyn Inode>, name: &XattrName<'_>) -> Result<Vec<u8>> {
+        // `XattrName` is not `Copy`/`Clone`, so each `get_xattr` re-borrows a
+        // thin owned view of the same full name. The copy loop validated
+        // `name` exactly once; re-parsing the same full name cannot fail (the
+        // recorded hard-invariant `unreachable!` precedent of the tree, never
+        // `.unwrap()`/`.expect()`).
+        let reborrow_fn = || match XattrName::try_from_full_name(name.full_name()) {
+            Some(name) => name,
+            None => unreachable!("the copy loop validated this xattr name"),
+        };
+        let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
+        let value_len = source.get_xattr(reborrow_fn(), &mut probe)?;
+        let mut value = vec![0u8; value_len];
+        let mut value_writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+        let written = source.get_xattr(reborrow_fn(), &mut value_writer)?;
+        value.truncate(written);
+        Ok(value)
+    }
 }
 
-impl Inode for OverlayInode {
+impl OverlayInode {
     // P1-33 xattr get: classification refusal runs first (before the
     // admission, so no authority side effect ever starts for a private name —
     // the classification ordering note, spec §4), then the frozen empty
@@ -234,7 +505,11 @@ impl Inode for OverlayInode {
     // scope (ext2/ramfs evidence, spec §4.0); the explicit real stage inside
     // `check_permission` is the benign double evaluation kept for
     // gate-independence.
-    fn get_xattr(&self, name: XattrName, value_writer: &mut VmWriter) -> Result<usize> {
+    pub(in crate::fs::fs_impls::overlayfs) fn get_xattr_impl(
+        &self,
+        name: XattrName,
+        value_writer: &mut VmWriter,
+    ) -> Result<usize> {
         if !matches!(
             self.fs_arc()?.xattr_policy().classify(name.full_name()),
             XattrClass::Public
@@ -256,7 +531,7 @@ impl Inode for OverlayInode {
     // creator-credential forward. The underlying `set_xattr` self-evaluates
     // under the creator-credential scope (spec §4.0); the explicit real stage
     // is the benign double evaluation.
-    fn set_xattr(
+    pub(in crate::fs::fs_impls::overlayfs) fn set_xattr_impl(
         &self,
         name: XattrName,
         value_reader: &mut VmReader,
@@ -281,7 +556,11 @@ impl Inode for OverlayInode {
     // streaming pass so `Private`/`Escaped`/`Reserved` records never reach
     // the caller (invariant, BC-5 §50.2). The filtered length returned by
     // `filter_private_names` is the number of bytes written to `list_writer`.
-    fn list_xattr(&self, namespace: XattrNamespace, list_writer: &mut VmWriter) -> Result<usize> {
+    pub(in crate::fs::fs_impls::overlayfs) fn list_xattr_impl(
+        &self,
+        namespace: XattrNamespace,
+        list_writer: &mut VmWriter,
+    ) -> Result<usize> {
         self.check_permission(AccessType::ReadOnly, Permission::empty())?;
         self.delegate_to_real(|real| {
             let mut raw_list = vec![0u8; XATTR_LIST_MAX_LEN];
@@ -297,7 +576,10 @@ impl Inode for OverlayInode {
     // refusal (`EPERM`) before the mutating admission, so a non-`Public` name
     // is refused with no promotion side effect, then the uniform mutating
     // shape and a creator-credential forward to the current real authority.
-    fn remove_xattr(&self, name: XattrName) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn remove_xattr_impl(
+        &self,
+        name: XattrName,
+    ) -> Result<()> {
         if !matches!(
             self.fs_arc()?.xattr_policy().classify(name.full_name()),
             XattrClass::Public

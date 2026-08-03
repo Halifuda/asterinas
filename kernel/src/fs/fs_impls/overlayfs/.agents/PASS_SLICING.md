@@ -195,3 +195,159 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     during repair and stabilized at acceptance; review packets/outputs under the
     gitignored `subagent-tasks/` / `components/` trees; durable `.agents/*.md`
     records stay uncommitted during the Wave cycle so review diffs are `.rs`-only.
+
+- **`pre_wave5_c2_required_20260804`**
+  - **Kind**: Scheduling and design-revision decision; executed and accepted
+    through the bounded closure passes below.
+  - **Parent**: `copyup_authority_file_views` owns the stable workdir-temp
+    request/retry interface (`P1-34`); the namespace-mutation consumers are
+    explicitly listed below and do not change Meso ownership.
+  - **Decision**: Complete bounded `EEXIST` retry for workdir temps (C2) is a
+    **required pre-wave5 correctness repair**, superseding the 2026-08-04
+    deferral recorded in the prior handoff state. Wave5 is blocked until the
+    required design and implementation receipts are accepted.
+  - **Required design before dispatch**: a bounded Designer addendum must
+    freeze one typed request/result interface in `copyup/workdir.rs`, one
+    shared retry bound, fresh-name-per-attempt behavior, retry-on-`EEXIST`
+    only, error propagation for every other failure, and the exact use of the
+    successful `(name, inode)` pair by every caller. It must not use an opaque
+    closure-based helper.
+  - **Required implementation scope**: `copyup/promote.rs`,
+    `copyup/workdir.rs`, `dir/remove.rs`, `dir/create.rs`, `dir/link.rs`, and
+    `dir/whiteout.rs`. The packet must enumerate every workdir-temp creation,
+    link, and mknod call site in those files. A two-site or random-suffix-only
+    repair is rejected.
+  - **Validation and boundary**: no ktest surface; no pre-wave5 build or
+    runtime command. Later meso-integration xfstests remains the sole runtime
+    lane. This decision does not reopen deferred P1 overlay-parent identity or
+    P2 executable creator credentials.
+  - **Designer acceptance (2026-08-04)**: the bounded addendum under
+    `components/pre_wave5_closure/` is structurally accepted. It freezes the
+    v3 origin-wire/snapshot contract, the complete six-file C2 retry contract,
+    and six mechanical dispositions.
+
+- **`pre_wave5_closure_creator_slicing_20260804`**
+  - **Kind**: Main-agent Creator slicing for the accepted bounded closure
+    addendum. The three phases are serial because their write-sets and the
+    final `mount/build.rs` cleanup overlap.
+  - **User-directed execution rule**: one long-lived Creator agent executes
+    all phases in order. After each phase, the main agent reviews its exact
+    production diff; any finding returns to that same Creator for an in-place
+    repair. The main agent amends only the accepted phase's Rust write-set.
+    This is not a new Reviewer wave and does not reintroduce the prior
+    Reviewer loop.
+  - **Phase A — `pass_08_workdir_temp_retry`**
+    - **Parent**: `copyup_authority_file_views`.
+    - **Covered Micro-Features**: `P1-34`.
+    - **Write-set**: `copyup/{workdir.rs,promote.rs}` and
+      `dir/{remove.rs,create.rs,link.rs,whiteout.rs}`.
+    - **Scope**: complete typed `WorkdirTempRequest`/`WorkdirTemp` retry
+      interface, all six call sites, fresh-name-per-attempt, the shared bound,
+      and `EEXIST`-only retry. Risk High.
+  - **Phase B — `pass_09_origin_triplet`**
+    - **Parent**: `visibility_projection_identity`.
+    - **Covered Micro-Features**: `P1-07`.
+    - **Write-set**: `mount/build.rs`, `projection/identity.rs`,
+      `projection/lower_id.rs`, and the inseparable record-consumer propagation
+      in `readdir_index.rs`.
+    - **Scope**: native v3 `(container_dev_id, lower_layer_root_ino,
+      real_ino)` wire, immutable lower snapshot, unique-fsid resolution, and
+      conservative fallback. This phase also closes the inseparable sixth
+      mechanical item by removing the never-read `IdentityPolicy::layer_devs`.
+      Risk High.
+  - **Phase C — `pass_10_closure_mechanical`**
+    - **Parent**: N/A — user-directed bounded cross-meso cleanup; `P0-15` is
+      documentation-only and the remaining repairs claim no Micro-feature.
+    - **Covered Micro-Features**: `P0-15` documentation-only; no new feature
+      claim for the five mechanical objectives.
+    - **Write-set**: `readdir_index.rs`, `dir/remove.rs`,
+      `metadata_security/xattr.rs`, and `mount/build.rs`.
+    - **Scope**: C1 weaker index/facts documentation, five-arm
+      `parent_fallback` documentation, clear-empty xattr wording, associated
+      xattr helpers, and explicit `if let` in `mount/build.rs`. The
+      `IdentityPolicy::layer_devs` objective is already closed in Phase B and
+      is not re-edited. Risk Normal.
+  - **Shared boundary**: Creator phases are command-free, no ktest surface is
+    permitted, and no P1/P2/generation/fingerprint/VFS or lock-topology work
+    may enter a phase. After Phase C is accepted and amended, the main agent
+    records closure and opens the Wave5 Checker-owned compile/lint lane.
+  - **Execution / acceptance (2026-08-04)**: one long-lived Creator completed
+    all three phases; the main agent reviewed each exact Rust diff and routed
+    two P3 documentation/formatting corrections back to that same Creator.
+    Phase A accepted the six-file typed retry; Phase B accepted the v3 triplet,
+    lower snapshot, unique pair resolver, `readdir_index.rs` consumer update,
+    and `IdentityPolicy::layer_devs` removal; Phase C accepted all five
+    remaining mechanical repairs. Each accepted Rust write-set amended the
+    same commit, now `7aabd029c` (`Add pre-wave5 bounded overlayfs revisions`),
+    whose title contains no `WIP`. No Reviewer was introduced.
+
+- **`wave5_compile_lint_20260804`**
+  - **Kind**: Checker-owned static meso-integration entry lane.
+  - **Parent**: `overlayfs_refactor_static_integration` (temporary validation
+    parent; not an accepted Architect meso-component).
+  - **Covered Micro-Features**: all 57 Stage-D `需要实现` IDs, including the
+    closure-revised `P1-07`, `P1-34`, and documentation-only `P0-15`; the
+    remaining mechanical repairs claim no new Micro-feature.
+  - **Dispatch**: `task_checker_wave5_compile_lint_20260804` through
+    `subagent-tasks/wave_05_compile_lint/pass_11_wave5_compile_lint_checker_dispatch.md`.
+  - **Scope**: serialized container-only `cargo check` → `make kernel` →
+    `make check`. A failure produces a preserved-evidence actionable repair
+    batch; the Checker changes no production source. This is not the later
+    xfstests integration Checker and introduces no Reviewer or ktest surface.
+  - **Initial Checker result (2026-08-04)**: the target-specific `cargo check`
+    failed with 42 errors (exit 101), so `make kernel` and `make check` were
+    not run. Evidence and the repair batch are in
+    `components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md`.
+    Before any bounded overlayfs repair, the VFS owner must decide the narrow
+    `FsCreationCtx` task-context accessor and the in-use claim-slot facility;
+    the Checker prohibits faking either facility inside overlayfs.
+  - **Takeover continuation (2026-08-04, user-directed):** before the next
+    Checker run, `overlayfs::init()` was switched to register
+    `mount::OverlayFsType`, the deferred `dead_code` expectation was removed,
+    and `mod legacy_fs;` wiring was removed while retaining `legacy_fs.rs` as
+    an unlinked archive. These two Rust files amended the same commit, now
+    `73aec1ae3`. Continuation packet
+    `pass_11_wave5_compile_lint_checker_continuation_01_dispatch.md` authorizes
+    only the exact protocol `cargo check` command. Its failure triage permits
+    main-agent repair only for mechanical spelling/import/visibility/interface
+    propagation; any ownership, VFS contract, lifecycle, locking, semantic, or
+    non-obvious borrow repair waits for user direction.
+  - **Final static result (2026-08-04): BLOCKED / USER DECISION.** Three
+    continuations ran only the same prescribed target-specific `cargo check`.
+    The main agent amended every Checker-classified mechanical repair, reducing
+    the result from 42 errors / 16 warnings to 15 errors / 1 warning at
+    `7aabd029c`. No mechanical candidate remains. The unresolved categories
+    are the root-inode one-shot carrier, `OverlayInode` trait-implementation
+    ownership, `FsCreationCtx` task-context access, in-use claim-slot
+    lifecycle, and the source-permission `AccessType`. This static entry lane
+    stops here: `make kernel`, `make check`, runtime, and xfstests remain
+    unscheduled until the user supplies those decisions.
+
+- **`wave5_static_owner_reconciliation_design_20260804`**
+  - **Kind**: Bounded Designer code-form revision; not a Creator, Checker,
+    Reviewer, or implementation pass.
+  - **Parent**: `N/A` — preserves the existing Meso owners while reconciling
+    the Wave5 static-entry blockers.
+  - **Covered Micro-Features**: `P0-01`, `P0-05`, `P1-16`, `P1-19`, and
+    `P1-35`, plus the already-landed trait-required surfaces; no new
+    Micro-feature claim.
+  - **Dispatch / acceptance**: `task_designer_wave5_static_owner_reconciliation_20260804`,
+    accepted 2026-08-04. Its packet and exactly two Designer artifacts live
+    under `subagent-tasks/wave_05_static_repair_design/` and
+    `components/wave_05_static_repair_design/`.
+  - **Decision**: Freeze the five user-adjudicated forms: a private
+    `Mutex<Option<Arc<dyn Inode>>>` root publication slot; sole `Inode` and
+    `FileOps` implementations in `projection/inode.rs` forwarding to
+    existing-Meso `*_impl` helpers; `FsCreationCtx::task_ctx()`; a dedicated
+    `Extension` group whose `overlay_inuse_slot()` accessor lazily initializes
+    one token-only atomic slot; and the `ReadOnly` source link admission.
+  - **VFS boundary**: exact expected write-set is
+    `kernel/src/fs/vfs/fs_apis/{registry.rs,inode.rs,inode_ext.rs}`. It adds no
+    VFS module, global map, other extension-group use, context carrier, or
+    lock domain. The slot's `Acquire`/`Release`/`Relaxed` protocol protects
+    only token ownership; existing `InodeClaimGuard` keeps the inode pin and
+    releases only its own token.
+  - **Explicit boundary**: this acceptance authorizes neither a Creator
+    packet nor any command. The next implementation decision must separately
+    choose and packet the disjoint VFS seam and Overlayfs forwarding/root/
+    permission write-sets; P1/P2 deferrals remain untouched.

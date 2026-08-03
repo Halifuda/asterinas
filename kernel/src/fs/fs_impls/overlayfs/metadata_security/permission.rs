@@ -12,9 +12,9 @@
 //! `Mutating` class + the projected-DAC block), the real-handle stage
 //! [`OverlayInode::check_real_permission`] (copy-up promotion via the meso-04
 //! authority seam, then the explicit real check under the creator-credential
-//! scope), and the read-only VFS entry `Inode::check_permission` (the
-//! 1-param trait leg; never promotes — the write-open promotion is meso-04's
-//! `Inode::open` side effect).
+//! scope). The canonical read-only `Inode::check_permission` forwarder lives
+//! in `projection/inode.rs`; it calls this two-parameter inherent admission
+//! entry with `AccessType::ReadOnly` and never promotes.
 //!
 //! Pipeline (frozen, BC-5 §48-49): the local stage always runs first and is
 //! entirely lock-free; `default_permissions` skips only the real/creator-
@@ -74,11 +74,11 @@ impl OverlayInode {
     /// with no invented rollback (meso-04 owns any already-started transition
     /// cleanup). Verdicts are never cached.
     ///
-    /// Arity-overload note (frozen): this 2-param inherent method coexists
-    /// with the 1-param `Inode`-trait `check_permission` below; Rust method
-    /// resolution prefers the inherent method when the arity matches, so
-    /// trait callers reach the 1-param read-only entry and meso entries call
-    /// this one.
+    /// Arity-overload note (frozen): this two-parameter inherent method
+    /// coexists with the one-parameter `Inode::check_permission` forwarder
+    /// in `projection/inode.rs`; Rust method resolution prefers the inherent
+    /// method when the arity matches, so trait callers reach the read-only
+    /// forwarder and meso entries call this one.
     pub(in crate::fs::fs_impls::overlayfs) fn check_permission(
         &self,
         access: AccessType,
@@ -138,13 +138,18 @@ impl OverlayInode {
         Some(posix_thread.credentials().fsuid())
     }
 
-    /// Returns whether the current task's supplementary-group set contains
-    /// `gid` (wave-4 round-5 repair item 3 — the shared current-groups
-    /// accessor).
+    /// Returns whether the current task's filesystem group ID or
+    /// supplementary group set contains `gid` — Linux `in_group_p` semantics
+    /// (`kernel/groups.c` `in_group_p`: `!gid_eq(grp, cred->fsgid)` then
+    /// `groups_search(cred->group_info, grp)`; pre-wave5 C4).
     ///
     /// Kernel contexts (no task / no posix thread) report `false` — the
-    /// shared kernel-context default, applied in one place. Whitelist Rule
-    /// B: consumed by `metadata.rs::set_group`'s owner-chgrp exemption.
+    /// shared kernel-context default, applied in one place. The fsgid
+    /// disjunct is the pre-wave5 C4 completion: without it, an owner whose
+    /// filesystem group ID (`fsgid`) is the target gid but whose
+    /// supplementary set omits it was denied the owner-chgrp exemption.
+    /// Whitelist Rule B: consumed
+    /// by `metadata.rs::set_group`'s owner-chgrp exemption.
     pub(in crate::fs::fs_impls::overlayfs) fn current_in_group(gid: Gid) -> bool {
         let Some(task) = Task::current() else {
             return false;
@@ -152,7 +157,8 @@ impl OverlayInode {
         let Some(posix_thread) = task.as_posix_thread() else {
             return false;
         };
-        posix_thread.credentials().groups().contains(&gid)
+        let credentials = posix_thread.credentials();
+        gid == credentials.fsgid() || credentials.groups().contains(&gid)
     }
 
     /// PRIVATE STAGE A — the lock-free local half of the two-stage check.
@@ -270,19 +276,5 @@ impl OverlayInode {
         fs.policy()
             .credential_policy()
             .with_creator_credentials_fn(|| real.check_permission(perm))
-    }
-}
-
-impl Inode for OverlayInode {
-    /// The read-only leg of the two-stage check for open/access/exec.
-    ///
-    /// Delegates to the 2-param admission entry with [`AccessType::ReadOnly`]
-    /// (the inherent method wins arity resolution). Never promotes: the
-    /// write-open promotion is meso-04's `Inode::open` side effect (frozen
-    /// meso-04 §4); when the object is lower-backed the check evaluates the
-    /// lower real authority, preserving the §9 check-before/after-copy-up
-    /// consistency.
-    fn check_permission(&self, perm: Permission) -> Result<()> {
-        self.check_permission(AccessType::ReadOnly, perm)
     }
 }

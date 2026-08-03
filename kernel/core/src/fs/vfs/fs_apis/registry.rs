@@ -159,6 +159,11 @@ impl<'a> FsCreationCtx<'a> {
         self.args
     }
 
+    /// Returns the mounting task context.
+    pub(in crate::fs) fn task_ctx(&self) -> &Context<'a> {
+        self.task_ctx
+    }
+
     /// Resolves the mount source into a block device.
     pub(in crate::fs) fn resolve_block_device(&mut self) -> Result<&Arc<dyn BlockDevice>> {
         if self.block_device().is_none() {

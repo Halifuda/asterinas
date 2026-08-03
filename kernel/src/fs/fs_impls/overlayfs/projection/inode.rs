@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The Overlay inode carrier and its VFS `Inode` surface
+//! The Overlay inode carrier and its canonical VFS trait surface
 //! (`P0-04`/`P0-06`/`P0-12`/`P0-17`).
 //!
 //! This module owns the [`OverlayInode`] struct (the published logical inode
 //! carrier of the `visibility_projection_identity` meso), its `INODE`-domain
 //! payload [`OverlayObjectFacts`], the frozen root-carrier seam
 //! ([`OverlayInode::new_root`], consumed by `OverlayFs::new` step 10), and the
-//! `Inode` trait implementation: lookup (`P0-08`/`P0-09`), metadata/identity
-//! projection (`P0-12`), revalidation (`P0-17`). The mutating `Inode` entries
-//! are owned by the landed meso-06 `dir/` tree (`namespace_mutation_whiteout`).
+//! sole `Inode` and `FileOps` implementations. Those canonical trait methods
+//! directly forward each Meso's behavior to its current helper owner:
+//! projection lookup/metadata/identity/revalidation helpers stay here;
+//! copy-up, readdir, metadata-security, and directory-mutation behavior stays
+//! in their existing Meso helpers, including `dir/`'s namespace mutations.
 //!
 //! Lock contract (spec §3.0/§3.1/§3.3): `dir_transaction_lock` is the
 //! payload-less per-directory `DIR` transaction lock (`Some` for directories
@@ -48,17 +50,24 @@ use super::{
 };
 use crate::{
     fs::{
-        file::{InodeMode, InodeType},
+        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
-            copyup::coordination::CopyUpTransition, mount::OverlayFs, readdir_index::ReaddirIndex,
+            AccessType, copyup::coordination::CopyUpTransition, mount::OverlayFs,
+            readdir_index::ReaddirIndex,
         },
         vfs::{
             file_system::FileSystem,
-            inode::{Extension, Inode, Metadata, RevalidationPolicy},
+            inode::{
+                Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
+                RevalidationPolicy, SymbolicLink,
+            },
+            xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
+        utils::DirentVisitor,
     },
     prelude::*,
     process::{Gid, Uid},
+    vm::page_cache::PageCache,
 };
 
 /// The logical Overlay inode carrier exposed to the VFS (`P0-06`).
@@ -255,7 +264,7 @@ impl OverlayInode {
             fsid: layer.fsid,
             container_dev_id: layer.container_dev_id,
         });
-        let lowers = layer_stack
+        let lowers: Vec<_> = layer_stack
             .lowers
             .iter()
             .enumerate()
@@ -326,11 +335,8 @@ impl OverlayInode {
     ///
     /// Published for sibling Mesos; copy-up (meso-04) re-projection keeps the
     /// lower-id-derived identity, so the value is stable across copy-up
-    /// (authority-continuity invariant).
-    #[expect(
-        dead_code,
-        reason = "frozen published accessor (spec §4); consumed by sibling mesos once they land"
-    )]
+    /// (authority-continuity invariant). Consumed by `readdir_index.rs`
+    /// `parent_fallback` (the frozen `d_ino("..") == d_ino(".")` route).
     pub(in crate::fs::fs_impls::overlayfs) fn object_id(&self) -> OverlayObjectId {
         self.object_id
     }
@@ -435,13 +441,13 @@ impl OverlayInode {
     }
 }
 
-impl Inode for OverlayInode {
-    fn size(&self) -> usize {
+impl OverlayInode {
+    fn size_impl(&self) -> usize {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().size()
     }
 
-    fn metadata(&self) -> Metadata {
+    fn metadata_impl(&self) -> Metadata {
         let facts = self.facts_snapshot();
         let mut metadata = visible_source(&facts).real_inode().metadata();
         // The precomputed `object_id` replaces dev/ino (`P2-01`/`P0-12`):
@@ -453,46 +459,46 @@ impl Inode for OverlayInode {
         metadata
     }
 
-    fn ino(&self) -> u64 {
+    fn ino_impl(&self) -> u64 {
         self.object_id.ino
     }
 
-    fn type_(&self) -> InodeType {
+    fn type_impl(&self) -> InodeType {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().type_()
     }
 
-    fn mode(&self) -> Result<InodeMode> {
+    fn mode_impl(&self) -> Result<InodeMode> {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().mode()
     }
 
-    fn owner(&self) -> Result<Uid> {
+    fn owner_impl(&self) -> Result<Uid> {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().owner()
     }
 
-    fn group(&self) -> Result<Gid> {
+    fn group_impl(&self) -> Result<Gid> {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().group()
     }
 
-    fn atime(&self) -> Duration {
+    fn atime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().atime()
     }
 
-    fn mtime(&self) -> Duration {
+    fn mtime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().mtime()
     }
 
-    fn ctime(&self) -> Duration {
+    fn ctime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().ctime()
     }
 
-    fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
+    fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
         if !self.type_().is_directory() {
             return_errno_with_message!(
                 Errno::ENOTDIR,
@@ -522,7 +528,7 @@ impl Inode for OverlayInode {
         }
     }
 
-    fn fs(&self) -> Arc<dyn FileSystem> {
+    fn fs_impl(&self) -> Arc<dyn FileSystem> {
         match self.fs.upgrade() {
             Some(fs) => fs,
             // A live `OverlayInode` pins its real objects and is itself
@@ -537,21 +543,225 @@ impl Inode for OverlayInode {
         }
     }
 
-    fn revalidation_policy(&self) -> RevalidationPolicy {
+    fn revalidation_policy_impl(&self) -> RevalidationPolicy {
         match self.type_() {
             InodeType::Dir => RevalidationPolicy::REVALIDATE_ABSENT,
             _ => RevalidationPolicy::empty(),
         }
     }
 
-    fn revalidate_absent(&self, _name: &str) -> bool {
+    fn revalidate_absent_impl(&self, _name: &str) -> bool {
         // Cheap and conservative (`P0-17`): a negative dentry hit is always
         // re-looked-up. No locks and no I/O (spec §3.3 Hazard 4).
         false
     }
 
-    fn extension(&self) -> &Extension {
+    fn extension_impl(&self) -> &Extension {
         &self.extension
     }
+}
 
+impl FileOps for OverlayInode {
+    fn read_at(
+        &self,
+        offset: usize,
+        writer: &mut VmWriter,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        self.read_at_impl(offset, writer, status_flags)
+    }
+
+    fn write_at(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        self.write_at_impl(offset, reader, status_flags)
+    }
+
+    fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+        self.readdir_at_impl(offset, visitor)
+    }
+}
+
+impl Inode for OverlayInode {
+    fn size(&self) -> usize {
+        self.size_impl()
+    }
+
+    fn metadata(&self) -> Metadata {
+        self.metadata_impl()
+    }
+
+    fn ino(&self) -> u64 {
+        self.ino_impl()
+    }
+
+    fn type_(&self) -> InodeType {
+        self.type_impl()
+    }
+
+    fn mode(&self) -> Result<InodeMode> {
+        self.mode_impl()
+    }
+
+    fn owner(&self) -> Result<Uid> {
+        self.owner_impl()
+    }
+
+    fn group(&self) -> Result<Gid> {
+        self.group_impl()
+    }
+
+    fn atime(&self) -> Duration {
+        self.atime_impl()
+    }
+
+    fn mtime(&self) -> Duration {
+        self.mtime_impl()
+    }
+
+    fn ctime(&self) -> Duration {
+        self.ctime_impl()
+    }
+
+    fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
+        self.lookup_impl(name)
+    }
+
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        self.fs_impl()
+    }
+
+    fn revalidation_policy(&self) -> RevalidationPolicy {
+        self.revalidation_policy_impl()
+    }
+
+    fn revalidate_absent(&self, name: &str) -> bool {
+        self.revalidate_absent_impl(name)
+    }
+
+    fn extension(&self) -> &Extension {
+        self.extension_impl()
+    }
+
+    fn open(
+        &self,
+        access_mode: AccessMode,
+        status_flags: StatusFlags,
+    ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
+        self.open_impl(access_mode, status_flags)
+    }
+
+    fn seek_end(&self) -> Option<usize> {
+        self.seek_end_impl()
+    }
+
+    fn resize(&self, new_size: usize) -> Result<()> {
+        self.resize_impl(new_size)
+    }
+
+    fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
+        self.fallocate_impl(mode, offset, len)
+    }
+
+    fn sync_all(&self) -> Result<()> {
+        self.sync_all_impl()
+    }
+
+    fn sync_data(&self) -> Result<()> {
+        self.sync_data_impl()
+    }
+
+    fn read_link(&self) -> Result<SymbolicLink> {
+        self.read_link_impl()
+    }
+
+    fn page_cache(&self) -> Option<PageCache> {
+        self.page_cache_impl()
+    }
+
+    fn set_mode(&self, mode: InodeMode) -> Result<()> {
+        self.set_mode_impl(mode)
+    }
+
+    fn set_owner(&self, uid: Uid) -> Result<()> {
+        self.set_owner_impl(uid)
+    }
+
+    fn set_group(&self, gid: Gid) -> Result<()> {
+        self.set_group_impl(gid)
+    }
+
+    fn set_atime(&self, time: Duration) {
+        self.set_atime_impl(time)
+    }
+
+    fn set_mtime(&self, time: Duration) {
+        self.set_mtime_impl(time)
+    }
+
+    fn set_ctime(&self, time: Duration) {
+        self.set_ctime_impl(time)
+    }
+
+    fn check_permission(&self, perm: Permission) -> Result<()> {
+        self.check_permission(AccessType::ReadOnly, perm)
+    }
+
+    fn get_xattr(&self, name: XattrName, value_writer: &mut VmWriter) -> Result<usize> {
+        self.get_xattr_impl(name, value_writer)
+    }
+
+    fn set_xattr(
+        &self,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
+    ) -> Result<()> {
+        self.set_xattr_impl(name, value_reader, flags)
+    }
+
+    fn list_xattr(&self, namespace: XattrNamespace, list_writer: &mut VmWriter) -> Result<usize> {
+        self.list_xattr_impl(namespace, list_writer)
+    }
+
+    fn remove_xattr(&self, name: XattrName) -> Result<()> {
+        self.remove_xattr_impl(name)
+    }
+
+    fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {
+        self.create_impl(name, type_, mode)
+    }
+
+    fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Arc<dyn Inode>> {
+        self.mknod_impl(name, mode, type_)
+    }
+
+    fn write_link(&self, target: &str) -> Result<()> {
+        self.write_link_impl(target)
+    }
+
+    fn link(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
+        self.link_impl(old, name)
+    }
+
+    fn unlink(&self, name: &str) -> Result<()> {
+        self.unlink_impl(name)
+    }
+
+    fn rmdir(&self, name: &str) -> Result<()> {
+        self.rmdir_impl(name)
+    }
+
+    fn rename(
+        &self,
+        old_name: &str,
+        target: &Arc<dyn Inode>,
+        new_name: &str,
+        mode: RenameMode,
+    ) -> Result<()> {
+        self.rename_impl(old_name, target, new_name, mode)
+    }
 }

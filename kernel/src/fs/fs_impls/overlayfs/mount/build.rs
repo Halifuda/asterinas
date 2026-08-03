@@ -18,7 +18,7 @@
 //! root seam runs because `OverlayInode::new_root` reads `fs.identity()`),
 //! and tag 10b is the frozen step-10 root-carrier seam
 //! (`OverlayInode::new_root`; reconciled per wave-2 review item 1 — the seam
-//! accepts the `Weak<OverlayFs>` and fills the late-bound `OnceLock` root
+//! accepts the `Weak<OverlayFs>` and fills the late-bound root publication
 //! slot right after the `Arc` is published via `Arc::new_cyclic`).
 //!
 //! 1. parse the mount options (`OverlayMountOptions::parse`, P0-01);
@@ -42,8 +42,8 @@
 //! 9. persist the UUID when effective (`UpperWorkdirClaim::persist_identity`,
 //!    P2-11; writable mounts only);
 //! 10a. meso-02 wiring: acquire the overlay `AnonDeviceId` (fallible) and
-//!      construct `IdentityPolicy` (`overlay_dev_id` set here; `layer_devs`
-//!      from the published layer snapshot) plus the empty
+//!      construct `IdentityPolicy` (`overlay_dev_id` set here; construction-
+//!      local layer identity tuples from the published layer snapshot) plus the empty
 //!      `bindings`/`inodes` caches (spec §3.5 item 1 / §3.4);
 //! 10b. construct the root carrier via the real meso-02 seam
 //!      (`OverlayInode::new_root`, spec §1 item 1 / §3.0.5 item 8; see the
@@ -58,7 +58,6 @@
 //! the policy snapshot, so on rollback they release before the Wave-1
 //! resources — the frozen Wave-1 release order is undisturbed.
 
-use core::cell::OnceLock;
 use core::sync::atomic::AtomicU64;
 
 use device_id::DeviceId;
@@ -82,7 +81,7 @@ use crate::{
         },
         pseudofs::AnonDeviceId,
         vfs::{
-            file_system::{FileSystem, FsEventSubscriberStats, FsFlags},
+            file_system::{FsEventSubscriberStats, FsFlags},
             registry::FsCreationCtx,
         },
     },
@@ -300,13 +299,14 @@ impl OverlayFs {
             upper_capabilities,
             write_access,
             options.is_default_permissions,
+            options.xino_mode, // pre-wave5 A1
         );
 
         // Step 10 — meso-02 construction wiring (cross-meso owner rule, spec
         // §3.5 item 1): the extended `OverlayFs::new` acquires the overlay
         // `AnonDeviceId` (fallible) and constructs the `IdentityPolicy`
-        // (`overlay_dev_id` set here; `layer_devs` from the published layer
-        // snapshot). The `bindings`/`inodes` caches are initialized empty
+        // (`overlay_dev_id` set here; construction-local layer identity
+        // tuples from the published layer snapshot). The `bindings`/`inodes` caches are initialized empty
         // here too — they are the meso-02 per-mount state fields added to the
         // Macro-Owner carrier (spec §1 item 2 / §3.4), and the `projection`
         // module publishes them through `OverlayFs::bindings()`/`inodes()`/
@@ -326,21 +326,31 @@ impl OverlayFs {
         })?;
         let overlay_dev_id = anon_device_id.id();
 
-        // `layer_devs` is the immutable `fsid -> container_dev_id` table of
-        // the published layer snapshot (upper first when present, then the
-        // lowers topmost-first) — the same single source that feeds
-        // `IdentityPolicy::is_all_layers_same_fs` (meso-02 spec §4
-        // `IdentityPolicy`; revision-07 ledger item 7: "built at construction
-        // from the published layer snapshot"). The table is fsid-sorted and
-        // frozen inside `IdentityPolicy::new`.
+        // `layer_devs` is construction-local `(fsid, container_dev_id,
+        // lower_layer_root_ino)` input from the published snapshot (upper
+        // first when present, then lowers topmost-first). `IdentityPolicy`
+        // derives all-layer same-fs state and retains only its fsid-sorted
+        // lower snapshot; no all-layer table remains stored after `new`.
         let layer_capacity =
             layer_stack.lowers.len() + if layer_stack.upper.is_some() { 1 } else { 0 };
-        let mut layer_devs: Vec<(u64, DeviceId)> = Vec::with_capacity(layer_capacity);
-        if let Some(upper) = &layer_stack.upper {
-            layer_devs.push((upper.fsid, upper.container_dev_id));
-        }
+        let mut layer_devs: Vec<(u64, DeviceId, u64)> = Vec::with_capacity(layer_capacity);
+        // The upper's entry position in `layer_devs`, when an upper exists:
+        // the LOWER-only snapshot that serves origin-record device/root-pair
+        // resolution is derived inside `IdentityPolicy::new`
+        // by excluding exactly this entry — one construction, so the two
+        // views can never diverge. The exclusion is by position, not by
+        // value: an upper sharing an underlying filesystem with a lower must
+        // not also drop the lower's entry. The explicit branch keeps the
+        // index capture next to the push it describes.
+        let upper_layer_dev_index = if let Some(upper) = layer_stack.upper.as_ref() {
+            let index = layer_devs.len();
+            layer_devs.push((upper.fsid, upper.container_dev_id, upper.root_inode.ino()));
+            Some(index)
+        } else {
+            None
+        };
         for lower in &layer_stack.lowers {
-            layer_devs.push((lower.fsid, lower.container_dev_id));
+            layer_devs.push((lower.fsid, lower.container_dev_id, lower.root_inode.ino()));
         }
 
         // The frozen xino mask width ("e.g. 64 - 16 = 48-bit payload", spec
@@ -348,8 +358,13 @@ impl OverlayFs {
         // policy value (identity.rs creator record §5 deviation 2). `new` is
         // fallible only to enforce the frozen `xino_shift <= 63` invariant.
         const XINO_SHIFT: u32 = 16;
-        let identity =
-            IdentityPolicy::new(overlay_dev_id, layer_devs.into_boxed_slice(), XINO_SHIFT)?;
+        let identity = IdentityPolicy::new(
+            overlay_dev_id,
+            layer_devs.into_boxed_slice(),
+            upper_layer_dev_index,
+            XINO_SHIFT,
+            policy.xino_mode(), // pre-wave5 A1: consumption at construction
+        )?;
 
         // The meso-02 cache fields start empty; entries are inserted/updated
         // under the caller's parent `DIR` transaction by the `projection`
@@ -373,7 +388,7 @@ impl OverlayFs {
         // `new_cyclic_in`). The reconciliation: `Arc::new_cyclic` establishes
         // the canonical `OverlayFs::self_weak` reference (ramfs
         // `Arc::new_cyclic` + `Weak<RamFs>` precedent), the struct is built
-        // with an empty `OnceLock` root slot, and the slot is filled
+        // with an empty root publication slot, and the slot is filled
         // immediately after the strong reference exists via
         // `OverlayInode::new_root(Arc::downgrade(&overlay_fs))`. The seam now
         // accepts the `Weak<OverlayFs>` — the recorded deviation from the
@@ -386,7 +401,7 @@ impl OverlayFs {
             claims,
             policy,
             mount_source,
-            root_inode: OnceLock::new(),
+            root_inode: Mutex::new(None),
             lifecycle: Mutex::new(MountLifecycle {
                 phase: MountPhase::Ready,
             }),
@@ -426,9 +441,8 @@ impl OverlayFs {
             // `dir/whiteout.rs`; forward reference by frozen name).
             whiteout_cache: Mutex::new(WhiteoutCache::new()),
         });
-        let _ = overlay_fs
-            .root_inode
-            .set(OverlayInode::new_root(Arc::downgrade(&overlay_fs)));
+        let root_inode = OverlayInode::new_root(Arc::downgrade(&overlay_fs));
+        *overlay_fs.root_inode.lock() = Some(root_inode);
         Ok(overlay_fs)
     }
 }

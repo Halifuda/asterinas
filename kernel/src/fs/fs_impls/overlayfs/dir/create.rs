@@ -42,15 +42,16 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
         fs_impls::overlayfs::{
-            metadata_security::xattr::{OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME},
             AccessType,
+            copyup::WorkdirTempRequest,
+            metadata_security::xattr::{OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME},
             projection::{
                 Binding, BindingKey, NegativeBinding, OverlayInode, OverlayObjectFacts,
                 PositiveBinding, PositiveKind, RealObject,
             },
         },
         vfs::{
-            inode::{Inode, MknodType, RenameMode},
+            inode::{MknodType, RenameMode},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -214,19 +215,10 @@ impl OverlayInode {
     /// recipe. This arm covers only the one affected pair of this recipe and
     /// never a partial sequence.
     ///
-    /// # Recorded deviation (spec §7.1 step 4 mknod leg)
-    ///
-    /// The frozen step-4 text creates every temp through
-    /// `create_workdir_temp(temp_name, type_, mode)` (a workdir `create`).
-    /// For the mknod leg (`mknod_type: Some(..)`) that would create the
-    /// device/pipe through the generic `create` surface, which cannot carry
-    /// the device id (ext2) and panics on backends whose `create` only
-    /// accepts regular/symlink/socket/dir kinds (ramfs). The landed meso-04
-    /// special-object copy-up leg solves exactly this by composing
-    /// `workdir.mknod(&temp_name, mode, mknod_type)` directly
-    /// (`copyup/promote.rs` special-object arm), so this recipe follows that
-    /// frozen-seam precedent: no new helper and no parallel interface, only
-    /// the same workdir `mknod` composition the landed copy-up uses.
+    /// The shared workdir-temp request carries a borrowed [`MknodType`] for
+    /// the special-object leg. Its retry owner recreates the VFS value for
+    /// each attempt, so device identity survives an `EEXIST` retry without a
+    /// caller-local staging operation.
     fn create_over_whiteout(
         &self,
         name: &str,
@@ -240,23 +232,27 @@ impl OverlayInode {
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
         let upper_parent = self.upper_parent()?;
-        // The workdir root resolves through the single shared resolver
-        // (`OverlayInode::workdir_root`, wave-4 repair item 11) — the inline
-        // claims block is deleted.
-        let workdir = self.workdir_root()?;
-        let temp_name = fs.generate_workdir_temp_name(name, &upper_parent);
         // Shared mechanical kind mapping (wave-4 repair item 11; consumed by
         // the opaque branch and the index seam). Computed before
         // `mknod_type` is consumed by the temp creation below.
         let object_type = mknod_type.as_ref().map(mknod_object_type).unwrap_or(type_);
         // Private staging: the temp is never a lookup/readdir/ReaddirIndex
-        // source (BC-6 §57). The mknod leg uses the workdir `mknod`
-        // composition (meso-04 precedent, see the method doc); the
-        // create-family leg uses the frozen meso-04 staging seam.
-        let temp = match mknod_type {
-            Some(mknod) => workdir.mknod(&temp_name, mode, mknod)?,
-            None => fs.create_workdir_temp(&temp_name, type_, mode)?,
+        // source (BC-6 §57). The typed request selects either the `mknod` or
+        // create operation while the shared owner performs every retry.
+        let temp = match &mknod_type {
+            Some(node) => fs.create_workdir_temp(
+                name,
+                &upper_parent,
+                WorkdirTempRequest::Mknod { mode, node },
+            )?,
+            None => fs.create_workdir_temp(
+                name,
+                &upper_parent,
+                WorkdirTempRequest::Create { kind: type_, mode },
+            )?,
         };
+        let (temp_name, temp) = temp.into_parts();
+        let workdir = self.workdir_root()?;
         // The shared recipe scaffold (wave-4 round-2 repair item 2): the
         // commit marker is flipped at the physical upper commit point and the
         // Case-13 reconcile / pre-publication cleanup classification is owned
@@ -284,15 +280,14 @@ impl OverlayInode {
                              required for a directory over a whiteout",
                         ));
                     }
-                    let marker_name =
-                        XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
+                    let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME)
+                        .ok_or_else(|| {
                             Error::with_message(
                                 Errno::EINVAL,
                                 "invalid overlay opaque marker xattr name",
                             )
                         })?;
-                    let mut marker_reader =
-                        VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
+                    let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
                     temp.set_xattr(
                         marker_name,
                         &mut marker_reader,

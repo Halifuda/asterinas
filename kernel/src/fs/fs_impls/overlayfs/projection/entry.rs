@@ -134,7 +134,7 @@ impl RealObject {
             Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
         })?;
         let mut value = [0u8; 1];
-        let mut writer = VmWriter::from(&mut value).to_fallible();
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match self.real_inode.get_xattr(name, &mut writer) {
             Ok(_) => Ok(true),
             Err(err) if err.error() == Errno::ERANGE => Ok(true),
@@ -160,7 +160,7 @@ impl RealObject {
             Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
         })?;
         let mut value = [0u8; 1];
-        let mut writer = VmWriter::from(&mut value).to_fallible();
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match self.real_inode.get_xattr(name, &mut writer) {
             Ok(written) => Ok(written == 1 && value[0] == b'y'),
             Err(err)
@@ -239,7 +239,6 @@ impl OverlayFs {
                             lowers: Vec::new(),
                         }));
                     }
-                    dir_hits.push(hit);
                     if hit.is_opaque_directory()? {
                         // An opaque directory found at the name is a merge
                         // barrier at EVERY layer, including the upper (Linux
@@ -253,6 +252,7 @@ impl OverlayFs {
                             lowers: Vec::new(),
                         }));
                     }
+                    dir_hits.push(hit);
                 }
                 Err(err) if err.error() == Errno::ENOENT => {
                     // The name is absent from the upper. An opaque upper
@@ -313,8 +313,9 @@ impl OverlayFs {
                         // -> `d->stop = true`; namei.c:298-299).
                         break;
                     }
+                    let is_opaque = hit.is_opaque_directory()?;
                     dir_hits.push(hit);
-                    if hit.is_opaque_directory()? {
+                    if is_opaque {
                         // An opaque directory found at this layer is the last
                         // entry of the merge: deeper lower directories are
                         // hidden (Linux `ovl_lookup_single`: `val == 'y'` ->
