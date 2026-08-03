@@ -10,6 +10,7 @@ use legacy_fs::OverlayFsType;
 mod legacy_fs;
 
 mod mount;
+mod projection;
 
 pub(super) fn init() {
     crate::fs::vfs::registry::register(&OverlayFsType).unwrap();

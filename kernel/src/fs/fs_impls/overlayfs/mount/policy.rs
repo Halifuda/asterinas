@@ -17,13 +17,19 @@
 //! 7), and the write-access accounting is created only for genuinely writable
 //! mounts (spec §4 invariant: `write_access` is `Some` iff
 //! `is_effective_read_only` is false).
+//!
+//! Round-3 review item 1 (cross-meso consumption widening per the owner
+//! rule): `MountPolicy` and `UpperFilesystemCapabilities` and the members the
+//! `projection` tree consumes (`is_effective_read_only`,
+//! `upper_capabilities`, `can_store_private_xattr`, `can_mknod_char`) are
+//! published at the overlayfs ceiling.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use aster_rights::ReadDupOp;
 
 use super::{
-    claims::{OverlayUuid, OVERLAY_UUID_SIZE},
+    claims::{OVERLAY_UUID_SIZE, OverlayUuid},
     options::UuidMode,
 };
 use crate::{
@@ -85,7 +91,7 @@ fn unique_temp_name(prefix: &str) -> String {
 /// `Credentials<ReadDupOp>` (via [`CreatorCredentialPolicy`]), which has no
 /// `Debug` impl (verified `kernel/src/process/credentials/mod.rs`); the spec
 /// §4 shape hint explicitly allows dropping an unsatisfiable derive.
-pub(super) struct MountPolicy {
+pub(in crate::fs::fs_impls::overlayfs) struct MountPolicy {
     /// Effective read-only state (`P0-18`), frozen before any claim is taken.
     is_effective_read_only: bool,
     /// The UUID/fsid mode (`P2-11`).
@@ -131,7 +137,10 @@ impl MountPolicy {
     }
 
     /// Reports the effective read-only state (`P0-18`).
-    pub(super) fn is_effective_read_only(&self) -> bool {
+    ///
+    /// Widened to the overlayfs ceiling (round-3 review item 1): consumed by
+    /// `OverlayInode::read_only_gate` from the `projection` tree.
+    pub(in crate::fs::fs_impls::overlayfs) fn is_effective_read_only(&self) -> bool {
         self.is_effective_read_only
     }
 
@@ -141,13 +150,19 @@ impl MountPolicy {
     /// `self.fs_arc()?.policy().is_default_permissions()` in its stage-B skip
     /// (BC-5 §49); it reports the frozen option value only — the skip
     /// semantics are meso-05's (spec §1 item 4).
-    #[expect(dead_code, reason = "frozen accessor (spec revision 04); meso-05 consumes it as `self.fs_arc()?.policy().is_default_permissions()` in its stage-B skip")]
+    #[expect(
+        dead_code,
+        reason = "frozen accessor (spec revision 04); meso-05 consumes it as `self.fs_arc()?.policy().is_default_permissions()` in its stage-B skip"
+    )]
     pub(super) fn is_default_permissions(&self) -> bool {
         self.is_default_permissions
     }
 
     /// Returns the frozen UUID/fsid mode (`P2-11`).
-    #[expect(dead_code, reason = "frozen published accessor (spec §4); consumed by sibling mesos once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen published accessor (spec §4); consumed by sibling mesos once they land"
+    )]
     pub(super) fn uuid_mode(&self) -> UuidMode {
         self.uuid_mode
     }
@@ -161,22 +176,33 @@ impl MountPolicy {
     }
 
     /// Returns the stashed creator-credential policy (`P1-19`).
-    #[expect(dead_code, reason = "frozen published accessor (spec §4); consumed by meso-04 once it lands")]
+    #[expect(
+        dead_code,
+        reason = "frozen published accessor (spec §4); consumed by meso-04 once it lands"
+    )]
     pub(super) fn credential_policy(&self) -> &CreatorCredentialPolicy {
         &self.credential_policy
     }
 
     /// Returns the advisory write-access accounting, if this is a writable
     /// mount (`P1-20`).
-    #[expect(dead_code, reason = "frozen published accessor (spec §4); consumed by meso write-access consumers once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen published accessor (spec §4); consumed by meso write-access consumers once they land"
+    )]
     pub(super) fn write_access(&self) -> Option<&WriteAccessAccounting> {
         self.write_access.as_ref()
     }
 
     /// Returns the post-claim upper-filesystem capability snapshot, if this
     /// is a writable mount (`P0-02`).
-    #[expect(dead_code, reason = "frozen published accessor (spec §4); consumed by meso-06 `WhiteoutRepresentation` derivation once it lands")]
-    pub(super) fn upper_capabilities(&self) -> Option<&UpperFilesystemCapabilities> {
+    #[expect(
+        dead_code,
+        reason = "frozen published accessor (spec §4); consumed by the P1-07 store seam (lower_id.rs) and later by meso-06 `WhiteoutRepresentation`"
+    )]
+    pub(in crate::fs::fs_impls::overlayfs) fn upper_capabilities(
+        &self,
+    ) -> Option<&UpperFilesystemCapabilities> {
         self.upper_capabilities.as_ref()
     }
 }
@@ -215,13 +241,19 @@ impl CreatorCredentialPolicy {
     }
 
     /// Returns the stashed creator credentials.
-    #[expect(dead_code, reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land"
+    )]
     pub(super) fn snapshot(&self) -> &Credentials<ReadDupOp> {
         &self.snapshot
     }
 
     /// Returns the credential source (closed set: `Creator` this wave).
-    #[expect(dead_code, reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land"
+    )]
     pub(super) fn source(&self) -> CredentialSource {
         self.source
     }
@@ -236,7 +268,10 @@ impl CreatorCredentialPolicy {
     /// runs with the caller's current credentials and the stashed snapshot is
     /// published for sibling Mesos but cannot be installed (temporary seam,
     /// recorded in the Creator report); no frozen signature is changed.
-    #[expect(dead_code, reason = "frozen creator-credential override contract (spec §4, P1-19); consumed by meso-04+ once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen creator-credential override contract (spec §4, P1-19); consumed by meso-04+ once they land"
+    )]
     pub(super) fn with_creator_credentials_fn<T>(
         &self,
         operation_fn: impl FnOnce() -> Result<T>,
@@ -263,7 +298,7 @@ pub(super) enum CredentialSource {
 /// `WhiteoutRepresentation` derivation) never re-probe or re-derive (spec §1
 /// item 5 / §4 invariants).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct UpperFilesystemCapabilities {
+pub(in crate::fs::fs_impls::overlayfs) struct UpperFilesystemCapabilities {
     /// Whether the upper can store private overlay xattrs (`trusted.`/`user.`
     /// namespace; `P0-02`/`P2-11` gate).
     can_store_private_xattr: bool,
@@ -383,11 +418,7 @@ impl UpperFilesystemCapabilities {
     /// cleanup is the `P3-09` insertion point, spec §2.4).
     fn probe_mknod_char(workdir_inode: &Arc<dyn Inode>) -> Result<bool> {
         let probe_name = unique_temp_name(CHAR_DEVICE_PROBE_PREFIX);
-        match workdir_inode.mknod(
-            &probe_name,
-            InodeMode::empty(),
-            MknodType::CharDevice(0),
-        ) {
+        match workdir_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
             Ok(_) => {
                 workdir_inode.unlink(&probe_name)?;
                 Ok(true)
@@ -398,7 +429,11 @@ impl UpperFilesystemCapabilities {
     }
 
     /// Reports whether the upper can store private overlay xattrs.
-    pub(super) fn can_store_private_xattr(&self) -> bool {
+    ///
+    /// Widened to the overlayfs ceiling (round-3 review item 1): consumed by
+    /// the P1-07 store seam (`projection/lower_id.rs`) from the `projection`
+    /// tree.
+    pub(in crate::fs::fs_impls::overlayfs) fn can_store_private_xattr(&self) -> bool {
         self.can_store_private_xattr
     }
 
@@ -409,7 +444,9 @@ impl UpperFilesystemCapabilities {
 
     /// Reports whether the workdir supports the classic whiteout char device
     /// `0:0` (revision 05).
-    pub(super) fn can_mknod_char(&self) -> bool {
+    ///
+    /// Widened to the overlayfs ceiling (round-3 review item 1, as consumed).
+    pub(in crate::fs::fs_impls::overlayfs) fn can_mknod_char(&self) -> bool {
         self.can_mknod_char
     }
 }
@@ -479,27 +516,36 @@ impl WriteAccessAccounting {
     /// incremented and the RAII guard returned. The increment is a
     /// non-blocking single-word atomic update that never wraps (spec §4
     /// invariant).
-    #[expect(dead_code, reason = "frozen P1-20 advisory guard intake (spec §4); consumed by write-access consumers once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen P1-20 advisory guard intake (spec §4); consumed by write-access consumers once they land"
+    )]
     pub(super) fn try_get_write_access(&self) -> Result<WriteAccessGuard<'_>> {
         if self.upper_fs.flags().contains(FsFlags::RDONLY) {
             return Err(Error::new(Errno::EROFS));
         }
-        let _ = self.active_write_users.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |count| Some(count.saturating_add(1)),
-        );
+        let _ =
+            self.active_write_users
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(1))
+                });
         Ok(WriteAccessGuard { accounting: self })
     }
 
     /// Reports whether any write-access user is currently counted.
-    #[expect(dead_code, reason = "frozen P1-20 advisory reporting accessor (spec §4); consumed by sibling mesos once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen P1-20 advisory reporting accessor (spec §4); consumed by sibling mesos once they land"
+    )]
     pub(super) fn has_active_write_users(&self) -> bool {
         self.active_write_users.load(Ordering::Relaxed) > 0
     }
 
     /// Returns the current advisory active-user count.
-    #[expect(dead_code, reason = "frozen P1-20 advisory reporting accessor (spec §4); consumed by sibling mesos once they land")]
+    #[expect(
+        dead_code,
+        reason = "frozen P1-20 advisory reporting accessor (spec §4); consumed by sibling mesos once they land"
+    )]
     pub(super) fn active_write_user_count(&self) -> u64 {
         self.active_write_users.load(Ordering::Relaxed)
     }

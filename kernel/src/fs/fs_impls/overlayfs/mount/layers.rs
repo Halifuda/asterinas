@@ -8,7 +8,10 @@
 //! superblock `fsid` assignment (`BC-1` §8), and the `P0-02` mount-time layer
 //! gates. The stack is constructed once by [`OverlayLayerStack::assemble`]
 //! during `OverlayFs::new` and is immutable afterwards for the mount lifetime;
-//! sibling Mesos read it only.
+//! sibling Mesos read it only. Round-3 review item 1 (cross-meso consumption
+//! widening per the owner rule): the carriers and the members the `projection`
+//! tree consumes (`upper`/`lowers`, `root_inode`/`fs`/`fsid`/
+//! `container_dev_id`) are published at the overlayfs ceiling.
 
 use device_id::DeviceId;
 
@@ -55,11 +58,11 @@ pub(super) fn resolve_root_path(fs_creation_ctx: &FsCreationCtx, raw_path: &str)
 /// after construction (`P0-02` immutability invariant); sibling Mesos read it
 /// only and never re-create, copy ownership of, or mutate it.
 #[derive(Debug)]
-pub(super) struct OverlayLayerStack {
+pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayerStack {
     /// Pinned upper layer; present iff the overlay is writable.
-    pub(super) upper: Option<OverlayLayer>,
+    pub(in crate::fs::fs_impls::overlayfs) upper: Option<OverlayLayer>,
     /// Pinned lower layers; non-empty and ordered topmost-first.
-    pub(super) lowers: Vec<OverlayLayer>,
+    pub(in crate::fs::fs_impls::overlayfs) lowers: Vec<OverlayLayer>,
 }
 
 /// One pinned real layer root of an overlay mount.
@@ -68,15 +71,15 @@ pub(super) struct OverlayLayerStack {
 /// (layer-lifetime pins, `P0-02`). `container_dev_id` carries the `st_dev`
 /// same-filesystem evidence used by the `P0-03` upper/workdir validation.
 #[derive(Debug)]
-pub(super) struct OverlayLayer {
+pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayer {
     /// Pinned real layer root (lifetime pin).
-    pub(super) root_inode: Arc<dyn Inode>,
+    pub(in crate::fs::fs_impls::overlayfs) root_inode: Arc<dyn Inode>,
     /// Underlying filesystem identity of the layer root.
-    pub(super) fs: Arc<dyn FileSystem>,
+    pub(in crate::fs::fs_impls::overlayfs) fs: Arc<dyn FileSystem>,
     /// Per-unique-underlying-superblock identifier assigned at assembly (`BC-1` §8).
-    pub(super) fsid: u64,
+    pub(in crate::fs::fs_impls::overlayfs) fsid: u64,
     /// `st_dev` of the layer root, used for same-filesystem comparisons (`P0-03`).
-    pub(super) container_dev_id: DeviceId,
+    pub(in crate::fs::fs_impls::overlayfs) container_dev_id: DeviceId,
 }
 
 impl OverlayLayer {

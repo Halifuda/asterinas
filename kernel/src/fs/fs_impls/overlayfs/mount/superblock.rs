@@ -4,19 +4,36 @@
 //! surface (`P0-05`).
 //!
 //! This module owns the `OverlayFs` struct (the published mount/layer/policy
-//! state), the `FileSystem` trait implementation, and the `MOUNT` level-1
+//! state plus the meso-02 projection state — `bindings`/`inodes`/`identity`,
+//! added under the cross-meso owner-extension rule, meso-02 spec §3.4/§3.5),
+//! the `FileSystem` trait implementation, and the `MOUNT` level-1
 //! lifecycle domain (`MountLifecycle`/`MountPhase`). All fallible mount work
 //! happens in `build.rs` (`OverlayFs::new`); the hooks here enter through a
 //! pinned `Arc<OverlayFs>` and hold no Overlay lock except the short `MOUNT`
 //! transition inside [`OverlayFs::begin_shutdown`].
+//!
+//! The wave-2 review item 2 widened the cross-boundary carriers to the
+//! documented overlayfs ceiling (`pub(in crate::fs::fs_impls::overlayfs)`):
+//! `OverlayFs` itself, plus the canonical `self_weak` reference added by the
+//! wave-2 repair item 1 (the root-carrier materialization). The
+//! `bindings`/`inodes`/`identity` fields already used that ceiling. Round-2
+//! review item 1 widened the consumed accessor methods (`layer_stack()`,
+//! `policy()`, `claims()`) to the same ceiling so the `projection` tree can
+//! call them (E0624).
+
+use core::cell::OnceLock;
 
 use super::{
-    claims::UpperWorkdirClaim, layers::OverlayLayerStack, policy::MountPolicy, OVERLAY_FS_NAME,
+    OVERLAY_FS_NAME, claims::UpperWorkdirClaim, layers::OverlayLayerStack, policy::MountPolicy,
 };
 use crate::{
-    fs::vfs::{
-        file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
-        inode::Inode,
+    fs::{
+        fs_impls::overlayfs::projection::{BindingCache, IdentityPolicy, InodeCache},
+        pseudofs::AnonDeviceId,
+        vfs::{
+            file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
+            inode::Inode,
+        },
     },
     prelude::*,
 };
@@ -26,15 +43,21 @@ use crate::{
 /// `OverlayFs` is the only object that publishes mount/layer/policy state to
 /// sibling Mesos. It is created by [`OverlayFs::new`] (in `build.rs`) through
 /// the frozen 11-step construction sequence; after publication the layer
-/// stack, claims, and policy snapshot are immutable.
+/// stack, claims, and policy snapshot are immutable. The meso-02 projection
+/// state — `bindings` ([`BindingCache`]), `inodes` ([`InodeCache`]), and
+/// `identity` ([`IdentityPolicy`]) — is initialized in the same constructor
+/// under the cross-meso owner-extension rule (meso-02 spec §3.4/§3.5) and
+/// consumed by the `projection` module.
 ///
 /// Invariants: `root_inode()` returns the prepared root carrier and performs
 /// no fallible work (`P0-05` infallible-root invariant); `claims` is `Some`
 /// only for writable mounts and is released exactly once on the final `Drop`
 /// (guard `Drop`, atomic non-blocking, no mutex); the `MOUNT` lifecycle is
 /// used only for lifecycle transitions and is never held across underlying
-/// callbacks.
-pub(super) struct OverlayFs {
+/// callbacks. The meso-02 `bindings`/`inodes` caches use sleep-capable
+/// `RwMutex` internal data locks (not topology levels) and the `identity`
+/// policy is immutable after construction.
+pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     pub(super) layer_stack: OverlayLayerStack,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
@@ -44,12 +67,61 @@ pub(super) struct OverlayFs {
     pub(super) policy: MountPolicy,
     /// The reported mount source (`P0-05` show-options surface).
     pub(super) mount_source: String,
-    /// The prepared root carrier (provisional cross-meso seam, spec §3.0.5
-    /// item 8).
-    pub(super) root_inode: Arc<dyn Inode>,
+    /// The prepared root carrier (frozen cross-meso seam, spec §3.0.5 item 8;
+    /// wave-2 repair item 1 reconciliation).
+    ///
+    /// The root inode needs the published mount (`fs.layer_stack()` /
+    /// `fs.identity()`), but `Weak::upgrade()` is documented-`None` inside
+    /// the `Arc::new_cyclic` closure (the strong count stays 0 until the
+    /// closure returns), so the slot is a `OnceLock` filled by `OverlayFs::new`
+    /// immediately after the `Arc` is published. `root_inode()` reads the
+    /// filled slot; the slot is always set for a published mount (the `None`
+    /// arm is a hard invariant failure, never a silent mount-less root).
+    pub(super) root_inode: OnceLock<Arc<dyn Inode>>,
     /// The `MOUNT` level-1 lifecycle domain; phase only, sleep-capable.
     pub(super) lifecycle: Mutex<MountLifecycle>,
     pub(super) fs_event_stats: FsEventSubscriberStats,
+    /// The canonical weak mount reference (wave-2 repair item 1).
+    ///
+    /// Established by `Arc::new_cyclic` in `OverlayFs::new` (ramfs
+    /// `Arc::new_cyclic` + `Weak<RamFs>` precedent) and consumed by
+    /// `projection::project_inode` to stamp created `OverlayInode`s with the
+    /// mount's live `Weak` — replacing the root-carrier downcast seam
+    /// (wave-2 review `coupling-cohesion` finding). The weak never pins the
+    /// mount (B/C-2 lifetime rule).
+    pub(in crate::fs::fs_impls::overlayfs) self_weak: Weak<OverlayFs>,
+    /// The mount-wide binding cache — the first source for `(parent, name)`
+    /// lookup results (`Binding-first` invariant; meso-02 spec §3.4/§4).
+    ///
+    /// Entries are immutable `Arc<Binding>` snapshots (a positive pins its
+    /// inode, a negative pins its barrier); insert/update happen under the
+    /// caller's parent `DIR` transaction lock. Not a second layer registry or
+    /// identity table.
+    pub(in crate::fs::fs_impls::overlayfs) bindings: BindingCache,
+    /// The mount-wide inode identity-reuse cache (`P0-16`).
+    ///
+    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`; weak values so
+    /// the cache never forms an `OverlayFs → OverlayInode → OverlayFs` strong
+    /// cycle.
+    pub(in crate::fs::fs_impls::overlayfs) inodes: InodeCache,
+    /// The immutable dev/ino projection policy (`P2-01`/`P0-12`, including
+    /// the `P1-07` lower-id consumption).
+    ///
+    /// Built once in the extended `OverlayFs::new` (overlay `st_dev` plus
+    /// `layer_devs` from the published layer snapshot); the fallback ino
+    /// allocator is a saturating `AtomicU64` inside the policy.
+    pub(in crate::fs::fs_impls::overlayfs) identity: IdentityPolicy,
+    /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime
+    /// (recorded forward reference from the wave-2 build-extension pass; the
+    /// integration-gate widening lands in this repair).
+    ///
+    /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
+    /// must live on the published `OverlayFs` (the substrate-idiomatic owner —
+    /// every Asterinas pseudo-fs and the legacy overlayfs hold `AnonDeviceId`
+    /// on the fs struct) or the minor number could be recycled under a live
+    /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
+    /// and suppresses the unused-field lint.
+    pub(in crate::fs::fs_impls::overlayfs) _anon_device_id: AnonDeviceId,
 }
 
 /// The `MOUNT` lifecycle state of an [`OverlayFs`].
@@ -99,22 +171,48 @@ impl OverlayFs {
     }
 
     /// Returns the immutable layer stack.
-    #[expect(
-        dead_code,
-        reason = "frozen published getter (spec §4); consumed by sibling mesos (meso-02+) once they land"
-    )]
-    pub(super) fn layer_stack(&self) -> &OverlayLayerStack {
+    ///
+    /// Widened to the overlayfs ceiling (round-2 review item 1): the
+    /// `projection` tree consumes this accessor from
+    /// `OverlayInode::new_root` (E0624 before the widening). The return type
+    /// remains `mount`-private this wave (wave-1 `layers.rs` widening is the
+    /// recorded integration-gate follow-up).
+    pub(in crate::fs::fs_impls::overlayfs) fn layer_stack(&self) -> &OverlayLayerStack {
         &self.layer_stack
     }
 
     /// Returns the immutable mount policy snapshot.
-    pub(super) fn policy(&self) -> &MountPolicy {
+    ///
+    /// Widened to the overlayfs ceiling (round-2 review item 1): consumed by
+    /// `OverlayInode::read_only_gate` and `OverlayFs::store_lower_id` from
+    /// the `projection` tree.
+    pub(in crate::fs::fs_impls::overlayfs) fn policy(&self) -> &MountPolicy {
         &self.policy
     }
 
     /// Returns the claimed upper/workdir pair, if this is a writable mount.
-    pub(super) fn claims(&self) -> Option<&UpperWorkdirClaim> {
+    ///
+    /// Widened to the overlayfs ceiling (round-2 review item 1) to match the
+    /// other accessors; no `projection` caller today.
+    pub(in crate::fs::fs_impls::overlayfs) fn claims(&self) -> Option<&UpperWorkdirClaim> {
         self.claims.as_ref()
+    }
+
+    /// Returns the `fsid`s of the current mount's lower layers (wave-2 repair
+    /// item 5).
+    ///
+    /// The persisted `trusted.overlay.origin` record's `fsid` is validated
+    /// against this set at the read boundary (`projection/lower_id.rs`):
+    /// `fsid` is a per-mount ordinal assigned by `OverlayLayerStack::assemble`,
+    /// so only a `fsid` that denotes a LOWER layer of the CURRENT mount may be
+    /// projected (a record never legitimately carries the upper's own `fsid`;
+    /// accepting one would let a stale/foreign record publish a colliding
+    /// identity). Hosted here because the underlying `lowers` stack is
+    /// `mount`-private and the projection tree must not reach into it.
+    pub(in crate::fs::fs_impls::overlayfs) fn lower_layer_fsids(
+        &self,
+    ) -> impl Iterator<Item = u64> + '_ {
+        self.layer_stack.lowers.iter().map(|layer| layer.fsid)
     }
 
     /// Returns the real filesystem that superblock hooks forward to: the upper
@@ -147,7 +245,17 @@ impl FileSystem for OverlayFs {
     }
 
     fn root_inode(&self) -> Arc<dyn Inode> {
-        self.root_inode.clone()
+        match self.root_inode.get() {
+            Some(root) => root.clone(),
+            // `OverlayFs::new` fills the slot right after publishing the
+            // `Arc`, so a published mount always carries its root; a missing
+            // slot is a construction-order violation, never a runtime
+            // condition (hard invariant, no `.unwrap()`/`.expect()`).
+            None => unreachable!(
+                "OverlayFs::new materializes the root carrier before publication; \
+                 a published overlay mount always has its root slot set"
+            ),
+        }
     }
 
     fn sb(&self) -> SuperBlock {

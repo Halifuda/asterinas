@@ -8,10 +8,18 @@
 //! step-label fix, item 8); each statement carries a unique tag. The list
 //! follows the *spec* order, not the textual statement order: the actual
 //! execution order is 1 → 4a → 2 → 4b → 4c → 3 → 5 → 6 → 7 → 8 → 9 → 4d →
-//! 10 → 11, because tags 4a-4d execute around steps 2-3 for drop-order
+//! 10a → 10b → 11, because tags 4a-4d execute around steps 2-3 for drop-order
 //! reasons (the credential snapshot is declared before the layer stack so it
 //! drops last), and steps 7-9 execute only on the writable branch (the
-//! post-guard order, wave-1 review round 2, item 5).
+//! post-guard order, wave-1 review round 2, item 5). Step 10 is the meso-02
+//! extension of the frozen step list (cross-meso owner rule, spec §3.5 item
+//! 1): tag 10a is the meso-02 construction wiring (`AnonDeviceId` +
+//! `IdentityPolicy` + the `bindings`/`inodes` caches, all required before the
+//! root seam runs because `OverlayInode::new_root` reads `fs.identity()`),
+//! and tag 10b is the frozen step-10 root-carrier seam
+//! (`OverlayInode::new_root`; reconciled per wave-2 review item 1 — the seam
+//! accepts the `Weak<OverlayFs>` and fills the late-bound `OnceLock` root
+//! slot right after the `Arc` is published via `Arc::new_cyclic`).
 //!
 //! 1. parse the mount options (`OverlayMountOptions::parse`, P0-01);
 //! 2. assemble the layer stack (`OverlayLayerStack::assemble`, P0-02);
@@ -33,28 +41,41 @@
 //!    writable mounts only);
 //! 9. persist the UUID when effective (`UpperWorkdirClaim::persist_identity`,
 //!    P2-11; writable mounts only);
-//! 10. construct the root carrier via the provisional cross-meso seam
-//!     (`OverlayInode::new_root`, spec §3.0.5 item 8);
+//! 10a. meso-02 wiring: acquire the overlay `AnonDeviceId` (fallible) and
+//!      construct `IdentityPolicy` (`overlay_dev_id` set here; `layer_devs`
+//!      from the published layer snapshot) plus the empty
+//!      `bindings`/`inodes` caches (spec §3.5 item 1 / §3.4);
+//! 10b. construct the root carrier via the real meso-02 seam
+//!      (`OverlayInode::new_root`, spec §1 item 1 / §3.0.5 item 8; see the
+//!      RECONCILIATION record at the call site);
 //! 11. publish the `Arc<OverlayFs>` (the single publication point).
 //!
 //! On failure the locals drop in reverse declaration order, so the runtime
 //! resources release in the spec's frozen order (BC-1 §14): root carrier /
 //! workdir state / workdir claim / upper claim / layer pins / credential
-//! snapshot.
+//! snapshot. The meso-02 step-10a locals (overlay `AnonDeviceId`, the
+//! `IdentityPolicy`, and the `bindings`/`inodes` caches) are declared after
+//! the policy snapshot, so on rollback they release before the Wave-1
+//! resources — the frozen Wave-1 release order is undisturbed.
+
+use core::cell::OnceLock;
+
+use device_id::DeviceId;
 
 use super::{
-    claims::{verify_inode_instance_stability, OverlayUuid, UpperWorkdirClaim},
-    layers::{resolve_root_path, OverlayLayerStack},
+    OVERLAY_FS_NAME,
+    claims::{OverlayUuid, UpperWorkdirClaim, verify_inode_instance_stability},
+    layers::{OverlayLayerStack, resolve_root_path},
     options::{OverlayMountOptions, UuidMode},
     policy::{
         CreatorCredentialPolicy, MountPolicy, UpperFilesystemCapabilities, WriteAccessAccounting,
     },
     superblock::{MountLifecycle, MountPhase, OverlayFs},
-    OVERLAY_FS_NAME,
 };
 use crate::{
     fs::{
-        fs_impls::overlayfs::projection::OverlayInode,
+        fs_impls::overlayfs::projection::{BindingCache, IdentityPolicy, InodeCache, OverlayInode},
+        pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags},
             registry::FsCreationCtx,
@@ -93,9 +114,8 @@ impl OverlayFs {
         // taken once, at construction, and is declared first so it is dropped
         // last (spec §2 release-order invariant: the credential snapshot is
         // the final release).
-        let credential_policy = CreatorCredentialPolicy::new(
-            fs_creation_ctx.task_ctx().posix_thread.credentials_dup(),
-        );
+        let credential_policy =
+            CreatorCredentialPolicy::new(fs_creation_ctx.task_ctx().posix_thread.credentials_dup());
 
         // Step 2 — assemble the layer stack (P0-02). The parsed
         // `is_forced_read_only` flag is passed in (wave-1 review `dry` fix,
@@ -277,32 +297,112 @@ impl OverlayFs {
             options.is_default_permissions,
         );
 
-        // Step 10 — construct the root carrier via the provisional cross-meso
-        // seam (spec §3.0.5 item 8): `OverlayInode::new_root(Arc<OverlayFs>)`,
-        // the frozen meso-02 seam name (supersedes `OverlayRootInode::new`).
+        // Step 10 — meso-02 construction wiring (cross-meso owner rule, spec
+        // §3.5 item 1): the extended `OverlayFs::new` acquires the overlay
+        // `AnonDeviceId` (fallible) and constructs the `IdentityPolicy`
+        // (`overlay_dev_id` set here; `layer_devs` from the published layer
+        // snapshot). The `bindings`/`inodes` caches are initialized empty
+        // here too — they are the meso-02 per-mount state fields added to the
+        // Macro-Owner carrier (spec §1 item 2 / §3.4), and the `projection`
+        // module publishes them through `OverlayFs::bindings()`/`inodes()`/
+        // `identity()` (sibling `projection/mod.rs`).
         //
-        // RECORDED SEAM GAP (not a redesign): the seam consumes the strong
-        // `Arc<OverlayFs>` published in step 11, while the `root_inode` field
-        // it fills is part of the same struct — a self-referential
-        // construction that safe Rust cannot express as a single struct
-        // literal. The spec records the exact Arc materialization as
-        // PROVISIONAL and the ramfs `Arc::new_cyclic` + `Weak`-fs pattern as
-        // the baseline (§3.0.5 item 8); Wave 2 (meso-02's `mount/build.rs`
-        // extension, which owns the seam) reconciles the materialization (for
-        // example a late-bound `root_inode` cell or a `Weak`-accepting seam
-        // entry). The frozen call is written exactly by name below; no frozen
-        // signature is changed by this pass.
+        // The overlay `AnonDeviceId` is the mount's own `st_dev` (major-0
+        // pseudo device, `pseudofs::AnonDeviceId`). Acquisition is fallible —
+        // the minor-number pool can be exhausted — and maps to `ENOSPC`; no
+        // `.expect()`/`.unwrap()` in production paths (meso-02 spec §4 "no
+        // unwrap" rule; `AnonDeviceId` acquisition "happens in the extended
+        // (fallible) `OverlayFs::new`, not a seam `.expect()`").
+        let anon_device_id = AnonDeviceId::acquire().ok_or_else(|| {
+            Error::with_message(
+                Errno::ENOSPC,
+                "no anonymous device ID is available for the overlay mount",
+            )
+        })?;
+        let overlay_dev_id = anon_device_id.id();
+
+        // `layer_devs` is the immutable `fsid -> container_dev_id` table of
+        // the published layer snapshot (upper first when present, then the
+        // lowers topmost-first) — the same single source that feeds
+        // `IdentityPolicy::is_all_layers_same_fs` (meso-02 spec §4
+        // `IdentityPolicy`; revision-07 ledger item 7: "built at construction
+        // from the published layer snapshot"). The table is fsid-sorted and
+        // frozen inside `IdentityPolicy::new`.
+        let layer_capacity =
+            layer_stack.lowers.len() + if layer_stack.upper.is_some() { 1 } else { 0 };
+        let mut layer_devs: Vec<(u64, DeviceId)> = Vec::with_capacity(layer_capacity);
+        if let Some(upper) = &layer_stack.upper {
+            layer_devs.push((upper.fsid, upper.container_dev_id));
+        }
+        for lower in &layer_stack.lowers {
+            layer_devs.push((lower.fsid, lower.container_dev_id));
+        }
+
+        // The frozen xino mask width ("e.g. 64 - 16 = 48-bit payload", spec
+        // §4); the frozen spec assigns no value, so the build packet owns the
+        // policy value (identity.rs creator record §5 deviation 2). `new` is
+        // fallible only to enforce the frozen `xino_shift <= 63` invariant.
+        const XINO_SHIFT: u32 = 16;
+        let identity =
+            IdentityPolicy::new(overlay_dev_id, layer_devs.into_boxed_slice(), XINO_SHIFT)?;
+
+        // The meso-02 cache fields start empty; entries are inserted/updated
+        // under the caller's parent `DIR` transaction by the `projection`
+        // module lookup flow (spec §4 lock-carrier table).
+        let bindings = BindingCache::new();
+        let inodes = InodeCache::new();
+
+        // Step 10 (root carrier) + Step 11 (publication) — the root is
+        // materialized through the real meso-02 seam
+        // `OverlayInode::new_root(Weak<OverlayFs>)` (the Wave-2-landed symbol,
+        // reconciled per wave-2 review item 1), and the `Arc<OverlayFs>` is
+        // published once.
         //
-        // Step 11 — the single publication point; no `commit` object.
-        let overlay_fs = Arc::new(OverlayFs {
+        // SELF-REFERENTIAL CONSTRUCTION RECONCILIATION (spec §3.0.5 item 8,
+        // ramfs baseline; wave-2 review item 1 — critical fix): the root
+        // carrier consumes the published mount (`fs.layer_stack()` /
+        // `fs.identity()`), so it cannot be built inside the
+        // `Arc::new_cyclic` closure — `Weak::upgrade()` is documented-`None`
+        // during construction (the strong count stays 0 until the closure
+        // returns; verified in the pinned toolchain `alloc/src/sync.rs`,
+        // `new_cyclic_in`). The reconciliation: `Arc::new_cyclic` establishes
+        // the canonical `OverlayFs::self_weak` reference (ramfs
+        // `Arc::new_cyclic` + `Weak<RamFs>` precedent), the struct is built
+        // with an empty `OnceLock` root slot, and the slot is filled
+        // immediately after the strong reference exists via
+        // `OverlayInode::new_root(Arc::downgrade(&overlay_fs))`. The seam now
+        // accepts the `Weak<OverlayFs>` — the recorded deviation from the
+        // provisional `new_root(fs: Arc<OverlayFs>)` signature (the upgrade is
+        // guaranteed at this call site). The inode stores the weak
+        // (`Arc::downgrade` inside `new_root`), so there is no
+        // `fs -> inode -> fs` strong cycle (B/C-2 lifetime rule).
+        let overlay_fs = Arc::new_cyclic(move |weak| OverlayFs {
             layer_stack,
             claims,
             policy,
             mount_source,
-            root_inode: OverlayInode::new_root(overlay_fs),
-            lifecycle: Mutex::new(MountLifecycle { phase: MountPhase::Ready }),
+            root_inode: OnceLock::new(),
+            lifecycle: Mutex::new(MountLifecycle {
+                phase: MountPhase::Ready,
+            }),
             fs_event_stats: FsEventSubscriberStats::new(),
+            bindings,
+            inodes,
+            identity,
+            self_weak: weak.clone(),
+            // The `AnonDeviceId` RAII guard is retained for the mount
+            // lifetime so the overlay `st_dev` (copied into
+            // `IdentityPolicy::overlay_dev_id`) is never recycled under a
+            // live mount. The substrate-idiomatic owner (every Asterinas
+            // pseudo-fs and the legacy overlayfs hold `AnonDeviceId` on the
+            // fs struct) is this `_anon_device_id: AnonDeviceId` field on
+            // `OverlayFs` — the recorded one-field widening of
+            // `mount/superblock.rs` (see the Creator report §5).
+            _anon_device_id: anon_device_id,
         });
+        let _ = overlay_fs
+            .root_inode
+            .set(OverlayInode::new_root(Arc::downgrade(&overlay_fs)));
         Ok(overlay_fs)
     }
 }
