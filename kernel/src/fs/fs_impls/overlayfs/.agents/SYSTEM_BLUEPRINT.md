@@ -38,9 +38,11 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     implementation commitments in this wave.
 
 - [x] **Phase 3: Designer Contracts** (per new Meso-component)
-  - **Status**: **Complete (2026-08-02)** — 6 basic-wave Designer contracts
-    `Specified` (meso 01-06); meso 07 deferred-only (0/4). Phase 4 (pass
-    slicing + Creator/Checker loops) is next.
+  - **Status**: **Complete / Closed (2026-08-03)** — 6 basic-wave Designer
+    contracts `Specified` (meso 01-06); meso 07 deferred-only (0/4). Phase 4
+    is open: pass slicing recorded 2026-08-03 (7 Creator passes; workflow
+    amended to Reviewer-only pre-code gate + single meso-integration xfstests
+    gate — no per-pass Checker).
   - **Prerequisite**: Accepted Phase 2 reframed topology
   - **Progress (2026-08-02)**: Designer wave **COMPLETE** — 6 basic-wave
     contracts are `Specified` (`mount_resource_policy` 9/6,
@@ -60,24 +62,61 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     the meso 07 deferred-only disposition; packets under `.agents/subagent-tasks/`.
   - **Boundary**: Do not reconstruct the deleted 13-Meso specs/validation contracts or create replacement Designer artifacts during this topology reset. The 57/24 classification is a design-scope decision only; it does not start Designer work.
 
+- [ ] **Phase 4: Creator Pass Slicing + Implementation** (per Creator Pass)
+  - **Status**: **In progress (2026-08-03)** — pass slicing recorded in
+    `PASS_SLICING.md` (`creator_pass_slicing_20260803`); 7 Creator passes:
+    Wave 1 `pass_01_mount_resource_policy`, Wave 2
+    `pass_02_visibility_projection_identity`, Wave 3
+    `pass_03_shared_carrier_seams` (seam placement, no feature claims),
+    Wave 4 (parallel) `pass_04_merged_directory_index` /
+    `pass_05_copyup_authority_file_views` /
+    `pass_06_metadata_security_xattr_policy` /
+    `pass_07_namespace_mutation_whiteout`. No pass dispatched yet.
+  - **Workflow amendment (user-directed 2026-08-03)**: no Creator-synced
+    per-pass Checker passes; Reviewer is the only pre-code-completion static
+    gate; the single runtime gate is the meso-integration xfstests Checker
+    after implementation + Reviewer stabilize. Creator passes are
+    command-free with no per-pass compile preflight.
+  - **Prerequisite**: Accepted Phase 3 Designer contracts (met) +
+    `creator_pass_slicing_20260803` decision (met).
+  - **Expected Artifacts**: Creator receipts
+    `components/<component-id>/pass_XX_<component>_creator.md` + production
+    `.rs` files under `kernel/src/fs/fs_impls/overlayfs/`; later per-meso
+    Reviewer reports; final meso-integration Checker evidence per the six
+    Designer validation contracts.
+  - **Legacy file (2026-08-03, user-directed):** `fs.rs` renamed to
+    `legacy_fs.rs` (`mod.rs` updated; content frozen); the legacy
+    `OverlayFsType` registration stays active until takeover. The only
+    permitted reference to `legacy_fs.rs` in Creator/Reviewer packets is the
+    registration wiring; all other legacy content is off-limits as a source.
+
 ## 2. Meso-Component Pipeline Index
 
 | Meso-Component | Current Scope | 1. Architect Map | 2. Designer Contract | 3. Creator Passes | 4. Checker Passes | 5. Integration Pass | 6. Reviewer | Overall Status |
 | :------------- | :----------: | :-------------: | :------------------: | :---------------: | :---------------: | :-----------------: | :---------: | :------------- |
-| `mount_resource_policy` | 9 / 6 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | - | - | - | - | **Specified** |
-| `visibility_projection_identity` | 12 / 2 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | - | - | - | - | **Specified** |
-| `merged_directory_index` | 4 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
-| `copyup_authority_file_views` | 17 / 6 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
-| `metadata_security_xattr_policy` | 4 / 4 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
-| `namespace_mutation_whiteout` | 11 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | - | - | - | - | **Specified** |
+| `mount_resource_policy` | 9 / 6 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | **Sliced** `pass_01` (Wave 1) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `visibility_projection_identity` | 12 / 2 | Accepted | **Accepted** (2026-08-01; validation deferred to integration) | **Sliced** `pass_02` (Wave 2) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `merged_directory_index` | 4 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_04` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `copyup_authority_file_views` | 17 / 6 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_05` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `metadata_security_xattr_policy` | 4 / 4 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_06` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
+| `namespace_mutation_whiteout` | 11 / 1 | Accepted | **Accepted** (2026-08-02, revision 01; validation deferred to integration) | **Sliced** `pass_07` (Wave 4) | Not scheduled (workflow amendment) | Pending (Wave 6) | Pending (Wave 5) | **Specified** |
 | `persistent_association_export` | 0 / 4 | Accepted | **Deferred-only** (2026-08-02; P1-07 moved to meso 02; no basic-wave Designer contract) | - | - | - | - | Deferred |
+
+`pass_03_shared_carrier_seams` (Wave 3) is a cross-meso foundation pass (parent
+N/A, no feature claims); it is recorded in `PASS_SLICING.md` but is not a
+meso-component row. Per the 2026-08-03 workflow amendment, the per-pass Checker
+column is intentionally empty for this wave; runtime validation is the single
+meso-integration xfstests Checker (Wave 6) per the six Designer validation
+contracts.
 
 `Current Scope` is shown as `需要实现 / 暂不实现`; the seven rows sum to
 `57 / 24` across the complete 81-Micro inventory (amended 2026-08-01).
 
 _The old 13-Meso topology and its Designer dispatch/specification artifacts are
-discarded. No implementation, Creator, Checker, Reviewer, or pass-slicing work
-is active; the next design action, if authorized, is a fresh Designer wave under
+discarded. Phase 4 pass slicing is recorded (2026-08-03); no implementation
+pass is dispatched yet. The next action is Creator dispatch per the live
+handoff `main-agent/20260803-creator-pass-slicing_main_agent_handoff.md`. The
+next design action, if authorized, is a fresh Designer wave under
 the seven accepted Meso boundaries._
 
 ## 3. Active Pass Tracking
@@ -147,3 +186,13 @@ Record only active or recently changed passes here. Durable slicing rationale be
   xfstests evidence moves to a meso-integration obligation after the identity
   Meso's root carrier + minimal read path exist; the meso 01 Creator pass is
   accepted on structural + compile-preflight evidence only.
+- **Workflow amendment (user-directed 2026-08-03):** Creator-synced per-pass
+  Checker passes are eliminated for this wave; the Reviewer is the only
+  pre-code-completion quality gate (static; PROTOCOL §1 rule 16 pre-checker
+  structural audit, user-requested); the meso-integration xfstests Checker is
+  the single runtime gate after implementation + Reviewer stabilize. Creator
+  passes are command-free with no per-pass compile preflight. Recorded in
+  `PASS_SLICING.md` (`creator_pass_slicing_20260803`) and the live handoff
+  `main-agent/20260803-creator-pass-slicing_main_agent_handoff.md`; PROTOCOL
+  §1 rule 5 remains unedited pending user confirmation of a permanent
+  amendment.

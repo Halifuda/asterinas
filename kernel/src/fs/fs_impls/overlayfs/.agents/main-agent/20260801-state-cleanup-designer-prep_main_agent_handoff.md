@@ -1,9 +1,24 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
+> ## SUPERSEDED — Historical Context Only
+>
+> This handoff is **no longer live**. The Designer wave (Phase 3) is complete
+> and **closed**. The current live main-agent handoff is
+> `20260803-creator-pass-slicing_main_agent_handoff.md` (created 2026-08-03),
+> which owns Phase 4 (Creator pass slicing + implementation).
+>
+> Its design atlas (module tree, cross-meso consistency audit, lock forms),
+> the confirmed five-lock topology, the 57/24 scope labels, the recorded
+> deferred handoff items, and the §9A distilled design-principles checklist
+> remain valid inputs for the Creator stage, but no session should treat this
+> file as the active scheduler state. The meso 01-06 Designer contracts are
+> `Specified` and accepted; meso 07 is deferred-only (0/4).
+
+
 # Main-Agent Handoff: 2026-08-01 State Cleanup & Designer Prep
 
 **Date / Time:** 2026-08-02 (updated in place; session record 2026-08-02 appended)
-**Status:** `Designer wave COMPLETE (2026-08-02): Phase 3 closed — meso 01-06 basic-wave contracts Specified; meso 07 deferred-only (0/4); next: Phase 4 pass slicing + Creator/Checker loops`
+**Status:** `ENDED / SUPERSEDED (2026-08-03): Designer wave closed — meso 01-06 basic-wave contracts Specified and accepted; meso 07 deferred-only (0/4). Phase 4 (Creator pass slicing) is live under the 2026-08-03 handoff.`
 
 ## 1. Global State Pointer
 

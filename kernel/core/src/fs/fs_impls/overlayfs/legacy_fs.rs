@@ -1,5 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 
+// LEGACY — FROZEN, NOT A DESIGN SOURCE.
+//
+// This is the old single-file overlayfs implementation, renamed from `fs.rs`
+// (2026-08-03) so it cannot collide with the refactor module tree under
+// `kernel/src/fs/fs_impls/overlayfs/` (`mount/`, `projection/`, `copyup/`,
+// `metadata_security/`, `dir/`, `readdir_index.rs`).
+//
+// It remains the ACTIVE registered overlay filesystem until the refactor
+// explicitly schedules a takeover (see `mod.rs::init()`). The ONLY permitted
+// use of this file by the refactor is the registration wiring: `OverlayFsType`
+// (the `FsType` impl) and how `register()` is invoked. All other content —
+// layout, structures, lock handling, recipes — must NOT be referenced by any
+// Architect/Designer/Creator/Checker/Reviewer packet; the authoritative
+// sources are the Designer specs, the design documents (`designdoc/`), and the
+// staged priors (`priors/`).
+
 #![expect(dead_code)]
 
 use alloc::format;

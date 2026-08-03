@@ -97,3 +97,101 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     subset may be reported at integration time only for cases that provably
     run without a successful baseline mount (Checker confirms from suite
     source).
+
+- **`creator_pass_slicing_20260803`**
+  - **Kind**: Pass-slicing decision (main-agent-owned) opening Phase 4 — the first
+    Creator implementation wave; supersedes the "no pass slices yet" state of the
+    Designer tenure.
+  - **Workflow amendment (user-directed 2026-08-03)**: the test flow is
+    xfstests-integration-only. **Creator-synced per-pass Checker passes are
+    eliminated** for this wave; the Reviewer is the only quality gate before the
+    code is complete (static review; PROTOCOL §1 rule 16 pre-checker structural
+    audit, explicitly user-requested); the **meso-integration xfstests Checker**
+    is the single runtime validation gate, scheduled after implementation +
+    Reviewer stabilize. Creator passes are command-free and receive **no per-pass
+    compile preflight**. This amends PROTOCOL §1 rule 5 for this wave by user
+    direction; PROTOCOL.md is not edited unless the user confirms a permanent
+    amendment.
+  - **Slicing rule**: each Creator pass owns a disjoint write-set; shared-file
+    edits (crate-root `overlayfs/mod.rs`, `mount/superblock.rs`,
+    `mount/build.rs`, `projection/inode.rs`, `projection/entry.rs`,
+    `projection/binding_cache.rs`, `projection/mod.rs`, `projection/identity.rs`)
+    are serialized and their frozen cross-meso extensions/widenings consolidated
+    into one seam-placement pass, so the four meso leaf passes are write-disjoint
+    and run in parallel. All seams taken verbatim from the accepted meso-03/04/05/06
+    consumption-seam records; no Designer contract is changed; the seams pass
+    claims no micro-feature.
+  - **Passes (waves 1-3 serial, wave 4 parallel, 57-micro union = Stage-D
+    `需要实现` exactly):**
+    - **Wave 1** `pass_01_mount_resource_policy` — parent
+      `mount_resource_policy` (9/6): P0-01, P0-02, P0-03, P0-05, P0-18, P1-19,
+      P1-20, P1-35, P2-11. Write-set: `overlayfs/mount/*` (new) + crate-root
+      `overlayfs/mod.rs` (`mod mount;`). Risk High.
+    - **Wave 2** `pass_02_visibility_projection_identity` — parent
+      `visibility_projection_identity` (12/2): P0-04, P0-06, P0-07, P0-08,
+      P0-09, P0-10, P0-11, P0-12, P0-16, P0-17, P1-07, P2-01. Write-set:
+      `overlayfs/projection/*` (new) + `mount/superblock.rs` +
+      `mount/build.rs` (meso-02 `OverlayFs` field additions + `OverlayFs::new`
+      extension) + crate-root `overlayfs/mod.rs` (`mod projection;`). Risk High.
+      Serial after Wave 1 (shared `mount/superblock.rs`/`build.rs`).
+    - **Wave 3** `pass_03_shared_carrier_seams` — parent N/A (cross-meso shared
+      carriers; foundation; **no feature claims**). Write-set: `mount/superblock.rs`
+      (`workdir_temp_serial` meso-04, `xattr_policy` meso-05, `whiteout_cache`
+      meso-06), `mount/build.rs` (their `OverlayFs::new` init), `projection/inode.rs`
+      (`readdir_index` meso-03 + `copyup_transition` meso-04 fields + init;
+      `facts_snapshot`/`dir` → `pub(super)`; `OverlayObjectFacts` content
+      readable `pub(super)`), `projection/entry.rs` (`RealObject::new` +
+      `is_opaque_directory` → `pub(super)`), `projection/binding_cache.rs`
+      (`BindingKey::new` + positive/hidden construction), `projection/mod.rs`
+      (`project_new_upper` seam + `record_copyup_transition` hook call at
+      positive-binding assembly), crate-root `overlayfs/mod.rs` (declare
+      `mod readdir_index; mod copyup; mod metadata_security; mod dir;` +
+      shared `AccessType` enum). Risk Normal. Not a meso pass — recorded here so
+      later main agents do not treat it as one.
+    - **Wave 4 (PARALLEL — disjoint write-sets):**
+      - `pass_04_merged_directory_index` — parent `merged_directory_index` (4/1):
+        P0-13, P0-14, P0-15, P1-31. Write-set: `overlayfs/readdir_index.rs`
+        (new; includes the meso-03-owned seams `invalidate_readdir_index`,
+        `readdir_index_insert`/`readdir_index_remove`, `visible_child_count`).
+        Risk High.
+      - `pass_05_copyup_authority_file_views` — parent
+        `copyup_authority_file_views` (17/6): P1-01, P1-02, P1-03, P1-04, P1-05,
+        P1-06, P1-08, P1-09, P1-10, P1-11, P1-12, P1-13, P1-14, P1-15, P1-32,
+        P1-34, P1-37. Write-set: `overlayfs/copyup/{mod.rs,coordination.rs,
+        trigger.rs,promote.rs,workdir.rs}` (new). Risk High.
+      - `pass_06_metadata_security_xattr_policy` — parent
+        `metadata_security_xattr_policy` (4/4): P1-16, P1-17, P1-18, P1-33.
+        Write-set: `overlayfs/metadata_security/{mod.rs,permission.rs,
+        metadata.rs,xattr.rs}` (new). Risk High.
+      - `pass_07_namespace_mutation_whiteout` — parent
+        `namespace_mutation_whiteout` (11/1): P1-21, P1-22, P1-23, P1-24,
+        P1-25, P1-26, P1-27, P1-28, P1-29, P1-30, P1-36. Write-set:
+        `overlayfs/dir/{mod.rs,create.rs,remove.rs,link.rs,rename.rs,
+        whiteout.rs}` (new). Risk High.
+  - **Post-implementation gates (workflow amendment):** per-meso Reviewer wave
+    (static only; the sole pre-code-completion gate), then a meso-integration
+    Checker wave (compile + full kernel build + overlay xfstests suite per the
+    six Designer validation contracts; the single runtime gate). Deferred
+    validation rows from the meso-01..06 validation contracts resolve there.
+  - **Legacy-reference boundary (user-directed 2026-08-03):** the old
+    single-file implementation was renamed `fs.rs` → `legacy_fs.rs` (git rename;
+    content unchanged except a LEGACY/FROZEN header banner; `mod.rs` updated to
+    `mod legacy_fs; use legacy_fs::OverlayFsType;`). The legacy `OverlayFsType`
+    registration in `overlayfs::init()` remains the ACTIVE registered overlay
+    filesystem until an explicit takeover decision after the integration gate.
+    Every Creator/Reviewer packet MUST state that the only permitted reference
+    to `legacy_fs.rs` is the registration wiring (`OverlayFsType` `FsType` impl
+    + `register()` shape); all other legacy content is forbidden as a reference
+    — implementation sources are the Designer specs, `designdoc/`, and
+    `priors/` only.
+  - **Explicit boundary:** `暂不实现` IDs (24) remain untouched; no ktest surface
+    is created or modified; no `#[ktest]`/`#[cfg(ktest)]` surface in
+    `legacy_fs.rs` is touched by the rename.
+  - **Subagent orchestration (user-confirmed 2026-08-03; full text in the live
+    handoff §2A):** one Creator per `.rs` file per Wave; Wave-end review via
+    aster-code-review in **`diff` mode** (base = previous accepted Wave commit;
+    3-persona fan-out as direct subagents, no `codex exec`); long-lived repair
+    Reviewer+Creator loop with `--amend` per round; per-Wave commits amended
+    during repair and stabilized at acceptance; review packets/outputs under the
+    gitignored `subagent-tasks/` / `components/` trees; durable `.agents/*.md`
+    records stay uncommitted during the Wave cycle so review diffs are `.rs`-only.
