@@ -150,11 +150,7 @@ impl MountPolicy {
     /// `self.fs_arc()?.policy().is_default_permissions()` in its stage-B skip
     /// (BC-5 §49); it reports the frozen option value only — the skip
     /// semantics are meso-05's (spec §1 item 4).
-    #[expect(
-        dead_code,
-        reason = "frozen accessor (spec revision 04); meso-05 consumes it as `self.fs_arc()?.policy().is_default_permissions()` in its stage-B skip"
-    )]
-    pub(super) fn is_default_permissions(&self) -> bool {
+    pub(in crate::fs::fs_impls::overlayfs) fn is_default_permissions(&self) -> bool {
         self.is_default_permissions
     }
 
@@ -176,11 +172,11 @@ impl MountPolicy {
     }
 
     /// Returns the stashed creator-credential policy (`P1-19`).
-    #[expect(
-        dead_code,
-        reason = "frozen published accessor (spec §4); consumed by meso-04 once it lands"
-    )]
-    pub(super) fn credential_policy(&self) -> &CreatorCredentialPolicy {
+    ///
+    /// Wave-4 repair item 7: the `#[expect(dead_code)]` marker is removed —
+    /// the accessor is live code, consumed by the landed meso-05 entries
+    /// (`metadata_security/mod.rs` delegation and `permission.rs` stage B).
+    pub(in crate::fs::fs_impls::overlayfs) fn credential_policy(&self) -> &CreatorCredentialPolicy {
         &self.credential_policy
     }
 
@@ -219,7 +215,7 @@ impl MountPolicy {
 /// `#[derive(Debug)]` is dropped: `Credentials<ReadDupOp>` has no `Debug` impl
 /// (verified `kernel/src/process/credentials/mod.rs`); the spec §4 shape hint
 /// explicitly allows dropping an unsatisfiable derive.
-pub(super) struct CreatorCredentialPolicy {
+pub(in crate::fs::fs_impls::overlayfs) struct CreatorCredentialPolicy {
     /// The stashed creator credentials (`P1-19`), taken once at construction
     /// via `fs_creation_ctx.task_ctx().posix_thread.credentials_dup()`.
     snapshot: Credentials<ReadDupOp>,
@@ -245,7 +241,7 @@ impl CreatorCredentialPolicy {
         dead_code,
         reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land"
     )]
-    pub(super) fn snapshot(&self) -> &Credentials<ReadDupOp> {
+    pub(in crate::fs::fs_impls::overlayfs) fn snapshot(&self) -> &Credentials<ReadDupOp> {
         &self.snapshot
     }
 
@@ -254,7 +250,7 @@ impl CreatorCredentialPolicy {
         dead_code,
         reason = "frozen creator-credential contract (spec §4, P1-19); consumed by meso-04+ once they land"
     )]
-    pub(super) fn source(&self) -> CredentialSource {
+    pub(in crate::fs::fs_impls::overlayfs) fn source(&self) -> CredentialSource {
         self.source
     }
 
@@ -268,11 +264,11 @@ impl CreatorCredentialPolicy {
     /// runs with the caller's current credentials and the stashed snapshot is
     /// published for sibling Mesos but cannot be installed (temporary seam,
     /// recorded in the Creator report); no frozen signature is changed.
-    #[expect(
-        dead_code,
-        reason = "frozen creator-credential override contract (spec §4, P1-19); consumed by meso-04+ once they land"
-    )]
-    pub(super) fn with_creator_credentials_fn<T>(
+    ///
+    /// Wave-4 repair item 7: the `#[expect(dead_code)]` marker is removed —
+    /// the seam is live code, consumed by the landed meso-05 delegation
+    /// helper (`metadata_security/mod.rs`) and the real permission stage.
+    pub(in crate::fs::fs_impls::overlayfs) fn with_creator_credentials_fn<T>(
         &self,
         operation_fn: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
@@ -285,7 +281,7 @@ impl CreatorCredentialPolicy {
 /// Closed set this wave: the mount creator's credentials are always used
 /// (`P3-07` adds `Caller` under an explicit scope decision).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CredentialSource {
+pub(in crate::fs::fs_impls::overlayfs) enum CredentialSource {
     /// The credentials of the task that created the mount.
     Creator,
 }

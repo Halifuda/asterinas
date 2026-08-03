@@ -8,8 +8,8 @@
 //! payload [`OverlayObjectFacts`], the frozen root-carrier seam
 //! ([`OverlayInode::new_root`], consumed by `OverlayFs::new` step 10), and the
 //! `Inode` trait implementation: lookup (`P0-08`/`P0-09`), metadata/identity
-//! projection (`P0-12`), revalidation (`P0-17`), and the §2 Case-7 gate stubs
-//! owned by later Mesos.
+//! projection (`P0-12`), revalidation (`P0-17`). The mutating `Inode` entries
+//! are owned by the landed meso-06 `dir/` tree (`namespace_mutation_whiteout`).
 //!
 //! Lock contract (spec §3.0/§3.1/§3.3): `dir_transaction_lock` is the
 //! payload-less per-directory `DIR` transaction lock (`Some` for directories
@@ -54,11 +54,7 @@ use crate::{
         },
         vfs::{
             file_system::FileSystem,
-            inode::{
-                Extension, FallocMode, HardLinkability, Inode, Metadata, MknodType, RenameMode,
-                RevalidationPolicy,
-            },
-            xattr::{XattrName, XattrSetFlags},
+            inode::{Extension, Inode, Metadata, RevalidationPolicy},
         },
     },
     prelude::*,
@@ -136,10 +132,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayInode {
     /// (`ReaddirIndex::new()` — `NeedsRebuild`, no entries), maintained by
     /// the meso-03 `readdir_at`/`invalidate_readdir_index` seams and the
     /// meso-06 decision seams in Wave 4.
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 seam field (handoff §2.3 item 1); read by meso-03/06 impls in Wave 4"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) readdir_index: Option<Mutex<ReaddirIndex>>,
     /// The `CUL`-domain (level 3) copy-up transition coordinate; `None` until
     /// meso-04 records the first positive-binding publication (Wave-3 seam,
@@ -148,10 +140,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayInode {
     /// The payload type lands in Wave 4 `copyup/coordination.rs` (frozen name
     /// `CopyUpTransition`); the `record_copyup_transition` hook and the
     /// `ensure_upper_authority` winner/waiter flow read it then.
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 seam field (handoff §2.3 item 1); read by meso-04 impls in Wave 4"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) copyup_transition: Mutex<Option<CopyUpTransition>>,
 }
 
@@ -190,30 +178,18 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectFacts {
 impl OverlayObjectFacts {
     /// Returns the per-name view classification of this object's facts
     /// (ceiling read-only accessor; wave-3 review item 4).
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 read-only accessor; consumed by the Wave-4 meso-03 merged scan (readdir_index.rs)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn kind(&self) -> PositiveKind {
         self.kind
     }
 
     /// Returns the upper real object, if this object has an upper component
     /// (ceiling read-only accessor; wave-3 review item 4).
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 read-only accessor; consumed by the Wave-4 meso-03 merged scan (readdir_index.rs)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn upper(&self) -> Option<&RealObject> {
         self.upper.as_ref()
     }
 
     /// Returns the lower stack, topmost first (ceiling read-only accessor;
     /// wave-3 review item 4).
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 read-only accessor; consumed by the Wave-4 meso-03 merged scan (readdir_index.rs)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn lowers(&self) -> &[RealObject] {
         &self.lowers
     }
@@ -228,10 +204,6 @@ impl OverlayObjectFacts {
     /// `upper.is_some() || !lowers.is_empty()` (spec §4) at construction, so
     /// a sibling meso can never mint facts whose `visible_source` indexing
     /// (`lowers[0]`) would panic on the lookup/metadata hot path.
-    #[expect(
-        dead_code,
-        reason = "frozen wave-3 construction seam; sibling mesos mint facts through it once the Wave-4 leaf Creators land"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn try_new(
         kind: PositiveKind,
         upper: Option<RealObject>,
@@ -346,10 +318,6 @@ impl OverlayInode {
     ///
     /// Published for sibling Mesos (merged-directory consumption of directory
     /// inputs/IDs, spec §1 item 3).
-    #[expect(
-        dead_code,
-        reason = "frozen published accessor (spec §4); consumed by sibling mesos once they land"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn key(&self) -> RealObjectKey {
         *self.key.lock()
     }
@@ -423,10 +391,6 @@ impl OverlayInode {
     /// strong keep-alive pin of the pre-transition real inode so it cannot be
     /// recycled while the alias exists (wave-3 round-5 repair item 1). The
     /// post-condition is verified with `Arc::ptr_eq` against this carrier.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-04 copy-up transition seam; consumed by the Wave-4 copyup Creator"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn replace_facts(
         self: &Arc<Self>,
         facts: OverlayObjectFacts,
@@ -469,35 +433,12 @@ impl OverlayInode {
         );
         Ok(())
     }
-
-    /// Rejects the operation with `EROFS` on effective read-only mounts.
-    ///
-    /// The §2 Case-7 gate: mutating operations owned by later Mesos return
-    /// `EROFS` when `MountPolicy::is_effective_read_only()` and `EOPNOTSUPP`
-    /// otherwise; this helper is the shared read-only half of that gate.
-    fn read_only_gate(&self) -> Result<()> {
-        let fs = self.fs.upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "the overlay mount is no longer alive")
-        })?;
-        if fs.policy().is_effective_read_only() {
-            return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
-        }
-        Ok(())
-    }
 }
 
 impl Inode for OverlayInode {
     fn size(&self) -> usize {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().size()
-    }
-
-    fn resize(&self, _new_size: usize) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay resize is owned by a later meso and is not implemented yet"
-        );
     }
 
     fn metadata(&self) -> Metadata {
@@ -526,25 +467,9 @@ impl Inode for OverlayInode {
         visible_source(&facts).real_inode().mode()
     }
 
-    fn set_mode(&self, _mode: InodeMode) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay mode mutation is owned by a later meso and is not implemented yet"
-        );
-    }
-
     fn owner(&self) -> Result<Uid> {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().owner()
-    }
-
-    fn set_owner(&self, _uid: Uid) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay ownership mutation is owned by a later meso and is not implemented yet"
-        );
     }
 
     fn group(&self) -> Result<Gid> {
@@ -552,23 +477,9 @@ impl Inode for OverlayInode {
         visible_source(&facts).real_inode().group()
     }
 
-    fn set_group(&self, _gid: Gid) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay group mutation is owned by a later meso and is not implemented yet"
-        );
-    }
-
     fn atime(&self) -> Duration {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().atime()
-    }
-
-    fn set_atime(&self, _time: Duration) {
-        // No-op gate stub (§2 Case 7): the trait returns `()`, so the
-        // EROFS/EOPNOTSUPP gate cannot be surfaced here; timestamp mutation
-        // is owned by a later Meso.
     }
 
     fn mtime(&self) -> Duration {
@@ -576,71 +487,9 @@ impl Inode for OverlayInode {
         visible_source(&facts).real_inode().mtime()
     }
 
-    fn set_mtime(&self, _time: Duration) {
-        // No-op gate stub (§2 Case 7): timestamp mutation is owned by a
-        // later Meso; see `set_atime`.
-    }
-
     fn ctime(&self) -> Duration {
         let facts = self.facts_snapshot();
         visible_source(&facts).real_inode().ctime()
-    }
-
-    fn set_ctime(&self, _time: Duration) {
-        // No-op gate stub (§2 Case 7): timestamp mutation is owned by a
-        // later Meso; see `set_atime`.
-    }
-
-    fn create(&self, _name: &str, _type_: InodeType, _mode: InodeMode) -> Result<Arc<dyn Inode>> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay create is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn create_tmpfile(
-        &self,
-        _mode: InodeMode,
-        _hard_linkability: HardLinkability,
-    ) -> Result<Arc<dyn Inode>> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay tmpfile creation is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn mknod(&self, _name: &str, _mode: InodeMode, _type_: MknodType) -> Result<Arc<dyn Inode>> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay mknod is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn link(&self, _old: &Arc<dyn Inode>, _name: &str) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay link is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn unlink(&self, _name: &str) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay unlink is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn rmdir(&self, _name: &str) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay rmdir is owned by a later meso and is not implemented yet"
-        );
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
@@ -671,36 +520,6 @@ impl Inode for OverlayInode {
             // §18.2/§22).
             None => Err(Error::new(Errno::ENOENT)),
         }
-    }
-
-    fn rename(
-        &self,
-        _old_name: &str,
-        _target: &Arc<dyn Inode>,
-        _new_name: &str,
-        _mode: RenameMode,
-    ) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay rename is owned by a later meso and is not implemented yet"
-        );
-    }
-
-    fn write_link(&self, _target: &str) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay symlink writes are owned by a later meso and are not implemented yet"
-        );
-    }
-
-    fn fallocate(&self, _mode: FallocMode, _offset: usize, _len: usize) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay fallocate is owned by a later meso and is not implemented yet"
-        );
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
@@ -735,24 +554,4 @@ impl Inode for OverlayInode {
         &self.extension
     }
 
-    fn set_xattr(
-        &self,
-        _name: XattrName,
-        _value_reader: &mut VmReader,
-        _flags: XattrSetFlags,
-    ) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay xattr writes are owned by a later meso and are not implemented yet"
-        );
-    }
-
-    fn remove_xattr(&self, _name: XattrName) -> Result<()> {
-        self.read_only_gate()?;
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "overlay xattr removal is owned by a later meso and is not implemented yet"
-        );
-    }
 }

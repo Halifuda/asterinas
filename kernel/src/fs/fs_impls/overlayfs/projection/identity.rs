@@ -56,9 +56,9 @@ use crate::prelude::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectId {
     /// Published `st_dev`.
-    pub(super) dev: DeviceId,
+    pub(in crate::fs::fs_impls::overlayfs) dev: DeviceId,
     /// Published `st_ino`.
-    pub(super) ino: u64,
+    pub(in crate::fs::fs_impls::overlayfs) ino: u64,
 }
 
 /// The `xino=` mount-option mode (`Off`/`Auto`/`On`).
@@ -193,7 +193,7 @@ impl IdentityPolicy {
     /// shared [`IdentityPolicy::project`] helper (wave-2 review item 9
     /// dedupe); this method supplies the visible source's `(fsid, real ino,
     /// origin dev)` and delegates.
-    pub(super) fn project_object_id(
+    pub(in crate::fs::fs_impls::overlayfs) fn project_object_id(
         &self,
         real: &RealObject,
         is_directory: bool,
@@ -217,7 +217,7 @@ impl IdentityPolicy {
     /// copy-up (authority-continuity invariant, spec §2 Case 10). The record
     /// is layer-validated before consumption (`read_lower_id`, wave-2 review
     /// item 5), so `layer_dev` never sees a foreign `fsid` on this path.
-    pub(super) fn project_object_id_from_lower_id(
+    pub(in crate::fs::fs_impls::overlayfs) fn project_object_id_from_lower_id(
         &self,
         lower_id: &LowerIdRecord,
         is_directory: bool,

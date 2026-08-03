@@ -40,7 +40,7 @@ use crate::{
 /// [`OverlayFs::store_lower_id`] is the single durable source of the lower
 /// identity; encode/decode are pure value transforms.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct LowerIdRecord {
+pub(in crate::fs::fs_impls::overlayfs) struct LowerIdRecord {
     /// Lower layer fsid (meso-01 published); the layer id for the xino mask
     /// (`P2-01`).
     fsid: u64,
@@ -85,10 +85,6 @@ impl LowerIdRecord {
     /// constructible this wave. `Ok(None)` is reserved for the absent
     /// export-FH seam (unreachable), and `Err` is reserved for genuine source
     /// failures (none expected).
-    #[expect(
-        dead_code,
-        reason = "frozen P1-07 constructor (spec revision 07); consumed by the deferred `OverlayFs::store_lower_id` seam once meso-04 lands"
-    )]
     pub(super) fn try_from_lower(lower: &RealObject) -> Result<Option<Self>> {
         Ok(Some(Self {
             fsid: lower.fsid(),
@@ -102,10 +98,6 @@ impl LowerIdRecord {
     /// (4 bytes); payload: `fsid`/`real_ino` (16 bytes), all native endian.
     /// The wire "type" byte is zero this wave — the record is a native
     /// identity pair, not an export-style file handle.
-    #[expect(
-        dead_code,
-        reason = "frozen P1-07 wire encoder (spec revision 07); consumed by the deferred `OverlayFs::store_lower_id` seam once meso-04 lands"
-    )]
     pub(super) fn serialize(&self) -> Vec<u8> {
         let mut wire = Vec::with_capacity(ORIGIN_WIRE_TOTAL_LEN);
         wire.extend_from_slice(&ORIGIN_WIRE_MAGIC.to_ne_bytes());
@@ -172,11 +164,11 @@ impl OverlayFs {
     /// to `EINVAL` (never `.unwrap()`, priors §2). Ordering: meso-04 invokes
     /// this seam before its facts replacement (caller obligation, frozen by
     /// the meso-04 revision-02 packet).
-    #[expect(
-        dead_code,
-        reason = "frozen P1-07 store seam (spec revision 07); consumed by meso-04 `publish_upper_authority` once it lands"
-    )]
-    pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
+    pub(in crate::fs::fs_impls::overlayfs) fn store_lower_id(
+        &self,
+        upper: &Arc<dyn Inode>,
+        lower: &RealObject,
+    ) -> Result<()> {
         let Some(capabilities) = self.policy().upper_capabilities() else {
             return Ok(());
         };
@@ -217,7 +209,10 @@ impl OverlayFs {
     /// fallback in `project_inode` (never silently wrong, never
     /// identity-colliding). Genuine xattr-read errors propagate. Consumed by
     /// `IdentityPolicy` via `project_inode` and by meso-04's re-projection.
-    pub(super) fn read_lower_id(&self, upper: &Arc<dyn Inode>) -> Result<Option<LowerIdRecord>> {
+    pub(in crate::fs::fs_impls::overlayfs) fn read_lower_id(
+        &self,
+        upper: &Arc<dyn Inode>,
+    ) -> Result<Option<LowerIdRecord>> {
         let name = XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME).ok_or_else(|| {
             Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name")
         })?;

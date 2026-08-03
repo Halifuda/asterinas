@@ -17,9 +17,11 @@
 //! [`PositiveKind`], [`RealObject`], [`RealObjectKey`], and
 //! [`OverlayObjectId`] (wave-2 review item 2 widened the cross-meso cache and
 //! policy carriers; wave-3 review item 3 completed the leaf-consumer chain to
-//! the same ceiling). Only the module-private intermediates (`LayerLookup`,
-//! `LowerIdRecord`) and the `pub(super)` carrier fields stay reachable only
-//! inside this module tree.
+//! the same ceiling; the wave-4 unblock pass widened the `P1-07`
+//! [`LowerIdRecord`] carrier to the same ceiling so the `read_lower_id` seam's
+//! return type is nameable by sibling mesos). Only the module-private
+//! intermediate (`LayerLookup`) and the `pub(super)` carrier fields stay
+//! reachable only inside this module tree.
 //!
 //! Wave-3 shared-carrier seams (handoff §2.3 item 4; parent N/A, no feature
 //! claims): `OverlayFs::project_new_upper` (meso-06 §4.1 consumption seam;

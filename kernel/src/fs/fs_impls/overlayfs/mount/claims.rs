@@ -376,7 +376,7 @@ impl UpperWorkdirClaim {
         dead_code,
         reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
     )]
-    pub(super) fn has_exclusive_claim(&self) -> bool {
+    pub(in crate::fs::fs_impls::overlayfs) fn has_exclusive_claim(&self) -> bool {
         let upper_owned = self
             .upper
             .inode
@@ -395,17 +395,17 @@ impl UpperWorkdirClaim {
         dead_code,
         reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
     )]
-    pub(super) fn upper_inode(&self) -> &Arc<dyn Inode> {
+    pub(in crate::fs::fs_impls::overlayfs) fn upper_inode(&self) -> &Arc<dyn Inode> {
         &self.upper.inode
     }
 
     /// Returns the pinned workdir root inode.
-    pub(super) fn workdir_inode(&self) -> &Arc<dyn Inode> {
+    pub(in crate::fs::fs_impls::overlayfs) fn workdir_inode(&self) -> &Arc<dyn Inode> {
         &self.workdir.inode
     }
 
     /// Returns the upper filesystem identity.
-    pub(super) fn upper_fs(&self) -> &Arc<dyn FileSystem> {
+    pub(in crate::fs::fs_impls::overlayfs) fn upper_fs(&self) -> &Arc<dyn FileSystem> {
         &self.upper_fs
     }
 
@@ -414,7 +414,7 @@ impl UpperWorkdirClaim {
         dead_code,
         reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
     )]
-    pub(super) fn identity(&self) -> OverlayUuid {
+    pub(in crate::fs::fs_impls::overlayfs) fn identity(&self) -> OverlayUuid {
         self.identity
     }
 }
