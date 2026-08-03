@@ -59,6 +59,7 @@
 //! resources — the frozen Wave-1 release order is undisturbed.
 
 use core::cell::OnceLock;
+use core::sync::atomic::AtomicU64;
 
 use device_id::DeviceId;
 
@@ -74,7 +75,11 @@ use super::{
 };
 use crate::{
     fs::{
-        fs_impls::overlayfs::projection::{BindingCache, IdentityPolicy, InodeCache, OverlayInode},
+        fs_impls::overlayfs::{
+            dir::whiteout::WhiteoutCache,
+            metadata_security::xattr::OverlayXattrPolicy,
+            projection::{BindingCache, IdentityPolicy, InodeCache, OverlayInode},
+        },
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags},
@@ -399,6 +404,27 @@ impl OverlayFs {
             // `OverlayFs` — the recorded one-field widening of
             // `mount/superblock.rs` (see the Creator report §5).
             _anon_device_id: anon_device_id,
+            // Wave-3 shared-carrier seams (cross-meso owner rule; parent N/A —
+            // seam placement only, the owning meso passes claim the features in
+            // Wave 4). The three fields were added by the sibling
+            // `mount/superblock.rs` seam packet and are initialized here in the
+            // frozen declaration order; all three have trivial drops, so the
+            // frozen RAII release order above is undisturbed.
+            //
+            // `workdir_temp_serial` (meso-04 P1-34) — the workdir unique-naming
+            // context (`generate_workdir_temp_name`); a saturating `AtomicU64`
+            // starting at 0, never gates I/O.
+            workdir_temp_serial: AtomicU64::new(0),
+            // `xattr_policy` (meso-05 P1-33) — the immutable xattr
+            // public/private/escaped classification policy; unit-struct default
+            // construction per its frozen shape (stateless this wave; the type
+            // lands in Wave 4 `metadata_security/xattr.rs`).
+            xattr_policy: OverlayXattrPolicy,
+            // `whiteout_cache` (meso-06 P1-36) — the mount-scoped `WL`-domain
+            // reusable whiteout cache; constructed through the frozen
+            // `WhiteoutCache::new` name (constructor lands in Wave 4
+            // `dir/whiteout.rs`; forward reference by frozen name).
+            whiteout_cache: Mutex::new(WhiteoutCache::new()),
         });
         let _ = overlay_fs
             .root_inode

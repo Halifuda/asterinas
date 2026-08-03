@@ -21,7 +21,7 @@
 //! `policy()`, `claims()`) to the same ceiling so the `projection` tree can
 //! call them (E0624).
 
-use core::cell::OnceLock;
+use core::{cell::OnceLock, sync::atomic::AtomicU64};
 
 use super::{
     OVERLAY_FS_NAME, claims::UpperWorkdirClaim, layers::OverlayLayerStack, policy::MountPolicy,
@@ -57,6 +57,13 @@ use crate::{
 /// callbacks. The meso-02 `bindings`/`inodes` caches use sleep-capable
 /// `RwMutex` internal data locks (not topology levels) and the `identity`
 /// policy is immutable after construction.
+///
+/// The wave-3 seams add the meso-04/05/06 cross-meso carriers —
+/// `workdir_temp_serial` (meso-04 P1-34), `xattr_policy` (meso-05 P1-33),
+/// `whiteout_cache` (meso-06 P1-36) — as forward references by frozen name;
+/// their construction and consumers land with the Wave-4 leaf Creators
+/// (`copyup`, `metadata_security`, `dir`) under the same cross-meso
+/// owner-extension rule (meso-04 spec §4.1 / meso-05 spec §4 / meso-06 spec §4).
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     pub(super) layer_stack: OverlayLayerStack,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
@@ -122,6 +129,42 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
     /// and suppresses the unused-field lint.
     pub(in crate::fs::fs_impls::overlayfs) _anon_device_id: AnonDeviceId,
+    /// The saturating workdir temp-name serial (meso-04 P1-34 seam).
+    ///
+    /// Unique-naming context for the `copyup` meso's
+    /// `OverlayFs::generate_workdir_temp_name` (meso-04 spec §4.1 / P1-34):
+    /// the value is saturating-fetched and never gates I/O. The consuming
+    /// methods land in Wave 4 (`copyup/mod.rs` + `copyup/workdir.rs`).
+    #[expect(
+        dead_code,
+        reason = "frozen meso-04 cross-meso seam; consumed by the Wave-4 copyup Creator (P1-34) via generate_workdir_temp_name; construction lands with the sibling build.rs extension"
+    )]
+    pub(in crate::fs::fs_impls::overlayfs) workdir_temp_serial: AtomicU64,
+    /// The immutable xattr classification policy (meso-05 P1-33 seam).
+    ///
+    /// Owned once here under the cross-meso owner-extension rule (meso-05
+    /// spec §4); stateless in this wave, no lock. Forward reference by frozen
+    /// name: `OverlayXattrPolicy` lands in Wave 4
+    /// (`metadata_security/xattr.rs`); the `OverlayFs::xattr_policy()`
+    /// accessor and the construction land with the meso-05 Creator.
+    #[expect(
+        dead_code,
+        reason = "frozen meso-05 cross-meso seam; type lands in Wave 4 metadata_security/xattr.rs, accessor + construction land with the meso-05 Creator (P1-33)"
+    )]
+    pub(in crate::fs::fs_impls::overlayfs) xattr_policy: OverlayXattrPolicy,
+    /// The mount-scoped reusable whiteout cache (meso-06 P1-36 seam; the
+    /// `WL` level-5 domain).
+    ///
+    /// Bounded to one workdir staging slot; `WL` critical sections never
+    /// cover BIO/sleep/underlying calls (meso-06 spec §8). Forward reference
+    /// by frozen name: `WhiteoutCache` lands in Wave 4 (`dir/whiteout.rs`);
+    /// the construction and the short slot protocol land with the meso-06
+    /// Creator.
+    #[expect(
+        dead_code,
+        reason = "frozen meso-06 cross-meso seam; type lands in Wave 4 dir/whiteout.rs, slot protocol + construction land with the meso-06 Creator (P1-36)"
+    )]
+    pub(in crate::fs::fs_impls::overlayfs) whiteout_cache: Mutex<WhiteoutCache>,
 }
 
 /// The `MOUNT` lifecycle state of an [`OverlayFs`].

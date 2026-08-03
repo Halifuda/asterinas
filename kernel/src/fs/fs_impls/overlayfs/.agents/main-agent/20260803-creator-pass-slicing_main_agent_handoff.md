@@ -163,7 +163,9 @@ This section is the authoritative dispatch/review/commit contract for the Creato
   long-lived repair Reviewer+Creator; per-Wave commits amended per repair
   round; review artifacts under gitignored `subagent-tasks/` + `components/`;
   durable records uncommitted during the Wave cycle. Recorded as §2A.
-- **No subagents dispatched** (slicing + orchestration only, per user request).
+- **Wave 1 EXECUTED and ACCEPTED (2026-08-03):** 7 per-file Creators produced the `mount/` module tree; wave commit amended through 2 repair rounds (`e4b5c0b27` → `dafd6a38e` → `e1613f12c`); aster-code-review diff-mode review (3 personas, base `be0e574c5`) ran 3 rounds — development 5→2→0, security 3→1 (recorded limitation), maintainability 15→8→5 (all accepted-with-note). Review artifacts under `.agents/components/wave_01_review/` (rounds 1-3). `e1613f12c` is the stable Wave-1 commit and the Wave-2 review base.
+- **Wave 2 EXECUTED and ACCEPTED (2026-08-03):** 9 per-file Creators landed `projection/*` + the superblock/build extensions; commit amended through 3 repair rounds (`157be7812` → `2787a56aa` → `23454f509` → `77b0d4a49`); diff-mode review (base `e1613f12c`) ran 4 rounds — development 8→4→2→1, security 2→1→1→0, maintainability 8→3→2→3 (all remaining accepted-with-note: frozen `is_directory` signature, P1-07 durable-origin record format limitation, claims() widening, no-unit-tests/ktest-forbidden). Review artifacts under `.agents/components/wave_02_review/`. `77b0d4a49` is the stable Wave-2 commit and the Wave-3 review base.
+- **Next: Wave 3** — shared-carrier seams (7 per-file creators: crate-root `overlayfs/mod.rs` module decls + `AccessType`, `mount/superblock.rs` 3 fields, `mount/build.rs` inits, `projection/inode.rs` 2 fields + widenings, `projection/entry.rs` `RealObject::new` + `is_opaque_directory`, `projection/binding_cache.rs` constructor widenings, `projection/mod.rs` `project_new_upper` + `record_copyup_transition` hook).
 
 ## 4. Explicit Agent-Level Decisions
 

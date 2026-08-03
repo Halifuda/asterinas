@@ -49,8 +49,12 @@ use crate::prelude::*;
 /// The pair is precomputed once by [`IdentityPolicy`] at inode creation and
 /// stored on the `OverlayInode`; stat reuses it without re-derivation. It is
 /// an identity projection, never a reverse name map.
+///
+/// Wave-3 review item 3 widened the type to the overlayfs ceiling: it is the
+/// return type of the published `OverlayInode::object_id()` accessor, so
+/// sibling mesos must be able to name it (private-in-public closure).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OverlayObjectId {
+pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectId {
     /// Published `st_dev`.
     pub(super) dev: DeviceId,
     /// Published `st_ino`.

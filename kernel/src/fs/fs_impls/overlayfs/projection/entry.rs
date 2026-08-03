@@ -47,13 +47,17 @@ const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 /// replaced, never mutated in place (BC-3 §33).
 ///
 /// Invariants: the pin is strong; the fields are fixed for the lifetime of the
-/// value. The named constructor (`RealObject::new`) is a Wave-3 seam; until it
-/// lands, values are built through the `pub(super)` fields (the mechanism the
-/// frozen meso-03 consumption note sanctions alongside the constructor), so the
-/// within-wave construction graph (root facts in `inode.rs`, the lookup scan
-/// here, `RealObjectKey::from_source`) can build same-module values.
+/// value. The named constructor ([`RealObject::new`]) is the Wave-3 seam for
+/// sibling mesos; within-`projection` builders (root facts in `inode.rs`, the
+/// lookup scan here, `RealObjectKey::from_facts`) construct through the
+/// `pub(super)` fields directly, so there is a single construction path for
+/// sibling mesos and no field widening beyond the projection tree.
+///
+/// Wave-3 review item 3 widened the type and its four read-only accessors to
+/// the overlayfs ceiling so the leaf meso consumers (`readdir_index.rs`,
+/// `copyup/`, `dir/`) can name the layer carriers.
 #[derive(Clone, Debug)]
-pub(super) struct RealObject {
+pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
     pub(super) layer_index: usize,
     pub(super) real_inode: Arc<dyn Inode>,
     pub(super) fsid: u64,
@@ -61,23 +65,48 @@ pub(super) struct RealObject {
 }
 
 impl RealObject {
+    /// Builds a real object from its four frozen fields.
+    ///
+    /// Wave-3 shared-carrier seam (meso-03 spec §5.3 E2 / meso-06 spec §4.1):
+    /// the leaf mesos construct same-layer real objects (the merged-scan
+    /// `..` parent-identity route and new-upper publication) from pinned
+    /// real inodes without touching the private fields. The `pub(super)`
+    /// fields remain for the within-module construction graph.
+    #[expect(
+        dead_code,
+        reason = "frozen meso-03 §5.3 E2 / meso-06 §4.1 construction seam; consumed by the Wave-4 leaf Creators"
+    )]
+    pub(in crate::fs::fs_impls::overlayfs) fn new(
+        layer_index: usize,
+        real_inode: Arc<dyn Inode>,
+        fsid: u64,
+        container_dev_id: DeviceId,
+    ) -> Self {
+        Self {
+            layer_index,
+            real_inode,
+            fsid,
+            container_dev_id,
+        }
+    }
+
     /// Returns the position of this real object in the overlay layer stack.
-    pub(super) fn layer_index(&self) -> usize {
+    pub(in crate::fs::fs_impls::overlayfs) fn layer_index(&self) -> usize {
         self.layer_index
     }
 
     /// Returns the pinned underlying inode of this real object.
-    pub(super) fn real_inode(&self) -> &Arc<dyn Inode> {
+    pub(in crate::fs::fs_impls::overlayfs) fn real_inode(&self) -> &Arc<dyn Inode> {
         &self.real_inode
     }
 
     /// Returns the layer filesystem identifier of this real object.
-    pub(super) fn fsid(&self) -> u64 {
+    pub(in crate::fs::fs_impls::overlayfs) fn fsid(&self) -> u64 {
         self.fsid
     }
 
     /// Returns the `st_dev` of the container filesystem of this real object.
-    pub(super) fn container_dev_id(&self) -> DeviceId {
+    pub(in crate::fs::fs_impls::overlayfs) fn container_dev_id(&self) -> DeviceId {
         self.container_dev_id
     }
 
@@ -123,7 +152,7 @@ impl RealObject {
     /// re-observed on every lookup (no marker cache, per the frozen contract).
     /// Absent, unsupported, or over-long markers read as "not opaque"; genuine
     /// xattr errors propagate.
-    fn is_opaque_directory(&self) -> Result<bool> {
+    pub(in crate::fs::fs_impls::overlayfs) fn is_opaque_directory(&self) -> Result<bool> {
         if !self.real_inode.type_().is_directory() {
             return Ok(false);
         }
