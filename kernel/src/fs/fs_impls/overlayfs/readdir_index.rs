@@ -337,10 +337,10 @@ impl OverlayInode {
         // Upper-backed real parent: prefer the durable lower-id record so the
         // `..` identity matches the parent's record-derived `stat("..")`,
         // gated on deterministic projection.
-        if visible.layer_index() == 0 {
-            if let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode) {
-                return object_id;
-            }
+        if visible.layer_index() == 0
+            && let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode)
+        {
+            return object_id;
         }
         // Deterministic-projection gate: under xino-off or a per-object
         // overflow the directory branch allocates a fresh fallback ino per

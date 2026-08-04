@@ -97,7 +97,8 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     Accepted Rust changes were amended into `7aabd029c`; P1/P2 remain deferred
     known gaps. Wave5's Checker-owned static compile/lint lane is now open;
     no Reviewer was introduced for this bounded closure.
-  - **Wave5 static entry final result (2026-08-04): BLOCKED / USER DECISION.**
+  - **Wave5 static entry initial stop record (2026-08-04): superseded by the
+    accepted user decisions and implementation below.**
     The three exact target-specific Checker runs reduced the compile result
     from 42 errors / 16 warnings to 15 errors / 1 warning; every authorized
     mechanical repair is amended at `7aabd029c`. The remaining five categories
@@ -105,7 +106,7 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     trait-implementation ownership/delegation, `FsCreationCtx` task-context
     access, in-use claim-slot lifecycle, and the source-permission
     `AccessType`. `make kernel`, `make check`, runtime, and xfstests were not
-    run; no overlayfs-local substitute or further repair is authorized.
+    run at that point; no overlayfs-local substitute was authorized.
   - **Wave5 five-item code-form reconciliation (2026-08-04): DESIGNER
     ACCEPTED.** `task_designer_wave5_static_owner_reconciliation_20260804`
     produced the accepted specification and validation contract under
@@ -115,6 +116,32 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     write-set remains exactly `fs_apis/{registry.rs,inode.rs,inode_ext.rs}`;
     it reuses the existing `Mutex`, Extension/InodeExt pattern, and atomics.
     No implementation or validation command is authorized by this acceptance.
+  - **Wave5 static entry continuation 04 (2026-08-04): REPRODUCED / STILL
+    BLOCKED.** After amend `783c81041`, the Checker ran the same sole
+    target-specific container `cargo check`; it exited `101` with the
+    unchanged 15 errors and one warning. The receipt proves the accepted
+    reconciliation is documentation only: its root slot, canonical trait
+    forwarders, three-file VFS seam, and `ReadOnly` source call have not yet
+    landed in production. No new mechanical repair is authorized; `make`,
+    Clippy, runtime, and xfstests remain unscheduled.
+  - **Wave5 five-item implementation (2026-08-04): ACCEPTED.** The five
+    separately reviewed Creator repairs
+    landed as the mutex-option root publication, canonical trait owner with
+    sibling `*_impl` helpers, narrow `FsCreationCtx::task_ctx`, dedicated VFS
+    in-use slot, and read-only link-source admission. The Rust-only result was
+    amended to `1378d502a`. Continuation 05 then ran the exact container
+    target-specific `cargo check` once at its preceding amend `10cf627e2` and
+    reduced the result to five errors and one warning. The main agent amended
+    its three explicitly mechanical candidates (two imports and an unused
+    local rename) without rerunning. The subsequent user-approved ownership
+    repair evaluated opacity / `d_type` before moving the affected values,
+    preserving the existing barrier and readdir contracts; continuation 06
+    confirmed the three `E0382` errors were gone. Its two remaining errors were
+    a direct claim-type visibility propagation, amended as the single
+    `UpperWorkdirClaim` ceiling widening at `36c30ac33`. Continuation 07 then
+    passed the exact target-specific container `cargo check` (exit 0, 8.54s).
+    It emits 17 warnings, so this is not `make check` or lint acceptance;
+    `make kernel`, `make check`, runtime, and xfstests remain unscheduled.
   - **Wave5 takeover (2026-08-04, user-directed):** the active registration
     names `mount::OverlayFsType`; the legacy module is no longer linked,
     though `legacy_fs.rs` remains an archive. The final static evidence is

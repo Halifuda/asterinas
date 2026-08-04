@@ -47,9 +47,7 @@
 
 use self::remove::RemoveKind;
 use super::{
-    projection::{
-        Binding, BindingKey, NegativeBinding, OverlayInode, PositiveBinding, PositiveKind,
-    },
+    projection::{Binding, BindingKey, NegativeBinding, OverlayInode, PositiveBinding},
     AccessType,
 };
 use crate::{
@@ -232,10 +230,7 @@ impl OverlayInode {
         // parent index (Valid + upper-only rule, spec §5.2). Both seams are
         // infallible; they run under the held `DIR` before release.
         let key = BindingKey::new(self.key(), String::from(name));
-        let binding = Arc::new(Binding::Positive(PositiveBinding::new(
-            PositiveKind::Single,
-            old_overlay.clone(),
-        )));
+        let binding = Arc::new(Binding::Positive(PositiveBinding::new(old_overlay.clone())));
         fs.bindings().insert(key, binding);
         self.readdir_index_insert(name, old_overlay.clone(), old_overlay.type_());
         Ok(())

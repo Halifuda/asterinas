@@ -61,7 +61,7 @@ const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
 /// `MountPolicy::uuid()`/`SuperBlock::fsid` (spec §3.0 unified-identity
 /// invariant).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct OverlayUuid(u64);
+pub(in crate::fs::fs_impls::overlayfs) struct OverlayUuid(u64);
 
 impl OverlayUuid {
     /// Creates an [`OverlayUuid`], rejecting the zero value with `EINVAL`.

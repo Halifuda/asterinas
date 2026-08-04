@@ -141,7 +141,7 @@ impl IdentityPolicy {
     /// extension packet can invoke it. See the Creator report §5.
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         overlay_dev_id: DeviceId,
-        layer_devs: Box<[(u64, DeviceId, u64)]>,
+        layer_devs: &[(u64, DeviceId, u64)],
         upper_layer_dev_index: Option<usize>,
         xino_shift: u32,
         // pre-wave5 A1 adds `xino_mode`; pre-wave5 A2 adds the

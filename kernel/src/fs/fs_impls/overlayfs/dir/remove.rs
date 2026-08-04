@@ -244,10 +244,7 @@ impl OverlayInode {
         // rmdir is always `Dir` (the non-dir type gate above refused
         // rmdir-on-file with `ENOTDIR` and unlink-on-dir with `EISDIR`).
         let target_type = target_inode.type_();
-        let replace_target = match target_facts.upper() {
-            Some(_) => Some(target_type),
-            None => None,
-        };
+        let replace_target = target_facts.upper().map(|_| target_type);
         let clear_empty_temp = if kind == RemoveKind::Rmdir {
             match target_facts.upper() {
                 Some(upper_obj) => {
@@ -273,10 +270,7 @@ impl OverlayInode {
         } else {
             None
         };
-        let staged_temp_name = match &clear_empty_temp {
-            Some(temp) => Some(temp.name()),
-            None => None,
-        };
+        let staged_temp_name = clear_empty_temp.as_ref().map(|temp| temp.name());
         // The shared recipe scaffold (wave-4 round-2 repair item 2): the
         // commit marker is flipped at each physical upper commit point and
         // the Case-13 reconcile / pre-publication cleanup classification is

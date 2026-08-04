@@ -175,10 +175,7 @@ impl OverlayInode {
         let inode = fs.project_new_upper(&new_facts);
         fs.bindings().insert(
             BindingKey::new(self.key(), String::from(name)),
-            Arc::new(Binding::Positive(PositiveBinding::new(
-                PositiveKind::Single,
-                inode.clone(),
-            ))),
+            Arc::new(Binding::Positive(PositiveBinding::new(inode.clone()))),
         );
         self.readdir_index_insert(name, inode.clone(), object_type);
         Ok(inode)
@@ -331,10 +328,7 @@ impl OverlayInode {
                 let inode = fs.project_new_upper(&new_facts);
                 fs.bindings().insert(
                     BindingKey::new(self.key(), String::from(name)),
-                    Arc::new(Binding::Positive(PositiveBinding::new(
-                        PositiveKind::Single,
-                        inode.clone(),
-                    ))),
+                    Arc::new(Binding::Positive(PositiveBinding::new(inode.clone()))),
                 );
                 self.readdir_index_insert(name, inode.clone(), object_type);
                 Ok(inode)

@@ -50,11 +50,6 @@ impl OverlayInuseSlot {
         );
     }
 
-    /// Returns whether any token currently owns this slot.
-    pub fn is_claimed(&self) -> bool {
-        self.owner_token.load(Ordering::Acquire) != 0
-    }
-
     /// Returns whether `token` currently owns this slot.
     pub fn is_claimed_by(&self, token: u64) -> bool {
         token != 0 && self.owner_token.load(Ordering::Acquire) == token

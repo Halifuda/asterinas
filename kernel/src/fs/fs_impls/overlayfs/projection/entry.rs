@@ -72,10 +72,6 @@ impl RealObject {
     /// `..` parent-identity route and new-upper publication) from pinned
     /// real inodes without touching the private fields. The `pub(super)`
     /// fields remain for the within-module construction graph.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-03 §5.3 E2 / meso-06 §4.1 construction seam; consumed by the Wave-4 leaf Creators"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         layer_index: usize,
         real_inode: Arc<dyn Inode>,

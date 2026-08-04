@@ -6,7 +6,7 @@
 //! This module implements the frozen §4 `binding_cache.rs` surface of the
 //! `visibility_projection_identity` meso spec (revision 07): one `Binding`
 //! type used for both cache entries and lookup results, the per-name positive
-//! binding (`{ kind, inode }` with zero per-name fact duplication), the
+//! binding (an inode with zero per-name fact duplication), the
 //! private negative reasons that all surface as `ENOENT`, and the mount-wide
 //! `BindingCache` — the first source for `(parent, name)` lookup results
 //! (`Binding-first` invariant). `BindingCache` is not a second layer registry
@@ -35,6 +35,9 @@ use hashbrown::HashMap;
 use super::{inode::OverlayInode, inode_cache::RealObjectKey};
 use crate::{fs::vfs::inode::Inode, prelude::*};
 
+type BindingsByName = HashMap<Box<str>, Arc<Binding>>;
+type BindingsByParent = HashMap<RealObjectKey, BindingsByName>;
+
 /// Outer positive/negative binding algebra (BC-2 §19) — one type for cache
 /// AND lookup results.
 ///
@@ -52,8 +55,7 @@ pub(in crate::fs::fs_impls::overlayfs) enum Binding {
     Negative(NegativeBinding),
 }
 
-/// A positive per-name binding: the per-name view classification plus the
-/// shared overlay inode.
+/// A positive per-name binding: the shared overlay inode.
 ///
 /// The real-object facts live once, in the shared inode's
 /// `OverlayObjectFacts`; a `PositiveBinding` carries zero per-name fact
@@ -63,8 +65,6 @@ pub(in crate::fs::fs_impls::overlayfs) enum Binding {
 /// makes the derive unsatisfiable (`OverlayInode` deliberately has no `Debug`).
 #[derive(Clone)]
 pub(in crate::fs::fs_impls::overlayfs) struct PositiveBinding {
-    /// The per-name view classification of the bound name.
-    pub(super) kind: PositiveKind,
     /// The shared inode for the bound name.
     pub(super) inode: Arc<OverlayInode>,
 }
@@ -73,19 +73,12 @@ impl PositiveBinding {
     /// Constructs a positive per-name binding (wave-3 seam-placement surface;
     /// meso-06 §4.1).
     ///
-    /// The namespace-mutation Meso publishes `Single`/`Merged` positive
-    /// bindings through this constructor at the overlayfs ceiling; the fields
-    /// stay private to the projection tree and the frozen `{ kind, inode }`
-    /// shape with zero per-name fact duplication is preserved.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-06 §4.1 construction seam; consumed by the Wave-4 namespace-mutation Creator (dir/)"
-    )]
-    pub(in crate::fs::fs_impls::overlayfs) fn new(
-        kind: PositiveKind,
-        inode: Arc<OverlayInode>,
-    ) -> Self {
-        Self { kind, inode }
+    /// The namespace-mutation Meso publishes positive bindings through this
+    /// constructor at the overlayfs ceiling; the field stays private to the
+    /// projection tree and the inode-only shape avoids per-name fact
+    /// duplication.
+    pub(in crate::fs::fs_impls::overlayfs) fn new(inode: Arc<OverlayInode>) -> Self {
+        Self { inode }
     }
 
     /// Returns the inode carrier bound to this positive name.
@@ -120,9 +113,21 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
     /// The name is absent from every layer.
     Absent,
     /// The name is hidden by a whiteout barrier.
-    HiddenByWhiteout(HiddenEvidence),
+    HiddenByWhiteout(
+        #[expect(
+            dead_code,
+            reason = "retained hidden-whiteout evidence carries barrier provenance and a lifetime pin for cached negative bindings"
+        )]
+        HiddenEvidence,
+    ),
     /// The name is hidden by an opaque-directory barrier.
-    HiddenByOpaque(HiddenEvidence),
+    HiddenByOpaque(
+        #[expect(
+            dead_code,
+            reason = "retained hidden-opaque evidence carries barrier provenance and a lifetime pin for cached negative bindings"
+        )]
+        HiddenEvidence,
+    ),
 }
 
 /// The barrier evidence of a hidden name: the layer whose barrier hid the
@@ -133,8 +138,16 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
 #[derive(Clone, Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct HiddenEvidence {
     /// The layer whose barrier hid the name.
+    #[expect(
+        dead_code,
+        reason = "retained hidden-barrier provenance supports conservative cached-negative revalidation"
+    )]
     pub(super) layer_index: usize,
     /// Strong pin to the barrier object.
+    #[expect(
+        dead_code,
+        reason = "strong pin retains the hidden barrier for the cached-negative binding lifetime"
+    )]
     pub(super) real_inode: Arc<dyn Inode>,
 }
 
@@ -146,10 +159,6 @@ impl HiddenEvidence {
     /// through this constructor at the overlayfs ceiling; the strong
     /// `real_inode` pin serves the BC-2 lifetime rule (a live negative binding
     /// pins its barrier) and the revalidation of the cached negative answer.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-06 §4.1 construction seam; consumed by the Wave-4 namespace-mutation Creator (dir/)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         layer_index: usize,
         real_inode: Arc<dyn Inode>,
@@ -186,10 +195,6 @@ impl BindingKey {
     /// takes the exact `name` as a `String`; the key stores it as a `Box<str>`
     /// so the cache's per-parent inner maps probe it without an allocation
     /// (wave-2 repair item 8).
-    #[expect(
-        dead_code,
-        reason = "frozen meso-06 §4.1 construction seam; consumed by the Wave-4 namespace-mutation Creator (dir/)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn new(parent_id: RealObjectKey, name: String) -> Self {
         Self {
             parent_id,
@@ -215,7 +220,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct BindingCache {
     /// Sleep-capable mount-wide cache (read-mostly; an internal data lock,
     /// not a topology level); insert/update happen under the caller's parent
     /// `DIR` transaction lock.
-    entries: RwMutex<HashMap<RealObjectKey, HashMap<Box<str>, Arc<Binding>>>>,
+    entries: RwMutex<BindingsByParent>,
 }
 
 impl BindingCache {
@@ -263,10 +268,6 @@ impl BindingCache {
 
     /// Removes the cached binding for `(parent_id, name)` (mutation-Meso
     /// surface). An emptied per-parent map is pruned.
-    #[expect(
-        dead_code,
-        reason = "frozen §4 mutation surface (spec: mutation-Meso surface); consumed by the namespace-mutation Meso once it lands"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn invalidate(
         &self,
         parent_id: &RealObjectKey,

@@ -99,9 +99,8 @@ impl OverlayFs {
         }
         let binding = match self.lookup_in_layers(parent_facts, name)? {
             LayerLookup::Positive(facts) => {
-                let kind = facts.kind;
                 let inode = self.project_inode(&facts);
-                Binding::Positive(PositiveBinding { kind, inode })
+                Binding::Positive(PositiveBinding { inode })
             }
             LayerLookup::Negative(negative) => Binding::Negative(negative),
         };
@@ -198,6 +197,8 @@ impl OverlayFs {
                 } else {
                     None
                 },
+                object_id,
+                extension: Extension::new(),
                 // Wave-3 seam fields (handoff §2.3 item 1): the readdir
                 // index is `Some` iff this object is a directory (meso-03
                 // spec §4; the empty initial index — `ReaddirIndex::new()`
@@ -210,8 +211,6 @@ impl OverlayFs {
                     None
                 },
                 copyup_transition: Mutex::new(None),
-                object_id,
-                extension: Extension::new(),
             })
         })
     }
@@ -225,10 +224,6 @@ impl OverlayFs {
     /// `get_or_create` by `RealObjectKey`, facts/object_id initialization
     /// — so a second projection of the same upper real object reuses the
     /// same `P0-16` identity carrier.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-06 §4.1 consumption seam; consumed by the Wave-4 namespace-mutation Creator (dir/)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn project_new_upper(
         &self,
         facts: &OverlayObjectFacts,

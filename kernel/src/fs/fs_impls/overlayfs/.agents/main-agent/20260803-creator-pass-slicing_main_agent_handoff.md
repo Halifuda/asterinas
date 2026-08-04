@@ -2,26 +2,39 @@
 
 # Main-Agent Handoff: 2026-08-03 Creator Pass Slicing (Phase 4)
 
+> **ENDED / SUPERSEDED (2026-08-04):** Wave5 static continuation 11 reached
+> the user-directed documentation-only stopping point. The single live
+> handoff is now
+> `20260804-wave6-documentation-lint_main_agent_handoff.md`.
+
 **Date / Time:** 2026-08-03; last updated 2026-08-04
-**Status:** `Pre-wave5 closure ACCEPTED; Wave5's five user-adjudicated owner/interface repairs are now Designer-accepted and await separately packeted implementation. The user-directed takeover plus every bounded mechanical compile repair are amended at 7aabd029c: overlayfs::init() registers mount::OverlayFsType, its deferred dead-code expectation is removed, and legacy_fs.rs is retained only as an unlinked archive. P1 overlay-parent identity and P2 executable creator credentials remain deferred known gaps. The three exact target-specific cargo checks reduced the result from 42 errors / 16 warnings to 15 errors / 1 warning. The accepted reconciliation freezes the root slot, trait-owner/forwarder, VFS task-context, VFS in-use-slot, and source-permission forms in §5B/§5C. No implementation packet is yet dispatched; no make/kernel/check, runtime, xfstests, or Reviewer task is scheduled.`
+**Status:** `Closed / handed over to Wave6 documentation lint. No further Wave5 scheduling belongs in this handoff.`
 
 ## 1. Global State Pointer
 
-- **Current Active Wave / Pass:** Wave5 static entry — **Designer reconciliation
-  accepted; awaiting separately packeted implementation** under
-  `task_designer_wave5_static_owner_reconciliation_20260804`.
-  `task_checker_wave5_compile_lint_20260804` completed three
-  prescribed, container-only target-specific cargo checks. The final run at
-  `7aabd029c` exits 101 with 15 errors / 1 warning, after all mechanical
-  candidates were amended. The legacy registry wiring is removed and
-  `mount::OverlayFsType` is active. The remaining blockers are a viable
-  root-slot construction, trait forwarding, VFS task context, in-use claim
-  lifecycle, and source-permission access semantics. The user decisions are
-  recorded in §5B; do not widen their stated implementation boundaries.
-  Phase 4 (implementation) is **COMPLETE and ACCEPTED**; Phase 3 (Designer)
-  closed with all 6 basic-wave contracts `Specified` and accepted; meso 07 deferred-only (0/4). The prior tenure's handoff
-  (`20260801-state-cleanup-designer-prep_main_agent_handoff.md`) is marked **ENDED / SUPERSEDED**; this file is the single live handoff.
-- **Stable commit chain (codex/overlayfs-refactor):** `be0e574c5` baseline (legacy rename + records) → `e1613f12c` Wave 1 (`mount/`) → `77b0d4a49` Wave 2 (`projection/` + OverlayFs extensions) → `b9b9d6caf` Wave 3 (shared-carrier seams) → `43a0747bc` Wave 4 (leaf mesos) → `7aabd029c` accepted pre-wave5 closure, Wave5 registry takeover, and both bounded mechanical compile repairs. The title has no `WIP`; tracked board files remain intentionally uncommitted.
+- **Current Active Wave / Pass:** Wave5 static entry — continuation 11 at the
+  current dirty source state passed the prescribed target-specific cargo smoke
+  and `make kernel` after `MountPolicy::assemble` switched to a call-local
+  borrowed `OverlayMountOptions` and `BindingCache::entries` gained the two
+  approved private aliases. Workspace Clippy then stopped with only nine
+  user-deferred Wave6 documentation diagnostics; `too_many_arguments`,
+  `type_complexity`, and `boxed_local` are absent. rustfmt and `make check`
+  remain unscheduled until the Wave6 documentation cleanup is complete;
+  neither runtime nor xfstests is scheduled. The legacy registry wiring is
+  removed and `mount::OverlayFsType` is active. P1/P2 remain deferred. Phase 4
+  (implementation) is **COMPLETE and ACCEPTED**; Phase 3 (Designer) closed
+  with all 6 basic-wave contracts `Specified`; meso 07 is deferred-only (0/4).
+  The prior tenure's handoff
+  (`20260801-state-cleanup-designer-prep_main_agent_handoff.md`) is marked
+  **ENDED / SUPERSEDED**; this file is the single live handoff.
+- **Stable commit chain (codex/overlayfs-refactor):** `be0e574c5` baseline
+  (legacy rename + records) → `e1613f12c` Wave 1 (`mount/`) → `77b0d4a49`
+  Wave 2 (`projection/` + OverlayFs extensions) → `b9b9d6caf` Wave 3
+  (shared-carrier seams) → `43a0747bc` Wave 4 (leaf mesos) → `7aabd029c`
+  accepted pre-wave5 closure → `36c30ac33` Wave5 takeover, five accepted
+  owner/interface repairs, bounded ownership-order repair, and claim
+  visibility propagation. The title has no `WIP`; tracked board files remain
+  intentionally uncommitted.
 - **Blueprint Updates Made:** Yes (2026-08-03): Phase 3 closed; Phase 4 opened with the pass-slicing decision, then marked **Complete** with the pipeline index rows set to `Implemented` (Creator pass done; per-pass Checker `not scheduled` by workflow amendment; integration Checker + Reviewer pending). `PASS_SLICING.md` carries the `creator_pass_slicing_20260803` block.
 - **Accepted baseline:** Phase 0-2 accepted; fresh Architect topology owns all 81 formal Micro IDs; Stage-D scope 57 `需要实现` / 24 `暂不实现` unchanged; meso 01-06 contracts `Specified`; meso 07 deferred-only. **The full 57-micro implementation set is now landed (30 new .rs files, ~10k lines).**
 
@@ -713,6 +726,315 @@ token ownership; it adds no lock domain. The Designer made no `.rs` edit, ran
 no command, designed no ktest, and scheduled no implementation. Separate VFS
 and Overlayfs Creator packets may now be considered, but are not authorized by
 this acceptance.
+
+## 5D. Continuation-04 Static Check Dispatch (2026-08-04)
+
+After the accepted coordination records were amended at `783c81041`, the main
+agent dispatched
+`task_checker_wave5_compile_lint_20260804_continuation_04` through
+`subagent-tasks/wave_05_compile_lint/pass_11_wave5_compile_lint_checker_continuation_04_designer_reconciliation_dispatch.md`.
+It authorizes exactly one attempt of the existing target-specific container
+`cargo check` command, no production edit or repair, and a distinct preserved
+evidence run. The accepted Designer reconciliation is documentation only, so
+this continuation must not describe it as implementation or infer that the
+previous 15-error result is repaired. `make`, Clippy, runtime, and xfstests
+remain forbidden.
+
+**Result:** Checker continuation 04 ran that one exact command at
+`783c81041`; it exited `101` with the same 15 errors and one warning as
+continuation 03. Receipt:
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §9;
+raw output:
+`components/wave_05_compile_lint/run_evidence/20260804T_continuation_04_designer_reconciliation/run_20260804T_continuation_04_targeted_cargo_check.stdout_stderr.log`.
+The five error categories now explicitly prove only that the accepted root,
+trait, VFS, and permission designs have not been implemented. No new
+mechanical repair exists, and no more continuation, build, lint, runtime, or
+xfstests command is authorized without an implementation packet.
+
+## 5E. Five Separate Creator Implementations (2026-08-04)
+
+**User authorization:** Implement the five accepted forms separately, then
+have the main agent review each exact production diff. The packet group is
+`subagent-tasks/wave_05_static_owner_repair/`; every Creator is command-free,
+cannot run git, and writes one ignored receipt under
+`components/wave_05_static_owner_repair/`.
+
+**Slicing and dependency:** pass 12 root publication (`P0-05`) changes
+`mount/{superblock.rs,build.rs}`; pass 13 canonical trait ownership changes
+the seven trait-body files; pass 15 in-use slot (`P1-35`) changes the two VFS
+extension files plus `mount/claims.rs`. These three disjoint write-sets start
+first. Pass 14 task context (`P0-01`, `P1-19`) waits for pass 12 because it
+also changes `mount/build.rs`; pass 16 source link permission (`P1-28`) waits
+for pass 13 because it changes the post-forwarder `dir/mod.rs` helper. The
+main agent reviews each task before dependent dispatch and amends only all
+accepted Rust changes together. A final Checker continuation uses the exact
+previously verified target-specific container `cargo check` command.
+
+**Pass 12 review:** Accepted. The exact `mount/{superblock.rs,build.rs}` diff
+removes `OnceLock`, uses `Mutex<Option<Arc<dyn Inode>>>`, creates the root
+outside the slot lock, publishes `Some(root)` before return, and makes the
+getter clone only a prepared root. No new entity, lock-order change, command,
+or out-of-scope edit was found; pass 14 is unblocked.
+
+**Pass 15 review:** Accepted. The exact VFS `inode.rs`/`inode_ext.rs` plus
+`mount/claims.rs` diff creates only the dedicated token slot and group3,
+preserves group1/group2, initializes only through `overlay_inuse_slot()`, and
+uses the frozen claim/release/observation orders. `InodeClaimGuard` retains
+its inode pin and only CAS-releases its own token; no global map, mutex,
+new lock domain, command, or out-of-scope edit was found.
+
+**Pass 14 review:** Accepted. The exact VFS diff adds only
+`FsCreationCtx::task_ctx() -> &Context<'a>` at `pub(in crate::fs)`. The two
+already-written mount construction expressions are the complete consumer set;
+they immediately resolve paths or duplicate credentials and retain no context.
+No new type, carrier, lock, credential override, command, or out-of-scope edit
+was found.
+
+**Pass 13 review:** Accepted. `projection/inode.rs` now holds the sole
+`impl Inode` and `impl FileOps` for the new `OverlayInode`; every sibling Meso
+body remained in its original file as an exact `*_impl` helper. The follow-up
+corrected stale ownership prose in `copyup/mod.rs`, `permission.rs`, and
+`projection/inode.rs`; no behavior, signature, lock scope, or out-of-scope
+production edit was introduced.
+
+**Pass 16 review:** Accepted. The sole additional `dir/mod.rs` call now uses
+`old_overlay.check_permission(AccessType::ReadOnly, Permission::MAY_WRITE)`
+after the existing owner predicate and before `link_source()`. The target
+parent's existing `Mutating` admission, target `DIR` guard, error conversion,
+and copy-up ordering are unchanged.
+
+**Five-pass amend:** The 13 accepted Rust files were amended to
+`10cf627e2` (`Add pre-wave5 bounded overlayfs revisions`); only the live
+`PASS_SLICING.md`, `SYSTEM_BLUEPRINT.md`, and this handoff remained modified
+outside the commit.
+
+**Checker continuation 05:** The packet
+`pass_11_wave5_compile_lint_checker_continuation_05_static_owner_implementation_dispatch.md`
+authorized the same one target-specific container command at `10cf627e2`.
+It exited `101` with five errors and one warning; raw evidence and the full
+classification are in `components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md`
+§10 and its referenced run directory. The command was not retried; no
+`make`, Clippy, runtime, or xfstests command ran.
+
+**Mechanical continuation repair:** The Checker proved three direct repairs:
+the missing `AccessType` import in `projection/inode.rs`, the missing `Inode`
+trait import in `metadata_security/permission.rs`, and the unused local in
+`dir/mod.rs`. The main agent applied only those spelling/scope/lint changes
+and amended them to `1378d502a`.
+
+**Pass 17 ownership-order repair:** The user approved the frozen no-clone
+ordering. A command-free Creator changed only `projection/entry.rs` and
+`readdir_index.rs`: upper opacity is evaluated before either returning or
+moving the hit, lower opacity is recorded before insertion and tested after
+insertion, and inode `type_()` is read before the `Arc` enters the readdir
+tuple. Exact-diff review accepted this as preservation of the existing opaque
+barrier, merged-layer, and `d_type` contracts; it was amended to `90a5facf7`.
+
+**Checker continuation 06:** The exact prescribed cargo check at `90a5facf7`
+exited `101` with the three `E0382` errors absent. Its only errors were the
+pre-existing `UpperWorkdirClaim` visibility mismatch exposed by
+`OverlayFs::claims()` and consumed by the single `OverlayFs::workdir_root()`
+resolver; the receipt records 17 warnings. This is direct interface
+propagation, so the main agent widened only `UpperWorkdirClaim` to the existing
+overlayfs ceiling and amended `36c30ac33`; no claim field, method, lifecycle,
+lock, or call ordering changed.
+
+**Checker continuation 07 / current result:** The same exact one-command
+container cargo check at `36c30ac33` exited `0` in 8.54 seconds. Receipt:
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §12;
+raw output:
+`components/wave_05_compile_lint/run_evidence/20260804T_continuation_07_claim_visibility/run_20260804T_continuation_07_targeted_cargo_check.stdout_stderr.log`.
+It still emits the following **17 unresolved Rust warnings**. They are recorded
+as warning/lint debt, not as a user-authorized cleanup:
+
+| Root cause | Diagnostics and locations | Current boundary |
+|------------|---------------------------|------------------|
+| Published signature has a narrower return type | One `private_interfaces` warning: `UpperWorkdirClaim::identity()` is visible at the overlayfs ceiling, but its returned `OverlayUuid` remains `mount`-private (`mount/claims.rs:411` and `:64`). | Do not silence it with `allow`. A later bounded decision must choose whether `identity()` should narrow to its true consumers or `OverlayUuid` is intentionally published to the same ceiling; that is an API/owner visibility choice. |
+| Facts/evidence are constructed but not consumed | Five `dead_code` diagnostics: `PositiveBinding::kind` (`projection/binding_cache.rs:67`), the `HiddenEvidence` payload of both `NegativeBinding` barrier variants (`:123`, `:125`), `HiddenEvidence::{layer_index, real_inode}` (`:136-138`), and VFS `OverlayInuseSlot::is_claimed()` (`fs_apis/inode_ext.rs:54`). | These are not automatically removable: the binding payloads preserve barrier/evidence state, while the VFS method is part of the new slot API. A cleanup must first prove every actual and intended consumer/disposition. |
+| Completed cross-Meso seam still expects `dead_code` | Eleven `unfulfilled_lint_expectations` warnings: `mount/superblock.rs:143,155,168`; `overlayfs/mod.rs:18`; `mount/policy.rs:210`; `projection/binding_cache.rs:81,150,190,267`; `projection/entry.rs:76`; and `projection/mod.rs:229`. | Each `#[expect(dead_code)]` was a forward-reference marker when its seam was unused. The Wave-4 consumers now use those seams, so Rust correctly warns that the expectation no longer fires. Removing the stale attributes is likely mechanical but must be a separately scoped lint-cleanup pass; do not convert them to `allow` or claim lint acceptance first. |
+
+No `make kernel`, `make check`, Clippy, runtime, or xfstests command has run,
+so the Wave5 static lane has **only cargo-smoke acceptance**, not lint
+acceptance. The next static lane action remains a separate Checker packet for
+`make kernel`; the warning register must stay attached to any later `make
+check`/lint-cleanup scheduling decision.
+
+## 5F. Post-Smoke Warning Decisions (2026-08-04)
+
+The user made the following binding dispositions for the continuation after
+the warning register was recorded:
+
+1. **`OverlayUuid` visibility:** `OverlayUuid` is an overlayfs-wide component,
+   not a mount-private implementation detail. The next bounded lint-cleanup
+   implementation must raise it to the overlayfs visibility ceiling, matching
+   `UpperWorkdirClaim::identity()`; it must not narrow that accessor or add an
+   `allow(private_interfaces)` suppression. This is visibility propagation,
+   not a change to UUID representation, construction, or claim lifecycle.
+2. **Stale expectations:** the 11 unfulfilled `#[expect(dead_code)]` markers
+   are mandatory lint-cleanup work. Remove them while resolving the future
+   lint lane; do not replace them with `allow`. This decision does not claim
+   that `make check` has run or authorize a broad warning cleanup.
+3. **Open evidence/API questions:** before disposing of
+   `PositiveBinding::kind`, either `NegativeBinding` evidence payload, or
+   `OverlayInuseSlot::is_claimed()`, inspect their construction, matching, and
+   intended lifecycle paths. In particular, a syntactically unread
+   `Arc<dyn Inode>` may still be the lifetime pin promised by `HiddenEvidence`;
+   it must not be removed merely to satisfy `dead_code`. The relevance of
+   `is_claimed()` to the mount claim protocol remains an explicit diagnosis
+   item, not an assumed cleanup.
+4. **Hidden evidence disposition:** retain the complete `HiddenEvidence`
+   payload, including both `layer_index` and `real_inode`; do not add a fake
+   consumer and do not shrink the carrier. Its retained evidence/provenance
+   and `Arc` lifetime-pin roles are intentional even where the current wave
+   has no field read. The later bounded lint-cleanup must place narrowly
+   targeted, reason-bearing `#[expect(dead_code)]` annotations on the
+   diagnostics caused by this intentional unread payload. It must not use
+   `allow`, and this disposition does not authorize a behavioral revalidation
+   change.
+
+### 5F.1 Warning-payload diagnosis (2026-08-04)
+
+The requested code/design cross-check produced the following results. These
+are diagnostic findings, not yet a user decision to alter the binding or VFS
+API shapes.
+
+1. **`PositiveBinding::kind` is currently a redundant, and potentially stale,
+   snapshot.** Every construction copies `facts.kind` into the binding, while
+   all current consumers either test only `Binding::Positive(_)` or extract
+   the inode; classification consumers use `OverlayInode::facts_snapshot()`.
+   More importantly, copy-up replaces the shared inode facts without
+   replacing already-published bindings: a formerly lower-only directory may
+   become `Merged` when an upper directory is created while lower inputs stay
+   present. Reading the immutable binding field after that transition could
+   yield the old `Single` classification. Do not invent a read merely to
+   silence the warning. The likely correct follow-up is a small Designer
+   revision that removes `kind` from `PositiveBinding` and makes the
+   inode-owned facts the sole classification source, with matching design-doc
+   correction; this must be decided before a Creator changes the carrier.
+2. **Hidden variants are active, but their evidence has two distinct roles.**
+   Layer lookup and namespace mutation construct `HiddenByWhiteout` and
+   `HiddenByOpaque`; create/link/rename/remove consume their discriminant to
+   choose the visibility recipe, while VFS receives `ENOENT`. No current code
+   reads `HiddenEvidence.layer_index` or borrows `real_inode`. Nevertheless,
+   retaining `real_inode: Arc<dyn Inode>` keeps the barrier object pinned until
+   the cached negative binding drops, which is an intentional `Drop`-lifetime
+   effect not visible to `dead_code`; it must remain. `layer_index` has no
+   present read or destruction role, but the documents reserve it for barrier
+   provenance / revalidation while the current conservative
+   `revalidate_absent` always returns `false`. The user decided to retain the
+   complete payload rather than fabricate a read or reduce the carrier; the
+   future bounded lint-cleanup will document that intentional state with
+   narrow, reason-bearing `#[expect(dead_code)]` annotations.
+3. **`OverlayInuseSlot::is_claimed()` is not a missing mount safety check.**
+   Mount construction claims upper then workdir with
+   `try_claim(token)`'s `compare_exchange(0, token, ...)`; that CAS is the
+   atomic test-and-acquire and returns `EBUSY` on conflict. A pre-check with
+   `is_claimed()` would have a TOCTOU race, while a post-check is redundant
+   and does not establish that the current mount owns the token. The correct
+   mount observer is `UpperWorkdirClaim::has_exclusive_claim()`, which uses
+   `is_claimed_by(identity)` for both pinned inodes (currently an unused
+   future audit seam). No call site invokes the any-owner `is_claimed()`.
+   Unless a concrete non-admission observer is specified, removing this VFS
+   method and its Designer-spec row is the minimal lint-cleanup direction.
+
+### 5F.2 Continuation-08 Static-Lane Stop (2026-08-04)
+
+The post-`pass_18_warning_cleanup` Checker continuation completed its exact
+container preflight, target-specific cargo smoke, and full kernel build:
+
+- `cargo check -p aster-kernel --target x86_64-unknown-none`: **PASS** (0).
+- `make kernel`: **PASS** (0).
+- workspace Clippy: **FAIL** (101, 22 lint errors).
+
+The first Clippy diagnostic is the explicitly deferred VFS method
+`OverlayInuseSlot::is_claimed()` (`fs_apis/inode_ext.rs:54`). It was neither
+suppressed, removed, redesigned, nor given a synthetic caller. Additional
+diagnostics include structural constructor-field ordering and API/carrier
+concerns (`too_many_arguments`, `type_complexity`, and `boxed_local`), as well
+as separately packetable mechanical candidates. Per the user-directed
+mechanical-only lint boundary, no source repair is authorized until the VFS
+deferred decision and the structural/API dispositions are supplied.
+
+The Checker did not run rustfmt or the process-local-wrapper `make check`.
+Its receipt is
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §13;
+raw Clippy evidence is in
+`components/wave_05_compile_lint/run_evidence/continuation_08_warning_cleanup/`.
+
+### 5F.3 User-Directed Mechanical Continuation (2026-08-04)
+
+The user clarified that the §5F.1 direction for the unconsumed any-owner
+observer is binding: `OverlayInuseSlot::is_claimed()` was deleted rather than
+given a synthetic consumer. The CAS admission (`try_claim`), guard release,
+and token-specific observation (`is_claimed_by`) are unchanged. The user also
+authorized the two field-initializer order repairs and all non-documentation
+mechanical Clippy repairs, while explicitly deferring documentation-only lint
+to Wave6.
+
+The accepted `pass_19_post_clippy_mechanical_cleanup` changed only the eight
+recorded Rust paths. Checker continuation 09 then passed the exact
+target-specific container cargo smoke and `make kernel`; workspace Clippy
+failed only with 12 residual diagnostics: nine user-deferred documentation
+items and the three pending API/representation questions,
+`MountPolicy::assemble` `too_many_arguments`, `BindingCache::entries`
+`type_complexity`, and `IdentityPolicy::new` `boxed_local`. All prior
+non-documentation mechanical diagnostics, including `is_claimed()`, are absent.
+The continuation did not run rustfmt or `make check`; both wait on the three
+pending dispositions and the Wave6 documentation cleanup. Receipt:
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §14;
+raw evidence:
+`components/wave_05_compile_lint/run_evidence/continuation_09_post_clippy_mechanical/`.
+
+### 5F.4 User-Approved `boxed_local` Continuation (2026-08-04)
+
+The user approved the `IdentityPolicy::new` input repair after ownership scope
+confirmation. The bounded Designer continuation freezes a borrowed
+`&[(u64, DeviceId, u64)]` construction input: `mount/build.rs` has no
+post-call use of its construction-local `layer_devs`, while `IdentityPolicy`
+copies the relevant lower tuples into, and retains only,
+`Box<[LowerLayerIdentity]>`. The Creator changed only that constructor
+parameter and its sole `&layer_devs` caller; no carrier, lock, lifetime,
+allocation, construction order, identity semantics, VFS surface, test, or
+`legacy_fs.rs` change entered the continuation.
+
+Checker continuation 10 passed the exact target-specific cargo smoke and
+`make kernel`, then stopped at workspace Clippy (exit 101) with eleven
+diagnostics only: the nine user-deferred Wave6 documentation items,
+`MountPolicy::assemble` `too_many_arguments`, and
+`BindingCache::entries` `type_complexity`. `IdentityPolicy::new`
+`boxed_local` is absent. The receipt is
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §15;
+raw evidence is
+`components/wave_05_compile_lint/run_evidence/continuation_10_identity_boxed_local/`.
+No rustfmt, `make check`, runtime, or xfstests command ran.
+
+### 5F.5 User-Approved Policy and Binding Lint Continuation (2026-08-04)
+
+The user approved the two remaining non-documentation Clippy repairs after
+the Designer froze their representation-only forms. Creator pass 21 changed
+only `mount/policy.rs`, `mount/build.rs`, and `projection/binding_cache.rs`:
+`MountPolicy::assemble` now takes a non-escaping construction-local
+`&OverlayMountOptions` and copies only `uuid_mode`,
+`is_default_permissions`, and `xino_mode`; its other five inputs keep their
+individual ordering. The cache remains `parent -> name -> binding` behind the
+same `RwMutex`; `BindingsByName` and `BindingsByParent` are private aliases
+only. No owner, lock, allocation, cache key, cache operation, lifecycle,
+test, VFS, `legacy_fs.rs`, or documentation/comment source change entered the
+pass.
+
+Checker continuation 11 passed the exact target-specific cargo smoke and
+`make kernel`, then stopped at workspace Clippy (exit 101) with exactly the
+nine user-deferred Wave6 documentation diagnostics: seven at
+`mount/build.rs:44-50` and two at `dir/remove.rs:76-77`.
+`MountPolicy::assemble` `too_many_arguments` and
+`BindingCache::entries` `type_complexity` are absent; the earlier
+`IdentityPolicy::new` `boxed_local` remains absent. The receipt is
+`components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md` §16;
+raw evidence is
+`components/wave_05_compile_lint/run_evidence/continuation_11_policy_binding_lint/`.
+No rustfmt, `make check`, runtime, or xfstests command ran. Wave6 exclusively
+owns the remaining documentation cleanup, after which rustfmt and `make
+check` may be scheduled.
 
 ## 6. Live File Discipline
 

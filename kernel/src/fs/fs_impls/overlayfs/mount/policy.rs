@@ -31,7 +31,7 @@ use aster_rights::ReadDupOp;
 
 use super::{
     claims::{OVERLAY_UUID_SIZE, OverlayUuid},
-    options::{UuidMode, XinoMode},
+    options::{OverlayMountOptions, UuidMode, XinoMode},
 };
 use crate::{
     fs::{
@@ -125,22 +125,20 @@ impl MountPolicy {
     pub(super) fn assemble(
         is_effective_read_only: bool,
         credential_policy: CreatorCredentialPolicy,
-        uuid_mode: UuidMode,
+        options: &OverlayMountOptions,
         uuid: Option<OverlayUuid>,
         upper_capabilities: Option<UpperFilesystemCapabilities>,
         write_access: Option<WriteAccessAccounting>,
-        is_default_permissions: bool,
-        xino_mode: XinoMode, // pre-wave5 A1: 8th parameter
     ) -> Self {
         Self {
             is_effective_read_only,
-            uuid_mode,
+            uuid_mode: options.uuid_mode,
             uuid,
             credential_policy,
             write_access,
             upper_capabilities,
-            is_default_permissions,
-            xino_mode,
+            is_default_permissions: options.is_default_permissions,
+            xino_mode: options.xino_mode,
         }
     }
 
@@ -206,10 +204,6 @@ impl MountPolicy {
 
     /// Returns the post-claim upper-filesystem capability snapshot, if this
     /// is a writable mount (`P0-02`).
-    #[expect(
-        dead_code,
-        reason = "frozen published accessor (spec §4); consumed by the P1-07 store seam (lower_id.rs) and later by meso-06 `WhiteoutRepresentation`"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) fn upper_capabilities(
         &self,
     ) -> Option<&UpperFilesystemCapabilities> {
@@ -377,7 +371,7 @@ impl UpperFilesystemCapabilities {
             Err(err) if err.error() == Errno::ENODATA => Ok(true),
             Err(err) if err.error() == Errno::ERANGE => Ok(true),
             Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(false),
-            Err(err) => return Err(err),
+            Err(err) => Err(err),
         }
     }
 

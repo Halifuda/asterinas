@@ -139,10 +139,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// `OverlayFs::generate_workdir_temp_name` (meso-04 spec §4.1 / P1-34):
     /// the value is saturating-fetched and never gates I/O. The consuming
     /// methods land in Wave 4 (`copyup/mod.rs` + `copyup/workdir.rs`).
-    #[expect(
-        dead_code,
-        reason = "frozen meso-04 cross-meso seam; consumed by the Wave-4 copyup Creator (P1-34) via generate_workdir_temp_name; construction lands with the sibling build.rs extension"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) workdir_temp_serial: AtomicU64,
     /// The immutable xattr classification policy (meso-05 P1-33 seam).
     ///
@@ -151,10 +147,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// name: `OverlayXattrPolicy` lands in Wave 4
     /// (`metadata_security/xattr.rs`); the `OverlayFs::xattr_policy()`
     /// accessor and the construction land with the meso-05 Creator.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-05 cross-meso seam; type lands in Wave 4 metadata_security/xattr.rs, accessor + construction land with the meso-05 Creator (P1-33)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) xattr_policy: OverlayXattrPolicy,
     /// The mount-scoped reusable whiteout cache (meso-06 P1-36 seam; the
     /// `WL` level-5 domain).
@@ -164,10 +156,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// by frozen name: `WhiteoutCache` lands in Wave 4 (`dir/whiteout.rs`);
     /// the construction and the short slot protocol land with the meso-06
     /// Creator.
-    #[expect(
-        dead_code,
-        reason = "frozen meso-06 cross-meso seam; type lands in Wave 4 dir/whiteout.rs, slot protocol + construction land with the meso-06 Creator (P1-36)"
-    )]
     pub(in crate::fs::fs_impls::overlayfs) whiteout_cache: Mutex<WhiteoutCache>,
 }
 

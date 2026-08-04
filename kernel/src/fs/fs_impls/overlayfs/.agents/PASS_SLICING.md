@@ -312,16 +312,17 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     main-agent repair only for mechanical spelling/import/visibility/interface
     propagation; any ownership, VFS contract, lifecycle, locking, semantic, or
     non-obvious borrow repair waits for user direction.
-  - **Final static result (2026-08-04): BLOCKED / USER DECISION.** Three
+  - **Initial static stop record (2026-08-04): superseded by the accepted
+    user decisions and implementation below.** Three
     continuations ran only the same prescribed target-specific `cargo check`.
     The main agent amended every Checker-classified mechanical repair, reducing
     the result from 42 errors / 16 warnings to 15 errors / 1 warning at
     `7aabd029c`. No mechanical candidate remains. The unresolved categories
     are the root-inode one-shot carrier, `OverlayInode` trait-implementation
     ownership, `FsCreationCtx` task-context access, in-use claim-slot
-    lifecycle, and the source-permission `AccessType`. This static entry lane
-    stops here: `make kernel`, `make check`, runtime, and xfstests remain
-    unscheduled until the user supplies those decisions.
+    lifecycle, and the source-permission `AccessType`. At this point the
+    static-entry cargo stage stopped; `make kernel`, `make check`, runtime,
+    and xfstests remained unscheduled pending those decisions.
 
 - **`wave5_static_owner_reconciliation_design_20260804`**
   - **Kind**: Bounded Designer code-form revision; not a Creator, Checker,
@@ -351,3 +352,110 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     packet nor any command. The next implementation decision must separately
     choose and packet the disjoint VFS seam and Overlayfs forwarding/root/
     permission write-sets; P1/P2 deferrals remain untouched.
+
+- **`wave5_compile_lint_continuation_04_20260804`**
+  - **Kind**: One-run Checker continuation under
+    `wave5_compile_lint_20260804`; not a new pass or implementation repair.
+  - **Parent / covered scope**: unchanged
+    `overlayfs_refactor_static_integration` / all 57 Stage-D `需要实现` IDs.
+  - **Dispatch**: exactly one existing target-specific container `cargo check`
+    after amend `783c81041`; packet
+    `pass_11_wave5_compile_lint_checker_continuation_04_designer_reconciliation_dispatch.md`.
+  - **Boundary**: no production code is authorized or implied by the accepted
+    Designer documents. The Checker preserves a new raw receipt and reports
+    the original diagnostics; `make`, Clippy, runtime, xfstests, and a
+    self-directed repair or rerun remain out of scope.
+  - **Result**: the one run at `783c81041` exited `101` with 15 errors and one
+    warning, unchanged from continuation 03. The five user-decided forms are
+    still unimplemented, so no diagnostic is a newly authorized mechanical
+    repair and this continuation stops.
+
+- **`wave5_static_owner_creator_slicing_20260804`**
+  - **Kind**: Main-agent Creator slicing of the accepted five-item static
+    owner reconciliation.
+  - **Shared boundary**: each Creator is command-free and writes only its
+    exact production set plus one ignored receipt. The main agent reviews each
+    completed exact diff; no Checker, `make`, Clippy, runtime, or xfstests run
+    occurs until the five Creator surfaces are accepted together.
+  - **Pass 12 — `root_publication`**: parent `mount_resource_policy`, `P0-05`;
+    `mount/{superblock.rs,build.rs}`. Replaces only the root `OnceLock` with
+    the accepted mutex-option publication slot. **Accepted by main-agent exact
+    diff review:** no new entity; root materializes before the short slot lock,
+    publication is `Some(root)` before return, and the getter only clones.
+  - **Pass 13 — `trait_owner`**: parent `N/A` (user-directed bounded
+    cross-Meso reconciliation; no new Micro claim);
+    `projection/inode.rs`, `copyup/mod.rs`, `readdir_index.rs`,
+    `metadata_security/{metadata.rs,permission.rs,xattr.rs}`, and `dir/mod.rs`.
+    Centralizes the sole trait implementations and leaves body helpers in
+    their existing Meso files. **Accepted by main-agent exact diff review:**
+    `projection/inode.rs` is the sole `Inode`/`FileOps` carrier; all sibling
+    bodies are direct `*_impl` helpers, and corrected ownership documentation
+    matches that split.
+  - **Pass 14 — `task_context`**: parent `mount_resource_policy`, `P0-01` and
+    `P1-19`; VFS `registry.rs` plus `mount/{build.rs,layers.rs}`. It begins
+    only after pass 12 acceptance because both touch `build.rs`. **Accepted by
+    main-agent exact diff review:** only `registry.rs` changes, adding the
+    narrow immutable field borrow; existing mount consumers do not retain a
+    `Context` or alter construction sequencing.
+  - **Pass 15 — `inuse_slot`**: parent `mount_resource_policy`, `P1-35`; VFS
+    `{inode.rs,inode_ext.rs}` plus `mount/claims.rs`. It is write-disjoint from
+    passes 12/13 and may begin with them. **Accepted by main-agent exact diff
+    review:** group3 is dedicated, the accessor is the only lazy initializer,
+    group1/group2 and lock topology are unchanged, and the pinned guard
+    releases only its own token with the frozen atomic ordering.
+  - **Pass 16 — `link_source_permission`**: parent
+    `namespace_mutation_whiteout`, `P1-28`; `dir/mod.rs` only. It begins only
+    after pass 13 acceptance because the canonical `link_impl` helper lands
+    there. **Accepted by main-agent exact diff review:** before `link_source`
+    can promote, the unchanged owner/DAC predicate calls the inherent
+    `check_permission(AccessType::ReadOnly, Permission::MAY_WRITE)` admission;
+    the target parent remains `Mutating`.
+  - **Commit boundary**: after all five independent review acceptances, the
+    main agent amends only their accepted Rust write-sets into the current
+    Wave5 commit; durable scheduler records stay uncommitted until a later
+    explicit integration/acceptance commit.
+  - **Implementation / continuation 05 (2026-08-04):** all five passes were
+    accepted and the 13 Rust-file implementation amended at `10cf627e2`.
+    The one authorized continuation-05 cargo check failed with five errors
+    and one warning; its raw evidence is in
+    `components/wave_05_compile_lint/run_evidence/20260804T_continuation_05_static_owner_implementation_dispatch/`.
+    The main agent amended the three checker-classified mechanical candidates
+    (two scope imports and the underscore unused-local rename) to
+    `1378d502a`, without a second command.
+  - **Pass 17 / continuations 06-07 (2026-08-04):** after user direction, the
+    command-free Creator made exactly three no-clone move-order repairs in
+    `projection/entry.rs` and `readdir_index.rs`, preserving the upper opaque
+    short-circuit, lower merged-layer insertion, and captured readdir type.
+    Main-agent exact-diff review accepted the repair and amended `90a5facf7`.
+    The single continuation-06 cargo check then exited `101` with those
+    `E0382`s absent and only two claim-type visibility errors plus 17 warnings.
+    The main agent applied the direct existing-ceiling visibility propagation
+    for `UpperWorkdirClaim` only and amended `36c30ac33`. The single
+    continuation-07 cargo check exited `0` in 8.54 seconds; evidence is in
+    `components/wave_05_compile_lint/pass_11_wave5_compile_lint_checker.md`
+    §12. The 17 warnings remain recorded warning debt. This proves only the
+    prescribed cargo smoke: `make kernel`, `make check`, runtime, and xfstests
+    remain unrun and require separately packeted Checker work.
+
+- **`wave5_policy_binding_lint_cleanup_20260804`**
+  - **Kind**: User-approved bounded cross-Meso lint-cleanup continuation.
+  - **Parent / covered scope**: `N/A`; no new Micro-feature claim. It is the
+    representation-only disposition of the two remaining non-documentation
+    Clippy diagnostics after continuation 10.
+  - **Designer acceptance**: `task_designer_wave5_policy_binding_lint_20260804`
+    freezes one non-escaping `&OverlayMountOptions` input to
+    `MountPolicy::assemble` and two private aliases naming the existing
+    `parent -> name -> binding` maps. No owner, lock, allocation, cache key,
+    policy field, or lifecycle change is permitted.
+  - **Creator Pass 21 — `policy_binding_lint_cleanup`**: exact Rust write-set
+    `mount/{policy.rs,build.rs}` and `projection/binding_cache.rs`; no test,
+    VFS, configuration, `legacy_fs.rs`, or documentation-lint path. The
+    policy constructor copies only `uuid_mode`, `is_default_permissions`, and
+    `xino_mode` from the construction-local options borrow; its other five
+    existing inputs remain individual. `BindingsByName` and
+    `BindingsByParent` are private aliases only.
+  - **Validation boundary**: Creator is command-free. The existing Wave5
+    static Checker task may continue after the exact three-file pass with the
+    prescribed cargo check -> make kernel -> workspace Clippy sequence. rustfmt
+    and `make check` remain deferred until the user-directed Wave6 document
+    cleanup is complete.

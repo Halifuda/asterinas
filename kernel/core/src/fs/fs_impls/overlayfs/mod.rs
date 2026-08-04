@@ -14,10 +14,6 @@ mod dir;
 /// derive from the VFS surface (meso-04 vocabulary), replacing a boolean
 /// parameter (priors `no-bool-args`). Cross-meso note: meso-04/06 may adopt
 /// this vocabulary later (ledger note only; no meso-04/06 edits).
-#[expect(
-    dead_code,
-    reason = "frozen meso-05 shared vocabulary; consumed by the Wave-4 metadata_security Creator"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) enum AccessType {
     /// open/access/exec/metadata-read/xattr-read: no EROFS gate, no promotion.

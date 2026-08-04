@@ -294,12 +294,10 @@ impl OverlayFs {
         let policy = MountPolicy::assemble(
             is_effective_read_only,
             credential_policy,
-            options.uuid_mode,
+            &options,
             uuid,
             upper_capabilities,
             write_access,
-            options.is_default_permissions,
-            options.xino_mode, // pre-wave5 A1
         );
 
         // Step 10 — meso-02 construction wiring (cross-meso owner rule, spec
@@ -360,7 +358,7 @@ impl OverlayFs {
         const XINO_SHIFT: u32 = 16;
         let identity = IdentityPolicy::new(
             overlay_dev_id,
-            layer_devs.into_boxed_slice(),
+            &layer_devs,
             upper_layer_dev_index,
             XINO_SHIFT,
             policy.xino_mode(), // pre-wave5 A1: consumption at construction
@@ -406,10 +404,10 @@ impl OverlayFs {
                 phase: MountPhase::Ready,
             }),
             fs_event_stats: FsEventSubscriberStats::new(),
+            self_weak: weak.clone(),
             bindings,
             inodes,
             identity,
-            self_weak: weak.clone(),
             // The `AnonDeviceId` RAII guard is retained for the mount
             // lifetime so the overlay `st_dev` (copied into
             // `IdentityPolicy::overlay_dev_id`) is never recycled under a

@@ -275,19 +275,19 @@ impl OverlayInode {
         // seam counts visible children (whiteout-hidden children do not
         // count, BC-6 §60.2); a pure-upper target defers to the upper
         // rename's own emptiness enforcement (Case 12).
-        if mode == RenameMode::Replace && target_is_positive {
-            if let Some(target_object) = target_binding.clone().into_inode() {
-                if target_object.type_().is_directory() {
-                    let target_facts = target_object.facts_snapshot();
-                    if !target_facts.lowers().is_empty()
-                        && target_object.visible_child_count(&target_facts)? != 0
-                    {
-                        return Err(Error::with_message(
-                            Errno::ENOTEMPTY,
-                            "the overlay rename target directory is not empty",
-                        ));
-                    }
-                }
+        if mode == RenameMode::Replace
+            && target_is_positive
+            && let Some(target_object) = target_binding.clone().into_inode()
+            && target_object.type_().is_directory()
+        {
+            let target_facts = target_object.facts_snapshot();
+            if !target_facts.lowers().is_empty()
+                && target_object.visible_child_count(&target_facts)? != 0
+            {
+                return Err(Error::with_message(
+                    Errno::ENOTEMPTY,
+                    "the overlay rename target directory is not empty",
+                ));
             }
         }
 
@@ -375,18 +375,12 @@ impl OverlayInode {
                     fs.bindings().invalidate(&self.key(), old_name);
                 }
                 // Target binding: the moved source is now the visible object at
-                // the target name (Cases 4/5); the binding kind mirrors the
-                // source inode's own facts classification — `lookup_binding`
-                // derives the per-name kind from the projected facts, so the
-                // published binding stays consistent with the object's
-                // authority-continuity classification (Single for every covered
-                // upper-backed source).
+                // the target name (Cases 4/5); its classification remains in
+                // the source inode's own facts, so the published binding has no
+                // stale per-name classification snapshot.
                 fs.bindings().insert(
                     BindingKey::new(target.key(), String::from(new_name)),
-                    Arc::new(Binding::Positive(PositiveBinding::new(
-                        source_inode.facts_snapshot().kind(),
-                        source_inode.clone(),
-                    ))),
+                    Arc::new(Binding::Positive(PositiveBinding::new(source_inode.clone()))),
                 );
                 // Rename reorders the visible sequence; the frozen §5.2 rule is
                 // the conservative invalidate on every affected parent (same

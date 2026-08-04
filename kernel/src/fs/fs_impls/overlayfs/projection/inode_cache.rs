@@ -308,7 +308,7 @@ impl InodeCache {
         // whole map's dead weak pins under the same write guard (O(live) but
         // only once per interval — O(1) amortized per miss).
         let misses = self.misses_since_sweep.fetch_add(1, Ordering::Relaxed) + 1;
-        if misses % SWEEP_INTERVAL == 0 {
+        if misses.is_multiple_of(SWEEP_INTERVAL) {
             // Reclaims dead carrier pins AND their stale-alias keep-alives:
             // dropping the entry drops the keep-alive `Arc` (round-5).
             guard.retain(|_, entry| entry.carrier.strong_count() > 0);
