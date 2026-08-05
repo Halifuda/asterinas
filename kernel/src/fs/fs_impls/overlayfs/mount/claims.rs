@@ -1,30 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Upper/workdir exclusivity claims and the unified 64-bit overlay identity
-//! (`P1-35` + `P2-11`).
+//! Upper/workdir exclusivity claims and the unified 64-bit overlay identity.
 //!
-//! This module implements Scheme A — the inode `Extension` runtime lease — as
-//! the frozen claim carrier (spec §3.0): each claimed root inode hosts a
-//! VFS-owned `OverlayInuseSlot` (recorded VFS dependency, spec §3.0.5 item 2),
-//! and the non-zero unified [`OverlayUuid`] value is both the claim token
+//! This module implements the inode `Extension` runtime lease as the claim
+//! carrier: each claimed root inode hosts a VFS-owned `OverlayInuseSlot`, and
+//! the non-zero unified [`OverlayUuid`] value is both the claim token
 //! (per-slot CAS) and, when effective, the overlay UUID persisted as
 //! `trusted.overlay.uuid` on the upper root. The upper slot is claimed first
 //! and released last; the workdir slot second and released first — enforced
 //! structurally by the field declaration order of [`UpperWorkdirClaim`]
 //! (`workdir` before `upper`; Rust drops struct fields in declaration order)
-//! plus the guard `Drop` order (spec §2 release-order invariant). All claim
-//! operations are single-word atomic CASes: non-blocking and safe in `Drop`
-//! (Scheme A crash/teardown policy, spec §3.0.4).
-//!
-//! # Recorded deviation (wave-1 review item 4)
-//!
-//! The spec §4 listing declares `upper` before `workdir` and asserts that
-//! order "guarantees workdir releases before upper". That sentence is
-//! inverted: Rust drops struct fields in declaration order, so an `upper`-
-//! first declaration releases the upper claim first. The review-corrected
-//! declaration order (`workdir` first, `upper` last) is what actually
-//! produces the frozen release order (workdir first, upper last) on `Drop`;
-//! the frozen invariant itself is unchanged.
+//! plus the guard `Drop` order. All claim operations are single-word atomic
+//! CASes: non-blocking and safe in `Drop`.
 
 use super::{layers::resolve_root_path, options::UuidMode};
 use crate::{
@@ -45,21 +32,18 @@ use crate::{
 /// The size in bytes of the persisted `trusted.overlay.uuid` value.
 ///
 /// `pub(super)` so the sibling `policy.rs` xattr-capability probe sizes its
-/// probe buffer at the persisted value length (wave-1 review item 1: the
-/// previous 1-byte probe buffer hit `ERANGE` on backends that fail a short
-/// read, deterministically failing `UuidMode::Auto` re-mounts).
+/// probe buffer at the persisted value length.
 pub(super) const OVERLAY_UUID_SIZE: usize = 8;
 
-/// The private xattr name carrying the effective overlay UUID (`P2-11`).
+/// The private xattr name carrying the effective overlay UUID.
 const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
 
-/// The unified 64-bit identity of one writable overlay mount (`P2-11`/`P1-35`).
+/// The unified 64-bit identity of one writable overlay mount.
 ///
 /// The value is never zero. It serves as the claim token for both
 /// [`InodeClaimGuard`]s (per-`OverlayInuseSlot` CAS) and, when effective, as
 /// the overlay UUID persisted as `trusted.overlay.uuid` and published through
-/// `MountPolicy::uuid()`/`SuperBlock::fsid` (spec §3.0 unified-identity
-/// invariant).
+/// `MountPolicy::uuid()`/`SuperBlock::fsid`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayUuid(u64);
 
@@ -79,14 +63,13 @@ impl OverlayUuid {
 
     /// Generates a fresh non-zero identity from the kernel CSPRNG.
     ///
-    /// Generation runs pre-claim and lock-free (spec §3.0.5 item 7); the zero
-    /// value has probability `2^-64` and is rejected by [`OverlayUuid::try_new`],
-    /// so the loop regenerates (bounded in practice, spec §3.3 Hazard 6).
+    /// Generation runs pre-claim and lock-free; the zero value has probability
+    /// `2^-64` and is rejected by [`OverlayUuid::try_new`], so the loop
+    /// regenerates.
     ///
     /// `pub(super)` since the sibling `build.rs` also generates the claim
     /// token directly for effective read-only overlays, where nothing is ever
-    /// persisted and a fresh in-memory token suffices (wave-1 review round 2,
-    /// item 2).
+    /// persisted and a fresh in-memory token suffices.
     pub(super) fn generate() -> Self {
         loop {
             let mut bytes = [0u8; OVERLAY_UUID_SIZE];
@@ -122,8 +105,8 @@ impl OverlayUuid {
 
     /// Persists the identity as `trusted.overlay.uuid` on the upper root.
     ///
-    /// Uses `XattrSetFlags::CREATE_OR_REPLACE` (P2-11, BC-1 step 9) and is
-    /// only called when the identity is effective.
+    /// Uses `XattrSetFlags::CREATE_OR_REPLACE` and is only called when the
+    /// identity is effective.
     fn persist_on_upper(&self, upper_inode: &Arc<dyn Inode>) -> Result<()> {
         let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
             .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))?;
@@ -133,13 +116,12 @@ impl OverlayUuid {
     }
 }
 
-/// A runtime lease on one root inode's `OverlayInuseSlot` (`P1-35`).
+/// A runtime lease on one root inode's `OverlayInuseSlot`.
 ///
 /// The guard pins the claimed inode so the slot cannot be evicted while the
-/// claim is held (identity contract, spec §3.0.5 item 3) and holds the unified
-/// non-zero token. `Drop` re-resolves the slot from the pinned inode and CASes
-/// the token free — atomic, non-blocking, safe in `Drop` (spec §3.0.3 claim
-/// guard contract).
+/// claim is held and holds the unified non-zero token. `Drop` re-resolves the
+/// slot from the pinned inode and CASes the token free — atomic,
+/// non-blocking, safe in `Drop`.
 #[derive(Debug)]
 pub(super) struct InodeClaimGuard {
     /// Pins the claimed inode (keeps the `OverlayInuseSlot` alive).
@@ -151,8 +133,7 @@ pub(super) struct InodeClaimGuard {
 impl InodeClaimGuard {
     /// Claims the inode's `OverlayInuseSlot` with `identity` as the token.
     ///
-    /// Returns `EBUSY` when the slot is already claimed by another holder
-    /// (spec §3.0.3).
+    /// Returns `EBUSY` when the slot is already claimed by another holder.
     pub(super) fn try_claim(inode: Arc<dyn Inode>, identity: OverlayUuid) -> Result<Self> {
         inode.overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
@@ -162,10 +143,7 @@ impl InodeClaimGuard {
     }
 
     /// Returns the unified token this guard holds.
-    #[expect(
-        dead_code,
-        reason = "frozen accessor (spec §4); consumed by sibling mesos (meso-02+) for claim auditing"
-    )]
+    #[expect(dead_code, reason = "consumed by sibling modules for claim auditing")]
     pub(super) fn token(&self) -> OverlayUuid {
         self.token
     }
@@ -175,22 +153,19 @@ impl Drop for InodeClaimGuard {
     fn drop(&mut self) {
         // Re-resolve the slot from the pinned inode and CAS the token free.
         // The release is non-blocking and fail-safe: a stale/wrong token is a
-        // no-op (spec §3.0.3).
-        self.inode
-            .overlay_inuse_slot()
-            .release(self.token.value());
+        // no-op.
+        self.inode.overlay_inuse_slot().release(self.token.value());
     }
 }
 
-/// The claimed upper/workdir pair of a writable overlay mount (`P1-35`/`P2-11`).
+/// The claimed upper/workdir pair of a writable overlay mount.
 ///
 /// The upper slot is claimed first and released last; the workdir slot second
 /// and released first. The field declaration order (`workdir` before `upper`)
 /// plus Rust's declaration-order field drops and the guard `Drop` order
-/// enforces the release ordering structurally (spec §2 release-order
-/// invariant; wave-1 review item 4). `identity` is the unified non-zero value
-/// used as the token for both slots and, when effective, persisted as
-/// `trusted.overlay.uuid`.
+/// enforces the release ordering structurally. `identity` is the unified
+/// non-zero value used as the token for both slots and, when effective,
+/// persisted as `trusted.overlay.uuid`.
 #[derive(Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     /// Workdir claim; taken second, released first.
@@ -199,18 +174,17 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     upper: InodeClaimGuard,
     /// Upper filesystem identity (same-filesystem evidence).
     upper_fs: Arc<dyn FileSystem>,
-    /// Unified identity; persisted iff effective (`P2-11`).
+    /// Unified identity; persisted iff effective.
     identity: OverlayUuid,
 }
 
 impl UpperWorkdirClaim {
-    /// Validates the upper/workdir pair structurally (`P0-03`).
+    /// Validates the upper/workdir pair structurally.
     ///
     /// Checks that both roots are directories, that they live on the same
     /// underlying filesystem (`st_dev` evidence), and that the workdir is
     /// neither identical to nor an ancestor/descendant of the upperdir.
-    /// Failures map to `ENOTDIR` / `EINVAL` per spec §2 Case 4 (Linux
-    /// `ovl_fill_super`).
+    /// Failures map to `ENOTDIR` / `EINVAL` (Linux `ovl_fill_super`).
     pub(super) fn validate_pair(upper: &Path, workdir: &Path) -> Result<()> {
         if !upper.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "upperdir is not a directory");
@@ -227,9 +201,8 @@ impl UpperWorkdirClaim {
         if Arc::ptr_eq(upper.dentry(), workdir.dentry()) {
             return_errno_with_message!(Errno::EINVAL, "workdir must be distinct from upperdir");
         }
-        // Alias rejection (wave-1 review `validate-at-boundaries` fix, item
-        // 11): two spellings of the same physical directory can produce
-        // different `path_name()` strings and different dentry objects
+        // Alias rejection: two spellings of the same physical directory can
+        // produce different `path_name()` strings and different dentry objects
         // (`upperdir=/real/u` with `workdir=/alias/u` where `/alias` is a
         // symlink to `/real`, or a bind-mount alias). The resolved inode
         // objects are the same for the same physical directory, so compare
@@ -247,8 +220,8 @@ impl UpperWorkdirClaim {
         // the same tree canonicalize to the same name, and exact aliases are
         // additionally rejected by the inode-identity check above. The
         // remaining exotic case (ancestor/descendant directories reached only
-        // through distinct dentry/inode objects) is a recorded limitation —
-        // this wave has no VFS canonicalize API.
+        // through distinct dentry/inode objects) is a known limitation — there
+        // is no VFS canonicalize API.
         let is_same_or_descendant_fn = |candidate: &str, ancestor: &str| -> bool {
             if ancestor == "/" {
                 // The filesystem root is an ancestor of every dentry.
@@ -272,28 +245,26 @@ impl UpperWorkdirClaim {
         Ok(())
     }
 
-    /// Determines the unified identity before the claim step (`P2-11`).
+    /// Determines the unified identity before the claim step.
     ///
     /// `On`/`Auto` reuse an existing persisted `trusted.overlay.uuid` when
     /// present; otherwise a fresh non-zero value is generated. `Off`/`Null`
-    /// never read and always generate a fresh in-memory-only token (spec §2
-    /// Case 10b). The value is determined pre-claim because the token must be
-    /// known at claim time (spec §3.0.4 unified-identity ordering).
+    /// never read and always generate a fresh in-memory-only token. The value
+    /// is determined pre-claim because the token must be known at claim time.
     pub(super) fn determine_identity(
         upper_inode: &Arc<dyn Inode>,
         uuid_mode: UuidMode,
     ) -> Result<OverlayUuid> {
         match uuid_mode {
             // `On` fails closed: a backend that cannot serve the xattr read
-            // also cannot satisfy persistence, so the read error propagates
-            // (spec §2 Case 10c).
+            // also cannot satisfy persistence, so the read error propagates.
             UuidMode::On => match OverlayUuid::read_from_upper(upper_inode)? {
                 Some(existing) => Ok(existing),
                 None => Ok(OverlayUuid::generate()),
             },
-            // `Auto` degrades on read unavailability (spec §2 Case 10b/10d):
-            // the backend will also fail the post-claim capability probe, so
-            // the generated value stays in-memory-only (not effective).
+            // `Auto` degrades on read unavailability: the backend will also
+            // fail the post-claim capability probe, so the generated value
+            // stays in-memory-only (not effective).
             UuidMode::Auto => match OverlayUuid::read_from_upper(upper_inode) {
                 Ok(Some(existing)) => Ok(existing),
                 Ok(None) | Err(_) => Ok(OverlayUuid::generate()),
@@ -302,11 +273,11 @@ impl UpperWorkdirClaim {
         }
     }
 
-    /// Claims the upper slot first, then the workdir slot (`P1-35`).
+    /// Claims the upper slot first, then the workdir slot.
     ///
     /// On a workdir conflict the already-taken upper claim is dropped
     /// immediately (rollback of the first claim) and the `EBUSY` propagates —
-    /// no partial exclusivity escapes construction (spec §3.0.4 ordering).
+    /// no partial exclusivity escapes construction.
     pub(super) fn claim(
         upper_inode: Arc<dyn Inode>,
         workdir_inode: Arc<dyn Inode>,
@@ -330,12 +301,11 @@ impl UpperWorkdirClaim {
         })
     }
 
-    /// Prepares the workdir for use (`P0-03`): it must be empty.
+    /// Prepares the workdir for use: it must be empty.
     ///
     /// Returns `ENOTEMPTY` when the workdir contains entries (Linux
     /// `ovl_check_empty_dir`); skipped entirely for read-only mounts (the
-    /// caller only invokes it for genuinely writable overlays, wave-1 review
-    /// item 2).
+    /// caller only invokes it for genuinely writable overlays).
     pub(super) fn prepare_workdir(&self) -> Result<()> {
         if !self.is_workdir_empty()? {
             return_errno_with_message!(Errno::ENOTEMPTY, "the workdir is not empty");
@@ -352,23 +322,22 @@ impl UpperWorkdirClaim {
         Ok(counter.count() == 0)
     }
 
-    /// Persists the unified identity as `trusted.overlay.uuid` (`P2-11`).
+    /// Persists the unified identity as `trusted.overlay.uuid`.
     ///
     /// Called only when the identity is effective (post-claim, construction
     /// step 9). The caller (`build.rs`) maps an `On` persist failure to
     /// `EOPNOTSUPP` fail-closed and an `Auto` persist failure to degrade to
-    /// not-effective (spec §3.2 step 9).
+    /// not-effective.
     pub(super) fn persist_identity(&self) -> Result<()> {
         self.identity.persist_on_upper(&self.upper.inode)
     }
 
     /// Reports whether both slots are still owned by this claim's token.
     ///
-    /// Returns `false` if either slot is claimed by a different token (spec
-    /// §2 exclusivity invariant).
+    /// Returns `false` if either slot is claimed by a different token.
     #[expect(
         dead_code,
-        reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
+        reason = "consumed by sibling modules once their consumers land"
     )]
     pub(in crate::fs::fs_impls::overlayfs) fn has_exclusive_claim(&self) -> bool {
         let upper_owned = self
@@ -387,7 +356,7 @@ impl UpperWorkdirClaim {
     /// Returns the pinned upper root inode.
     #[expect(
         dead_code,
-        reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
+        reason = "consumed by sibling modules once their consumers land"
     )]
     pub(in crate::fs::fs_impls::overlayfs) fn upper_inode(&self) -> &Arc<dyn Inode> {
         &self.upper.inode
@@ -406,43 +375,36 @@ impl UpperWorkdirClaim {
     /// Returns the unified identity of this claim.
     #[expect(
         dead_code,
-        reason = "frozen UpperWorkdirClaim accessor (spec §4); consumed by sibling mesos once they land"
+        reason = "consumed by sibling modules once their consumers land"
     )]
     pub(in crate::fs::fs_impls::overlayfs) fn identity(&self) -> OverlayUuid {
         self.identity
     }
 }
 
-/// Probes that a root path resolves to a backend-instance-stable inode
-/// (`P1-35` pre-claim evidence; heuristic, spec §3.0.2).
+/// Probes that a root path resolves to a backend-instance-stable inode.
 ///
 /// Resolving the same root path twice must yield `Arc::ptr_eq`-equal inodes,
 /// proving the backend's inode cache is instance-stable for pinned roots. In
 /// addition, both resolutions must be the same instance as `pinned_inode` —
 /// the layer-pinned object that step 6 actually claims — so the checked
-/// object and the used object are the same (wave-1 review item 6, TOCTOU
-/// check/use alignment). This is a heuristic; the durable guarantee is the
-/// backend identity contract (spec §3.0.5 item 3). A failing backend fails
-/// closed with `EOPNOTSUPP` (spec §2 Case 3).
-///
-/// # Visibility note (recorded deviation)
-///
-/// Declared `pub(super)` (visible within the `mount` module tree only) instead
-/// of strictly module-private because the frozen construction step 3 (spec
-/// §3.2) invokes the probe for both roots from `OverlayFs::new` in the sibling
-/// `build.rs`; a module-private item would be unreachable from there. The probe
-/// is not re-exported by `mount/mod.rs`, so it stays internal to the mount
-/// meso, preserving the spec §4 visibility-audit intent.
+/// object and the used object are the same. This is a heuristic; the durable
+/// guarantee is the backend identity contract. A failing backend fails closed
+/// with `EOPNOTSUPP`.
 pub(super) fn verify_inode_instance_stability(
     fs_creation_ctx: &FsCreationCtx,
     raw_path: &str,
     pinned_inode: &Arc<dyn Inode>,
 ) -> Result<()> {
-    // Both resolutions go through the shared `resolve_root_path` helper
-    // (wave-1 review `dry` fix, item 8); each resolution is compared both to
-    // the other and to the layer-pinned inode that is claimed downstream.
-    let first = resolve_root_path(fs_creation_ctx, raw_path)?.inode().clone();
-    let second = resolve_root_path(fs_creation_ctx, raw_path)?.inode().clone();
+    // Both resolutions go through the shared `resolve_root_path` helper; each
+    // resolution is compared both to the other and to the layer-pinned inode
+    // that is claimed downstream.
+    let first = resolve_root_path(fs_creation_ctx, raw_path)?
+        .inode()
+        .clone();
+    let second = resolve_root_path(fs_creation_ctx, raw_path)?
+        .inode()
+        .clone();
     if !Arc::ptr_eq(&first, &second) || !Arc::ptr_eq(&first, pinned_inode) {
         return_errno_with_message!(
             Errno::EOPNOTSUPP,

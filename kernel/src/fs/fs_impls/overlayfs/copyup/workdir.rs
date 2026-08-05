@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The workdir temporary lifecycle — `P1-34`.
+//! The workdir temporary lifecycle.
 //!
-//! This module owns the workdir-temp retry contract — `P1-34`.
+//! This module owns the workdir-temp retry contract.
 //!
 //! [`WorkdirTempRequest`] describes the closed set of staging operations and
 //! [`WorkdirTemp`] preserves the successful name/inode pair. The
@@ -11,21 +11,19 @@
 //!
 //! The workdir is a private staging area on the upper filesystem, never a
 //! layer: temporaries never enter lookup/readdir, unique naming keeps them out
-//! of the overlay namespace, and a failure leaves a recorded cleanup
-//! obligation, never a visible entry (invariant I7, BC-4 §40/§45.1). A temp
-//! handle belongs only to the winner's copy-up transaction (BC-4 §40.2): it is
-//! never returned to the VFS, never stored on the inode, and never a
-//! page-cache forwarding target. The P1-35 claim guarantees no cross-mount
-//! collision (a workdir cannot be claimed by two live mounts), so the
-//! composite name needs only per-mount uniqueness.
+//! of the overlay namespace, and a failure leaves a cleanup obligation, never
+//! a visible entry. A temp handle belongs only to the winner's copy-up
+//! transaction: it is never returned to the VFS, never stored on the inode,
+//! and never a page-cache forwarding target. The claim protocol guarantees no
+//! cross-mount collision (a workdir cannot be claimed by two live mounts), so
+//! the composite name needs only per-mount uniqueness.
 //!
-//! Lock contract (spec §3.0): workdir temp naming is uniqueness-based, not
-//! lock-based — no Overlay lock is acquired or held by any method here, and
-//! the underlying upper-filesystem calls run against that filesystem's own
-//! locking (proven non-re-entrant into Overlay, spec §3.3 Hazard 2). The EROFS
-//! gate precedes every workdir/upper side effect (I10): the private
-//! [`OverlayFs::workdir_root`] resolver returns `Err(Errno::EROFS)` when no
-//! writable claim exists (spec §2 Case 4).
+//! Lock contract: workdir temp naming is uniqueness-based, not lock-based —
+//! no Overlay lock is acquired or held by any method here, and the underlying
+//! upper-filesystem calls run against that filesystem's own locking (proven
+//! non-re-entrant into Overlay). The EROFS gate precedes every workdir/upper
+//! side effect: the private [`OverlayFs::workdir_root`] resolver returns
+//! `Err(Errno::EROFS)` when no writable claim exists.
 //!
 //! [`OverlayFs::workdir_root`] remains the single workdir-root claim resolver
 //! of the overlayfs tree.
@@ -100,8 +98,7 @@ impl WorkdirTempRequest<'_> {
 }
 
 impl OverlayFs {
-    /// Generates a uniquely-named workdir temp name for a copy-up target
-    /// (`P1-34`, meso-04 spec §4 `copyup/workdir.rs`).
+    /// Generates a uniquely-named workdir temp name for a copy-up target.
     ///
     /// The composite is `#{target_name}#{parent_ino}#{serial}`: the target's
     /// publication name, the upper-parent real inode number ([`Inode::ino`]),
@@ -126,7 +123,7 @@ impl OverlayFs {
         format!("#{target_component}#{parent_ino}#{serial}")
     }
 
-    /// Creates a private workdir temp object for copy-up staging (`P1-34`).
+    /// Creates a private workdir temp object for copy-up staging.
     ///
     /// Each attempt generates a fresh name and dispatches the same typed
     /// request. Only `EEXIST` retries; on exhaustion the final underlying
@@ -155,12 +152,11 @@ impl OverlayFs {
         }
     }
 
-    /// Removes a workdir temp object (`P1-34`).
+    /// Removes a workdir temp object.
     ///
     /// The recipe calls this best-effort on any pre-publication failure; a
-    /// cleanup failure propagates as the recorded P3-09 workdir-cleanup
-    /// obligation and never becomes a visible namespace entry (invariant I7,
-    /// BC-4 §45.1).
+    /// cleanup failure propagates as a known workdir-cleanup debt and never
+    /// becomes a visible namespace entry.
     pub(in crate::fs::fs_impls::overlayfs) fn cleanup_workdir_temp(
         &self,
         temp_name: &str,
@@ -170,18 +166,15 @@ impl OverlayFs {
 
     /// Resolves the pinned workdir root inode of this writable mount.
     ///
-    /// The single workdir-root claim resolver of the overlayfs tree (wave-4
-    /// round-2 repair item 5): every workdir-root consumer — the three
-    /// helpers in this file, `OverlayInode::workdir_root`
-    /// (`copyup/promote.rs`), the meso-06 dir/ recipes, and the two
-    /// `dir/whiteout.rs` sites — funnels through this one entry, so the
-    /// claim-resolution shape and the EROFS error text exist exactly once.
-    /// The workdir root is reachable via the meso-01 `claims()` seam (spec §2
-    /// pre-condition P1-34: "the workdir root and upper parent real inode are
-    /// reachable via meso-01 `claims()`"). A missing claim means the mount is
-    /// effectively read-only (or the claims were released), so the EROFS gate
-    /// fires here — before any workdir/upper side effect (I10, spec §2
-    /// Case 4).
+    /// The single workdir-root claim resolver of the overlayfs tree: every
+    /// workdir-root consumer — the three helpers in this file,
+    /// `OverlayInode::workdir_root` (`copyup/promote.rs`), the `dir/`
+    /// recipes, and the two `dir/whiteout.rs` sites — funnels through this
+    /// one entry, so the claim-resolution shape and the EROFS error text exist
+    /// exactly once. The workdir root is reachable via `claims()`. A
+    /// missing claim means the mount is effectively read-only (or the claims
+    /// were released), so the EROFS gate fires here — before any
+    /// workdir/upper side effect.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
         let claim = self.claims().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")

@@ -14,7 +14,7 @@
 - `pass_XX_{component_name}`
 **Parent Meso-Component:** `meso_YY_{component_name}`
 **Covered Micro-Features:**
-- 
+-
 
 - **Naming Conventions:** [e.g., Fixed 3 variables from `a, b, c` to `cluster, offset, length`].
 - **Imports:** [e.g., Enforced `StdExternalCrate` grouping policy].
@@ -41,8 +41,8 @@
 
 - **Creator Census Completeness:** *(Did every introduced production entity appear in the Creator census? If not, list the omissions.)*
 - **Full-Surface Audit Coverage:** *(Required when packeted. Did the artifact disposition every named surviving production `struct`, `enum`, carrier, and non-trait helper in the audited write-set? If not, list the omissions.)*
-- **Owner / Module Placement:** *(Did any helper sit under the wrong owner, a neutral aggregator, or a catch-all file when it should belong to a narrower module?)* 
-- **Temporary Facades / Dead Variants:** *(Did any dispatcher enum, facade, or variant lack a real caller or exit plan?)* 
+- **Owner / Module Placement:** *(Did any helper sit under the wrong owner, a neutral aggregator, or a catch-all file when it should belong to a narrower module?)*
+- **Temporary Facades / Dead Variants:** *(Did any dispatcher enum, facade, or variant lack a real caller or exit plan?)*
 
 ### 2.2 Cleanup Target Closure Verification
 

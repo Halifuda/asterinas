@@ -188,6 +188,36 @@ Record only active or recently changed passes here. Durable slicing rationale be
   - **Execution shape**: One fresh QEMU and freshly recreated TEST/SCRATCH image pair per case, a 300-second hang cutoff, and immediate append to the rerun status table
   - **Result**: 80 attributable rows: 9 `PASS`, 15 `FAIL`, 49 `NOTRUN`, and 7 `HANG/TIMEOUT`; no `CORRUPT`. The Architect design wave is now unblocked as a separate user-authorized scheduling decision.
 
+- **`wave6_documentation_review_20260805`** — **Active / Static closure ACCEPTED**
+  - **Kind**: User-directed comprehensive comment-documentation review wave
+    (pass-slicing recorded in `PASS_SLICING.md`); supersedes the lint-only
+    Wave6 framing. The nine Clippy diagnostics and the two TODO annotations
+    are mandatory items inside passes 22/24.
+  - **Scope**: all 31 active `.rs` files (everything except `legacy_fs.rs`);
+    remove all micro-feature IDs and internal workspace vocabulary from
+    comments, rewrite stale/redundant prose against current code, fix the
+    nine rustdoc diagnostics, add the two scoped comment-only TODOs. Shared
+    standard: `subagent-tasks/wave_06_documentation_review/
+    WAVE6_DOC_STANDARD.md`.
+  - **Passes**: `pass_22_mount_resource_policy` (mount/* + crate-root annex),
+    `pass_23_visibility_projection_identity` (projection/*),
+    `pass_24_namespace_mutation_whiteout` (dir/*),
+    `pass_25_copyup_authority_file_views` (copyup/*),
+    `pass_26_metadata_security_xattr_policy` (metadata_security/*),
+    `pass_27_merged_directory_index` (readdir_index.rs). All command-free,
+    risk Low; main-agent exact-diff acceptance per lane.
+  - **Post-lane gates**: Checker workspace Clippy → rustfmt → `make check`
+    (each run evidenced). **Closed 2026-08-05:** workspace Clippy (exit 0),
+    `cargo fmt --check` (exit 0), `make check` (exit 0) after the authorized
+    mechanical `cargo fmt` (14 files incl. VFS `inode_ext.rs`) and
+    trailing-whitespace cleanup of 11 pre-existing `.agents/` markdown files;
+    evidence under `components/wave_06_documentation_review/run_evidence/`.
+    A second review pass (2026-08-05) cleaned doc comments that dwelt on
+    visibility/publish/derive/mechanical minutiae instead of meaning and
+    design intent; the static chain was revalidated (runs 06-08, all exit 0).
+    Runtime xfstests, final Reviewer acceptance, and Wave7 `legacy_fs.rs`
+    deletion remain later gates.
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

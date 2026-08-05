@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
+mod copyup;
+mod dir;
+mod metadata_security;
 mod mount;
 mod projection;
 mod readdir_index;
-mod copyup;
-mod metadata_security;
-mod dir;
 
-/// The mutating-vs-read-only access class of an overlayfs entry (meso-05
-/// shared vocabulary, revision-01 promotion).
+/// The mutating-vs-read-only access class of an overlayfs entry.
 ///
 /// Closed set: encodes the coarse mutating-vs-read-only class that entries
-/// derive from the VFS surface (meso-04 vocabulary), replacing a boolean
-/// parameter (priors `no-bool-args`). Cross-meso note: meso-04/06 may adopt
-/// this vocabulary later (ledger note only; no meso-04/06 edits).
+/// derive from the VFS surface, replacing a boolean parameter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) enum AccessType {
     /// open/access/exec/metadata-read/xattr-read: no EROFS gate, no promotion.

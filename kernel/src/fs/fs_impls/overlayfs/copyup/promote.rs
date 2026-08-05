@@ -1,32 +1,28 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The copy-up winner body: object-kind promotion and upper publication
-//! (`P1-03`/`P1-04`/`P1-05`/`P1-06`, plus the `P1-32` promotion side).
+//! The copy-up winner body: object-kind promotion and upper publication.
 //!
 //! This module hosts the private winner body [`OverlayInode::promote`], its
 //! object-kind recipe arms ([`OverlayInode::promote_regular_file`],
-//! [`OverlayInode::promote_symlink`] and the inline `Dir` arm — the former
-//! [`OverlayInode::promote_directory`] is dissolved into the `Dir` arm by
-//! wave-4 repair item 2), the metadata/xattr transfer steps
-//! ([`OverlayInode::transfer_metadata`], [`OverlayInode::copy_eligible_xattrs`]),
-//! the ReconcilePending verification ([`OverlayInode::verify_upper_target`],
-//! [`OverlayInode::upper_real_object`]), and the semantic publication seam
+//! [`OverlayInode::promote_symlink`] and the inline `Dir` arm), the
+//! metadata/xattr transfer steps ([`OverlayInode::transfer_metadata`],
+//! [`OverlayInode::copy_eligible_xattrs`]), the ReconcilePending
+//! verification ([`OverlayInode::verify_upper_target`],
+//! [`OverlayInode::upper_real_object`]), and the semantic publication step
 //! ([`OverlayInode::publish_upper_authority`]).
 //!
-//! Lock contract (meso-04 spec §3.2/§4.2, BC-4 §37.3, reconciled by wave-4
-//! repair item 4): the trigger (trigger.rs) acquires the `CUL` guard
+//! Lock contract: the trigger (trigger.rs) acquires the `CUL` guard
 //! (`OverlayInode::copyup_transition`) and HOLDS it across this whole winner
-//! body — the re-snapshot (Case 3 waiter leg), the ReconcilePending scope
-//! inspection (Case 6 recovery), and the promotion recipe including the
-//! semantic publication — so no concurrent winner can interleave between the
+//! body — the re-snapshot (waiter leg), the ReconcilePending scope
+//! inspection (recovery), and the promotion recipe including the semantic
+//! publication — so no concurrent winner can interleave between the
 //! re-snapshot and the publication (the double copy-up TOCTOU is closed).
 //! The winner reads the coordinate once under the guard and passes it into
 //! [`OverlayInode::promote`]; every helper in this file consumes the passed
 //! `publication_parent`/`name` instead of performing its own brief `CUL`
-//! read, so the non-reentrant `ostd::sync::Mutex` is never re-acquired
-//! (spec §3.3 Hazard 2; the guard is sleep-capable, spec §4 lock-carrier
-//! table — promotion may BIO under it). The `INODE`-domain facts snapshots
-//! stay brief and are never held across an underlying call.
+//! read, so the non-reentrant `ostd::sync::Mutex` is never re-acquired (the
+//! guard is sleep-capable — promotion may BIO under it). The `INODE`-domain
+//! facts snapshots stay brief and are never held across an underlying call.
 
 use core::cmp::min;
 
@@ -55,78 +51,72 @@ use crate::{
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
 impl OverlayInode {
-    /// Runs the winner promotion body for this object (`P1-03`/`P1-04`/
-    /// `P1-05`/`P1-06`, plus the `P1-32` promotion side).
+    /// Runs the winner promotion body for this object.
     ///
     /// Winner body: called by the trigger (trigger.rs) with the `CUL`
-    /// arbitration guard **held** (wave-4 repair item 4) and the publication
-    /// coordinate passed in — the trigger read the coordinate once, then
-    /// holds `copyup_transition` across the re-snapshot, the
-    /// ReconcilePending verification, and this whole recipe, so a concurrent
-    /// winner can never interleave between the re-snapshot and the semantic
-    /// publication (the double copy-up TOCTOU is closed; BC-4 §37.3). The
-    /// object kind is derived from the topmost lower real object
-    /// (`lowers[0].real_inode().type_()`) and dispatched internally (BC-4
-    /// §36.1 match arms; no recipe enum). The `CUL` guard is never
-    /// re-acquired inside this body: every helper consumes the passed
-    /// coordinate (`publication_parent`/`name`) instead of re-reading it, so
-    /// the non-reentrant mutex cannot deadlock (`ostd::sync::Mutex`,
-    /// spec §3.3 Hazard 2). The success path commits the phase to
-    /// [`CopyUpPhase::Idle`] through the passed coordinate; the recipe arms
-    /// classify failures (Case 5 cleanup before publication vs Case 6
+    /// arbitration guard **held** and the publication coordinate passed in —
+    /// the trigger read the coordinate once, then holds `copyup_transition`
+    /// across the re-snapshot, the ReconcilePending verification, and this
+    /// whole recipe, so a concurrent winner can never interleave between the
+    /// re-snapshot and the semantic publication (the double copy-up TOCTOU is
+    /// closed). The object kind is derived from the topmost lower real object
+    /// (`lowers[0].real_inode().type_()`) and dispatched internally (match
+    /// arms; no recipe enum). The `CUL` guard is never re-acquired inside
+    /// this body: every helper consumes the passed coordinate
+    /// (`publication_parent`/`name`) instead of re-reading it, so the
+    /// non-reentrant mutex cannot deadlock. The success path commits the
+    /// phase to [`CopyUpPhase::Idle`] through the passed coordinate; the
+    /// recipe arms classify failures (cleanup before publication vs
     /// `ReconcilePending` after publication).
     ///
     /// The coordinate contents are read by the trigger under the held guard;
-    /// the ReconcilePending marker (Case 6 recovery) is derived directly from
-    /// `coordinate.phase` inside this body, under the held guard (wave-4
-    /// round-2 repair item 3 — no redundant bool crosses the trigger
-    /// boundary): a pending reconcile means the upper entry at
-    /// `(publication_parent, name)` must be verified before reuse, BC-4
-    /// §45.2.
+    /// the ReconcilePending marker (recovery) is derived directly from
+    /// `coordinate.phase` inside this body, under the held guard (no
+    /// redundant bool crosses the trigger boundary): a pending reconcile
+    /// means the upper entry at `(publication_parent, name)` must be verified
+    /// before reuse.
     pub(super) fn promote(
         &self,
         publication_parent: &Arc<OverlayInode>,
         name: &str,
         coordinate: &mut CopyUpTransition,
     ) -> Result<()> {
-        // 1) Idempotent upper fast path (Case 2): a waiter may have completed
-        //    the transition while this task waited for the arbitration guard
-        //    (the trigger re-snapshots under the guard; this is the defensive
+        // 1) Idempotent upper fast path: a waiter may have completed the
+        //    transition while this task waited for the arbitration guard (the
+        //    trigger re-snapshots under the guard; this is the defensive
         //    re-check at the winner boundary) — a brief facts snapshot, no
         //    `CUL`.
         if self.facts_snapshot().upper().is_some() {
             return Ok(());
         }
 
-        // 2) ReconcilePending verification (Case 6 recovery) under the held
-        //    `CUL` guard: the marker is derived directly from the coordinate
-        //    phase (wave-4 round-2 repair item 3 — no redundant bool
-        //    crosses the trigger boundary). The upper parent existence is
-        //    resolved by the trigger's ancestor walk (I3), so its real
-        //    object is the upper directory. The verify helper consumes the
-        //    passed `name` (no `CUL` re-read under the held guard).
+        // 2) ReconcilePending verification (recovery) under the held `CUL`
+        //    guard: the marker is derived directly from the coordinate phase
+        //    (no redundant bool crosses the trigger boundary). The upper
+        //    parent existence is resolved by the trigger's ancestor walk, so
+        //    its real object is the upper directory. The verify helper
+        //    consumes the passed `name` (no `CUL` re-read under the held
+        //    guard).
         if coordinate.phase == CopyUpPhase::ReconcilePending {
             let upper_dir = publication_parent.select_real_inode();
             self.verify_upper_target(&upper_dir, name)?;
         }
 
         // 3) Upper/workdir operations below run against the underlying
-        //    filesystem's own locking (spec §3.0); the `CUL` guard stays
-        //    held across them by design (sleep-capable mutex, spec §4
-        //    lock-carrier table; wave-4 repair item 4).
+        //    filesystem's own locking; the `CUL` guard stays held across them
+        //    by design (sleep-capable mutex).
         let upper_dir = publication_parent.select_real_inode();
         let fs = self.fs_arc()?;
         let lower = self.lower_source()?;
         let result = match lower.real_inode().type_() {
             InodeType::Dir => {
-                // P1-03 directory copy-up: a private workdir temp directory,
+                // Directory copy-up: a private workdir temp directory,
                 // metadata/xattr transfer, then atomic publication via
-                // `RenameMode::Replace` (wave-4 repair item 2 — the
-                // `File`/`SymLink` recovery discipline: a stale upper entry
-                // at the publication coordinate, including a Case-6
-                // `ReconcilePending` residue, is atomically replaced instead
-                // of failing `create` with `EEXIST`). No children are copied
-                // (BC-4 §39.3/§39.4).
+                // `RenameMode::Replace` (the `File`/`SymLink` recovery
+                // discipline: a stale upper entry at the publication
+                // coordinate, including a `ReconcilePending` residue, is
+                // atomically replaced instead of failing `create` with
+                // `EEXIST`). No children are copied.
                 let mode = lower.real_inode().mode()?;
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
@@ -154,9 +144,9 @@ impl OverlayInode {
                 )
             }
             InodeType::File => {
-                // P1-04 full copy-up: private workdir temp, complete
+                // Full copy-up: private workdir temp, complete
                 // metadata/data/xattr transfer, durability, then atomic
-                // publication via rename (BC-4 §38.1).
+                // publication via rename.
                 let mode = lower.real_inode().mode()?;
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
@@ -177,14 +167,13 @@ impl OverlayInode {
                         self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
                         self.promote_regular_file(&temp)?;
                         // Durability (fsync=auto default; strict/volatile are
-                        // the `P2-12` insertion points): the data file is
-                        // synced before publication.
+                        // future insertion points): the data file is synced
+                        // before publication.
                         temp.sync_all()?;
-                        // P1-04 atomic publication: rename the private
-                        // workdir temp onto the upper target name. `Replace`
-                        // resolves the stale-upper-entry case; a whiteout at
-                        // the name is impossible for authority-only promotion
-                        // (I7 note).
+                        // Atomic publication: rename the private workdir temp
+                        // onto the upper target name. `Replace` resolves the
+                        // stale-upper-entry case; a whiteout at the name is
+                        // impossible for authority-only promotion.
                         let workdir = self.workdir_root()?;
                         workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
                         marker.commit();
@@ -194,10 +183,10 @@ impl OverlayInode {
                 )
             }
             InodeType::SymLink => {
-                // P1-32 promotion side: a workdir symlink temp recreated from
-                // the lower target, then xattrs and the atomic rename
-                // (BC-4 §38.4.5; only the symlink object itself is copied,
-                // never its target).
+                // Symlink promotion side: a workdir symlink temp recreated
+                // from the lower target, then xattrs and the atomic rename
+                // (only the symlink object itself is copied, never its
+                // target).
                 let mode = lower.real_inode().mode()?;
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
@@ -302,19 +291,16 @@ impl OverlayInode {
                 "cannot promote an overlay object of unknown type",
             )),
         };
-        // Wave-4 round-3 repair item 3: the no-op `Ok`/`Err` passthrough
-        // match is flattened with `?`; on success the transition is
-        // committed (any pending reconcile marker is resolved through the
-        // passed coordinate — the `CUL` guard is held by the trigger across
-        // this call, no re-lock).
+        // The no-op `Ok`/`Err` passthrough match is flattened with `?`; on
+        // success the transition is committed (any pending reconcile marker
+        // is resolved through the passed coordinate — the `CUL` guard is held
+        // by the trigger across this call, no re-lock).
         result?;
         coordinate.phase = CopyUpPhase::Idle;
         Ok(())
     }
 
-    /// Runs a fallible upper-mutation recipe with the shared commit
-    /// scaffold (wave-4 round-2 repair item 2, refined by round-3 repair
-    /// item 2).
+    /// Runs a fallible upper-mutation recipe with the shared commit scaffold.
     ///
     /// The recipe closure receives the [`CommitMarker`] and calls
     /// [`CommitMarker::commit`] exactly at the physical-upper-commit point
@@ -324,17 +310,16 @@ impl OverlayInode {
     /// recipe boundary (a bare boolean can no longer be flipped the wrong
     /// way or read as an arbitrary value). On success the recipe's value is
     /// returned unchanged. On failure the scaffold classifies the outcome:
-    /// a failure AFTER the commit runs the `reconcile` closure (Case 6
-    /// `mark_reconcile_pending` for the copy-up arms, Case 13
-    /// `invalidate_stale_cache` for the dir/ recipes); a failure BEFORE the
-    /// commit best-effort cleans the staged workdir temp named by
-    /// `temp_name` when one exists (`Some(..)`; the cleanup of a
-    /// never-created name is an ignored `ENOENT`, and `None` — the plain
-    /// rename recipe, which stages nothing — is a no-op). The
-    /// classification scaffold was copy-pasted at seven sites (the four
-    /// `promote` arms plus `create_over_whiteout`, `remove_target`, and
-    /// `rename_upper`); Whitelist Rule B + the round-2 review extraction
-    /// mandate justify this single private helper.
+    /// a failure AFTER the commit runs the `reconcile` closure
+    /// (`mark_reconcile_pending` for the copy-up arms,
+    /// `invalidate_stale_cache` for the `dir/` recipes); a failure BEFORE the
+    /// commit best-effort cleans the staged workdir temp named by `temp_name`
+    /// when one exists (`Some(..)`; the cleanup of a never-created name is an
+    /// ignored `ENOENT`, and `None` — the plain rename recipe, which stages
+    /// nothing — is a no-op). The classification scaffold is used at seven
+    /// sites (the four `promote` arms plus `create_over_whiteout`,
+    /// `remove_target`, and `rename_upper`), which justifies this single
+    /// private helper.
     pub(in crate::fs::fs_impls::overlayfs) fn run_recipe<T>(
         &self,
         fs: &Arc<OverlayFs>,
@@ -350,9 +335,9 @@ impl OverlayInode {
                 if marker.is_committed() {
                     reconcile();
                 } else if let Some(temp_name) = temp_name {
-                    // Pre-commit failure (Case 5 / pre-publication arm):
-                    // best-effort temp cleanup; residue is a recorded
-                    // `P3-09` obligation, never a visible source.
+                    // Pre-commit failure (pre-publication arm): best-effort
+                    // temp cleanup; residue is a known cleanup debt, never a
+                    // visible source.
                     let _ = fs.cleanup_workdir_temp(temp_name);
                 }
                 Err(err)
@@ -360,13 +345,12 @@ impl OverlayInode {
         }
     }
 
-    /// Streams the lower regular file's data into the workdir temp (`P1-04`
-    /// data leg; BC-4 §38.1).
+    /// Streams the lower regular file's data into the workdir temp.
     ///
     /// The stream runs `read_at`/`write_at` pairs over one reused buffer.
     /// Short reads advance by the read length; a zero-length read before the
     /// declared size or a short write is surfaced as `EIO` — a partial
-    /// transfer is never treated as short successful I/O (BC-4 §38.3).
+    /// transfer is never treated as short successful I/O.
     fn promote_regular_file(&self, temp: &Arc<dyn Inode>) -> Result<()> {
         let lower = self.lower_source()?;
         let size = lower.real_inode().size();
@@ -397,8 +381,7 @@ impl OverlayInode {
         Ok(())
     }
 
-    /// Recreates the lower symlink target on the workdir temp (`P1-32`
-    /// promotion side; BC-4 §38.4.5).
+    /// Recreates the lower symlink target on the workdir temp.
     ///
     /// The lower symlink's target string is read and written onto the temp; a
     /// `SymbolicLink::Path` target (procfs-style) cannot be recreated as a
@@ -418,13 +401,12 @@ impl OverlayInode {
         temp.write_link(&target)
     }
 
-    /// Transfers the lower metadata onto the upper object (`P1-05`): owner,
-    /// group, mode, timestamps, and — for regular files — size.
+    /// Transfers the lower metadata onto the upper object: owner, group,
+    /// mode, timestamps, and — for regular files — size.
     ///
     /// The size transfer applies to regular files only: directories report
     /// their own table size and device/socket/FIFO objects have no settable
-    /// size (BC-4 §38.3 transfers size; the directory recipe §39.3 transfers
-    /// owner/mode/timestamps/eligible xattrs without size).
+    /// size.
     fn transfer_metadata(&self, temp: &Arc<dyn Inode>) -> Result<()> {
         let lower = self.lower_source()?;
         let lower_inode = lower.real_inode();
@@ -444,15 +426,15 @@ impl OverlayInode {
     /// `User`/`Trusted`/`Security` namespaces are enumerated through
     /// `OverlayXattrPolicy::copy_eligible_xattrs` with the caller-selected
     /// [`XattrCopyPolicy`] — the promotion recipe passes the strict
-    /// [`XattrCopyPolicy::Strict`] (the wave-4 baseline); overlay-private
-    /// names and the `System` namespace stay excluded (`P1-06`).
+    /// [`XattrCopyPolicy::Strict`]; overlay-private names and the `System`
+    /// namespace stay excluded.
     ///
-    /// The copy-up policy is strict (the wave-4 baseline): a denied source
-    /// read (`EACCES`/`EPERM`) propagates and fails the copy-up rather than
+    /// The copy-up policy is strict: a denied source read
+    /// (`EACCES`/`EPERM`) propagates and fails the copy-up rather than
     /// silently dropping `security.*`/`trusted.*` metadata. The copy travels
     /// through the mount's creator-credential scope
-    /// (`with_creator_credentials_fn`, meso-01 P1-19); see
-    /// [`OverlayXattrPolicy::copy_eligible_xattrs`] for the credential-seam
+    /// (`with_creator_credentials_fn`); see
+    /// [`OverlayXattrPolicy::copy_eligible_xattrs`] for the credential
     /// and source-read-policy discussion.
     fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>, policy: XattrCopyPolicy) -> Result<()> {
         let lower = self.lower_source()?;
@@ -465,25 +447,22 @@ impl OverlayInode {
             })
     }
 
-    /// Publishes the upper authority semantically (`P1-01` plus the `P1-07`
-    /// seam).
+    /// Publishes the upper authority semantically.
     ///
-    /// 1) The meso-02 `OverlayFs::store_lower_id` seam persists the
-    ///    lower-source origin record on the upper real inode BEFORE the facts
-    ///    replacement (ordering constraint, meso-04 revision-02 packet). The
-    ///    seam is capability-gated (`Ok(())` with no record when gated, never
-    ///    silently wrong) and FALLIBLE — the result is propagated unchanged.
+    /// 1) The `OverlayFs::store_lower_id` step persists the lower-source
+    ///    origin record on the upper real inode BEFORE the facts replacement
+    ///    (ordering constraint). The step is capability-gated (`Ok(())` with
+    ///    no record when gated, never silently wrong) and FALLIBLE — the
+    ///    result is propagated unchanged.
     /// 2) The facts are replaced (`upper = upper_real`) under the brief
-    ///    `INODE` guard via the Wave-3 [`replace_facts`](OverlayInode::replace_facts)
-    ///    transition seam; the lower-derived `object_id` is kept (constant
+    ///    `INODE` guard via the [`replace_facts`](OverlayInode::replace_facts)
+    ///    transition; the lower-derived `object_id` is kept (constant
     ///    `st_ino`, no re-project-from-upper). The registered carrier for the
-    ///    current visible-source key is recovered through the frozen
-    ///    `OverlayFs::project_new_upper` get-or-create seam (`P0-16`: one
-    ///    carrier per key — the recovered carrier is this inode, never a
-    ///    duplicate).
-    /// 3) The `P2-10` no-op hook seam (lower page-cache invalidation on
-    ///    authority change) is a recorded insertion point; no field is
-    ///    pre-baked.
+    ///    current visible-source key is recovered through the
+    ///    `OverlayFs::project_new_upper` get-or-create step (one carrier per
+    ///    key — the recovered carrier is this inode, never a duplicate).
+    /// 3) The lower page-cache invalidation hook on authority change is a
+    ///    future insertion point; no field is pre-baked.
     fn publish_upper_authority(
         &self,
         upper_real: RealObject,
@@ -492,20 +471,19 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         fs.store_lower_id(upper_real.real_inode(), &lower_real)?;
         let old_facts = self.facts_snapshot();
-        // Wave-4 repair item 1 + round-2 repair item 1: a copied-up
-        // DIRECTORY keeps the merged view — the upper directory is created
-        // empty (no children are copied, BC-4 §39.3), so a copied-up
-        // directory that still carries a lower stack must stay `Merged` or
-        // the merged readdir and `visible_child_count` would enumerate only
-        // the empty upper and the pre-existing lower children would vanish
-        // from `getdents` (and the `P1-27` emptiness gate would pass while
-        // lower children still exist). Non-directories keep their
-        // pre-copy-up kind (`Single` for every promote path — the condition
-        // is keyed on `self.type_().is_directory()`, never on the lower
-        // stack alone, so copied-up files/symlinks/specials are not
-        // misclassified as `Merged`; the `lowers` are retained regardless so
-        // `remove_target`'s pure-upper test and `rename_upper`'s
-        // source-fallback compose keep publishing whiteouts).
+        // A copied-up DIRECTORY keeps the merged view — the upper directory
+        // is created empty (no children are copied), so a copied-up directory
+        // that still carries a lower stack must stay `Merged` or the merged
+        // readdir and `visible_child_count` would enumerate only the empty
+        // upper and the pre-existing lower children would vanish from
+        // `getdents` (and the rmdir emptiness gate would pass while lower
+        // children still exist). Non-directories keep their pre-copy-up kind
+        // (`Single` for every promote path — the condition is keyed on
+        // `self.type_().is_directory()`, never on the lower stack alone, so
+        // copied-up files/symlinks/specials are not misclassified as
+        // `Merged`; the `lowers` are retained regardless so `remove_target`'s
+        // pure-upper test and `rename_upper`'s source-fallback compose keep
+        // publishing whiteouts).
         let kind = if self.type_().is_directory() && !old_facts.lowers().is_empty() {
             PositiveKind::Merged
         } else {
@@ -522,16 +500,14 @@ impl OverlayInode {
     }
 
     /// Verifies the upper entry at the publication coordinate before reuse
-    /// (`P1-01` ReconcilePending path; BC-4 §45.2).
+    /// (ReconcilePending path).
     ///
     /// The verification covers the upper entry's object type and basic mode
-    /// metadata; the full origin/lower-id verification is meso-02's
-    /// `read_lower_id` read seam (`P1-07` is owned by meso-02). A mismatch
-    /// rejects the reconcile with `EIO`; the caller surfaces the
-    /// reconcile/error state. The caller holds the `CUL` guard (wave-4
-    /// repair item 4), so the publication name is passed in — the helper
-    /// never re-reads the coordinate (no non-reentrant lock, spec §3.3
-    /// Hazard 2).
+    /// metadata; the full origin/lower-id verification is the `read_lower_id`
+    /// read. A mismatch rejects the reconcile with `EIO`; the caller
+    /// surfaces the reconcile/error state. The caller holds the `CUL` guard,
+    /// so the publication name is passed in — the helper never re-reads the
+    /// coordinate (no non-reentrant lock).
     pub(super) fn verify_upper_target(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<()> {
         let upper_real = self.upper_real_object(upper_dir, name)?;
         let lower = self.lower_source()?;
@@ -551,12 +527,11 @@ impl OverlayInode {
     }
 
     /// Resolves the real object now published at the upper target name
-    /// (`upper_dir.lookup(name)` → `layer_index` 0 with the meso-01 upper
-    /// layer's `fsid`/`container_dev_id`).
+    /// (`upper_dir.lookup(name)` → `layer_index` 0 with the upper layer's
+    /// `fsid`/`container_dev_id`).
     ///
-    /// Wave-4 repair item 4: the caller holds the `CUL` guard, so the
-    /// publication name is passed in — the helper never re-reads the
-    /// coordinate (no non-reentrant lock, spec §3.3 Hazard 2).
+    /// The caller holds the `CUL` guard, so the publication name is passed in
+    /// — the helper never re-reads the coordinate (no non-reentrant lock).
     fn upper_real_object(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<RealObject> {
         let real_inode = upper_dir.lookup(name)?;
         let fs = self.fs_arc()?;
@@ -574,29 +549,26 @@ impl OverlayInode {
     /// Returns the pinned workdir root inode of this mount.
     ///
     /// Thin delegation to the single `OverlayFs`-level resolver
-    /// ([`OverlayFs::workdir_root`], `copyup/workdir.rs`) — wave-4 round-2
-    /// repair item 5 centralizes the claim resolution (and the EROFS error
-    /// text) in exactly one helper: the `OverlayInode` entry exists so the
-    /// copy-up recipe arms and the meso-06 dir/ recipes
-    /// (`create.rs`/`link.rs`/`remove.rs`) resolve the workdir root without
-    /// re-upgrading the mount themselves. Whitelist Rule B: the workdir root
-    /// is the rename source of the `File`/`SymLink`/`Special`/`Dir`
-    /// publication steps, the `mknod` target of the special-object arm, and
-    /// the staging root of the three dir/ recipes (seven call sites across
-    /// the tree).
+    /// ([`OverlayFs::workdir_root`], `copyup/workdir.rs`) — the claim
+    /// resolution (and the EROFS error text) lives in exactly one helper: the
+    /// `OverlayInode` entry exists so the copy-up recipe arms and the `dir/`
+    /// recipes (`create.rs`/`link.rs`/`remove.rs`) resolve the workdir root
+    /// without re-upgrading the mount themselves. The workdir root is the
+    /// rename source of the `File`/`SymLink`/`Special`/`Dir` publication
+    /// steps, the `mknod` target of the special-object arm, and the staging
+    /// root of the three `dir/` recipes (seven call sites across the tree).
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
         self.fs_arc()?.workdir_root()
     }
 
     /// Marks the transition [`CopyUpPhase::ReconcilePending`].
     ///
-    /// Called on failure after physical publication (Case 6; BC-4 §45.2): the
-    /// upper object at the publication coordinate is retained and the next
-    /// winner entry must verify it before reuse. Wave-4 repair item 4: the
-    /// caller holds the `CUL` guard, so the phase is written through the
-    /// passed coordinate borrow — no re-lock (non-reentrant mutex, spec §3.3
-    /// Hazard 2). Whitelist Rule B: invoked by the `File`/`SymLink`/
-    /// `Special`/`Dir` recipe arms (four call sites).
+    /// Called on failure after physical publication: the upper object at the
+    /// publication coordinate is retained and the next winner entry must
+    /// verify it before reuse. The caller holds the `CUL` guard, so the phase
+    /// is written through the passed coordinate borrow — no re-lock
+    /// (non-reentrant mutex). Invoked by the `File`/`SymLink`/`Special`/`Dir`
+    /// recipe arms (four call sites).
     fn mark_reconcile_pending(&self, coordinate: &mut CopyUpTransition) {
         coordinate.phase = CopyUpPhase::ReconcilePending;
     }
@@ -606,10 +578,10 @@ impl OverlayInode {
     /// The `upper.is_some() || !lowers.is_empty()` facts invariant guarantees
     /// the topmost lower exists for a lower-backed object; the checked access
     /// surfaces a structural violation as `EIO` instead of panicking (no
-    /// `.unwrap()`/`.expect()` in production paths). Whitelist Rule B: the
-    /// identical selection runs in `promote` (all four recipe arms),
-    /// `promote_regular_file`, `promote_symlink`, `transfer_metadata`,
-    /// `copy_eligible_xattrs`, and `verify_upper_target` (seven call sites).
+    /// `.unwrap()`/`.expect()` in production paths). The identical selection
+    /// runs in `promote` (all four recipe arms), `promote_regular_file`,
+    /// `promote_symlink`, `transfer_metadata`, `copy_eligible_xattrs`, and
+    /// `verify_upper_target` (seven call sites).
     fn lower_source(&self) -> Result<RealObject> {
         self.facts_snapshot()
             .lowers()
@@ -625,18 +597,18 @@ impl OverlayInode {
 }
 
 /// The physical-upper-commit marker of a [`run_recipe`](OverlayInode::run_recipe)
-/// recipe closure (wave-4 round-3 repair item 2).
+/// recipe closure.
 ///
 /// A small one-way latch over the commit boolean: the recipe calls
 /// [`CommitMarker::commit`] exactly once at the physical-upper-commit point
 /// (after the upper rename / exchange / whiteout publish, before the
 /// semantic publication), and the shared scaffold reads
-/// [`CommitMarker::is_committed`] to classify a later failure (Case 6/13
-/// reconcile vs Case-5/pre-publication cleanup). The state transitions
-/// `Pending -> Committed` are the only mutations, so the
+/// [`CommitMarker::is_committed`] to classify a later failure (reconcile vs
+/// pre-publication cleanup). The state transitions `Pending -> Committed` are
+/// the only mutations, so the
 /// post-commit-failure-with-`false` classification cannot arise by
 /// construction — the marker is not a bare boolean at the recipe boundary.
-/// Owner/guard: a stack local owned by [`OverlayInode::run_recipe`] and
+/// Storage: a stack local owned by [`OverlayInode::run_recipe`] and
 /// borrowed by the recipe closure for the duration of the recipe call; no
 /// lock.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

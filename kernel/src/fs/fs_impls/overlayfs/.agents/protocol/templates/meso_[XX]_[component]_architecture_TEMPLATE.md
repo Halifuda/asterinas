@@ -25,6 +25,6 @@
   - Prohibited dependencies: `Cannot acquire any lock above Level N`
 
 ## 4. External structural interactions
-<!-- Static, strict interactions with other Macro components. 
-DO NOT write dynamic execution paths. 
+<!-- Static, strict interactions with other Macro components.
+DO NOT write dynamic execution paths.
 DO NOT advise on private helper function architectures (leave to Creator). -->

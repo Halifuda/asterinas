@@ -21,7 +21,7 @@
 
 ### Pre-conditions
 *Logical conditions required of inputs. When applicable, annotate which micro-features depend on each condition.*
-- 
+-
 
 ### Post-conditions
 *Describe the success / failure classes and resulting system state. When applicable, annotate which micro-features each branch covers. Freeze the semantic cases AND their Rust representation: the enum/error types and variants (or success-result carriers) that encode each case.*
@@ -30,19 +30,19 @@
 
 ### Invariants
 *Integrity rules spanning the execution. When applicable, annotate which micro-features each invariant protects.*
-- 
+-
 
 ## 3. Dynamic Lock Orchestration
 
 ### Inlet/Outlet Lock State
 *Inherited from Architect. What static state must the system be in when this executes?*
-- **Inlet:** 
+- **Inlet:**
 - **Outlet:**
 
 ### Acquisition Order
 *If local locks within the Meso-Component must be acquired, specify the topological order.*
-1. 
-2. 
+1.
+2.
 
 ### Concurrency & Non-blocking Hazards
 *State the specific blocking points (e.g., calling `Bio`) and handoffs. Mandate that no deadlocking locks be held across these points.*
@@ -64,37 +64,37 @@ cross-owner / invariant rule admits them.*
 ### Structs / Carriers
 *[For each new struct: fields with types, the invariant each field protects,
 the owner/guard boundary that justifies it.]*
-- 
+-
 
 ### Enums
 *[For each new enum: variants with names/spellings and the invariant encoded;
 closed sets prefer `enum` over trait objects.]*
-- 
+-
 
 ### Helper Signatures
 *[For each new internal helper: signature + one-line purpose, or the explicit
 reason it is inlined into an owner method.]*
-- 
+-
 
 ### Lock Carriers
 *[Which struct fields carry which lock domains (`DIR`, `CUL`, `INODE`, `WL`,
 or the reserved `UPPER`/`WL` cleanup candidates), with sleep-capability
 constraints (`Mutex` for BIO-capable domains).]*
-- 
+-
 
 ### Naming / Style Compliance Confirmation
 *[Confirm the proposed names satisfy the priors' conventions; fix any name the
 guidelines would reject in this spec rather than deferring it.]*
-- 
+-
 
 ### Complexity Baseline
 *[Advisory counts for new entities, long-parameter functions, temporary
 carriers, coordination objects, or repeated spec text, and deliberate budget
 overruns. Every named intermediate type must be listed here with a one-line
 justification; pure temporaries are locals, not types.]*
-- 
+-
 
 ### Revision Disposition
 *[For a revision continuation: changed obligations, preserved obligations, and
 any Architect escalation.]*
-- 
+-

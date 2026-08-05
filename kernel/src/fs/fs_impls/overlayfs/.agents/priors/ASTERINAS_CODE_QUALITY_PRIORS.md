@@ -2,7 +2,7 @@
 
 # Asterinas Code Quality Priors (Strict Rulebook)
 
-This document is the absolute, objective checklist of coding standards for the Asterinas OS, derived directly from the repository-root `AGENTS.md` and the `book/src/to-contribute/coding-guidelines/`. 
+This document is the absolute, objective checklist of coding standards for the Asterinas OS, derived directly from the repository-root `AGENTS.md` and the `book/src/to-contribute/coding-guidelines/`.
 
 Under the Top-Down Strict Protocol, this file serves as the strict operational boundary for Creators (when writing code) and Reviewers (when auditing). It contains NO agent-workflow meta-instructions or role-profile slicing.
 

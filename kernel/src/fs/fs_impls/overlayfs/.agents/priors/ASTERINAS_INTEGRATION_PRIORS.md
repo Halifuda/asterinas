@@ -2,7 +2,7 @@
 
 # Asterinas Integration Priors (For VFS & Substrates)
 
-This document is the "Asterinas OS Reality Dictionary" strictly intended for the **Designer**. It translates the generic OS requirements into the exact constraints the file system module must appease when orchestrated. 
+This document is the "Asterinas OS Reality Dictionary" strictly intended for the **Designer**. It translates the generic OS requirements into the exact constraints the file system module must appease when orchestrated.
 
 **CRITICAL RULE FOR REFACTORING:**
 Do **NOT** use the flawed legacy Asterinas filesystem implementation as a reference. Everything written in this dictionary is derived from the generic VFS (`kernel/src/fs/vfs`), the OSTD locks (`ostd::sync`), and stable block device layers.
@@ -10,10 +10,10 @@ Do **NOT** use the flawed legacy Asterinas filesystem implementation as a refere
 ## 1. Asterinas Lock Primitives & Concurrency Substrate
 The Designer must orchestrate locks without violating these hard operational limits:
 
-- **`ostd::sync::SpinLock`**: 
+- **`ostd::sync::SpinLock`**:
   - **Semantics**: Disables thread preemption.
   - **Fatal Constraint**: **STRICTLY FORBIDS** Block I/O, `Bio` calls, sleeping memory allocations, or acquiring any yielding lock (`Mutex`) within its critical section. Doing so will immediately cause a kernel panic/deadlock.
-- **`ostd::sync::Mutex` and `RwLock`**: 
+- **`ostd::sync::Mutex` and `RwLock`**:
   - **Semantics**: These are sleep-locks; threads waiting for them will yield to the scheduler.
   - **Constraint**: Safe to hold across Block I/O boundaries, but holding them for too long (e.g., waiting on slow disk sectors) creates severe contention. Revalidate underlying shared state if another thread might have raced during the sleep window.
 
@@ -42,7 +42,7 @@ The disk also implements `ostd::mm::VmIo`, offering `VmReader` and `VmWriter` bo
 - **Blocking Reality**: Submitting synchronous block methods or calling `.wait()` on a `BioWaiter` suspends the thread. The Designer must re-validate any shared state (like allocation block pointers or directory entries) after the thread wakes up if a `Mutex`/`RwLock` was temporarily unlocked.
 
 ## 3. Exhaustive PageCacheBackend Interface (`vfs::page_cache`)
-For file data caching, Asterinas VFS uses a generic `PageCache`. The Designer must provide a `PageCacheBackend` implementation for inodes that support cached data I/O. This translates generic page offsets into specific physical block manipulations. 
+For file data caching, Asterinas VFS uses a generic `PageCache`. The Designer must provide a `PageCacheBackend` implementation for inodes that support cached data I/O. This translates generic page offsets into specific physical block manipulations.
 
 **`PageCacheBackend` Trait (in `kernel/src/fs/vfs/page_cache.rs`)**:
 - `fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter>;`
@@ -56,7 +56,7 @@ For file data caching, Asterinas VFS uses a generic `PageCache`. The Designer mu
 - `CachePage`: Represents an in-memory page frame (`Frame<CachePageMeta>`). Contains DMA-safe memory that can be directly appended into a `BioBuilder` segment for zero-copy I/O.
 - `BioWaiter`: A token yielded by `kernel/comps/block/src/bio.rs` when an asynchronous I/O is submitted. The VFS layer will call `.wait()` on this token, which will **suspend the thread** until hardware signals completion.
 
-**Design Constraints**: 
+**Design Constraints**:
 - The implementer must calculate where `idx` (the Page Cache index) lands in the actual on-disk block mapping.
 - Since files might be fragmented, a single `CachePage` (e.g., 4096 bytes) might span multiple disjoint sectors/clusters, requiring careful BIO construction.
 - The `read_page_async` and `write_page_async` must not block synchronously for I/O completion; they must return the `BioWaiter` so VFS can sleep.
@@ -100,7 +100,7 @@ The `Inode` trait bridges VFS path resolution and file actions to the specific f
 **I/O (`InodeIo` Trait - Required by `Inode`)**:
 - `fn read_at(&self, offset: usize, writer: &mut VmWriter, status_flags: StatusFlags) -> Result<usize>;`
 - `fn write_at(&self, offset: usize, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize>;`
-- **`StatusFlags` Handling**: 
+- **`StatusFlags` Handling**:
   - `O_APPEND`: During `write_at`, the write must be evaluated at the very end of the file.
   - `O_SYNC` / `O_DSYNC` / `O_DIRECT`: The implementation must bypass/flush caches appropriately. Direct IO requires physical sector alignment checks.
 - `fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()>;`

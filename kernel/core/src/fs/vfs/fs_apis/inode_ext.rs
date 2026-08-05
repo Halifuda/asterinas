@@ -42,12 +42,9 @@ impl OverlayInuseSlot {
 
     /// Releases this slot only when `token` still owns it.
     pub fn release(&self, token: u64) {
-        let _ = self.owner_token.compare_exchange(
-            token,
-            0,
-            Ordering::Release,
-            Ordering::Relaxed,
-        );
+        let _ = self
+            .owner_token
+            .compare_exchange(token, 0, Ordering::Release, Ordering::Relaxed);
     }
 
     /// Returns whether `token` currently owns this slot.
@@ -136,7 +133,9 @@ impl InodeExt for dyn Inode {
             .downcast_ref()
         {
             Some(slot) => slot,
-            None => unreachable!("the dedicated overlay inuse extension group has the wrong payload"),
+            None => {
+                unreachable!("the dedicated overlay inuse extension group has the wrong payload")
+            }
         }
     }
 }

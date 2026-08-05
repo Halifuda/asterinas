@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mount option parsing for overlayfs (`P0-01`).
+//! Mount option parsing for overlayfs.
 //!
 //! This module validates the mount option string into an immutable
 //! [`OverlayMountOptions`] construction input. The recognized key set is
@@ -11,9 +11,8 @@ use crate::{fs::vfs::file_system::FsFlags, prelude::*};
 
 /// A recognized overlayfs mount option key.
 ///
-/// The set is closed for this wave: any other key is rejected with `EINVAL`.
-/// The deferred micro-features (`P2-12`, `P2-16`, `P2-17`, `P3-06`, `P3-07`)
-/// add keys later and must extend this enum instead of parsing ad-hoc strings.
+/// The set is closed: any other key is rejected with `EINVAL`. Future option
+/// keys must extend this enum instead of parsing ad-hoc strings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MountOptionKey {
     /// The `lowerdir` option, a colon-separated list of lower layer paths.
@@ -26,18 +25,14 @@ enum MountOptionKey {
     Uuid,
     /// The `default_permissions` boolean option.
     DefaultPermissions,
-    /// The `xino` option with values `off|auto|on` (`P2-01`).
-    ///
-    /// Pre-wave5 A1: the closed set gains `Xino` (the meso-02 spec §3.5
-    /// item-2 `xino=` publication gap is closed); `P2-12`/`P2-16`/`P2-17`/
-    /// `P3-06`/`P3-07` add keys later.
+    /// The `xino` option with values `off|auto|on`.
     Xino,
 }
 
-/// The UUID/`fsid` policy of an overlay mount (`P2-11`).
+/// The UUID/`fsid` policy of an overlay mount.
 ///
-/// The closed value set matches `FILESYSTEM_SPEC_SUMMARY.md` §12; the default
-/// is [`UuidMode::Auto`].
+/// The closed value set is `off|null|on|auto`; the default is
+/// [`UuidMode::Auto`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UuidMode {
     /// The overlay UUID is null and the fsid comes from the topmost underlying fs.
@@ -50,34 +45,25 @@ pub(super) enum UuidMode {
     Auto,
 }
 
-/// The `xino=` mode (`P2-01`); moved here from `projection/identity.rs`
-/// (pre-wave5 A1) — the meso-02 spec §3.5 item-2 record says the declaration
-/// "should move to `mount/options.rs` and be consumed from there".
+/// The `xino=` mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) enum XinoMode {
     /// xino encoding disabled; non-directories report the underlying dev/ino.
     Off,
-    /// xino enabled when feasible (this wave's default).
+    /// xino enabled when feasible (the default).
     Auto,
     /// xino encoding always enabled.
     On,
 }
 
-/// Validated construction input for an overlay mount (`P0-01`).
+/// Validated construction input for an overlay mount.
 ///
 /// Fields are immutable after parsing. The struct is constructed once by
 /// [`OverlayMountOptions::parse`], consumed once by `OverlayFs::new`, and
 /// needs no lock because parsing happens in the single-threaded mount phase.
 /// Invariants: `lower_dirs` is non-empty and
-/// `upper_dir.is_some() == work_dir.is_some()`.
-///
-/// # Visibility (wave-1 review `information-hiding` fix, item 7)
-///
-/// The struct and every field are `pub(super)` (visible within the `mount`
-/// module tree only): `parse` is `pub(super)` and the sibling `build.rs`
-/// reads `lower_dirs`/`upper_dir`/`work_dir`/`is_forced_read_only`/
-/// `is_default_permissions`/`uuid_mode`/`xino_mode` directly as frozen
-/// construction inputs. `MountOptionKey` stays module-private.
+/// `upper_dir.is_some() == work_dir.is_some()`. The sibling `build.rs` reads
+/// the fields directly as immutable construction inputs.
 #[derive(Debug)]
 pub(super) struct OverlayMountOptions {
     /// Lower layer paths in option order; the topmost lower is the rightmost.
@@ -86,13 +72,13 @@ pub(super) struct OverlayMountOptions {
     pub(super) upper_dir: Option<String>,
     /// Work directory path; `Some` iff `upper_dir` is `Some`.
     pub(super) work_dir: Option<String>,
-    /// Whether the mount was requested with `FsFlags::RDONLY` (`P0-18`).
+    /// Whether the mount was requested with `FsFlags::RDONLY`.
     pub(super) is_forced_read_only: bool,
     /// Whether the `default_permissions` option was set.
     pub(super) is_default_permissions: bool,
-    /// The UUID persistence mode; defaults to [`UuidMode::Auto`] (`P2-11`).
+    /// The UUID persistence mode; defaults to [`UuidMode::Auto`].
     pub(super) uuid_mode: UuidMode,
-    /// The `xino=` mode; defaults to [`XinoMode::Auto`] (pre-wave5 A1).
+    /// The `xino=` mode; defaults to [`XinoMode::Auto`].
     pub(super) xino_mode: XinoMode,
 }
 
@@ -114,7 +100,7 @@ impl OverlayMountOptions {
         // dedicated marker because `UuidMode::Auto` is also the default value.
         let mut saw_uuid = false;
         // `xino` needs a dedicated marker because `XinoMode::Auto` is also
-        // the default value (same discipline as `uuid`; pre-wave5 A1).
+        // the default value (same discipline as `uuid`).
         let mut xino_mode = XinoMode::Auto;
         let mut saw_xino = false;
 

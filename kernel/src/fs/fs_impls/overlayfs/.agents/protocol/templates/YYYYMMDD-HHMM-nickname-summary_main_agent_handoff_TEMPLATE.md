@@ -18,7 +18,7 @@
 
 ## 3. Thread Activity Log (The Active Wave)
 *What did this specific main-agent session actually do? Keep it concise. Focus on scheduling and dispatching.*
-- **Dispatches Sent:** 
+- **Dispatches Sent:**
   - `[Subagent ID]` dispatched for `[Parent Meso] / [Pass ID or meso-wide task]` using `[Packet Path]`
 - **Acceptance Outcomes:**
   - `[Parent Meso] - [Role] - [Pass ID or meso-wide task]` -> [Accepted (Template Validated) | Rejected (Reason)]

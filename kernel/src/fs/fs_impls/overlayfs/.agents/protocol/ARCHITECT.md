@@ -43,7 +43,7 @@ If assigned to the Global Backbone, you must:
 If assigned to map a specific Meso-Component (e.g., `write_at`), you must:
 1. **Consume the Micro-Feature Inventory**: Actively pull the relevant micro-features from the provided inventory prior and map them strictly to your assigned Meso-Component.
 2. **Build the Meso Traceability Matrix**: Output a `meso_XX_<component_name>_architecture.md` file that explicitly lists every assigned micro-feature, ensuring no feature is dropped (eliminating "Owner Gaps"). Keep the rows exhaustive and unsliced so the main agent can later form Creator Passes from them.
-3. **Establish Static Lock Boundaries for the Meso-Component**: 
+3. **Establish Static Lock Boundaries for the Meso-Component**:
    - **Expected Inlet State**: Declare what static lock state the system *must* be in before this component is invoked (e.g., "Must hold `InodeRwLock(Write)`").
    - **Topology Placement**: Explicitly tie this component into the `macro_00_global_topology.md`, strictly forbidding it from making calls that require higher-level locks in the hierarchy.
 4. **Strict Obedience to Phase 1**: You must unconditionally adhere to the pre-existing global lock topology. Do not invent new macro-locks or reverse lock hierarchies.

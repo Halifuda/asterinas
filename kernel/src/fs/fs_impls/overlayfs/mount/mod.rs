@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mount resource & policy meso (`mount_resource_policy`, meso-01).
+//! Mount resource and policy: the VFS entry point, the filesystem carrier,
+//! and the read-only carriers published to the rest of the overlayfs
+//! implementation.
 //!
-//! Implements the frozen `meso_01_mount_resource_policy_designer_spec.md` boundary:
-//! the VFS entry point (`OverlayFsType` implementing `crate::fs::vfs::registry::FsType`),
-//! the Macro-Owner carrier (`OverlayFs`), and the published read-only carriers consumed
-//! by sibling Mesos (`OverlayLayerStack`/`OverlayLayer`, `MountPolicy`,
-//! `CreatorCredentialPolicy`, `UpperFilesystemCapabilities`, `WriteAccessAccounting`,
-//! `UpperWorkdirClaim`). All fallible mount work happens inside `FsType::create` →
-//! `OverlayFs::new`; the only artifacts that cross this boundary outward are an
-//! `Arc<dyn FileSystem>` and the `Errno`-encoded error result (spec §1).
+//! This module provides the VFS entry point ([`OverlayFsType`] implementing
+//! `crate::fs::vfs::registry::FsType`), the macro-level carrier
+//! ([`OverlayFs`]), and the read-only carriers consumed by sibling modules
+//! (`OverlayLayerStack`/`OverlayLayer`, `MountPolicy`,
+//! `CreatorCredentialPolicy`, `UpperFilesystemCapabilities`,
+//! `WriteAccessAccounting`, `UpperWorkdirClaim`). All fallible mount work
+//! happens inside `FsType::create` → `OverlayFs::new`; the only values that
+//! cross this module boundary outward are an `Arc<dyn FileSystem>` and an
+//! `Errno`-encoded error result.
 
 mod build;
 mod claims;
@@ -35,7 +38,7 @@ use crate::{
 /// Single representation of the `"overlay"` name used by the VFS entry point
 /// ([`FsType::name`]), the reported mount-source default (`build.rs`), and
 /// [`FileSystem::name`](crate::fs::vfs::file_system::FileSystem::name)
-/// (`superblock.rs`) — wave-1 review `dry` fix (item 8).
+/// (`superblock.rs`).
 pub(super) const OVERLAY_FS_NAME: &str = "overlay";
 
 /// The VFS entry point of the overlay filesystem (mirrors Linux `ovl_fs_type`).

@@ -459,3 +459,63 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     prescribed cargo check -> make kernel -> workspace Clippy sequence. rustfmt
     and `make check` remain deferred until the user-directed Wave6 document
     cleanup is complete.
+
+- **`wave6_documentation_review_20260805`**
+  - **Kind**: Main-agent pass-slicing decision (user-directed, 2026-08-05)
+    opening Wave6 as a **comprehensive comment-documentation review**, not
+    just the nine Clippy diagnostics. Supersedes the lint-only framing of the
+    prior handoff status; the nine diagnostics and the two user-required TODO
+    annotations are mandatory items inside two of the six passes below, not
+    separate passes.
+  - **Scope**: every active overlayfs source file (all 31 non-`legacy_fs.rs`
+    `.rs` files) is comment-rewritten so a developer reading only
+    `kernel/src/fs/fs_impls/overlayfs/` understands the code without the
+    `.agents/` workspace. All micro-feature IDs (`P0-xx`/`P1-xx`/`P2-xx`/
+    `P3-xx`) and internal workspace vocabulary (Meso/Wave/pass IDs/spec §/
+    review-repair-round history/RECONCILIATION/frozen etc.) are removed from
+    comments; stale and redundant prose is rewritten against current code;
+    the nine rustdoc diagnostics in `mount/build.rs:44-50` and
+    `dir/remove.rs:76-77` are fixed; exactly two scoped comment-only TODO
+    annotations are added (one in `mount/build.rs`, one in `dir/remove.rs`).
+    Normative rules: `subagent-tasks/wave_06_documentation_review/
+    WAVE6_DOC_STANDARD.md`.
+  - **Passes (six, one per implemented meso, disjoint write-sets; batch A =
+    passes 22-24, batch B = passes 25-27; all command-free, risk Low):**
+    - **Pass 22** `mount_resource_policy` — write-set `mount/*` +
+      crate-root `mod.rs` annex (parent N/A for the annex; `AccessType` docs
+      only). Includes the 7 `build.rs` diagnostics + TODO 1. Covered
+      micro-features: P0-01, P0-02, P0-03, P0-05, P0-18, P1-19, P1-20,
+      P1-35, P2-11.
+    - **Pass 23** `visibility_projection_identity` — write-set `projection/*`.
+      Covered: P0-04, P0-06, P0-07, P0-08, P0-09, P0-10, P0-11, P0-12,
+      P0-16, P0-17, P1-07, P2-01.
+    - **Pass 24** `namespace_mutation_whiteout` — write-set `dir/*`. Includes
+      the 2 `remove.rs` diagnostics + TODO 2. Covered: P1-21..P1-30, P1-36.
+    - **Pass 25** `copyup_authority_file_views` — write-set `copyup/*`.
+      Covered: P1-01..P1-06, P1-08..P1-15, P1-32, P1-34, P1-37.
+    - **Pass 26** `metadata_security_xattr_policy` — write-set
+      `metadata_security/*`. Covered: P1-16, P1-17, P1-18, P1-33.
+    - **Pass 27** `merged_directory_index` — write-set `readdir_index.rs`.
+      Covered: P0-13, P0-14, P0-15, P1-31.
+  - **Acceptance flow**: main-agent exact-diff review per lane (comment-only;
+    reject any behavioral, signature, formatting-outside-comments, `#[allow]`/
+    `#[expect]`, `legacy_fs.rs`, VFS, or test change). After all six lanes
+    are accepted, the Checker runs workspace Clippy; only on clean Clippy it
+    runs rustfmt, then `make check`, preserving evidence per run.
+  - **Static closure (2026-08-05, ACCEPTED)**: all six Creator lanes were
+    executed in-thread (subagent task delivery failed in the session) and
+    accepted; workspace Clippy, `cargo fmt --check`, and `make check` all
+    exit 0. The pre-existing workspace format drift (incl. VFS
+    `inode_ext.rs`) and trailing whitespace in 11 pre-existing `.agents/`
+    markdown files were cleared by the authorized mechanical `cargo fmt` and
+    whitespace stripping; receipts and run evidence are under
+    `components/wave_06_documentation_review/`.
+  - **Second review pass (2026-08-05)**: user-directed cleanup of doc comments
+    that focused on mechanical details (`pub`/visibility, `#[derive(Debug)]`,
+    seam/ceiling/accessor phrasing) instead of meaning and design intent.
+    Comment-only across all six lanes; revalidated by workspace Clippy,
+    `cargo fmt --check`, and `make check` (runs 06-08, all exit 0).
+  - **Explicit boundary**: no production behavior, owner, lock, cache, VFS,
+    test, harness, xfstests, or `legacy_fs.rs` edit. P1/P2 deferrals, origin
+    UUID/export-FH parity, P2-07/P3-01, runtime xfstests, final Reviewer
+    acceptance, and Wave7 `legacy_fs.rs` deletion remain outside Wave6.

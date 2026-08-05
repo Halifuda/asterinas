@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Real-object projection and the upper-first layer lookup core (`P0-07`..`P0-11`).
+//! Real-object projection and the upper-first layer lookup core.
 //!
 //! This module owns [`RealObject`] — the pinned real (underlying) object of one
 //! layer — its private whiteout/opaque marker reads, and the module-private
 //! [`LayerLookup`] intermediate produced by [`OverlayFs::lookup_in_layers`].
 //! The lookup scan is upper-first and matches the Linux `ovl_lookup_single`
 //! merge-stop semantics (verified against the Linux source tree
-//! `fs/overlayfs/namei.c`, function `ovl_lookup_single`; wave-2 review items
-//! 3/4): the first non-directory hit terminates
-//! as `Single`; directory hits accumulate into the lower stack until a
-//! barrier — a whiteout (negative, BC-2 §18.2), an opaque directory found at
-//! the name (the merge stops below it, namei.c:324-331), or a non-directory
-//! below an accumulated directory (the merge stops, namei.c:298-299) — or
-//! the upper-miss opaque-parent case (negative, Case 3). Meso-02 spec §4
-//! `projection/entry.rs`.
+//! `fs/overlayfs/namei.c`, function `ovl_lookup_single`): the first
+//! non-directory hit terminates as `Single`; directory hits accumulate into
+//! the lower stack until a barrier — a whiteout (negative), an opaque
+//! directory found at the name (the merge stops below it, namei.c:324-331),
+//! or a non-directory below an accumulated directory (the merge stops,
+//! namei.c:298-299) — or the upper-miss opaque-parent case (negative).
 
 use device_id::DeviceId;
 
@@ -37,25 +35,24 @@ const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
 /// The xattr name of the opaque-directory marker (Linux `OVL_XATTR_OPAQUE`).
 const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 
-/// One pinned real (underlying) object of an overlay layer (`P0-07`).
+/// One pinned real (underlying) object of an overlay layer.
 ///
 /// `layer_index` is the object's position in the overlay layer stack (`0` =
 /// upper, `1..` = lower position); `fsid` is the per-unique-underlying-
-/// superblock identifier published by meso-01; `container_dev_id` is the
-/// `st_dev` evidence of the same layer. The real inode is a strong pin:
-/// `RealObject` values inside facts are immutable while published — facts are
-/// replaced, never mutated in place (BC-3 §33).
+/// superblock identifier; `container_dev_id` is the `st_dev` evidence of the
+/// same layer. The real inode is a strong pin: `RealObject` values inside
+/// facts are immutable while published — facts are replaced, never mutated in
+/// place.
 ///
 /// Invariants: the pin is strong; the fields are fixed for the lifetime of the
-/// value. The named constructor ([`RealObject::new`]) is the Wave-3 seam for
-/// sibling mesos; within-`projection` builders (root facts in `inode.rs`, the
-/// lookup scan here, `RealObjectKey::from_facts`) construct through the
-/// `pub(super)` fields directly, so there is a single construction path for
-/// sibling mesos and no field widening beyond the projection tree.
+/// value. The named constructor ([`RealObject::new`]) is used by sibling
+/// modules; within-`projection` builders (root facts in `inode.rs`, the lookup
+/// scan here, `RealObjectKey::from_facts`) construct through the `pub(super)`
+/// fields directly, so there is a single construction path for sibling modules
+/// and no field widening beyond the projection tree.
 ///
-/// Wave-3 review item 3 widened the type and its four read-only accessors to
-/// the overlayfs ceiling so the leaf meso consumers (`readdir_index.rs`,
-/// `copyup/`, `dir/`) can name the layer carriers.
+/// The leaf modules (`readdir_index.rs`, `copyup/`, `dir/`) name the layer
+/// carriers.
 #[derive(Clone, Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
     pub(super) layer_index: usize,
@@ -65,13 +62,12 @@ pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
 }
 
 impl RealObject {
-    /// Builds a real object from its four frozen fields.
+    /// Builds a real object from its four fields.
     ///
-    /// Wave-3 shared-carrier seam (meso-03 spec §5.3 E2 / meso-06 spec §4.1):
-    /// the leaf mesos construct same-layer real objects (the merged-scan
-    /// `..` parent-identity route and new-upper publication) from pinned
-    /// real inodes without touching the private fields. The `pub(super)`
-    /// fields remain for the within-module construction graph.
+    /// The leaf modules construct same-layer real objects (the merged-scan
+    /// `..` parent-identity route and new-upper publication) from pinned real
+    /// inodes without touching the private fields. The `pub(super)` fields
+    /// remain for the within-module construction graph.
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         layer_index: usize,
         real_inode: Arc<dyn Inode>,
@@ -106,15 +102,14 @@ impl RealObject {
         self.container_dev_id
     }
 
-    /// Returns whether this real object is a whiteout (`P0-11`).
+    /// Returns whether this real object is a whiteout.
     ///
     /// A whiteout is either a classic character device `0:0` (Linux
     /// `ovl_is_whiteout`) or an object carrying the
-    /// `trusted.overlay.whiteout` marker. The marker read is presence-based
-    /// (accepted meso-06 contract): an absent (`ENODATA`) or unsupported
-    /// (`EOPNOTSUPP`) marker reads as "not a whiteout", while a value longer
-    /// than the 1-byte probe (`ERANGE`) still proves presence. Genuine xattr
-    /// errors propagate.
+    /// `trusted.overlay.whiteout` marker. The marker read is presence-based:
+    /// an absent (`ENODATA`) or unsupported (`EOPNOTSUPP`) marker reads as
+    /// "not a whiteout", while a value longer than the 1-byte probe (`ERANGE`)
+    /// still proves presence. Genuine xattr errors propagate.
     fn is_whiteout(&self) -> Result<bool> {
         let metadata = self.real_inode.metadata();
         // A classic whiteout is a character device with device number 0:0.
@@ -141,13 +136,12 @@ impl RealObject {
         }
     }
 
-    /// Returns whether this real object is an opaque directory (`P0-10`).
+    /// Returns whether this real object is an opaque directory.
     ///
     /// An opaque directory carries `trusted.overlay.opaque == "y"` and acts
     /// as a lower-search barrier. Only directories qualify; the marker is
-    /// re-observed on every lookup (no marker cache, per the frozen contract).
-    /// Absent, unsupported, or over-long markers read as "not opaque"; genuine
-    /// xattr errors propagate.
+    /// re-observed on every lookup (no marker cache). Absent, unsupported, or
+    /// over-long markers read as "not opaque"; genuine xattr errors propagate.
     pub(in crate::fs::fs_impls::overlayfs) fn is_opaque_directory(&self) -> Result<bool> {
         if !self.real_inode.type_().is_directory() {
             return Ok(false);
@@ -172,7 +166,7 @@ impl RealObject {
 }
 
 /// The module-private layer-lookup outcome (entry.rs) — the only named
-/// intermediate of the lookup path (intermediate-hygiene rule).
+/// intermediate of the lookup path.
 ///
 /// The payloads are final types (`OverlayObjectFacts` / `NegativeBinding`);
 /// `PositiveBinding` is assembled by the caller (`lookup_binding` in `mod.rs`)
@@ -185,9 +179,9 @@ pub(super) enum LayerLookup {
 
 impl OverlayFs {
     /// Runs the upper-first layer lookup for `name` inside `parent_facts`'s
-    /// real layers (`P0-08`/`P0-09`/`P0-10`/`P0-11`).
+    /// real layers.
     ///
-    /// Frozen scan contract, matching Linux `ovl_lookup_single` (verified
+    /// Scan contract, matching Linux `ovl_lookup_single` (verified
     /// against namei.c): layers are observed topmost-first
     /// (`parent_facts.upper`, then `parent_facts.lowers`); the first
     /// non-directory hit terminates as `Single`; directory hits accumulate
@@ -197,8 +191,8 @@ impl OverlayFs {
     /// below an accumulated directory stops the merge (namei.c:298-299); an
     /// opaque parent upper (re-observed `trusted.overlay.opaque == "y"`)
     /// terminates names absent from the upper as `HiddenByOpaque` without a
-    /// lower scan (Case 3). The caller holds the parent `DIR` transaction
-    /// lock; this function takes no Overlay lock itself.
+    /// lower scan. The caller holds the parent `DIR` transaction lock; this
+    /// function takes no Overlay lock itself.
     pub(super) fn lookup_in_layers(
         &self,
         parent_facts: &OverlayObjectFacts,
@@ -228,7 +222,7 @@ impl OverlayFs {
                     }
                     if !hit.real_inode().type_().is_directory() {
                         // The first non-directory hit terminates as `Single`
-                        // and hides all lower hits (P0-08).
+                        // and hides all lower hits.
                         return Ok(LayerLookup::Positive(OverlayObjectFacts {
                             kind: PositiveKind::Single,
                             upper: Some(hit),
@@ -241,7 +235,7 @@ impl OverlayFs {
                         // `ovl_lookup_single`: `val == 'y'` -> `d->stop =
                         // true`; namei.c:324-331): its lower counterparts are
                         // hidden, so the upper directory is the sole visible
-                        // layer entry (P0-10).
+                        // layer entry.
                         return Ok(LayerLookup::Positive(OverlayObjectFacts {
                             kind: PositiveKind::Single,
                             upper: Some(hit),
@@ -252,8 +246,8 @@ impl OverlayFs {
                 }
                 Err(err) if err.error() == Errno::ENOENT => {
                     // The name is absent from the upper. An opaque upper
-                    // directory is a lower-search barrier (Case 3): the name
-                    // is hidden and lower layers are never scanned.
+                    // directory is a lower-search barrier: the name is hidden
+                    // and lower layers are never scanned.
                     if upper_real.is_opaque_directory()? {
                         return Ok(LayerLookup::Negative(NegativeBinding::HiddenByOpaque(
                             HiddenEvidence {
@@ -280,7 +274,7 @@ impl OverlayFs {
                     };
                     if hit.is_whiteout()? {
                         // A whiteout is the topmost occurrence of the name:
-                        // the name is hidden (P0-11). Below an already-visible
+                        // the name is hidden. Below an already-visible
                         // directory it only ends the downward merge scan.
                         if dir_hits.is_empty() {
                             return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
@@ -295,7 +289,7 @@ impl OverlayFs {
                     if !hit.real_inode().type_().is_directory() {
                         if dir_hits.is_empty() {
                             // The first non-directory hit terminates as
-                            // `Single`; lower hits are hidden (P0-08).
+                            // `Single`; lower hits are hidden.
                             return Ok(LayerLookup::Positive(OverlayObjectFacts {
                                 kind: PositiveKind::Single,
                                 upper: None,

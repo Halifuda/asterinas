@@ -2,16 +2,16 @@
 
 # Subagent Dispatch Stub
 
-**Role ID:** ARCHITECT  
-**Pass Kind:** Macro Backbone + complete Meso Mapping  
-**Task ID:** `ovfs-architect-reframed-topology-20260730`  
-**Task Kind:** design  
-**Risk Tier:** High  
-**Workspace Root:** `/home/ayd/asterinas`  
-**Component/Task Group:** `architect-reframed-topology`  
-**Parent Meso-Component:** `N/A` (fresh global decomposition)  
-**Covered Micro-Features:** All 81 formal Micro IDs in `MICRO_FEATURE_INVENTORY.md`  
-**Continuation / Parent Task:** `N/A`  
+**Role ID:** ARCHITECT
+**Pass Kind:** Macro Backbone + complete Meso Mapping
+**Task ID:** `ovfs-architect-reframed-topology-20260730`
+**Task Kind:** design
+**Risk Tier:** High
+**Workspace Root:** `/home/ayd/asterinas`
+**Component/Task Group:** `architect-reframed-topology`
+**Parent Meso-Component:** `N/A` (fresh global decomposition)
+**Covered Micro-Features:** All 81 formal Micro IDs in `MICRO_FEATURE_INVENTORY.md`
+**Continuation / Parent Task:** `N/A`
 **Write-Set:**
 
 - `kernel/src/fs/fs_impls/overlayfs/.agents/components/architect-reframed-topology/macro_00_global_topology.md`

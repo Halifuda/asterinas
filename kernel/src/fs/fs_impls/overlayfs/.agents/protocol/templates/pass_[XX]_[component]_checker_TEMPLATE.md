@@ -13,7 +13,7 @@
 **Pass Kind:** `[Creator-Synced | Meso-Integration]`
 **Parent Meso-Component:** `meso_YY_{component_name}`
 **Covered Micro-Features:**
-- 
+-
 **Creator Pass Artifact(s):**
 - `path/to/pass_creator.md` *(or `N/A` for a pure integration pass if no single creator receipt applies)*
 **Validation Run IDs:**
