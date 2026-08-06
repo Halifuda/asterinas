@@ -196,7 +196,6 @@ impl OverlayFs {
             let claimed_pair = UpperWorkdirClaim::claim(
                 upper.root_inode.clone(),
                 workdir_path.inode().clone(),
-                upper.fs.clone(),
                 identity,
             )?;
 

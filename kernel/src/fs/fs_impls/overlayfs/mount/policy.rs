@@ -143,15 +143,6 @@ impl MountPolicy {
         self.xino_mode
     }
 
-    /// Returns the UUID/fsid mode.
-    #[expect(
-        dead_code,
-        reason = "consumed by sibling modules once their consumers land"
-    )]
-    pub(super) fn uuid_mode(&self) -> UuidMode {
-        self.uuid_mode
-    }
-
     /// Returns the effective unified overlay identity, if any.
     ///
     /// `Some` iff the identity is effective; the persisted value is never
@@ -167,9 +158,11 @@ impl MountPolicy {
 
     /// Returns the advisory write-access accounting, if this is a writable
     /// mount.
+    // TODO: Replace this local accounting with VFS writer/freeze protection
+    // around upper-mutating transactions.
     #[expect(
         dead_code,
-        reason = "consumed by write-access consumers once they land"
+        reason = "the VFS has no writer/freeze interface for upper mutations"
     )]
     pub(super) fn write_access(&self) -> Option<&WriteAccessAccounting> {
         self.write_access.as_ref()
@@ -212,13 +205,15 @@ impl CreatorCredentialPolicy {
     }
 
     /// Returns the stashed creator credentials.
-    #[expect(dead_code, reason = "consumed by copy-up consumers once they land")]
+    // TODO: Consume this through a VFS scoped credential-switch API.
+    #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
     pub(in crate::fs::fs_impls::overlayfs) fn snapshot(&self) -> &Credentials<ReadDupOp> {
         &self.snapshot
     }
 
     /// Returns the credential source (closed set: `Creator` today).
-    #[expect(dead_code, reason = "consumed by copy-up consumers once they land")]
+    // TODO: Consume this through a VFS scoped credential-switch API.
+    #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
     pub(in crate::fs::fs_impls::overlayfs) fn source(&self) -> CredentialSource {
         self.source
     }
@@ -428,6 +423,8 @@ impl DirentVisitor for DTypeProbeVisitor {
 /// ([`WriteAccessGuard`]); the counter never gates underlying I/O and is not
 /// a second ownership source. Minimal because Asterinas has no VFS superblock
 /// freeze/`want_write` API.
+// TODO: Replace this provisional counter with VFS writer/freeze protection,
+// then acquire it at each upper-mutating transaction boundary.
 #[derive(Debug)]
 pub(super) struct WriteAccessAccounting {
     /// The accounted upper filesystem (defensive `EROFS` gate).
@@ -456,7 +453,7 @@ impl WriteAccessAccounting {
     /// update that never wraps.
     #[expect(
         dead_code,
-        reason = "consumed by write-access consumers once they land"
+        reason = "the VFS has no writer/freeze interface for upper mutations"
     )]
     pub(super) fn try_get_write_access(&self) -> Result<WriteAccessGuard<'_>> {
         if self.upper_fs.flags().contains(FsFlags::RDONLY) {
@@ -473,7 +470,7 @@ impl WriteAccessAccounting {
     /// Reports whether any write-access user is currently counted.
     #[expect(
         dead_code,
-        reason = "consumed by sibling modules once their consumers land"
+        reason = "the VFS has no writer/freeze interface for upper mutations"
     )]
     pub(super) fn has_active_write_users(&self) -> bool {
         self.active_write_users.load(Ordering::Relaxed) > 0
@@ -482,7 +479,7 @@ impl WriteAccessAccounting {
     /// Returns the current advisory active-user count.
     #[expect(
         dead_code,
-        reason = "consumed by sibling modules once their consumers land"
+        reason = "the VFS has no writer/freeze interface for upper mutations"
     )]
     pub(super) fn active_write_user_count(&self) -> u64 {
         self.active_write_users.load(Ordering::Relaxed)
@@ -496,7 +493,7 @@ impl WriteAccessAccounting {
 #[derive(Debug)]
 #[expect(
     dead_code,
-    reason = "constructed only through the deferred try_get_write_access"
+    reason = "the VFS has no writer/freeze interface for upper mutations"
 )]
 pub(super) struct WriteAccessGuard<'a> {
     /// The accounting this guard borrows; `Drop` decrements it.

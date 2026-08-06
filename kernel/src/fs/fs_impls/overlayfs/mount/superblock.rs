@@ -152,10 +152,8 @@ pub(super) enum MountPhase {
     /// The mount is live and accepts operations.
     Ready,
     /// The mount is draining; no new operations may start.
-    #[expect(
-        dead_code,
-        reason = "only reachable via the deferred OverlayFs::begin_shutdown teardown path"
-    )]
+    // TODO: Wire a VFS unmount/shutdown callback to this transition before detach.
+    #[expect(dead_code, reason = "the VFS exposes no filesystem shutdown callback")]
     ShuttingDown,
 }
 
@@ -165,10 +163,8 @@ impl OverlayFs {
     /// Returns `EBUSY` if the mount is already shutting down. Claim release
     /// happens only on the final `Drop` (after pinned consumers drain), so no
     /// consumer can observe a half-released claim.
-    #[expect(
-        dead_code,
-        reason = "consumed by the teardown path once the VFS shutdown seams land"
-    )]
+    // TODO: Invoke this from the VFS unmount/shutdown callback before detach.
+    #[expect(dead_code, reason = "the VFS exposes no filesystem shutdown callback")]
     pub(super) fn begin_shutdown(&self) -> Result<()> {
         let mut lifecycle = self.lifecycle.lock();
         if lifecycle.phase == MountPhase::ShuttingDown {
@@ -207,10 +203,10 @@ impl OverlayFs {
     /// topmost lower is `lowers[0]`, which is guaranteed non-empty by the
     /// checked `OverlayLayerStack::assemble` constructor.
     fn selected_real_fs(&self) -> &Arc<dyn FileSystem> {
-        match self.claims() {
-            Some(claims) => claims.upper_fs(),
-            None => &self.layer_stack.lowers[0].fs,
-        }
+        self.layer_stack
+            .upper
+            .as_ref()
+            .map_or(&self.layer_stack.lowers[0].fs, |upper| &upper.fs)
     }
 }
 

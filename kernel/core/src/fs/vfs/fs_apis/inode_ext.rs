@@ -46,11 +46,6 @@ impl OverlayInuseSlot {
             .owner_token
             .compare_exchange(token, 0, Ordering::Release, Ordering::Relaxed);
     }
-
-    /// Returns whether `token` currently owns this slot.
-    pub fn is_claimed_by(&self, token: u64) -> bool {
-        token != 0 && self.owner_token.load(Ordering::Acquire) == token
-    }
 }
 
 impl FsLockContext {

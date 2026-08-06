@@ -18,7 +18,6 @@ use crate::{
     fs::{
         utils::DirentCounter,
         vfs::{
-            file_system::FileSystem,
             inode::Inode,
             inode_ext::InodeExt,
             path::Path,
@@ -141,12 +140,6 @@ impl InodeClaimGuard {
             token: identity,
         })
     }
-
-    /// Returns the unified token this guard holds.
-    #[expect(dead_code, reason = "consumed by sibling modules for claim auditing")]
-    pub(super) fn token(&self) -> OverlayUuid {
-        self.token
-    }
 }
 
 impl Drop for InodeClaimGuard {
@@ -172,8 +165,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     workdir: InodeClaimGuard,
     /// Upper claim; taken first, released last.
     upper: InodeClaimGuard,
-    /// Upper filesystem identity (same-filesystem evidence).
-    upper_fs: Arc<dyn FileSystem>,
     /// Unified identity; persisted iff effective.
     identity: OverlayUuid,
 }
@@ -281,7 +272,6 @@ impl UpperWorkdirClaim {
     pub(super) fn claim(
         upper_inode: Arc<dyn Inode>,
         workdir_inode: Arc<dyn Inode>,
-        upper_fs: Arc<dyn FileSystem>,
         identity: OverlayUuid,
     ) -> Result<Self> {
         let upper = InodeClaimGuard::try_claim(upper_inode, identity)?;
@@ -296,7 +286,6 @@ impl UpperWorkdirClaim {
         Ok(Self {
             workdir,
             upper,
-            upper_fs,
             identity,
         })
     }
@@ -332,53 +321,9 @@ impl UpperWorkdirClaim {
         self.identity.persist_on_upper(&self.upper.inode)
     }
 
-    /// Reports whether both slots are still owned by this claim's token.
-    ///
-    /// Returns `false` if either slot is claimed by a different token.
-    #[expect(
-        dead_code,
-        reason = "consumed by sibling modules once their consumers land"
-    )]
-    pub(in crate::fs::fs_impls::overlayfs) fn has_exclusive_claim(&self) -> bool {
-        let upper_owned = self
-            .upper
-            .inode
-            .overlay_inuse_slot()
-            .is_claimed_by(self.identity.value());
-        let workdir_owned = self
-            .workdir
-            .inode
-            .overlay_inuse_slot()
-            .is_claimed_by(self.identity.value());
-        upper_owned && workdir_owned
-    }
-
-    /// Returns the pinned upper root inode.
-    #[expect(
-        dead_code,
-        reason = "consumed by sibling modules once their consumers land"
-    )]
-    pub(in crate::fs::fs_impls::overlayfs) fn upper_inode(&self) -> &Arc<dyn Inode> {
-        &self.upper.inode
-    }
-
     /// Returns the pinned workdir root inode.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_inode(&self) -> &Arc<dyn Inode> {
         &self.workdir.inode
-    }
-
-    /// Returns the upper filesystem identity.
-    pub(in crate::fs::fs_impls::overlayfs) fn upper_fs(&self) -> &Arc<dyn FileSystem> {
-        &self.upper_fs
-    }
-
-    /// Returns the unified identity of this claim.
-    #[expect(
-        dead_code,
-        reason = "consumed by sibling modules once their consumers land"
-    )]
-    pub(in crate::fs::fs_impls::overlayfs) fn identity(&self) -> OverlayUuid {
-        self.identity
     }
 }
 
