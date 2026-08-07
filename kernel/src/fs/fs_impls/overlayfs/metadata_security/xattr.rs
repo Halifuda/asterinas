@@ -27,8 +27,8 @@
 //!
 //! Entry contract: the classification stage runs **before**
 //! `check_permission` for `set_xattr`/`remove_xattr` so a non-`Public` name is
-//! refused with no promotion side effect (`ENODATA` for `get_xattr`; `EPERM`
-//! for `set_xattr`/`remove_xattr`); `list_xattr` streams the underlying raw
+//! refused with no promotion side effect (`EOPNOTSUPP` for `get_xattr`;
+//! `EPERM` for `set_xattr`/`remove_xattr`); `list_xattr` streams the underlying raw
 //! name list through [`OverlayXattrPolicy::filter_private_names`] so no
 //! private record ever reaches the caller. `get_xattr`/`list_xattr` carry the
 //! empty permission demand (`AccessType::ReadOnly`, `Permission::empty()`);
@@ -469,8 +469,10 @@ impl OverlayXattrPolicy {
 
 impl OverlayInode {
     // Xattr get: classification refusal runs first (before the admission, so
-    // no authority side effect ever starts for a private name), then the
-    // empty permission demand (`AccessType::ReadOnly`,
+    // no authority side effect ever starts for a private name); the refusal
+    // returns `EOPNOTSUPP` for every non-`Public` name (Linux v4.10+
+    // `ovl_xattr_get` semantics — the pre-v4.10 `ENODATA` is not returned),
+    // then the empty permission demand (`AccessType::ReadOnly`,
     // `Permission::empty()`; namespace gating already ran in the syscall
     // layer), then a creator-credential forward to the current real
     // authority. The underlying `get_xattr` self-evaluates under the
@@ -487,7 +489,7 @@ impl OverlayInode {
             XattrClass::Public
         ) {
             return Err(Error::with_message(
-                Errno::ENODATA,
+                Errno::EOPNOTSUPP,
                 "the overlay-private xattr is not exposed through the generic get path",
             ));
         }

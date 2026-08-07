@@ -652,10 +652,12 @@ impl OverlayInode {
     /// pinned layer real objects (the build leg).
     ///
     /// Merged (`facts.kind() == Merged`): enumerate the upper (when present),
-    /// then each lower top→bottom, unless the upper is opaque
-    /// (`is_opaque_directory()` — the opaque barrier stops the downward
-    /// merge). Single (`facts.kind() == Single`): enumerate the single
-    /// visible source (the upper, or `lowers[0]`). Per new name:
+    /// then each lower top→bottom; the downward merge stops after the first
+    /// layer whose real directory is opaque (`is_opaque_directory()` — the
+    /// opaque layer's own names are still emitted and a deeper lower's names
+    /// never leak through the barrier). Single
+    /// (`facts.kind() == Single`): enumerate the single visible source (the
+    /// upper, or `lowers[0]`). Per new name:
     /// `OverlayFs::lookup_binding` resolves the merged visibility — a
     /// positive binding contributes the shared [`OverlayInode`] (and its
     /// scan-time `type_`); a negative binding (whiteout/opaque evidence) is
@@ -683,7 +685,7 @@ impl OverlayInode {
         // The layers to enumerate in scan order. The layer list is
         // a local (not a named type): `Single` -> the single visible source;
         // `Merged` -> the upper (when present) then the lowers top→bottom,
-        // unless the upper is opaque.
+        // stopping after the first opaque layer.
         let layers: Vec<&RealObject> = match facts.kind() {
             PositiveKind::Single => {
                 let source = match facts.upper() {
@@ -695,15 +697,18 @@ impl OverlayInode {
                 vec![source]
             }
             PositiveKind::Merged => {
+                // Enumerate the upper (when present), then the lowers
+                // top→bottom. The downward merge stops after the first layer
+                // whose real directory is opaque (`is_opaque_directory()`),
+                // matching Linux `ovl_iterate` / `ovl_dir_read_merged`: a
+                // deeper lower's names must never leak through an opaque
+                // barrier. The opaque layer's own names are still emitted.
                 let mut layers = Vec::new();
-                match facts.upper() {
-                    Some(upper) => {
-                        layers.push(upper);
-                        if !upper.is_opaque_directory()? {
-                            layers.extend(facts.lowers());
-                        }
+                for layer in facts.upper().into_iter().chain(facts.lowers().iter()) {
+                    layers.push(layer);
+                    if layer.is_opaque_directory()? {
+                        break;
                     }
-                    None => layers.extend(facts.lowers()),
                 }
                 layers
             }

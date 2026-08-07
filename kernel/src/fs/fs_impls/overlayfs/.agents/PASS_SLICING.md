@@ -519,3 +519,130 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     test, harness, xfstests, or `legacy_fs.rs` edit. P1/P2 deferrals, origin
     UUID/export-FH parity, P2-07/P3-01, runtime xfstests, final Reviewer
     acceptance, and Wave7 `legacy_fs.rs` deletion remain outside Wave6.
+
+- **`wave7_logic_bug_repair_20260807`**
+  - **Kind**: User-directed bounded repair wave (Designer addendum + Creator
+    implementation) fixing the five Wave7 xfstests logic-bug groups. Parent
+    meso owners are preserved; no Architect repair is required (no static
+    owner or lock-topology defect was found). No ktest surface; no xfstests
+    run is scheduled by this decision — the user directed the main agent to
+    verify compilation only after the Creator lands.
+  - **Designer decision**: `task_designer_wave7_logic_bug_repair_20260807` —
+    one bounded cross-meso repair addendum under
+    `components/wave7_logic_bug_repair/` (one spec + one validation file),
+    preserving every existing Meso owner and the accepted static topology.
+  - **Creator slicing**: one Creator pass
+    `pass_28_wave7_logic_bug_repair` (Risk High) with an enumerated
+    write-set. Passes are executed after the Designer addendum is accepted.
+  - **Repair objectives (each parent Meso + covered Micro, from the Wave7
+    batch summary and upstream suite sources):**
+    1. **Workdir residue cleanup (`overlay/024`, `overlay/010`)** — parent
+       `mount_resource_policy` (Meso 01), covered `P0-03` (workdir setup).
+       `prepare_workdir` (`mount/claims.rs`) must accept a non-empty workdir
+       root and clean the `<workdir>/work` residue at mount, instead of
+       failing `ENOTEMPTY` (Linux `ovl_get_workdir`/`ovl_make_workdir`/
+       `ovl_workdir_cleanup` semantics).
+    2. **Readdir lower opaque layer barrier (`overlay/014`)** — parent
+       `merged_directory_index` (Meso 03), covered `P0-14` (merged readdir).
+       `readdir_sequence` (`readdir_index.rs`) currently checks the opaque
+       barrier on the upper layer only; it must stop the downward merge at
+       the first opaque layer (Linux `ovl_iterate` layer-stack stop).
+    3. **`ETXTBSY` on truncate of an executing overlay file
+       (`overlay/013`)** — parent `copyup_authority_file_views` (Meso 04),
+       covered `P1-08` (file open / truncate real-file authority). The
+       truncate path (`resize_impl`) must fail `ETXTBSY` when the target
+       overlay file is currently executing. The priors document the lower
+       `ETXTBSY` divergence (§19c) as preserved; the Designer decides the
+       narrow VFS/process seam (exec mark + truncate check) with an explicit
+       lifecycle (mark on successful exec load, release at process teardown).
+    4. **`trusted.overlay.*` getxattr errno (`overlay/026`)** — parent
+       `metadata_security_xattr_policy` (Meso 05), covered `P1-33` (xattr
+       get/set/list delegation). The generic `get_xattr` path must return
+       `EOPNOTSUPP` (Linux v4.10+ semantics) instead of `ENODATA` for
+       non-`Public` overlay-private names.
+    5. **Stale upper dentry removal `ESTALE` (`overlay/012`)** — parent
+       `namespace_mutation_whiteout` (Meso 06), covered `P1-26` (unlink).
+       When a positive projection asserted an upper object at `name` and the
+       physical upper operation reports the object gone (`ENOENT`), the
+       remove recipe must return `ESTALE` (Linux
+       `ovl_remove_and_whiteout`/`ovl_verify_upper` semantics) instead of
+       propagating `ENOENT`.
+  - **Explicit boundary**: the pass touches production code only; no
+    `legacy_fs.rs`, no test/harness files, no `SYSTEM_BLUEPRINT.md` state
+    change beyond the repair record, and no xfstests/QEMU run. The main
+    agent personally verifies the target-specific `cargo check` after the
+    Creator reports (user-directed; no experiment restart).
+
+- **`wave7_workdir_workspace_revision_20260807`**
+  - **Kind**: User-directed bounded revision of the wave7 repair O1
+    objective; Designer audit + Creator implementation. Supersedes the
+    "staging at the workdir root" disposition of
+    `wave7_logic_bug_repair_20260807` O1.
+  - **Decision**: every workdir usage site must resolve to
+    `<workdir>/work` (Linux `OVL_WORKDIR_NAME`, `ofs->workdir`) as the actual
+    staging workspace, never the claimed workdir root. The claim protocol
+    still claims the workdir ROOT inode; the staging workspace is pinned as a
+    plain `Arc<dyn Inode>` on `UpperWorkdirClaim` after `prepare_workdir`
+    (create when absent, residue-clean + recreate when present; never
+    `ENOTEMPTY` for root residue). Mount order becomes prepare (step 7) →
+    capability probes against the workspace (step 8) → UUID persist (step 9).
+    `OverlayFs::workdir_root` (and the `OverlayInode` convenience) resolve
+    the pinned workspace; all staging consumers (workdir temps, whiteout
+    cache, copy-up/promote renames, dir create/link/remove recipes) follow
+    without per-consumer edits.
+  - **Designer acceptance**: `task_designer_wave7_workdir_workspace_audit_20260807`
+    accepted 2026-08-07 (audit table + frozen Rust surface under
+    `components/wave7_logic_bug_repair/wave7_workdir_workspace_designer_spec.md`
+    + `_designer_validation.md`).
+  - **Creator pass**: `pass_29_wave7_workdir_workspace` (Risk High,
+    command-free), write-set
+    `mount/{claims.rs,build.rs,policy.rs,superblock.rs}`,
+    `copyup/{workdir.rs,promote.rs}`, `dir/{link.rs,remove.rs,whiteout.rs}`
+    (doc-only for promote/link/remove/whiteout/superblock),
+    `dir/create.rs` dispositioned no-edit. Accepted after main-agent diff
+    review; compile verified by the main agent (user-directed).
+  - **VFS revert (user-directed, 2026-08-07)**: the wave7 O3 `ETXTBSY`
+    mechanism (VFS `Inode` trait `deny_write_access`/`allow_write_access`
+    defaults + overlay count + process exec/fork/drop lifecycle) is
+    **fully reverted** — interface-breaking VFS modifications are refused for
+    this wave. `overlay/013`'s `ETXTBSY` behavior therefore remains a
+    documented divergence (priors §19c) pending a redesign that does not
+    modify VFS interfaces. All seven touched files
+    (`fs/vfs/fs_apis/inode.rs`, `projection/{inode.rs,mod.rs}`,
+    `copyup/mod.rs`, `process/{execve.rs,process_vm/mod.rs}`,
+    `process/process/init_proc.rs`) are byte-identical to HEAD.
+  - **Explicit boundary**: no VFS/process write-set for the remainder of this
+    wave; no ktest surface; no xfstests/QEMU run scheduled by this decision;
+    the main agent verified the target-specific `cargo check` (exit 0,
+    pre-existing `MountPolicy::uuid_mode` warning only).
+
+- **`pass_37_wave7_fixed_case_rerun`**
+  - **Kind**: Main-agent Creator slicing for the accepted fixed-case-rerun
+    Designer addendum (`task_designer_wave7_fixed_case_rerun_20260807`).
+    Continuation of `wave7_logic_bug_repair_20260807`; no Architect repair
+    (no static owner or lock-topology defect).
+  - **Parent**: `mount_resource_policy` (Meso 01).
+  - **Covered Micro-Features**: `P0-02` (layer stack assembly; lowerdir
+    ordering parity), `P0-03` (workdir setup; workspace mode + mount-time
+    cleanup coherence). The Meso-03 readdir opaque barrier (`P0-14`) is NOT
+    re-sliced: the re-run proved it correct; `overlay/014` serves as external
+    evidence for the ordering fix.
+  - **Write-set (exact, per the accepted spec)**: `mount/options.rs`
+    (doc corrections only), `mount/layers.rs` (delete
+    `normalize_lower_ordering`; consume parsed `lower_dirs` directly; doc
+    corrections), `mount/claims.rs` (new `WORKDIR_MODE` const = 0o700 +
+    divergence doc; `prepare_workdir(&mut self, workdir_path: &Path)` with
+    `Path::rmdir`/`Path::unlink`/`Path::new_fs_child` for the visible `work`
+    name + `TODO(workdir-cleanup-vfs-parity)` / `TODO(workdir-mode)`),
+    `mount/build.rs` (step 7 passes `&workdir_path`; doc note). Zero VFS
+    interface change; no ktest surface; `remove_work_entries` raw recursion
+    retained (residue dentry discarded wholesale).
+  - **Execution / acceptance (2026-08-07)**: Creator executed in-thread (no
+    subagent per user direction; the accepted spec is the packet). Accepted
+    after main-agent exact-diff review; no deviations. User-directed
+    compile verification (main-agent run): `cargo check -p aster-kernel
+    --target x86_64-unknown-none` exits 0 with only the pre-existing
+    `MountPolicy::uuid_mode` warning; `cargo fmt --check` on the four changed
+    files exits 0. No QEMU/xfstests run (user owns the re-run decision).
+  - **Boundary**: 014 opaque-marker/clear-empty triage and `overlay/013`
+    `ETXTBSY` remain out of scope per the handoff.

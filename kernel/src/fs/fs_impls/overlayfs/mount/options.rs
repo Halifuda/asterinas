@@ -66,7 +66,8 @@ pub(in crate::fs::fs_impls::overlayfs) enum XinoMode {
 /// the fields directly as immutable construction inputs.
 #[derive(Debug)]
 pub(super) struct OverlayMountOptions {
-    /// Lower layer paths in option order; the topmost lower is the rightmost.
+    /// Lower layer paths in option order; the first option is the topmost
+    /// lower layer (Linux `lowerdir=/l1:/l2:/l3` stacks `l1` topmost).
     pub(super) lower_dirs: Vec<String>,
     /// Upper layer path; `None` means a read-only overlay.
     pub(super) upper_dir: Option<String>,
@@ -149,6 +150,9 @@ impl OverlayMountOptions {
                             "the `lowerdir` mount option requires a non-empty value"
                         );
                     }
+                    // A single colon-joined `lowerdir` value is stacked
+                    // left-to-right: the first path is the topmost layer
+                    // (Linux multi-layer semantics).
                     lower_dirs = value.split(':').map(str::to_string).collect();
                     if lower_dirs.iter().any(|lower_dir| lower_dir.is_empty()) {
                         return_errno_with_message!(

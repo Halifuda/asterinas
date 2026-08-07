@@ -99,7 +99,12 @@ impl OverlayInode {
     ///    opaque barrier): direct `upper_parent.unlink(name)`/`rmdir(name)`
     ///    (no whiteout); publication inline: `BindingCache::invalidate` +
     ///    `readdir_index_remove` (both steps infallible, so no reconcile arm
-    ///    is reachable on this path).
+    ///    is reachable on this path). When the fresh projection asserted an
+    ///    upper object at `name` and the physical upper unlink/rmdir reports
+    ///    `ENOENT`, the recipe returns `ESTALE` (the upper object became
+    ///    stale behind the overlay; Linux `ovl_remove_upper` /
+    ///    `ovl_remove_and_whiteout`); every other upper error propagates
+    ///    unchanged.
     /// 5. **Upper-over-lower / lower-only / opaque-over-lower target:**
     ///    publication of a whiteout at `(upper_parent, name)` via the
     ///    sibling `publish_whiteout` helper (`Replace` over a present
@@ -117,7 +122,11 @@ impl OverlayInode {
     ///    the upper — + `readdir_index_remove`. The recipe distinguishes the
     ///    pre-publication failure arm (best-effort workdir temp cleanup;
     ///    lower authority stays valid) from the post-physical-success arm
-    ///    (conservative reconcile), honoring the never-partial contract.
+    ///    (conservative reconcile), honoring the never-partial contract. A
+    ///    physical-upper `ENOENT` on the asserted-upper arms (the clear-empty
+    ///    exchange or the whiteout `Replace`/`Exchange` publish) is translated
+    ///    to `ESTALE`; the `None` link arm keeps `ENOENT` unchanged (the
+    ///    projection asserted no upper object).
     ///
     /// # Notes
     ///
@@ -205,14 +214,17 @@ impl OverlayInode {
 
         if is_pure_upper {
             // Step 3 — pure-upper direct removal, no whiteout: the name is
-            // genuinely gone from the upper namespace. Upper errors propagate
-            // as-is. Both publication seams are infallible, so no reconcile
-            // arm is structurally reachable here.
-            if kind == RemoveKind::Rmdir {
-                upper_parent.rmdir(name)?;
+            // genuinely gone from the upper namespace. A physical-upper
+            // `ENOENT` means the asserted upper object became stale behind
+            // the overlay and maps to `ESTALE`; every other upper error
+            // propagates as-is. Both publication seams are infallible, so no
+            // reconcile arm is structurally reachable here.
+            let result = if kind == RemoveKind::Rmdir {
+                upper_parent.rmdir(name)
             } else {
-                upper_parent.unlink(name)?;
-            }
+                upper_parent.unlink(name)
+            };
+            result.map_err(translate_stale_upper_enoent)?;
             fs.bindings().invalidate(&self.key(), name);
             self.readdir_index_remove(name);
             return Ok(());
@@ -349,10 +361,13 @@ impl OverlayInode {
                     // object at `name` and the old upper dir moves to the
                     // workdir temp name. From this point the visible upper
                     // namespace has changed (reconcile applies on any later
-                    // failure). The workdir root resolves through the single
-                    // shared resolver (`OverlayInode::workdir_root`).
+                    // failure). The workdir staging workspace resolves
+                    // through the single shared resolver
+                    // (`OverlayInode::workdir_root`).
                     let workdir = self.workdir_root()?;
-                    workdir.rename(temp.name(), &upper_parent, name, RenameMode::Exchange)?;
+                    workdir
+                        .rename(temp.name(), &upper_parent, name, RenameMode::Exchange)
+                        .map_err(translate_stale_upper_enoent)?;
                     marker.commit();
                     // Clean the displaced old upper dir in the workdir: every
                     // remaining entry is a whiteout (the emptiness gate
@@ -385,7 +400,14 @@ impl OverlayInode {
                 // an absent upper name gets a whiteout linked in (`link`).
                 // Marker bytes are written by the sibling owner; no `WL`
                 // payload is touched here.
-                fs.publish_whiteout(&upper_parent, name, replace_target)?;
+                fs.publish_whiteout(&upper_parent, name, replace_target)
+                    .map_err(|err| {
+                        if replace_target.is_some() {
+                            translate_stale_upper_enoent(err)
+                        } else {
+                            err
+                        }
+                    })?;
                 marker.commit();
                 // Semantic publication — inline seam composition: the whiteout
                 // is re-observed from the upper (layer 0) so the published
@@ -406,5 +428,31 @@ impl OverlayInode {
                 Ok(())
             },
         )
+    }
+}
+
+/// Translates a physical-upper `ENOENT` into the stale-upper `ESTALE` error.
+///
+/// Used when the remove recipe's fresh projection asserted an upper object at
+/// the target name (Linux `ovl_remove_upper` / `ovl_remove_and_whiteout`
+/// return `ESTALE` when the upper dentry no longer matches); every other
+/// errno passes through unchanged.
+///
+/// TODO(stale-upper): this post-operation errno translation is an indirect
+/// approximation and is deliberately tricky. The faithful approach is a
+/// VFS-level dentry verification: before the physical upper operation,
+/// compare the overlay's cached upper dentry against a fresh upper lookup by
+/// name and return `ESTALE` on mismatch without touching the upper (Linux
+/// `ovl_matches_upper`). That requires a breaking VFS interface/behavior
+/// change, which this wave intentionally avoids; revisit once a non-breaking
+/// VFS seam exists.
+fn translate_stale_upper_enoent(err: Error) -> Error {
+    if err.error() == Errno::ENOENT {
+        Error::with_message(
+            Errno::ESTALE,
+            "the upper object at the target name became stale",
+        )
+    } else {
+        err
     }
 }

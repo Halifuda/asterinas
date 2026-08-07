@@ -85,10 +85,10 @@ impl OverlayInode {
     /// Lock contract: runs under the caller's target-parent `DIR`; the
     /// underlying upper operations (`workdir.link`/`workdir.rename`) may
     /// block and run in the sleep-capable domain, never under `WL` or any
-    /// spin lock. The workdir root resolves through the single shared
-    /// resolver `OverlayInode::workdir_root` (no workdir side effect without
-    /// a writable claim). No Overlay lock is acquired or held by this method
-    /// and none crosses the return boundary.
+    /// spin lock. The workdir staging workspace resolves through the single
+    /// shared resolver `OverlayInode::workdir_root` (no workdir side effect
+    /// without a writable claim). No Overlay lock is acquired or held by this
+    /// method and none crosses the return boundary.
     pub(super) fn link_over_whiteout(&self, name: &str, upper_real: &Arc<dyn Inode>) -> Result<()> {
         let fs = self.fs_arc()?;
         let upper_parent = self.upper_parent()?;

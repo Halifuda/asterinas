@@ -30,10 +30,10 @@
 //!    overlays; `UpperWorkdirClaim::determine_identity` reuse-or-generate for
 //!    writable overlays);
 //! 6. claim the upper/workdir slots (`UpperWorkdirClaim::claim`);
-//! 7. probe the upper capabilities and apply the d_type/whiteout gates
-//!    (writable mounts only);
-//! 8. prepare the workdir (`UpperWorkdirClaim::prepare_workdir`; writable
-//!    mounts only);
+//! 7. prepare the workdir staging workspace (`<workdir>/work` via
+//!    `UpperWorkdirClaim::prepare_workdir`; writable mounts only);
+//! 8. probe the upper capabilities against the workdir staging workspace
+//!    and apply the d_type/whiteout gates (writable mounts only);
 //! 9. persist the UUID when effective (`UpperWorkdirClaim::persist_identity`;
 //!    writable mounts only);
 //! 10. perform the projection wiring: (a) acquire the overlay `AnonDeviceId`
@@ -136,10 +136,10 @@ impl OverlayFs {
 
         // Steps 3 and 5-9 — upper/workdir handling. The locals are declared
         // after the layer stack so the claims (and their inode guards) release
-        // before the layer pins on rollback. Steps 7-9 (capability probe,
-        // workdir preparation, UUID persistence) run only for genuinely
-        // writable overlays: a read-only overlay never probes, never checks
-        // the workdir for emptiness, and never persists, so
+        // before the layer pins on rollback. Steps 7-9 (workdir preparation,
+        // capability probe, UUID persistence) run only for genuinely
+        // writable overlays: a read-only overlay never prepares a workdir
+        // staging workspace, never probes, and never persists, so
         // `write_access`/`upper_capabilities`/`uuid` all stay `None`.
         let mut write_access = None;
         let mut claims = None;
@@ -193,20 +193,28 @@ impl OverlayFs {
 
             // Step 6 — claim the upper slot first, then the workdir slot; a
             // workdir conflict rolls back the upper claim.
-            let claimed_pair = UpperWorkdirClaim::claim(
+            let mut claimed_pair = UpperWorkdirClaim::claim(
                 upper.root_inode.clone(),
                 workdir_path.inode().clone(),
                 identity,
             )?;
 
             if !is_effective_read_only {
-                // Step 7 — probe the upper capabilities post-claim and apply
-                // the d_type/whiteout gates (writable overlays only — the
-                // whiteout gate is irrelevant to read-only overlays and the
-                // char-device probe performs a write).
+                // Step 7 — prepare the workdir staging workspace
+                // (`<workdir>/work`): ensure it exists empty and pin it; the
+                // `work` name is removed/recreated through the mount-time
+                // `Path` API (`workdir_path`) so the base view's
+                // `DentryChildren` is coherent (VFS admission errors
+                // propagate fail-closed). Skipped for read-only overlays.
+                claimed_pair.prepare_workdir(&workdir_path)?;
+
+                // Step 8 — probe the upper capabilities post-claim against
+                // the workdir staging workspace and apply the d_type/whiteout
+                // gates (Linux `ovl_make_workdir` probes `ofs->workdir`, the
+                // `work` subdirectory).
                 let capabilities = UpperFilesystemCapabilities::probe(
                     &upper.root_inode,
-                    claimed_pair.workdir_inode(),
+                    claimed_pair.workdir_workspace()?,
                 )?;
                 if !capabilities.can_report_directory_type() {
                     return_errno_with_message!(
@@ -237,10 +245,6 @@ impl OverlayFs {
                     UuidMode::Auto => capabilities.can_store_private_xattr(),
                     UuidMode::Off | UuidMode::Null => false,
                 };
-
-                // Step 8 — prepare the workdir (`ENOTEMPTY` on residue;
-                // skipped for read-only overlays).
-                claimed_pair.prepare_workdir()?;
 
                 // Step 9 — persist the UUID when effective. `On` persist
                 // failure fails closed; `Auto` degrades to not-effective. A

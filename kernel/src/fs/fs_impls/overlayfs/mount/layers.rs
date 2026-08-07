@@ -105,11 +105,12 @@ impl OverlayLayerStack {
     /// Assembles the resolved upper/lower layer stack of an overlay mount.
     ///
     /// `upper_dir` is present only when a writable overlay was requested;
-    /// `lower_dirs` carries the option-order lower paths (topmost lower =
-    /// rightmost option). The upper root fails with `EROFS` when its backend
-    /// reports `FsFlags::RDONLY` and the overlay itself was not forced
-    /// read-only; `is_forced_read_only` is the already-parsed option value
-    /// fed from `OverlayMountOptions`. Every layer root is resolved through
+    /// `lower_dirs` carries the option-order lower paths; the first option is
+    /// the topmost lower layer (Linux `lowerdir=/l1:/l2:/l3` stacks `l1`
+    /// topmost). The upper root fails with `EROFS` when its backend reports
+    /// `FsFlags::RDONLY` and the overlay itself was not forced read-only;
+    /// `is_forced_read_only` is the already-parsed option value fed from
+    /// `OverlayMountOptions`. Every layer root is resolved through
     /// [`OverlayLayer::resolve`] and one `fsid` is assigned per unique
     /// underlying filesystem instance, deduplicated at assembly time.
     ///
@@ -146,7 +147,7 @@ impl OverlayLayerStack {
             );
         }
         let mut lowers = Vec::with_capacity(lower_dirs.len());
-        for raw_path in Self::normalize_lower_ordering(lower_dirs) {
+        for raw_path in lower_dirs {
             lowers.push(OverlayLayer::resolve(fs_creation_ctx, &raw_path)?);
         }
 
@@ -177,14 +178,5 @@ impl OverlayLayerStack {
         }
 
         Ok(Self { upper, lowers })
-    }
-
-    /// Returns `lower_dirs` reordered topmost-first.
-    ///
-    /// Lower layers are stacked from the topmost (the rightmost option in the
-    /// mount option list) down to the bottommost (the leftmost option), so the
-    /// first element of the returned vector is the topmost lower layer.
-    fn normalize_lower_ordering(lower_dirs: Vec<String>) -> Vec<String> {
-        lower_dirs.into_iter().rev().collect()
     }
 }

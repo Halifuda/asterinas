@@ -16,11 +16,11 @@
 use super::{layers::resolve_root_path, options::UuidMode};
 use crate::{
     fs::{
-        utils::DirentCounter,
+        file::{InodeMode, InodeType},
         vfs::{
             inode::Inode,
             inode_ext::InodeExt,
-            path::Path,
+            path::{Path, is_dot_or_dotdot},
             registry::FsCreationCtx,
             xattr::{XattrName, XattrSetFlags},
         },
@@ -36,6 +36,28 @@ pub(super) const OVERLAY_UUID_SIZE: usize = 8;
 
 /// The private xattr name carrying the effective overlay UUID.
 const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
+
+/// The overlay-internal staging workspace name under the workdir root.
+///
+/// Linux names this directory `work` (`OVL_WORKDIR_NAME` in
+/// `fs/overlayfs/super.c`); mount preparation ensures it exists as an empty
+/// directory (creating it when absent, recreating it after residue removal)
+/// and pins it as the staging workspace. Named constant, no magic string.
+const WORKDIR_NAME: &str = "work";
+
+/// The mode of the `<workdir>/work` staging workspace.
+///
+/// Linux `ovl_workdir_create` creates `work/` with mode 0 (`S_IFDIR|0`,
+/// clearing inherited bits) and relies on `generic_permission`'s directory
+/// special-case (CAP_DAC_OVERRIDE overrides all DACs for `S_ISDIR`,
+/// including the no-exec-bit case), whereas this kernel's
+/// `check_permission` applies the "exec override requires at least one exec
+/// bit" rule to directories too, so root cannot traverse or unlink inside a
+/// mode-0 directory. The workspace therefore uses a usable owner-rwx mode
+/// (0o700) instead of replicating 0o000; the test harness's `rm -rf` sweep
+/// between runs must also be able to remove leftover staging temps under the
+/// workspace.
+const WORKDIR_MODE: InodeMode = InodeMode::from_bits_truncate(0o700);
 
 /// The unified 64-bit identity of one writable overlay mount.
 ///
@@ -167,6 +189,13 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     upper: InodeClaimGuard,
     /// Unified identity; persisted iff effective.
     identity: OverlayUuid,
+    /// The pinned staging workspace inode (`<workdir>/work`); `Some` only
+    /// after [`prepare_workdir`](Self::prepare_workdir) completed on the
+    /// writable branch (Linux `ofs->workdir` dentry-ref parity: staging never
+    /// re-resolves the name, and an upper-side unlink of the name does not
+    /// invalidate the pinned inode). Written exactly once during mount
+    /// construction, before publication; no lock domain.
+    workdir_workspace: Option<Arc<dyn Inode>>,
 }
 
 impl UpperWorkdirClaim {
@@ -287,28 +316,92 @@ impl UpperWorkdirClaim {
             workdir,
             upper,
             identity,
+            workdir_workspace: None,
         })
     }
 
-    /// Prepares the workdir for use: it must be empty.
+    /// Ensures the `<workdir>/work` staging workspace exists, empty, and
+    /// pinned.
     ///
-    /// Returns `ENOTEMPTY` when the workdir contains entries (Linux
-    /// `ovl_check_empty_dir`); skipped entirely for read-only mounts (the
-    /// caller only invokes it for genuinely writable overlays).
-    pub(super) fn prepare_workdir(&self) -> Result<()> {
-        if !self.is_workdir_empty()? {
-            return_errno_with_message!(Errno::ENOTEMPTY, "the workdir is not empty");
+    /// The workdir root may contain arbitrary other entries; only the `work`
+    /// workspace name (Linux `OVL_WORKDIR_NAME`,
+    /// `ovl_make_workdir`/`ovl_workdir_cleanup`) is managed: a non-directory
+    /// residue is unlinked, a directory residue is removed depth-first and
+    /// rmdir'd, then a fresh empty workspace is created with [`WORKDIR_MODE`]
+    /// and pinned on the claim.
+    ///
+    /// TODO(workdir-cleanup-vfs-parity): the visible `work` name is removed
+    /// and recreated through the mount-time `Path` API (`workdir_path`), so
+    /// the base view's `DentryChildren` is updated: the previous raw-inode
+    /// cleanup bypassed the VFS dentry layer and left stale cached entries
+    /// (`work/foo`) visible after mount, whereas Linux `ovl_workdir_cleanup`
+    /// operates through the upper-fs VFS dentry layer and keeps the cached
+    /// directory view coherent. Zero VFS interface change.
+    ///
+    /// `workdir_path` is the resolved base-mount workdir root from the
+    /// construction sequence (the same object validated and claimed by the
+    /// caller). `ENOENT` on the workspace name is a no-op creation step;
+    /// every other underlying error propagates unchanged and fails the mount
+    /// (fail closed). `ENOTEMPTY` is never returned for residue at the
+    /// workdir root; it can surface only as the underlying error of a
+    /// genuine residue-subtree cleanup failure. Skipped entirely for
+    /// read-only mounts (the caller only invokes it for genuinely writable
+    /// overlays). The workspace field is written exactly once here, before
+    /// publication; no lock domain.
+    pub(super) fn prepare_workdir(&mut self, workdir_path: &Path) -> Result<()> {
+        match self.workdir.inode.lookup(WORKDIR_NAME) {
+            Ok(residue) if residue.type_().is_directory() => {
+                self.remove_work_entries(&residue, 0)?;
+                // TODO(workdir-cleanup-vfs-parity): the `work` name must be
+                // removed through the VFS dentry layer (`Path::rmdir`) so the
+                // base view's `DentryChildren` is updated; Linux
+                // `ovl_workdir_cleanup` keeps the upper-fs cached view
+                // coherent through the dentry layer (see the method doc).
+                workdir_path.rmdir(WORKDIR_NAME)?;
+            }
+            Ok(_) => {
+                // TODO(workdir-cleanup-vfs-parity): same as the rmdir arm —
+                // `Path::unlink` keeps the base view's `DentryChildren`
+                // coherent with the on-disk removal (see the method doc).
+                workdir_path.unlink(WORKDIR_NAME)?;
+            }
+            Err(err) if err.error() == Errno::ENOENT => {}
+            Err(err) => return Err(err),
         }
+        // TODO(workdir-mode): the workspace mode diverges from Linux by
+        // design — Linux `ovl_workdir_create` uses mode 0 and relies on
+        // `generic_permission`'s CAP_DAC_OVERRIDE directory special-case,
+        // while this kernel's `check_permission` requires an exec bit to
+        // traverse directories even for root; 0o700 keeps the workspace
+        // usable and removable by the harness cleanup (see [`WORKDIR_MODE`]).
+        let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
+        self.workdir_workspace = Some(workspace.inode().clone());
         Ok(())
     }
 
-    /// Scans the workdir and reports whether it is empty.
+    /// Removes the entries of one residue directory depth-first.
     ///
-    /// The scan uses a [`DirentCounter`], which excludes `.` and `..`.
-    fn is_workdir_empty(&self) -> Result<bool> {
-        let mut counter = DirentCounter::new();
-        self.workdir.inode.readdir_at(0, &mut counter)?;
-        Ok(counter.count() == 0)
+    /// `level` is the recursion depth from the residue root (`0`); directories
+    /// at `level >= 2` are rmdir'd without descending, so a deeper non-empty
+    /// directory surfaces the underlying `ENOTEMPTY` instead of unbounded
+    /// recursion (Linux `ovl_workdir_cleanup`/`ovl_workdir_cleanup_recurse`
+    /// three-level contract).
+    fn remove_work_entries(&self, dir: &Arc<dyn Inode>, level: usize) -> Result<()> {
+        let mut names = Vec::new();
+        dir.readdir_at(0, &mut names)?;
+        names.retain(|name| !is_dot_or_dotdot(name));
+        for name in names {
+            let child = dir.lookup(&name)?;
+            if child.type_().is_directory() {
+                if level < 2 {
+                    self.remove_work_entries(&child, level + 1)?;
+                }
+                dir.rmdir(&name)?;
+            } else {
+                dir.unlink(&name)?;
+            }
+        }
+        Ok(())
     }
 
     /// Persists the unified identity as `trusted.overlay.uuid`.
@@ -321,9 +414,33 @@ impl UpperWorkdirClaim {
         self.identity.persist_on_upper(&self.upper.inode)
     }
 
-    /// Returns the pinned workdir root inode.
+    /// Returns the pinned workdir root inode (the claimed root).
+    ///
+    /// The root is the `InodeClaimGuard` target and stays the claim-protocol
+    /// surface; staging consumers resolve through the workspace accessor
+    /// ([`Self::workdir_workspace`]) instead.
+    #[expect(
+        dead_code,
+        reason = "the workdir-root claim surface is preserved by the claim protocol; \
+                  staging consumers resolve through the workspace accessor"
+    )]
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_inode(&self) -> &Arc<dyn Inode> {
         &self.workdir.inode
+    }
+
+    /// Returns the pinned staging workspace inode.
+    ///
+    /// `Ok` only after [`prepare_workdir`](Self::prepare_workdir) ran;
+    /// `Err(EROFS)` when the workspace was never prepared (upper-backed
+    /// effective read-only mount) — the claim exists but staging must still
+    /// fail closed.
+    pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
+        self.workdir_workspace.as_ref().ok_or_else(|| {
+            Error::with_message(
+                Errno::EROFS,
+                "the overlay workdir workspace is not prepared",
+            )
+        })
     }
 }
 

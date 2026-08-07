@@ -87,7 +87,7 @@ const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
 /// target-name component; the cached whiteout is a generic workdir resource —
 /// not a `(parent, name)` owner — so a fixed content-named component is used.
 /// Uniqueness comes from the composite (`#{name}#{parent_ino}#{serial}`):
-/// the workdir-root real ino plus the per-mount saturating
+/// the workdir staging-workspace real ino plus the per-mount saturating
 /// `workdir_temp_serial` make the name unique per mount (the claim protocol
 /// guarantees no cross-mount collision).
 const WHITEOUT_TEMP_NAME_COMPONENT: &str = "whiteout";
@@ -269,8 +269,8 @@ impl OverlayFs {
     /// creation (never a visible source).
     fn create_whiteout_temp(&self) -> Result<WhiteoutHandle> {
         let representation = self.whiteout_representation()?;
-        // The workdir root resolves through the single shared resolver
-        // (`OverlayFs::workdir_root`).
+        // The workdir staging workspace resolves through the single shared
+        // resolver (`OverlayFs::workdir_root`).
         let workdir = self.workdir_root()?;
         match representation {
             WhiteoutRepresentation::CharDevice => {
@@ -387,11 +387,11 @@ impl OverlayFs {
             None => self.create_whiteout_temp()?,
         };
 
-        // Step 3 — publish at `(upper_parent, name)`. The workdir root is the
-        // physical rename source; a missing writable claim is the EROFS gate
-        // (the admission already passed for a live mutation, so this is the
-        // defensive arm) — resolved through the single shared resolver
-        // (`OverlayFs::workdir_root`).
+        // Step 3 — publish at `(upper_parent, name)`. The workdir staging
+        // workspace is the physical rename source; a missing writable claim
+        // is the EROFS gate (the admission already passed for a live
+        // mutation, so this is the defensive arm) — resolved through the
+        // single shared resolver (`OverlayFs::workdir_root`).
         let workdir = self.workdir_root()?;
         match replace_target {
             // Target absent: the link path keeps the workdir original for

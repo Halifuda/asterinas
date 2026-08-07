@@ -9,24 +9,26 @@
 //! [`OverlayFs::create_workdir_temp`] entry retries only `EEXIST`, regenerates
 //! the name for every attempt, and leaves publication or cleanup to its caller.
 //!
-//! The workdir is a private staging area on the upper filesystem, never a
-//! layer: temporaries never enter lookup/readdir, unique naming keeps them out
-//! of the overlay namespace, and a failure leaves a cleanup obligation, never
-//! a visible entry. A temp handle belongs only to the winner's copy-up
-//! transaction: it is never returned to the VFS, never stored on the inode,
-//! and never a page-cache forwarding target. The claim protocol guarantees no
-//! cross-mount collision (a workdir cannot be claimed by two live mounts), so
-//! the composite name needs only per-mount uniqueness.
+//! The workdir staging workspace (`<workdir>/work`) is a private staging area
+//! on the upper filesystem, never a layer: temporaries never enter
+//! lookup/readdir, unique naming keeps them out of the overlay namespace, and
+//! a failure leaves a cleanup obligation, never a visible entry. A temp
+//! handle belongs only to the winner's copy-up transaction: it is never
+//! returned to the VFS, never stored on the inode, and never a page-cache
+//! forwarding target. The claim protocol guarantees no cross-mount collision
+//! (a workdir cannot be claimed by two live mounts), so the composite name
+//! needs only per-mount uniqueness.
 //!
 //! Lock contract: workdir temp naming is uniqueness-based, not lock-based —
 //! no Overlay lock is acquired or held by any method here, and the underlying
 //! upper-filesystem calls run against that filesystem's own locking (proven
 //! non-re-entrant into Overlay). The EROFS gate precedes every workdir/upper
 //! side effect: the private [`OverlayFs::workdir_root`] resolver returns
-//! `Err(Errno::EROFS)` when no writable claim exists.
+//! `Err(Errno::EROFS)` when no writable claim exists or the staging workspace
+//! was never prepared.
 //!
-//! [`OverlayFs::workdir_root`] remains the single workdir-root claim resolver
-//! of the overlayfs tree.
+//! [`OverlayFs::workdir_root`] remains the single workdir staging-workspace
+//! resolver of the overlayfs tree.
 
 use alloc::format;
 
@@ -164,21 +166,25 @@ impl OverlayFs {
         self.workdir_root()?.unlink(temp_name)
     }
 
-    /// Resolves the pinned workdir root inode of this writable mount.
+    /// Resolves the pinned workdir staging workspace inode of this writable
+    /// mount.
     ///
-    /// The single workdir-root claim resolver of the overlayfs tree: every
-    /// workdir-root consumer — the three helpers in this file,
+    /// The single workdir staging-workspace resolver of the overlayfs tree:
+    /// every workdir staging consumer — the three helpers in this file,
     /// `OverlayInode::workdir_root` (`copyup/promote.rs`), the `dir/`
     /// recipes, and the two `dir/whiteout.rs` sites — funnels through this
     /// one entry, so the claim-resolution shape and the EROFS error text exist
-    /// exactly once. The workdir root is reachable via `claims()`. A
-    /// missing claim means the mount is effectively read-only (or the claims
-    /// were released), so the EROFS gate fires here — before any
+    /// exactly once. The workspace inode is pinned on the claim by
+    /// `UpperWorkdirClaim::prepare_workdir` during mount construction (Linux
+    /// `ofs->workdir` dentry-ref parity: staging never re-resolves the `work`
+    /// name); the claim is reachable via `claims()`. A missing claim or an
+    /// unprepared workspace means the mount is effectively read-only (or the
+    /// claims were released), so the EROFS gate fires here — before any
     /// workdir/upper side effect.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
         let claim = self.claims().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")
         })?;
-        Ok(claim.workdir_inode().clone())
+        Ok(claim.workdir_workspace()?.clone())
     }
 }

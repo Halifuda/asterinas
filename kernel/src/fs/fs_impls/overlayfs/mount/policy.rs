@@ -53,14 +53,15 @@ use crate::{
 const PRIVATE_XATTR_PROBE_NAME: &str = "trusted.overlay.uuid";
 
 /// Prefix of the uniquely-named temporary char-device probe entry created in
-/// the workdir for the `can_mknod_char` probe.
+/// the workdir staging workspace for the `can_mknod_char` probe.
 const CHAR_DEVICE_PROBE_PREFIX: &str = ".overlay-char-device-probe-";
 
 /// Prefix of the uniquely-named temporary file probe entry created in the
-/// workdir for the d_type probe.
+/// workdir staging workspace for the d_type probe.
 const D_TYPE_PROBE_PREFIX: &str = ".overlay-dtype-probe-";
 
-/// Generates a uniquely-named workdir temp entry for a capability probe.
+/// Generates a uniquely-named workdir staging-workspace temp entry for a
+/// capability probe.
 ///
 /// Shared by the d_type and char-device probes: one `getrandom` + `format!`
 /// sequence instead of two copies (the exact logic is required at two sites
@@ -261,25 +262,25 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperFilesystemCapabilities {
 }
 
 impl UpperFilesystemCapabilities {
-    /// Probes the upper/workdir capabilities post-claim.
+    /// Probes the upper/workspace capabilities post-claim.
     ///
     /// Writable mounts only, sleep-capable construction context. The xattr
     /// probe (`get_xattr` on the private overlay namespace) is read-only on
     /// the upper; the d_type probe creates a uniquely-named temporary file in
-    /// the workdir, scans the workdir until exhausted, and removes the temp (a
-    /// workdir entry guarantees a non-vacuous probe); the `can_mknod_char`
-    /// probe creates a uniquely-named temporary char device (`Inode::mknod`,
-    /// `MknodType::CharDevice(0)`) in the workdir and removes it on success
-    /// and failure — no workdir residue. Each probe is a small per-capability
-    /// helper and the temp entry names share one [`unique_temp_name`]
-    /// generator.
+    /// the workdir staging workspace, scans the workspace until exhausted,
+    /// and removes the temp (a workspace entry guarantees a non-vacuous
+    /// probe); the `can_mknod_char` probe creates a uniquely-named temporary
+    /// char device (`Inode::mknod`, `MknodType::CharDevice(0)`) in the
+    /// workdir staging workspace and removes it on success and failure — no
+    /// workspace residue. Each probe is a small per-capability helper and the
+    /// temp entry names share one [`unique_temp_name`] generator.
     pub(super) fn probe(
         upper_inode: &Arc<dyn Inode>,
-        workdir_inode: &Arc<dyn Inode>,
+        workspace_inode: &Arc<dyn Inode>,
     ) -> Result<Self> {
         let can_store_private_xattr = Self::probe_private_xattr(upper_inode)?;
-        let can_report_directory_type = Self::probe_d_type(workdir_inode)?;
-        let can_mknod_char = Self::probe_mknod_char(workdir_inode)?;
+        let can_report_directory_type = Self::probe_d_type(workspace_inode)?;
+        let can_mknod_char = Self::probe_mknod_char(workspace_inode)?;
         Ok(Self {
             can_store_private_xattr,
             can_report_directory_type,
@@ -319,20 +320,21 @@ impl UpperFilesystemCapabilities {
     ///
     /// Probe a directory guaranteed to contain at least one non-dot entry
     /// instead of the usually-empty upper root. A uniquely-named temp file is
-    /// created in the workdir (the same underlying filesystem as the upper,
-    /// enforced by the `container_dev_id` check in `validate_pair`), the
-    /// workdir is scanned until exhausted, and the temp is removed — an empty
-    /// upper root can no longer make the gate pass vacuously, and
+    /// created in the workdir staging workspace (the same underlying
+    /// filesystem as the upper, enforced by the `container_dev_id` check in
+    /// `validate_pair`), the workspace is scanned until exhausted, and the
+    /// temp is removed — an empty upper root can no longer make the gate pass
+    /// vacuously, and
     /// `InodeType::Unknown` on any non-dot entry is the concrete evidence of a
     /// backend without `d_type` (fail-closed). Residue cleanup is best-effort
     /// on the failure path.
-    fn probe_d_type(workdir_inode: &Arc<dyn Inode>) -> Result<bool> {
+    fn probe_d_type(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
         let d_type_probe_name = unique_temp_name(D_TYPE_PROBE_PREFIX);
-        workdir_inode.create(&d_type_probe_name, InodeType::File, InodeMode::empty())?;
+        workspace_inode.create(&d_type_probe_name, InodeType::File, InodeMode::empty())?;
         let mut d_type_probe = DTypeProbeVisitor::new();
         let mut offset = 0;
         let d_type_scan_result = loop {
-            match workdir_inode.readdir_at(offset, &mut d_type_probe) {
+            match workspace_inode.readdir_at(offset, &mut d_type_probe) {
                 Ok(0) => break Ok(()),
                 Ok(visited) => offset += visited,
                 Err(err) => break Err(err),
@@ -340,28 +342,29 @@ impl UpperFilesystemCapabilities {
         };
         match d_type_scan_result {
             Ok(()) => {
-                workdir_inode.unlink(&d_type_probe_name)?;
+                workspace_inode.unlink(&d_type_probe_name)?;
                 Ok(!d_type_probe.saw_unknown_non_dot)
             }
             Err(err) => {
-                let _ = workdir_inode.unlink(&d_type_probe_name);
+                let _ = workspace_inode.unlink(&d_type_probe_name);
                 Err(err)
             }
         }
     }
 
-    /// Probes whether the workdir supports the classic whiteout char device
-    /// `0:0`.
+    /// Probes whether the workdir staging workspace supports the classic
+    /// whiteout char device `0:0`.
     ///
-    /// The workdir hosts a uniquely-named temporary char device `0:0`;
+    /// The workdir staging workspace hosts a uniquely-named temporary char
+    /// device `0:0`;
     /// `EOPNOTSUPP` means no classic-whiteout form. The temp is removed inline
     /// on success; only an `unlink` failure after a successful `mknod` can
     /// leave residue, which fails the mount closed.
-    fn probe_mknod_char(workdir_inode: &Arc<dyn Inode>) -> Result<bool> {
+    fn probe_mknod_char(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
         let probe_name = unique_temp_name(CHAR_DEVICE_PROBE_PREFIX);
-        match workdir_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
+        match workspace_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
             Ok(_) => {
-                workdir_inode.unlink(&probe_name)?;
+                workspace_inode.unlink(&probe_name)?;
                 Ok(true)
             }
             Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(false),

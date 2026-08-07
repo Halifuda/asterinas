@@ -546,17 +546,18 @@ impl OverlayInode {
         ))
     }
 
-    /// Returns the pinned workdir root inode of this mount.
+    /// Returns the pinned workdir staging workspace inode of this mount.
     ///
     /// Thin delegation to the single `OverlayFs`-level resolver
     /// ([`OverlayFs::workdir_root`], `copyup/workdir.rs`) — the claim
     /// resolution (and the EROFS error text) lives in exactly one helper: the
     /// `OverlayInode` entry exists so the copy-up recipe arms and the `dir/`
-    /// recipes (`create.rs`/`link.rs`/`remove.rs`) resolve the workdir root
-    /// without re-upgrading the mount themselves. The workdir root is the
-    /// rename source of the `File`/`SymLink`/`Special`/`Dir` publication
-    /// steps, the `mknod` target of the special-object arm, and the staging
-    /// root of the three `dir/` recipes (seven call sites across the tree).
+    /// recipes (`create.rs`/`link.rs`/`remove.rs`) resolve the workdir
+    /// staging workspace without re-upgrading the mount themselves. The
+    /// workdir staging workspace is the rename source of the
+    /// `File`/`SymLink`/`Special`/`Dir` publication steps, the `mknod` target
+    /// of the special-object arm, and the staging root of the three `dir/`
+    /// recipes (seven call sites across the tree).
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
         self.fs_arc()?.workdir_root()
     }

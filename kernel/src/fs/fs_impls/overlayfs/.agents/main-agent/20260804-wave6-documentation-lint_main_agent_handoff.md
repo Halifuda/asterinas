@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-05 Wave6 Documentation Review (expanded)
 
 **Date / Time:** 2026-08-05
-**Status:** `Active. Wave6 expanded (user-confirmed 2026-08-05) from the nine
+**Status:** `Closed / Handed Over (2026-08-05). Wave6 expanded (user-confirmed 2026-08-05) from the nine
 documentation-only Clippy diagnostics into a comprehensive comment-documentation
 review of every active overlayfs source file: all micro-feature IDs and
 internal workspace vocabulary are removed from comments, stale/redundant prose
@@ -22,7 +22,7 @@ intent; the static chain was revalidated (Clippy / fmt / make check all exit
 
 ## 1. Global State Pointer
 
-- **Current Active Wave / Pass:** Wave6 comprehensive documentation review
+- **Final Wave / Pass (closed):** Wave6 comprehensive documentation review
   (`wave6_documentation_review_20260805`). Wave5 continuation 11 passed the
   target-specific `cargo check` and `make kernel`; workspace Clippy stopped
   only on the nine documentation diagnostics (seven in `mount/build.rs:44-50`,
@@ -132,22 +132,25 @@ intent; the static chain was revalidated (Clippy / fmt / make check all exit
 6. Runtime validation, meso-integration xfstests, and final Reviewer
    acceptance remain separate later gates; passing static checks does not
    claim them.
+7. **Closure (2026-08-05):** Wave6 ends here. Its only authorized scope was
+   comment documentation and the static gate, both accepted. The successor
+   live handoff is `20260805-wave7-xfstests-sequencing_main_agent_handoff.md`;
+   it records a planned, current-scope-only xfstests order and explicitly does
+   not dispatch or start Wave7.
 
 ## 5. Next Actions for the Next Thread (CRITICAL)
 
-1. Wave6 static closure is accepted (Clippy / rustfmt / make check all exit
-   0), including the second review pass (runs 06-08); record the closure in
-   the blueprint/ledger and commit the wave.
-2. Keep P1/P2, origin UUID/export-FH parity, P2-07/P3-01, runtime xfstests,
-   final Reviewer acceptance, and Wave7 `legacy_fs.rs` deletion out of this
-   wave; those remain later gates.
+1. Do not reopen Wave6. Its static closure is accepted (Clippy / rustfmt /
+   `make check` all exit 0), including the second review pass (runs 06-08).
+2. Continue only through the successor Wave7 handoff. P1/P2 deferrals,
+   origin UUID/export-FH parity, P2-07/P3-01, runtime xfstests, final
+   Reviewer acceptance, and `legacy_fs.rs` deletion remain later gates.
 
 ## 6. Live File Discipline
 
-- **This file is the live handoff for:** Wave6 documentation review tenure.
-- **Update rule:** Update this file in place for every Wave6 dispatch,
-  acceptance, Checker run, or escalation until ownership is intentionally
-  rolled forward.
+- **This file was the live handoff for:** Wave6 documentation review tenure.
+- **Closure rule:** Closed and handed over on 2026-08-05. Do not add Wave7
+  scheduling, dispatch, validation, or implementation events here.
 - **Supersedes / Replaces:**
   `20260803-creator-pass-slicing_main_agent_handoff.md`, marked ENDED /
   SUPERSEDED on 2026-08-04.

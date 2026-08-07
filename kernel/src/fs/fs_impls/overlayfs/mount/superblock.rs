@@ -58,7 +58,9 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
     /// Established single-threaded before publication and released by the
-    /// final `Drop` (guard `Drop`, no mutex).
+    /// final `Drop` (guard `Drop`, no mutex). The claim additionally pins the
+    /// prepared workdir staging workspace inode (`<workdir>/work`) once
+    /// `prepare_workdir` completes — a plain `Arc` pin with no lock domain.
     pub(super) claims: Option<UpperWorkdirClaim>,
     pub(super) policy: MountPolicy,
     /// The reported mount source.
