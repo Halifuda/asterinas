@@ -37,6 +37,7 @@
 //! No `.unwrap()`/`.expect()` appears in any production path; hard invariant
 //! failures use the `Error::with_message`/`unreachable!` precedents.
 
+use super::whiteout;
 use crate::{
     fs::{
         file::{InodeType, Permission},
@@ -213,6 +214,20 @@ impl OverlayInode {
         let upper_parent = self.upper_parent()?;
 
         if is_pure_upper {
+            // Branch A (Objective 2): a pure-upper rmdir may still face
+            // physical whiteout residue inside the upper dir (the
+            // visible-emptiness gate does not count whiteouts) — sweep it
+            // before the physical rmdir. The `EIO` arm is defensive:
+            // `is_pure_upper` already implies an upper object.
+            if kind == RemoveKind::Rmdir {
+                let target_upper_dir = target_facts.upper().ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EIO,
+                        "the pure-upper rmdir target has no upper real directory",
+                    )
+                })?;
+                whiteout::cleanup_upper_whiteouts(target_upper_dir.real_inode())?;
+            }
             // Step 3 — pure-upper direct removal, no whiteout: the name is
             // genuinely gone from the upper namespace. A physical-upper
             // `ENOENT` means the asserted upper object became stale behind
@@ -227,6 +242,16 @@ impl OverlayInode {
             result.map_err(translate_stale_upper_enoent)?;
             fs.bindings().invalidate(&self.key(), name);
             self.readdir_index_remove(name);
+            // C1 (Objective 1): the removal may have restored purity —
+            // refresh the marker best-effort (the mutation already committed;
+            // a refresh failure never fails the removal).
+            if let Err(err) = self.refresh_impure_marker() {
+                warn!(
+                    "overlay remove: the impure-marker refresh failed after the \
+                     pure-upper removal (best-effort): {:?}",
+                    err
+                );
+            }
             return Ok(());
         }
 
@@ -371,18 +396,17 @@ impl OverlayInode {
                     marker.commit();
                     // Clean the displaced old upper dir in the workdir: every
                     // remaining entry is a whiteout (the emptiness gate
-                    // refused visible children), so unlink each and rmdir the
-                    // dir. Best-effort: a cleanup failure is a known workdir-
-                    // cleanup debt and never becomes a visible namespace entry
-                    // — the whiteout publish below proceeds with the opaque
-                    // temp at `name`.
-                    let mut displaced_names = Vec::new();
-                    if old_upper_dir.readdir_at(0, &mut displaced_names).is_ok() {
-                        for entry in displaced_names {
-                            if !is_dot_or_dotdot(&entry) {
-                                let _ = old_upper_dir.unlink(&entry);
-                            }
-                        }
+                    // refused visible children), so sweep them through the
+                    // shared seam and rmdir the dir. Best-effort: a cleanup
+                    // failure is a known workdir-cleanup debt and never
+                    // becomes a visible namespace entry — the whiteout
+                    // publish below proceeds with the opaque temp at `name`.
+                    if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&old_upper_dir) {
+                        warn!(
+                            "overlay clear-empty: the displaced-directory whiteout cleanup \
+                             failed (residue, never a visible source): {:?}",
+                            cleanup_err
+                        );
                     }
                     if let Err(cleanup_err) = workdir.rmdir(temp.name()) {
                         warn!(
@@ -427,7 +451,18 @@ impl OverlayInode {
                 self.readdir_index_remove(name);
                 Ok(())
             },
-        )
+        )?;
+        // C1 (Objective 1): the removal may have restored purity — refresh
+        // the marker best-effort (the mutation already committed; a refresh
+        // failure never fails the removal).
+        if let Err(err) = self.refresh_impure_marker() {
+            warn!(
+                "overlay remove: the impure-marker refresh failed after the \
+                 whiteout publish (best-effort): {:?}",
+                err
+            );
+        }
+        Ok(())
     }
 }
 

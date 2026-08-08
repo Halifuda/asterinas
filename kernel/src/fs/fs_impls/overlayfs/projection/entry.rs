@@ -35,6 +35,41 @@ const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
 /// The xattr name of the opaque-directory marker (Linux `OVL_XATTR_OPAQUE`).
 const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 
+/// Returns whether `real_inode` is a whiteout.
+///
+/// The single whiteout predicate of the overlayfs tree (Linux
+/// `ovl_is_whiteout`): a whiteout is either a classic character device `0:0`
+/// or an object carrying the `trusted.overlay.whiteout` marker. The marker
+/// read is presence-based: an absent (`ENODATA`) or unsupported
+/// (`EOPNOTSUPP`) marker reads as "not a whiteout", while a value longer than
+/// the 1-byte probe (`ERANGE`) still proves presence. Genuine xattr errors
+/// propagate.
+pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
+    real_inode: &Arc<dyn Inode>,
+) -> Result<bool> {
+    let metadata = real_inode.metadata();
+    // A classic whiteout is a character device with device number 0:0.
+    // Backends report that device number either as
+    // `Some(DeviceId::null())` or — when the device number is zero
+    // (e.g. ramfs) — as `None`.
+    if metadata.type_ == InodeType::CharDevice
+        && metadata.self_dev_id.is_none_or(|dev_id| dev_id.is_null())
+    {
+        return Ok(true);
+    }
+    let name = XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME).ok_or_else(|| {
+        Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
+    })?;
+    let mut value = [0u8; 1];
+    let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+    match real_inode.get_xattr(name, &mut writer) {
+        Ok(_) => Ok(true),
+        Err(err) if err.error() == Errno::ERANGE => Ok(true),
+        Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 /// One pinned real (underlying) object of an overlay layer.
 ///
 /// `layer_index` is the object's position in the overlay layer stack (`0` =
@@ -104,36 +139,10 @@ impl RealObject {
 
     /// Returns whether this real object is a whiteout.
     ///
-    /// A whiteout is either a classic character device `0:0` (Linux
-    /// `ovl_is_whiteout`) or an object carrying the
-    /// `trusted.overlay.whiteout` marker. The marker read is presence-based:
-    /// an absent (`ENODATA`) or unsupported (`EOPNOTSUPP`) marker reads as
-    /// "not a whiteout", while a value longer than the 1-byte probe (`ERANGE`)
-    /// still proves presence. Genuine xattr errors propagate.
+    /// Delegates to the shared [`is_whiteout_inode`] predicate — the single
+    /// source of truth for the whiteout test.
     fn is_whiteout(&self) -> Result<bool> {
-        let metadata = self.real_inode.metadata();
-        // A classic whiteout is a character device with device number 0:0.
-        // Backends report that device number either as
-        // `Some(DeviceId::null())` or — when the device number is zero
-        // (e.g. ramfs) — as `None`.
-        if metadata.type_ == InodeType::CharDevice
-            && metadata.self_dev_id.is_none_or(|dev_id| dev_id.is_null())
-        {
-            return Ok(true);
-        }
-        let name = XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
-        })?;
-        let mut value = [0u8; 1];
-        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-        match self.real_inode.get_xattr(name, &mut writer) {
-            Ok(_) => Ok(true),
-            Err(err) if err.error() == Errno::ERANGE => Ok(true),
-            Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => {
-                Ok(false)
-            }
-            Err(err) => Err(err),
-        }
+        is_whiteout_inode(&self.real_inode)
     }
 
     /// Returns whether this real object is an opaque directory.

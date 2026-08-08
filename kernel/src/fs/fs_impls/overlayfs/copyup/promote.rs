@@ -107,6 +107,11 @@ impl OverlayInode {
         //    by design (sleep-capable mutex).
         let upper_dir = publication_parent.select_real_inode();
         let fs = self.fs_arc()?;
+        // T1 (Objective 1): every promoted object makes its publication
+        // parent impure — persist the marker before the object-kind dispatch
+        // and the physical upper commit (strict, pre-commit; read-first
+        // idempotence makes an already-marked parent a no-op).
+        fs.xattr_policy().set_impure_marker(&upper_dir)?;
         let lower = self.lower_source()?;
         let result = match lower.real_inode().type_() {
             InodeType::Dir => {

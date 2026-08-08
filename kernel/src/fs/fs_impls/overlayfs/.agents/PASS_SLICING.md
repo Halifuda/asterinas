@@ -646,3 +646,125 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     files exits 0. No QEMU/xfstests run (user owns the re-run decision).
   - **Boundary**: 014 opaque-marker/clear-empty triage and `overlay/013`
     `ETXTBSY` remain out of scope per the handoff.
+
+- **`pass_39_wave7_comprehensive_cases_20260808`**
+  - **Kind**: Meso-integration external-validation batch (Checker pass,
+    main-agent executed in-thread per user direction; no subagents).
+  - **Parent**: `overlayfs_refactor_meso_integration` (temporary integration
+    parent).
+  - **Covered Micro-Features (many-to-many)**: `P0-14`/whiteout visibility
+    and `P1-2x` remove semantics (`overlay/031`), copy-up/impure dir
+    (`overlay/038`), `P2-01` xino (`038` observed / `041` option gate),
+    `d_real` stacked resolution (`029`), readdir cache invalidation (`077`),
+    credential/namespace behavior (`020`, NOTRUN at userns gate).
+  - **Execution shape**: one case per run via temporary
+    `wave7-single.list`; images rebuilt fresh before each case; per-case
+    `qemu.log`/`qemu-serial.log` archived under
+    `components/wave7-xfstests-sequencing/run_evidence/<case>/comprehensive_20260808/`;
+    upstream sources `020/031/038/041` archived under
+    `run_evidence/upstream_sources/20260808/`; receipt
+    `components/wave7-xfstests-sequencing/pass_39_wave7_comprehensive_cases_checker.md`.
+  - **Result**: `029`/`077` PASS; `031` FAIL (invalid whiteout exposure after
+    lowerdir change + merged-dir remove `ENOTEMPTY`); `038` FAIL (missing
+    `trusted.overlay.impure` marker); `020` NOTRUN (unshare -m -p -U
+    unsupported); `041` NOTRUN (`xino=on` mount option unsupported).
+    Cross-run finding: 031 residue leaves a stale unmerged dirent record on
+    base ext2 (whiteout char-device unlink path), breaking the next case's
+    `_scratch_mkfs` cleanup with `rmdir ENOTEMPTY` on an on-disk-empty dir;
+    every later case therefore ran on rebuilt images.
+  - **Boundary**: `078` and stress cases `001`/`021`/`019` explicitly
+    excluded by the user; `013` ETXTBSY still unscheduled; no ktest surface;
+    no production code changed; temp runlist and generated images deleted
+    after evidence capture.
+
+- **`wave7_impure_cleanup_design_20260808`**
+  - **Kind**: Main-agent design-research dispatch decision (Designer task,
+    user-directed; dispatched via the WSL codex CLI launcher
+    `aster-code-review/scripts/run_agent.sh` with the `codex` profile —
+    private `CODEX_HOME` + inherited auth + `codex exec`, NOT the desktop
+    subagent mechanism per user direction).
+  - **Parent**: `N/A` — bounded cross-meso design research preserving every
+    existing Meso owner; no Architect repair expected.
+  - **Objectives**:
+    1. **Impure marker persistence** (`overlay/038` FAIL) — enumerate every
+       modification point to write/clear `trusted.overlay.impure` on upper
+       dirs (copy-up-into-dir, whiteout publish, clear-empty, purity
+       restoration), assign the marker owner, freeze constants/helpers/
+       signatures, and record the private-filter interaction.
+    2. **Whiteout cleanup before rmdir** (`overlay/031` FAIL) — branch census
+       of every "visible-empty but physical-upper-non-empty" site
+       (pure-upper rmdir arm confirmed by probe; lower-backed clear-empty;
+       rename/whiteout adjacencies), freeze the repair shape (pre-rmdir
+       whiteout sweep vs clear-empty routing), and explicitly disposition
+       the never-exercised existing clear-empty implementation.
+  - **Bug B boundary**: the base-fs↔overlayfs view-coherence fix is
+    explicitly OUT OF SCOPE; the packet requires only dependency-edge notes.
+  - **Packet**: `subagent-tasks/wave7_impure_cleanup_design/task_designer_wave7_impure_cleanup_20260808_dispatch.md`.
+  - **Expected artifacts** (write-set, exactly two):
+    `components/wave7_impure_cleanup_design/wave7_impure_cleanup_designer_spec.md`
+    and `_designer_validation.md`.
+  - **Boundary**: no production `.rs` edits, no commands, no ktest surface,
+    no pass slicing, no VFS/base-view design, no task-board edits by the
+    Designer.
+  - **Acceptance (2026-08-08): ACCEPTED structurally.** Designer (via WSL
+    codex CLI, inherited `~/.codex`, deepseek-v4-flash/custom) completed the
+    research; artifacts written after the platform exec outage cleared:
+    `components/wave7_impure_cleanup_design/wave7_impure_cleanup_designer_spec.md`
+    (718 lines) and `_designer_validation.md` (136 lines). Both carry the
+    template sections per objective; micro IDs reconciled to the inventory
+    (`P2-03`, `P1-33`, `P1-01..P1-07`, `P1-25..P1-28`, `P1-31`, `P1-36`);
+    Bug B appears only as out-of-scope dependency notes. Frozen surface:
+    impure set triggers T1-T4 / clear C1-C2 +
+    `OverlayXattrPolicy::{has,set,clear}_impure_marker` +
+    `OverlayInode::refresh_impure_marker` + `IMPURE_*` constants; cleanup =
+  `cleanup_upper_whiteouts` pre-rmdir sweep (pure-upper arm) +
+  `is_whiteout_inode` predicate extraction + clear-empty preserved for the
+  lower-backed arm (displaced-dir leg routed through the sweep seam,
+  best-effort). Next step: main-agent Creator pass slicing when the user
+  authorizes implementation.
+
+- **`pass_40_wave7_impure_cleanup_20260808`**
+  - **Kind**: Creator Pass (High risk; bounded cross-meso implementation of
+    the ACCEPTED `wave7_impure_cleanup_design` contract; user-directed
+    dispatch via the WSL codex CLI, main-agent acceptance).
+  - **Parent**: `N/A` — cross-meso (precedent: `pass_28_wave7_logic_bug_repair`);
+    per-objective owners preserved (O1: Meso 04/05/06; O2: Meso 06 + Meso 02
+    predicate + two Meso 03 widenings).
+  - **Covered Micro-Features**: `P2-03`, `P1-33`, `P1-01..P1-07`,
+    `P1-25`, `P1-27`, `P1-28`, `P1-31`, `P1-36`.
+  - **Write-set**: `metadata_security/xattr.rs`, `copyup/promote.rs`,
+    `dir/{mod.rs,rename.rs,whiteout.rs,remove.rs}`,
+    `projection/entry.rs`, `readdir_index.rs` + Creator report
+    `components/wave7_impure_cleanup_design/pass_40_wave7_impure_cleanup_creator.md`.
+  - **Execution shape**: command-free (compile withheld); frozen surface per
+    spec §1.4/§2.4; Bug B out of scope; main agent performs exact-diff
+    acceptance + target-specific `cargo check` after the Creator reports.
+  - **Packet**:
+    `subagent-tasks/wave7_impure_cleanup_design/task_creator_wave7_impure_cleanup_20260808_dispatch.md`.
+  - **Acceptance (2026-08-08): ACCEPTED with recorded deviations.** Creator
+    (via WSL codex CLI, inherited `~/.codex`) implemented the frozen surface:
+    `IMPURE_*` constants + `OverlayXattrPolicy::{has,set,clear}_impure_marker`
+    + `OverlayInode::refresh_impure_marker` (xattr.rs), T1-T4 triggers
+    (promote/mod/link/rename/whiteout), C1/C2 best-effort refreshes,
+    `is_whiteout_inode` extraction + delegation (entry.rs),
+    `cleanup_upper_whiteouts` sweep seam (whiteout.rs), branch-A/branch-E
+    sweep call sites, clear-empty leg routed through the seam, two index
+    widenings (+ recorded third `ReaddirIndex::entries` widening),
+    projection/mod.rs one-line re-export (recorded incidental edit). Report
+    `components/wave7_impure_cleanup_design/pass_40_wave7_impure_cleanup_creator.md`
+    with full census + 6 recorded deviations (all accepted; behavior-
+    preserving or forced by the frozen location). Main-agent verification:
+  `cargo check -p aster-kernel --target x86_64-unknown-none` exit 0 (only
+    pre-existing `MountPolicy::uuid_mode` warning); `cargo fmt --check` clean
+    after the main-agent mechanical `cargo fmt` of the changed files. Bug B
+    untouched. Next step: user-authorized `overlay/031` + `overlay/038`
+    validation re-run (Checker lane; ls3 expected to remain a Bug B
+    dependency failure).
+  - **Validation (2026-08-08, `pass_41_wave7_impure_cleanup_checker.md`):
+    `overlay/038` PASS** (impure set + clear + filter assertions all pass);
+    **`overlay/031` in-scope objectives VERIFIED** — both `ENOTEMPTY`
+    failures fixed by the sweep, rm3 lower-backed publish correct; the single
+    remaining diff line is ls3, the recorded out-of-scope Bug B dependency
+    (expected to remain FAIL until the base-view coherence fix). No repair
+    batch for pass_40. Evidence under
+    `components/wave7-xfstests-sequencing/run_evidence/{overlay031,overlay038}/impure_cleanup_20260808/`.

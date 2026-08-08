@@ -56,9 +56,12 @@
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::{copyup::WorkdirTempRequest, mount::OverlayFs},
+        fs_impls::overlayfs::{
+            copyup::WorkdirTempRequest, mount::OverlayFs, projection::is_whiteout_inode,
+        },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
+            path::is_dot_or_dotdot,
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -393,6 +396,11 @@ impl OverlayFs {
         // mutation, so this is the defensive arm) — resolved through the
         // single shared resolver (`OverlayFs::workdir_root`).
         let workdir = self.workdir_root()?;
+        // T2 (Objective 1): publishing a whiteout inside the parent makes it
+        // impure — persist the marker before the physical publish (strict,
+        // pre-physical-publish; read-first idempotence makes the
+        // T1-covered call chains a no-op).
+        self.xattr_policy().set_impure_marker(upper_parent)?;
         match replace_target {
             // Target absent: the link path keeps the workdir original for
             // reuse (share); a link that fails the share contract degrades to
@@ -456,4 +464,36 @@ impl OverlayFs {
             }
         }
     }
+}
+
+/// Sweeps the physical whiteout residue out of an upper directory.
+///
+/// Enumerates the real upper directory, filters `.`/`..`, and unlinks every
+/// physical child that is a whiteout (char device `0:0` or
+/// `trusted.overlay.whiteout` marker, via the shared
+/// [`is_whiteout_inode`] predicate). A physical child that is NOT a whiteout
+/// refuses the sweep with `ENOTEMPTY` (Linux `ovl_check_empty_dir` parity —
+/// unknown state is never deleted); underlying lookup/readdir/unlink errors
+/// propagate unchanged. The sweep never recurses into directories: with the
+/// caller's visible-emptiness gate holding, every deleted physical child is a
+/// whiteout, so the bound is one physical pass.
+///
+/// The caller holds the affected parent `DIR` transaction guard(s); the sweep
+/// runs strictly before the physical rmdir/rename (pre-commit), so a failure
+/// aborts the removal and a retry converges.
+pub(super) fn cleanup_upper_whiteouts(upper_dir: &Arc<dyn Inode>) -> Result<()> {
+    let mut names = Vec::new();
+    upper_dir.readdir_at(0, &mut names)?;
+    names.retain(|name| !is_dot_or_dotdot(name));
+    for name in names {
+        let child = upper_dir.lookup(&name)?;
+        if !is_whiteout_inode(&child)? {
+            return Err(Error::with_message(
+                Errno::ENOTEMPTY,
+                "a hidden non-whiteout entry prevents the overlay directory removal",
+            ));
+        }
+        upper_dir.unlink(&name)?;
+    }
+    Ok(())
 }

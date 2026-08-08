@@ -83,7 +83,7 @@ pub(super) enum ReaddirIndexValidity {
 /// directories only) and protected by the sleep-capable `INODE`-domain lock.
 pub(super) struct ReaddirIndex {
     /// Visible + tombstone slots in ascending cookie order.
-    entries: Vec<ReaddirIndexEntry>,
+    pub(super) entries: Vec<ReaddirIndexEntry>,
     /// Serve-or-rebuild state.
     validity: ReaddirIndexValidity,
     /// Cookie high-water mark; survives rebuilds; never decreases.
@@ -560,7 +560,7 @@ impl OverlayInode {
     }
 
     /// Returns the per-directory index lock, if this object is a directory.
-    fn readdir_index(&self) -> Option<&Mutex<ReaddirIndex>> {
+    pub(super) fn readdir_index(&self) -> Option<&Mutex<ReaddirIndex>> {
         self.readdir_index.as_ref()
     }
 
@@ -580,7 +580,10 @@ impl OverlayInode {
     /// complete sequence is published only under the index lock; a failed
     /// scan leaves the index `NeedsRebuild` and never tears down a previously
     /// `Valid` index (the rebuild path replaces only on success).
-    fn ensure_readdir_index(&self, facts: &OverlayObjectFacts) -> Result<OverlayObjectFacts> {
+    pub(super) fn ensure_readdir_index(
+        &self,
+        facts: &OverlayObjectFacts,
+    ) -> Result<OverlayObjectFacts> {
         let index = self.readdir_index().ok_or_else(|| {
             Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
         })?;

@@ -34,7 +34,7 @@ pub(in crate::fs::fs_impls::overlayfs) use binding_cache::{
     PositiveKind,
 };
 use entry::LayerLookup;
-pub(in crate::fs::fs_impls::overlayfs) use entry::RealObject;
+pub(in crate::fs::fs_impls::overlayfs) use entry::{RealObject, is_whiteout_inode};
 pub(in crate::fs::fs_impls::overlayfs) use identity::{IdentityPolicy, OverlayObjectId};
 pub(in crate::fs::fs_impls::overlayfs) use inode::{OverlayInode, OverlayObjectFacts};
 pub(in crate::fs::fs_impls::overlayfs) use inode_cache::{InodeCache, RealObjectKey};

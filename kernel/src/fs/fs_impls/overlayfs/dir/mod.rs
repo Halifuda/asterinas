@@ -192,6 +192,13 @@ impl OverlayInode {
         // (known degradation, a future insertion point); upper-authoritative
         // sources always share one upper inode (real hard link).
         let upper_real = self.link_source(&old_overlay)?;
+        // T4 (Objective 1): linking an origin-bearing source into this parent
+        // makes the parent impure — persist the marker before either
+        // physical-link branch (Linux `ovl_create_or_link` origin arm;
+        // strict, pre-commit).
+        if !old_overlay.facts_snapshot().lowers().is_empty() {
+            fs.xattr_policy().set_impure_marker(&self.upper_parent()?)?;
+        }
         if target_is_whiteout {
             // Target hidden by a whiteout: workdir hard link + rename-over
             // the whiteout (Linux `ovl_create_over_whiteout` hardlink leg).

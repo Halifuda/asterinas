@@ -69,6 +69,7 @@
 //!
 //! No `.unwrap()`/`.expect()` appears in any production path.
 
+use super::whiteout;
 use crate::{
     fs::{
         file::Permission,
@@ -243,8 +244,10 @@ impl OverlayInode {
         // rename only sees the upper dir). The `visible_child_count` seam
         // counts visible children (whiteout-hidden children do not count); a
         // pure-upper target defers to the upper rename's own emptiness
-        // enforcement.
-        if mode == RenameMode::Replace
+        // enforcement. The gate records the fresh target facts so the
+        // branch-E whiteout sweep (Objective 2) can run on the target's
+        // physical upper copy after the per-branch promotions.
+        let gate_target_facts = if mode == RenameMode::Replace
             && target_is_positive
             && let Some(target_object) = target_binding.clone().into_inode()
             && target_object.type_().is_directory()
@@ -258,7 +261,10 @@ impl OverlayInode {
                     "the overlay rename target directory is not empty",
                 ));
             }
-        }
+            Some(target_facts)
+        } else {
+            None
+        };
 
         // Per-branch promotion in stable object-identity order: the source
         // object first, then the source parent, then the target parent. Each
@@ -275,6 +281,28 @@ impl OverlayInode {
         // (post-promotion `select_real_inode`, `dir/mod.rs::upper_parent`).
         let upper_parent = self.upper_parent()?;
         let target_upper_parent = target.upper_parent()?;
+
+        // Branch E (Objective 2): when the Replace gate passed for a
+        // directory target with a physical upper copy, sweep the target's
+        // physical whiteout residue before the physical rename (Linux
+        // `ovl_clear_empty` for the same case, dir.c:1215-1227). Strict and
+        // pre-commit: a failure aborts before `run_recipe`, whose pre-commit
+        // cleanup is a no-op because no workdir temp is staged.
+        if let Some(target_upper_dir) = gate_target_facts
+            .as_ref()
+            .and_then(|target_facts| target_facts.upper())
+        {
+            whiteout::cleanup_upper_whiteouts(target_upper_dir.real_inode())?;
+        }
+
+        // T3 (Objective 1): a cross-directory move of an origin-bearing
+        // source makes the target parent impure — persist the marker before
+        // the physical rename (Linux `ovl_rename_upper` cross-dir origin
+        // arm; strict, pre-commit).
+        let same_parent = self.key() == target.key();
+        if !same_parent && source_has_lower {
+            fs.xattr_policy().set_impure_marker(&target_upper_parent)?;
+        }
 
         // The shared recipe scaffold: the commit marker is flipped at the
         // physical upper rename and the reconcile classification is owned by
@@ -299,7 +327,6 @@ impl OverlayInode {
                     _ if target_is_whiteout => RenameMode::Replace,
                     _ => mode,
                 };
-                let same_parent = self.key() == target.key();
                 // The physical upper rename: same-directory against the
                 // single upper parent, cross-directory against the promoted
                 // target upper parent.
@@ -363,6 +390,28 @@ impl OverlayInode {
                 }
                 Ok(())
             },
-        )
+        )?;
+        // C2 (Objective 1): a cross-directory rename may have restored purity
+        // in the source or target parent (the overwrite-of-origin-target case
+        // can clear the target's last origin-bearing entry) — refresh both
+        // markers best-effort (the mutation already committed; a refresh
+        // failure never fails the rename).
+        if !same_parent {
+            if let Err(err) = self.refresh_impure_marker() {
+                warn!(
+                    "overlay rename: the source-parent impure-marker refresh failed \
+                     (best-effort): {:?}",
+                    err
+                );
+            }
+            if let Err(err) = target.refresh_impure_marker() {
+                warn!(
+                    "overlay rename: the target-parent impure-marker refresh failed \
+                     (best-effort): {:?}",
+                    err
+                );
+            }
+        }
+        Ok(())
     }
 }

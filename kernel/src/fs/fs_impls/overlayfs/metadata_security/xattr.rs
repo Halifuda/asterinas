@@ -50,7 +50,9 @@
 use crate::{
     fs::{
         file::Permission,
-        fs_impls::overlayfs::{AccessType, projection::OverlayInode},
+        fs_impls::overlayfs::{
+            AccessType, projection::OverlayInode, readdir_index::ReaddirIndexEntry,
+        },
         vfs::{
             inode::Inode,
             xattr::{XATTR_LIST_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags},
@@ -99,7 +101,7 @@ pub(in crate::fs::fs_impls::overlayfs) enum XattrClass {
 ///   whiteout, opaque -> namespace-mutation owner [insertion point]
 ///   redirect         -> deferred
 ///   origin, upper    -> association/identity work [insertion point]
-///   impure           -> directory-index owner
+///   impure           -> metadata/xattr owner (this module)
 ///   nlink            -> copy-up hardlink bookkeeping
 ///   uuid             -> mount UUID persist
 ///   metacopy         -> deferred
@@ -131,6 +133,19 @@ pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_XATTR_FULL_NAME: &str =
 /// The opaque marker value (Linux writes `"y"`; the reader requires the first
 /// byte `b'y'`).
 pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
+
+/// The xattr full name of the impure-directory marker (Linux `OVL_XATTR_IMPURE`).
+///
+/// The `impure` suffix is already a known overlay-private record
+/// (`OVERLAY_PRIVATE_SUFFIXES`), so the name/value pair lives here as the
+/// single declaration; the marker is only ever read/written/cleared through
+/// the internal [`OverlayXattrPolicy`] seam — never through the user-facing
+/// xattr entries (`P1-33`).
+pub(in crate::fs::fs_impls::overlayfs) const IMPURE_XATTR_FULL_NAME: &str =
+    "trusted.overlay.impure";
+
+/// The impure marker value (Linux writes `"y"`; the reader is presence-based).
+pub(in crate::fs::fs_impls::overlayfs) const IMPURE_MARKER_VALUE: &[u8] = b"y";
 
 /// The xattr-copy failure policy of the shared xattr copy
 /// ([`OverlayXattrPolicy::copy_eligible_xattrs`]) — a small closed enum
@@ -465,9 +480,134 @@ impl OverlayXattrPolicy {
         value.truncate(written);
         Ok(value)
     }
+
+    /// Returns whether `real_dir` carries the persisted impure marker.
+    ///
+    /// Presence probe on the real upper directory (Linux
+    /// `ovl_cache_get_impure` read). The marker read is presence-based: an
+    /// absent (`ENODATA`) or unsupported (`EOPNOTSUPP`) marker reads as "not
+    /// impure", while a value longer than the 1-byte probe (`ERANGE`) still
+    /// proves presence. Genuine xattr errors propagate.
+    pub(in crate::fs::fs_impls::overlayfs) fn has_impure_marker(
+        &self,
+        real_dir: &Arc<dyn Inode>,
+    ) -> Result<bool> {
+        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
+        })?;
+        let mut value = [0u8; 1];
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+        match real_dir.get_xattr(name, &mut writer) {
+            Ok(_) => Ok(true),
+            Err(err) if err.error() == Errno::ERANGE => Ok(true),
+            Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Persists the impure marker on the real upper directory `real_dir`.
+    ///
+    /// Read-first idempotent: an already-marked directory is not written
+    /// again (Linux `ovl_set_impure` no-op parity). The internal write goes
+    /// directly through the underlying inode — never through the user-facing
+    /// `OverlayInode` xattr entries, whose `Private` refusal surface is
+    /// untouched (`P1-33`).
+    pub(in crate::fs::fs_impls::overlayfs) fn set_impure_marker(
+        &self,
+        real_dir: &Arc<dyn Inode>,
+    ) -> Result<()> {
+        if self.has_impure_marker(real_dir)? {
+            return Ok(());
+        }
+        debug_assert!(
+            self.is_private(IMPURE_XATTR_FULL_NAME),
+            "the impure marker name must classify as an overlay-private record"
+        );
+        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
+        })?;
+        let mut marker_reader = VmReader::from(IMPURE_MARKER_VALUE).to_fallible();
+        real_dir.set_xattr(name, &mut marker_reader, XattrSetFlags::CREATE_OR_REPLACE)
+    }
+
+    /// Removes the impure marker from the real upper directory `real_dir`.
+    ///
+    /// Internal `remove_xattr`; an absent marker (`ENODATA`) reads as the
+    /// already-cleared state and returns `Ok(())` (idempotent). Genuine xattr
+    /// errors propagate.
+    pub(in crate::fs::fs_impls::overlayfs) fn clear_impure_marker(
+        &self,
+        real_dir: &Arc<dyn Inode>,
+    ) -> Result<()> {
+        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
+        })?;
+        match real_dir.remove_xattr(name) {
+            Ok(()) => Ok(()),
+            Err(err) if err.error() == Errno::ENODATA => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 impl OverlayInode {
+    /// Refreshes this directory's persisted impure marker against its current
+    /// visible children.
+    ///
+    /// The lifecycle coordinator: a directory without a real upper cannot
+    /// carry the marker (`Ok(())` no-op); a directory whose marker is absent
+    /// has nothing to refresh; otherwise the index is ensured `Valid` under
+    /// the caller's `DIR` transaction, the `Visible` child `Arc`s are cloned
+    /// under a brief index `INODE` lock (released before any per-child facts
+    /// snapshot or xattr call), and the marker is cleared when NO visible
+    /// child keeps a non-empty lower stack (the frozen purity predicate;
+    /// whiteout residue is never counted). Callers invoke it best-effort
+    /// (warn-and-continue) after the underlying mutation has already
+    /// committed, matching Linux `ovl_cache_get_impure`.
+    pub(in crate::fs::fs_impls::overlayfs) fn refresh_impure_marker(&self) -> Result<()> {
+        // Upper-present gate: the marker lives only on real upper
+        // directories; a lower-only directory cannot carry one (defensive
+        // early return, never an unwrap).
+        let facts = self.facts_snapshot();
+        let Some(upper_real) = facts.upper() else {
+            return Ok(());
+        };
+        let fs = self.fs_arc()?;
+        let xattr_policy = fs.xattr_policy();
+        if !xattr_policy.has_impure_marker(upper_real.real_inode())? {
+            return Ok(());
+        }
+        // Purity scan under the caller-held `DIR` transaction: ensure the
+        // index is `Valid`, then clone the `Visible` child `Arc`s under a
+        // brief index `INODE` lock. No `INODE` guard is held across a child
+        // `facts_snapshot` or the marker clear below (`DIR -> INODE` order).
+        self.ensure_readdir_index(&facts)?;
+        let children: Vec<Arc<OverlayInode>> = {
+            let index = self.readdir_index().ok_or_else(|| {
+                Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
+            })?;
+            let index = index.lock();
+            index
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    ReaddirIndexEntry::Visible { inode, .. } => Some(inode.clone()),
+                    ReaddirIndexEntry::Tombstone { .. } => None,
+                })
+                .collect()
+        };
+        // Per-child lowers scan: any visible child with a non-empty lower
+        // stack keeps the marker.
+        for child in &children {
+            if !child.facts_snapshot().lowers().is_empty() {
+                return Ok(());
+            }
+        }
+        xattr_policy.clear_impure_marker(upper_real.real_inode())
+    }
+
     // Xattr get: classification refusal runs first (before the admission, so
     // no authority side effect ever starts for a private name); the refusal
     // returns `EOPNOTSUPP` for every non-`Public` name (Linux v4.10+
