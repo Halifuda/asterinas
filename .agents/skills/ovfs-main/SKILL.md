@@ -68,6 +68,28 @@ them pointer-oriented, and require artifacts under the matching
 For an Architect packet, use `$ovfs-subagent` with role `Architect` and the
 protocol in `kernel/src/fs/fs_impls/overlayfs/.agents/protocol/ARCHITECT.md`.
 
+### V2 dispatch lane (platform-verified 2026-08-08)
+
+The spawn payload, the NEW_TASK header, and followup/send messages are not
+readable by subagents; the only readable channel is the latest user turn at
+spawn time. Every dispatch therefore follows this five-step lane:
+
+1. Write/refresh the packet under
+   `subagent-tasks/<component-id>/<task_id>_dispatch.md`.
+2. Fill the User Dispatch Turn template
+   (`protocol/templates/user_dispatch_turn_TEMPLATE.md`) with the task_id,
+   packet path, role, and report contract.
+3. The user posts the dispatch turn verbatim; no other user message may
+   intervene before the spawn.
+4. Spawn immediately with `task_name=<task_id>`, `fork_turns="1"`.
+5. Collect the receipt; acceptance is based only on artifacts the subagent
+   produced, never on UI context inspection.
+
+Continuation/repair rounds are new User Dispatch Turns carrying the
+Continuation / Parent Task pointer — followup_task/send_message are not valid
+channels. Do not deliver task content through the spawn payload or rely on
+goal text reaching subagents (get_goal returns null on subagent threads).
+
 ## Acceptance boundary
 
 Accept artifacts structurally against the applicable templates and protocol.

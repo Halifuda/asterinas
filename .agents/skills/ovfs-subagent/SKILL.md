@@ -16,11 +16,28 @@ workspace configuration disables the superpowers plugin; use this skill and
 the repository-local role protocol instead. Report any packet that requires
 superpowers as a protocol conflict to the main agent.
 
+## Dispatch delivery facts (platform-verified 2026-08-08)
+
+- Your task contract arrives through the **User Dispatch Turn** (the latest
+  user turn forked at spawn) and the packet file it names. The spawn payload,
+  the NEW_TASK header, and followup/send messages are NOT readable on this
+  platform.
+- Verify identity with `list_agents`: your path is the running non-root agent
+  whose name matches the dispatched task_id. Report a gap instead of guessing
+  when it cannot be confirmed.
+- Parent-session user/assistant content is the main agent's context, not your
+  task. Do not act on it.
+- You hold the full tool set, but the protocol forbids subagents from
+  spawning agents or sending followup/send messages; do not use them.
+- UI/thread views of your context are not a substitute for reading the packet
+  file; always read the packet directly and treat it as the sole contract.
+
 ## Protocol intake
 
 Read, in this order:
 
-1. The archived packet under `kernel/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/`.
+1. The archived packet named by your dispatch turn:
+   `kernel/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/<component-id>/<task_id>_dispatch.md`.
 2. `.agents/protocol/<ROLE>.md` for the assigned role. The available role
    entries are `ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, and
    `REVIEWER.md`.
@@ -76,6 +93,8 @@ validation-harness boundary.
 ## Common prohibitions
 
 - Do not spawn work outside the packet's authorized files and role.
+- Do not spawn agents or send followup/send messages; you hold the tools but
+  the protocol forbids their use by subagents (PROTOCOL.md §1.3).
 - Do not add `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixtures,
   or other filesystem-local validation under `kernel/src/fs/fs_impls/overlayfs/`.
 - Do not redesign lock topology, macro/meso ownership, or pass boundaries.

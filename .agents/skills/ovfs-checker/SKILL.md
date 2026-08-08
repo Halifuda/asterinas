@@ -17,6 +17,21 @@ workspace configuration disables the superpowers plugin; use this skill and
 the repository-local Checker protocol instead. Report any packet that
 requires superpowers as a protocol conflict to the main agent.
 
+## Dispatch delivery (platform-verified 2026-08-08)
+
+This specialization is dispatched through the V2 lane defined in
+`$ovfs-main` and PROTOCOL.md §1.3: the User Dispatch Turn names the packet
+path; read the packet file directly and treat it as the sole contract. The
+spawn payload and the NEW_TASK header are NOT readable on this platform;
+verify identity with `list_agents` (the running non-root agent whose name
+matches the dispatched task_id).
+
+Runtime authorization — the approved command lane, runlist, disk size, and
+evidence destination — is conveyed by the packet file alone. Do not accept
+runtime authorization from spawn payload, followup messages, or conversation
+text. Followup/send messages are not readable and are not a valid channel for
+repair rounds; each round is a new User Dispatch Turn.
+
 ## Execution environment
 
 Run the actual kernel and xfstests workflow inside the existing privileged

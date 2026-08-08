@@ -137,6 +137,32 @@ need large scratch images and long runtime.
 
 ## 4. Thread Activity Log
 
+- **V2 子代理派发机制实测与协议修订（2026-08-08，user-directed；机制验证
+  探针 + 端到端冒烟均通过）：** 只读探针（probe4/5/7 可见性汇报、probe7
+  对照、probe6 主代理错乱样本）实测确立以下平台机制事实：
+  - `fork_turns="1"` 时子代理模型输入 = 系统提示（含 skill 目录与全部工具）
+    + **最新一条 user 轮**；spawn payload、NEW_TASK 头、followup/send_message
+    内容均不可读；助手消息（含 spawn 前同轮内容）不进入模型输入；
+    **UI/线程上下文 ≠ 模型上下文**（UI 显示父会话内容、模型读不到——
+    ASSISTANT-MARKER-V7 探针确认"存在但不可见"）。
+  - 子代理 `get_goal` 恒为 `null`（根线程 active 时亦然）；goal 注入不是可
+    fork 的 user 轮；**goal 常驻契约无法自动到达子代理**，goal 模式只能
+    自动化主代理侧。
+  - 身份由最新 user 轮措辞锚定 + `list_agents` 交叉验证；若最新 user 轮是
+    面向主代理的消息，子代理会主代理错乱（probe2/3/6，probe3 曾递归 spawn
+    子代理，均已中断）。
+  据此协议修订（user-confirmed）：`PROTOCOL.md` §1.3 重写为 User Dispatch
+  Turn 派发契约（`fork_turns="1"` 唯一允许、`all` 禁止、`none` 不可用；
+  续派 = 新派发轮 + Continuation 指针；验收只看子代理产物）；新增
+  `protocol/templates/user_dispatch_turn_TEMPLATE.md`；`$ovfs-main` /
+  `$ovfs-subagent` / `$ovfs-checker` 三个 skill 同步（V2 派发五步 lane、
+  Delivery facts、运行时授权仅来自 packet）。
+  端到端冒烟（`task_smoke_v2_dispatch_20260808`；packet 见
+  `subagent-tasks/v2_dispatch_smoke/`）通过：子代理从磁盘读 packet、
+  `list_agents` 确认身份、按 write-set 产出 receipt 至
+  `components/v2_dispatch_smoke/smoke_receipt_20260808.md`，未越权、
+  未跑命令。后续所有子代理派发一律走此 lane。
+
 - **综合用例批次（2026-08-08，user-directed；main agent 亲自执行，无
   subagent；每例单独 runlist、单独 QEMU，按需重建镜像）：** 结果矩阵与逐例
   证据见
@@ -322,6 +348,33 @@ need large scratch images and long runtime.
     选项"接缝并让 `MountsFileOps` 打印，属 VFS 边界决策。附带疑点：用例
     grep 按 `/dev/vde` 匹配 /proc/mounts 行，回显修复后需先确认 guest 侧
     行布局（overlay 行 source 是路径而非 /dev/vde）再承诺用例可过。
+
+- **Bug B 解决方向调研（2026-08-08，user-directed；只读）：** "mount 期
+  保存所有 layer path" 方案评估——**可行**，但正确定义是"root Path 锚点 +
+  沿 dentry 层逐级解析 / 随 binding 携带 dentry 锚定的 Path"，等价于
+  Linux（Linux 也不保存全部路径，而是从根经底层 fs 的 VFS 逐步解析）。
+  - 可行性证据：mount 期已解析出 layer root `Path`（`resolve_root_path`）；
+    `Path = {mount, dentry}` 可 `Clone` 长期持有（先例：
+    `ProcessVm::executable_file: Path`）；`Path::{mknod,link,unlink,rmdir,
+    rename(..., mode: RenameMode → 支持 Exchange),new_fs_child,create_tmpfile}`
+    均走 dentry 层并维护 `DentryChildren`（024 先例已证）；
+    `Path::new`/`dentry()` 与 `Dentry::lookup_child` 为 `pub(in
+    crate::fs)`，overlayfs 可达。
+  - 操作分类（用户确认的理解）：**必须走 Path** = 名称解析
+    （`lookup_child`）+ 一切改变目录项集合的操作（whiteout 发布的
+    mknod/link、copy-up 的 workdir→upper rename、clear-empty 的 Exchange、
+    remove/sweep 的 unlink/rmdir、new_fs_child）；**可留裸 inode** = 已解析
+    inode 的内容/元数据（read/write、xattr get/set/remove 含 impure 标记、
+    mode/owner/times、resize/sync、overlay 自身 `readdir_at`——后者读 fs
+    真值，一致性是"单向"：overlay 写走 dentry 即更新共享树）。
+    012 stale-upper 的 fresh-lookup 验证宜顺路走 dentry。
+  - 遗留设计成本：`RealObject`/facts 载体加 `Path`（Architect/Designer
+    级载体变更）、`DIR → dentry-children` 锁序、dentry 生命周期与
+    `revalidate_cached_entry` 对齐、base 挂载先卸的契约；症状 (b)（盘上
+    陈旧 dirent）是否纯由 overlay 裸 unlink 造成仍未确诊——若 ext2 驱动
+    unlink 自身不合并 dirent，路径路由只能防新污染、不能修旧盘。
+  - 结论：作为 Bug B 设计调研的**候选 A**（与缓存失效接缝 / base 读回盘面
+    并列），待用户拍板 VFS 边界后开设计任务。
 
 - **Logic-bug repair wave start (2026-08-07, user-directed):** user
   authorized Designer + Creator repair of the five Wave7 FAIL groups and a
@@ -690,6 +743,13 @@ need large scratch images and long runtime.
    does not authorize Wave7 implementation or runtime work.
 5. A future runtime packet must retain xfstests as the sole validation lane;
    no ktest or filesystem-local substitute is permitted.
+6. **V2 dispatch delivery contract adopted (user-confirmed 2026-08-08):** the
+   User Dispatch Turn (latest user turn) + `fork_turns="1"` is the only
+   subagent content channel on this platform; spawn payload, NEW_TASK header,
+   followup/send messages, and goal text are not channels. Normative text:
+   `PROTOCOL.md` §1.3 and
+   `protocol/templates/user_dispatch_turn_TEMPLATE.md`. Mechanism evidence and
+   smoke receipt: §4.
 
 ## 6. Next Actions for the Next Thread (CRITICAL)
 
@@ -700,13 +760,22 @@ need large scratch images and long runtime.
    `pass_40_wave7_impure_cleanup_creator.md` +
    `pass_41_wave7_impure_cleanup_checker.md`; per-case evidence
    `run_evidence/{overlay031,overlay038}/impure_cleanup_20260808/`.
-2. **Bug B — base-fs↔overlayfs view coherence (REGISTERED, out of scope for
-   this wave):** root cause of 031 ls3 `ENOENT` and the 031→020 cross-run
-   `_scratch_mkfs` residue. Candidate fix directions (overlay upper writes
-   routed through the base mount `Path` layer / cache-invalidation seam /
-   read-through base readdir) all touch the VFS boundary; requires a user
-   scope decision and a separate design task. Until it lands, every case must
-   run on freshly rebuilt images.
+2. **Bug B — base-fs↔overlayfs view coherence (REGISTERED; direction studied
+   2026-08-08, see §4):** root cause of 031 ls3 `ENOENT` and the 031→020
+   cross-run `_scratch_mkfs` residue. **Candidate A (primary):** retain the
+   layer-root `Path`s at mount (anchors) and route every namespace-mutating
+   physical upper write (whiteout publish `mknod`/`link`, copy-up workdir→
+   upper `rename`, clear-empty `Exchange`, remove/sweep `unlink`/`rmdir`,
+   `new_fs_child`) plus name lookups through the dentry/`Path` layer,
+   carrying a dentry-anchored `Path` in `RealObject`; content/metadata ops
+   (I/O, xattr incl. impure marker, mode/times, `readdir_at`) stay raw inode.
+   Equals Linux semantics; costs = `RealObject` carrier change + `DIR`→
+   dentry-children lock order + dentry lifetime. Alternatives B
+   (cache-invalidation seam) / C (base readdir read-through) compared in the
+   design task. Open sub-question: stale on-disk dirent (031→020) — overlay
+   raw-unlink artifact vs ext2 unlink defect; diagnose first. Requires a user
+   scope decision (VFS boundary) and a separate design task. Until it lands,
+   every case runs on freshly rebuilt images.
 3. **041 — `xino=on` mount-option echo gap (REGISTERED, interface gate):**
    option is parsed and xino works (038), but `/proc/self/mounts` prints no
    fs-specific options (no Linux `show_options` equivalent), so the case's
@@ -725,6 +794,13 @@ need large scratch images and long runtime.
 7. **Boundaries:** no VFS interface-breaking changes without explicit user
    authorization; `.agents` records stay uncommitted; the pass_40 production
    `.rs` changes (9 files) remain uncommitted pending a user commit decision.
+8. **Dispatch lane (NEW, mandatory):** all future Architect/Designer/Creator/
+   Checker/Reviewer dispatches use the verified V2 lane — write the packet,
+   fill the User Dispatch Turn template, have the user post it, then spawn
+   with `fork_turns="1"` and `task_name=<task_id>`. Do not deliver task
+   content via spawn payload, followup, or goal text; continuation rounds are
+   new dispatch turns. Mechanism facts and smoke evidence: §4; normative
+   text: `PROTOCOL.md` §1.3.
 
 ## 7. Live File Discipline
 
