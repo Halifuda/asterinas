@@ -196,21 +196,41 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     /// invalidate the pinned inode). Written exactly once during mount
     /// construction, before publication; no lock domain.
     workdir_workspace: Option<Arc<dyn Inode>>,
+    /// The dentry-anchored staging workspace `Path` (`<workdir>/work`);
+    /// `Some` exactly when [`Self::workdir_workspace`] is `Some` — both
+    /// written once in [`prepare_workdir`](Self::prepare_workdir) at the same
+    /// statement. Keeps the staging workspace routed through the base VFS
+    /// dentry layer so every workdir mutation updates the base view's cached
+    /// directory state.
+    workdir_workspace_path: Option<Path>,
 }
 
 impl UpperWorkdirClaim {
     /// Validates the upper/workdir pair structurally.
     ///
-    /// Checks that both roots are directories, that they live on the same
-    /// underlying filesystem (`st_dev` evidence), and that the workdir is
-    /// neither identical to nor an ancestor/descendant of the upperdir.
-    /// Failures map to `ENOTDIR` / `EINVAL` (Linux `ovl_fill_super`).
+    /// Checks that both roots are directories, that they share one mount
+    /// node, that they live on the same underlying filesystem (`st_dev`
+    /// evidence), and that the workdir is neither identical to nor an
+    /// ancestor/descendant of the upperdir. Failures map to `ENOTDIR` /
+    /// `EINVAL` (Linux `ovl_fill_super` / `ovl_get_workdir`).
     pub(super) fn validate_pair(upper: &Path, workdir: &Path) -> Result<()> {
         if !upper.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "upperdir is not a directory");
         }
         if !workdir.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "workdir is not a directory");
+        }
+        // Linux `ovl_get_workdir` rejects an upper/workdir pair whose roots do
+        // not share one mount node (super.c:806-811): the workdir must reside
+        // under the same mount as the upperdir, because the later
+        // workdir→upper `Path::rename`/`Path::link` operations are
+        // same-`Mount` operations (a cross-mount pair would fail with `EXDEV`
+        // at operation time).
+        if !Arc::ptr_eq(upper.mount_node(), workdir.mount_node()) {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "workdir and upperdir must reside under the same mount"
+            );
         }
         if upper.metadata().container_dev_id != workdir.metadata().container_dev_id {
             return_errno_with_message!(
@@ -317,6 +337,7 @@ impl UpperWorkdirClaim {
             upper,
             identity,
             workdir_workspace: None,
+            workdir_workspace_path: None,
         })
     }
 
@@ -376,6 +397,7 @@ impl UpperWorkdirClaim {
         // usable and removable by the harness cleanup (see [`WORKDIR_MODE`]).
         let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
         self.workdir_workspace = Some(workspace.inode().clone());
+        self.workdir_workspace_path = Some(workspace);
         Ok(())
     }
 
@@ -436,6 +458,21 @@ impl UpperWorkdirClaim {
     /// fail closed.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
         self.workdir_workspace.as_ref().ok_or_else(|| {
+            Error::with_message(
+                Errno::EROFS,
+                "the overlay workdir workspace is not prepared",
+            )
+        })
+    }
+
+    /// Returns the dentry-anchored staging workspace path.
+    ///
+    /// `Ok` only after [`prepare_workdir`](Self::prepare_workdir) ran;
+    /// `Err(EROFS)` when the workspace was never prepared (upper-backed
+    /// effective read-only mount) — the claim exists but staging must still
+    /// fail closed.
+    pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
+        self.workdir_workspace_path.as_ref().ok_or_else(|| {
             Error::with_message(
                 Errno::EROFS,
                 "the overlay workdir workspace is not prepared",

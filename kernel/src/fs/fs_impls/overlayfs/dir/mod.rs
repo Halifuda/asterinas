@@ -10,10 +10,10 @@
 //! ([`OverlayInode::lock_dir_transaction`]), the two-parent `DIR` lock helper
 //! ([`OverlayInode::lock_parent_dir_transactions`], stable object-identity
 //! order, each parent exactly once), the post-promotion upper real parent
-//! resolution ([`OverlayInode::upper_parent`]), and the single shared private
-//! reconcile entry ([`OverlayInode::invalidate_stale_cache`]). The real
-//! control flow lives in the sibling files: `create.rs` (dispatcher +
-//! upper-only/over-whiteout/opaque branches), `remove.rs` (unlink/rmdir +
+//! `Path` resolution ([`OverlayInode::upper_parent_path`]), and the single
+//! shared private reconcile entry ([`OverlayInode::invalidate_stale_cache`]).
+//! The real control flow lives in the sibling files: `create.rs` (dispatcher
+//! + upper-only/over-whiteout/opaque branches), `remove.rs` (unlink/rmdir +
 //! visible emptiness + clear-empty), `link.rs` (source promotion +
 //! target-over-whiteout fragments), `rename.rs` (EXDEV gate + upper rename +
 //! dual-parent publication), and `whiteout.rs` (whiteout cache +
@@ -38,7 +38,10 @@ use super::{
 use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
-        vfs::inode::{Inode, MknodType, RenameMode},
+        vfs::{
+            inode::{Inode, MknodType, RenameMode},
+            path::Path,
+        },
     },
     prelude::*,
 };
@@ -131,7 +134,7 @@ impl OverlayInode {
     // Link. Only the target parent's `DIR` is acquired (the source is an
     // object, not a namespace of this mutation; its promotion is
     // `CUL`-serialized). The two `link.rs` fragments — `link_source` (source
-    // promotion to the shared upper real inode) and `link_over_whiteout`
+    // promotion to the shared upper real `Path`) and `link_over_whiteout`
     // (workdir hard link + rename-over) — are composed here with the fresh
     // target projection and the inline target publication (the publication
     // seams are infallible, so the reconcile path is unreachable here).
@@ -187,25 +190,28 @@ impl OverlayInode {
             ));
         }
         // Source promotion (link.rs): `ensure_upper_authority` then the
-        // shared upper real inode. Without an origin/index, two lower aliases
-        // of one lower inode may copy up separately to distinct upper inodes
-        // (known degradation, a future insertion point); upper-authoritative
-        // sources always share one upper inode (real hard link).
-        let upper_real = self.link_source(&old_overlay)?;
+        // shared upper real object's dentry-anchored `Path`. Without an
+        // origin/index, two lower aliases of one lower inode may copy up
+        // separately to distinct upper inodes (known degradation, a future
+        // insertion point); upper-authoritative sources always share one
+        // upper inode (real hard link).
+        let source_path = self.link_source(&old_overlay)?;
         // T4 (Objective 1): linking an origin-bearing source into this parent
         // makes the parent impure — persist the marker before either
         // physical-link branch (Linux `ovl_create_or_link` origin arm;
         // strict, pre-commit).
         if !old_overlay.facts_snapshot().lowers().is_empty() {
-            fs.xattr_policy().set_impure_marker(&self.upper_parent()?)?;
+            fs.xattr_policy()
+                .set_impure_marker(self.upper_parent_path()?.inode())?;
         }
         if target_is_whiteout {
             // Target hidden by a whiteout: workdir hard link + rename-over
             // the whiteout (Linux `ovl_create_over_whiteout` hardlink leg).
-            self.link_over_whiteout(name, &upper_real)?;
+            self.link_over_whiteout(name, &source_path)?;
         } else {
-            // Absent (or opaque-hidden) target: direct upper hard link.
-            self.upper_parent()?.link(&upper_real, name)?;
+            // Absent (or opaque-hidden) target: direct upper hard link
+            // through the base VFS `Path` layer.
+            self.upper_parent_path()?.link(&source_path, name)?;
         }
         // Inline target publication: the positive binding shares the source
         // `OverlayInode` — inode-cache reuse by `RealObjectKey`, so
@@ -376,14 +382,22 @@ impl OverlayInode {
         }
     }
 
-    /// Returns the promoted upper real parent directory of this directory.
+    /// Returns the dentry-anchored path of the promoted upper real parent
+    /// directory.
     ///
-    /// The physical-operation target of every recipe: after the mutating
-    /// admission's promotion stage, `select_real_inode()` resolves the upper
-    /// real inode. The `Result` return is the signature; the body is a single
-    /// infallible resolution (the promotion side effect already ran).
-    pub(super) fn upper_parent(&self) -> Result<Arc<dyn Inode>> {
-        Ok(self.select_real_inode())
+    /// The physical-operation target of every `Path`-routed recipe: after the
+    /// mutating admission's promotion stage the facts carry an upper real
+    /// object, and that object is always dentry-anchored by the carrier
+    /// invariant, so the checked `real_path()` accessor succeeds.
+    /// `EROFS` surfaces when the facts carry no upper (a non-writable
+    /// overlay); `EIO` propagates when the upper real object is not
+    /// dentry-anchored.
+    pub(super) fn upper_parent_path(&self) -> Result<Path> {
+        let facts = self.facts_snapshot();
+        let upper = facts.upper().ok_or_else(|| {
+            Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
+        })?;
+        Ok(upper.real_path()?.clone())
     }
 
     /// Conservatively invalidates the stale projection of the affected

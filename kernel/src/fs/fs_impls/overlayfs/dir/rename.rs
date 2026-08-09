@@ -25,11 +25,12 @@
 //! the source object and the real admission stage —
 //! `check_permission(AccessType::Mutating, ...)` — for each parent, under the
 //! caller-held `DIR`s). The underlying upper/workdir operations
-//! (`rename`/`lookup`/the whiteout publish) run in the sleep-capable `DIR`
-//! domain under the underlying filesystem's own locking; no `WL`/spin domain
-//! is entered and no `WL` payload is touched here (the whiteout cache is the
-//! sibling `dir/whiteout.rs` owner). `MOUNT` is never acquired; no Overlay
-//! lock crosses the return boundary.
+//! (`rename`/`lookup`/the whiteout publish) route through the base VFS
+//! `Path` layer and run in the sleep-capable `DIR` domain under the
+//! underlying filesystem's own locking; no `WL`/spin domain is entered and
+//! no `WL` payload is touched here (the whiteout cache is the sibling
+//! `dir/whiteout.rs` owner). `MOUNT` is never acquired; no Overlay lock
+//! crosses the return boundary.
 //!
 //! Recipe notes:
 //!
@@ -79,7 +80,10 @@ use crate::{
                 Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode, PositiveBinding,
             },
         },
-        vfs::inode::{Inode, RenameMode},
+        vfs::{
+            inode::{Inode, RenameMode},
+            path::Path,
+        },
     },
     prelude::*,
 };
@@ -163,15 +167,16 @@ impl OverlayInode {
     ///    entry's earlier admission makes these idempotent no-ops in the
     ///    ordinary path.
     /// 3. **Performs the physical upper rename** — same-directory
-    ///    `upper_parent.rename(old, upper_parent, new, ...)`, cross-directory
-    ///    `upper_parent.rename(old, target_upper_parent, new, ...)` — with
-    ///    the `RenameMode` (Replace/NoReplace/Exchange per `mode`)
-    ///    and the whiteout-target adjustments of Linux `ovl_rename_start`
-    ///    (consume/replace a whiteout marker; switch whiteouts via
-    ///    `Exchange` when the source has a lower fallback), and then the
-    ///    source-whiteout compose when the moved source had a lower fallback
-    ///    (Asterinas has no `RENAME_WHITEOUT`; the compose is a second upper
-    ///    step inside the same `DIR` domain(s)).
+    ///    `upper_parent_path.rename(old, upper_parent_path, new, ...)`,
+    ///    cross-directory
+    ///    `upper_parent_path.rename(old, target_upper_parent_path, new,
+    ///    ...)` — with the `RenameMode` (Replace/NoReplace/Exchange per
+    ///    `mode`) and the whiteout-target adjustments of Linux
+    ///    `ovl_rename_start` (consume/replace a whiteout marker; switch
+    ///    whiteouts via `Exchange` when the source has a lower fallback), and
+    ///    then the source-whiteout compose when the moved source had a lower
+    ///    fallback (Asterinas has no `RENAME_WHITEOUT`; the compose is a
+    ///    second upper step inside the same `DIR` domain(s)).
     /// 4. **Publishes inline:** the source
     ///    binding (`BindingCache::invalidate`, or a
     ///    `Negative(HiddenByWhiteout)` insert when a source whiteout was
@@ -278,9 +283,10 @@ impl OverlayInode {
         target.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
 
         // The promoted upper real parents — the physical-operation targets
-        // (post-promotion `select_real_inode`, `dir/mod.rs::upper_parent`).
-        let upper_parent = self.upper_parent()?;
-        let target_upper_parent = target.upper_parent()?;
+        // (post-promotion dentry-anchored `Path`s via
+        // `dir/mod.rs::upper_parent_path`).
+        let upper_parent_path = self.upper_parent_path()?;
+        let target_upper_parent_path = target.upper_parent_path()?;
 
         // Branch E (Objective 2): when the Replace gate passed for a
         // directory target with a physical upper copy, sweep the target's
@@ -292,7 +298,7 @@ impl OverlayInode {
             .as_ref()
             .and_then(|target_facts| target_facts.upper())
         {
-            whiteout::cleanup_upper_whiteouts(target_upper_dir.real_inode())?;
+            whiteout::cleanup_upper_whiteouts(target_upper_dir.real_path()?)?;
         }
 
         // T3 (Objective 1): a cross-directory move of an origin-bearing
@@ -301,7 +307,8 @@ impl OverlayInode {
         // arm; strict, pre-commit).
         let same_parent = self.key() == target.key();
         if !same_parent && source_has_lower {
-            fs.xattr_policy().set_impure_marker(&target_upper_parent)?;
+            fs.xattr_policy()
+                .set_impure_marker(target_upper_parent_path.inode())?;
         }
 
         // The shared recipe scaffold: the commit marker is flipped at the
@@ -329,13 +336,18 @@ impl OverlayInode {
                 };
                 // The physical upper rename: same-directory against the
                 // single upper parent, cross-directory against the promoted
-                // target upper parent.
+                // target upper parent — through the base VFS `Path` layer.
                 if same_parent {
-                    upper_parent.rename(old_name, &upper_parent, new_name, effective_mode)?;
-                } else {
-                    upper_parent.rename(
+                    upper_parent_path.rename(
                         old_name,
-                        &target_upper_parent,
+                        &upper_parent_path,
+                        new_name,
+                        effective_mode,
+                    )?;
+                } else {
+                    upper_parent_path.rename(
+                        old_name,
+                        &target_upper_parent_path,
                         new_name,
                         effective_mode,
                     )?;
@@ -351,7 +363,7 @@ impl OverlayInode {
                 // conservatively reconciled if the compose fails.
                 let mut source_whiteout_published = false;
                 if source_has_lower && !target_is_whiteout && mode != RenameMode::Exchange {
-                    fs.publish_whiteout(&upper_parent, old_name, None)?;
+                    fs.publish_whiteout(&upper_parent_path, old_name, None)?;
                     source_whiteout_published = true;
                 }
                 // Dual-parent publication (inline; the `publish_rename`
@@ -362,7 +374,11 @@ impl OverlayInode {
                 // stale positive binding is invalidated and the next lookup
                 // re-derives from upper truth.
                 if source_whiteout_published {
-                    let whiteout_real = upper_parent.lookup(old_name)?;
+                    let whiteout_path = Path::new(
+                        upper_parent_path.mount_node().clone(),
+                        upper_parent_path.dentry().as_dir_dentry_or_err()?.lookup_child(old_name)?,
+                    );
+                    let whiteout_real = whiteout_path.inode().clone();
                     fs.bindings().insert(
                         BindingKey::new(self.key(), String::from(old_name)),
                         Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(

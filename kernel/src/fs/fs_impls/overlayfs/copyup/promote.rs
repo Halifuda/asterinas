@@ -38,7 +38,10 @@ use crate::{
             mount::OverlayFs,
             projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
         },
-        vfs::inode::{Inode, MknodType, RenameMode, SymbolicLink},
+        vfs::{
+            inode::{Inode, MknodType, RenameMode, SymbolicLink},
+            path::Path,
+        },
     },
     prelude::*,
 };
@@ -98,14 +101,15 @@ impl OverlayInode {
         //    consumes the passed `name` (no `CUL` re-read under the held
         //    guard).
         if coordinate.phase == CopyUpPhase::ReconcilePending {
-            let upper_dir = publication_parent.select_real_inode();
-            self.verify_upper_target(&upper_dir, name)?;
+            let upper_dir_path = publication_parent.upper_parent_path()?;
+            self.verify_upper_target(&upper_dir_path, name)?;
         }
 
         // 3) Upper/workdir operations below run against the underlying
         //    filesystem's own locking; the `CUL` guard stays held across them
         //    by design (sleep-capable mutex).
         let upper_dir = publication_parent.select_real_inode();
+        let upper_dir_path = publication_parent.upper_parent_path()?;
         let fs = self.fs_arc()?;
         // T1 (Objective 1): every promoted object makes its publication
         // parent impure — persist the marker before the object-kind dispatch
@@ -126,7 +130,7 @@ impl OverlayInode {
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
                         name,
-                        &upper_dir,
+                        &upper_dir_path,
                         WorkdirTempRequest::Create {
                             kind: InodeType::Dir,
                             mode,
@@ -138,12 +142,17 @@ impl OverlayInode {
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
-                        self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
-                        let workdir = self.workdir_root()?;
-                        workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
+                        self.transfer_metadata(temp.inode())?;
+                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        let workdir_path = self.workdir_root_path()?;
+                        workdir_path.rename(
+                            &temp_name,
+                            &upper_dir_path,
+                            name,
+                            RenameMode::Replace,
+                        )?;
                         marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir, name)?;
+                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
                         self.publish_upper_authority(upper_real, lower.clone())
                     },
                 )
@@ -156,7 +165,7 @@ impl OverlayInode {
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
                         name,
-                        &upper_dir,
+                        &upper_dir_path,
                         WorkdirTempRequest::Create {
                             kind: InodeType::File,
                             mode,
@@ -168,21 +177,26 @@ impl OverlayInode {
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
-                        self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
-                        self.promote_regular_file(&temp)?;
+                        self.transfer_metadata(temp.inode())?;
+                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        self.promote_regular_file(temp.inode())?;
                         // Durability (fsync=auto default; strict/volatile are
                         // future insertion points): the data file is synced
                         // before publication.
-                        temp.sync_all()?;
+                        temp.inode().sync_all()?;
                         // Atomic publication: rename the private workdir temp
                         // onto the upper target name. `Replace` resolves the
                         // stale-upper-entry case; a whiteout at the name is
                         // impossible for authority-only promotion.
-                        let workdir = self.workdir_root()?;
-                        workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
+                        let workdir_path = self.workdir_root_path()?;
+                        workdir_path.rename(
+                            &temp_name,
+                            &upper_dir_path,
+                            name,
+                            RenameMode::Replace,
+                        )?;
                         marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir, name)?;
+                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
                         self.publish_upper_authority(upper_real, lower.clone())
                     },
                 )
@@ -196,7 +210,7 @@ impl OverlayInode {
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
                         name,
-                        &upper_dir,
+                        &upper_dir_path,
                         WorkdirTempRequest::Create {
                             kind: InodeType::SymLink,
                             mode,
@@ -208,12 +222,17 @@ impl OverlayInode {
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
-                        self.promote_symlink(&temp)?;
-                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
-                        let workdir = self.workdir_root()?;
-                        workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
+                        self.promote_symlink(temp.inode())?;
+                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        let workdir_path = self.workdir_root_path()?;
+                        workdir_path.rename(
+                            &temp_name,
+                            &upper_dir_path,
+                            name,
+                            RenameMode::Replace,
+                        )?;
                         marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir, name)?;
+                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
                         self.publish_upper_authority(upper_real, lower.clone())
                     },
                 )
@@ -269,24 +288,29 @@ impl OverlayInode {
                 let (temp_name, temp) = fs
                     .create_workdir_temp(
                         name,
-                        &upper_dir,
+                        &upper_dir_path,
                         WorkdirTempRequest::Mknod {
                             mode,
                             node: &mknod_type,
                         },
                     )?
                     .into_parts();
-                let workdir = self.workdir_root()?;
+                let workdir_path = self.workdir_root_path()?;
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
                     || self.mark_reconcile_pending(coordinate),
                     |marker| {
-                        self.transfer_metadata(&temp)?;
-                        self.copy_eligible_xattrs(&temp, XattrCopyPolicy::Strict)?;
-                        workdir.rename(&temp_name, &upper_dir, name, RenameMode::Replace)?;
+                        self.transfer_metadata(temp.inode())?;
+                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        workdir_path.rename(
+                            &temp_name,
+                            &upper_dir_path,
+                            name,
+                            RenameMode::Replace,
+                        )?;
                         marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir, name)?;
+                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
                         self.publish_upper_authority(upper_real, lower.clone())
                     },
                 )
@@ -513,8 +537,8 @@ impl OverlayInode {
     /// surfaces the reconcile/error state. The caller holds the `CUL` guard,
     /// so the publication name is passed in — the helper never re-reads the
     /// coordinate (no non-reentrant lock).
-    pub(super) fn verify_upper_target(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        let upper_real = self.upper_real_object(upper_dir, name)?;
+    pub(super) fn verify_upper_target(&self, upper_dir_path: &Path, name: &str) -> Result<()> {
+        let upper_real = self.upper_real_object(upper_dir_path, name)?;
         let lower = self.lower_source()?;
         if upper_real.real_inode().type_() != lower.real_inode().type_() {
             return_errno_with_message!(
@@ -532,39 +556,39 @@ impl OverlayInode {
     }
 
     /// Resolves the real object now published at the upper target name
-    /// (`upper_dir.lookup(name)` → `layer_index` 0 with the upper layer's
-    /// `fsid`/`container_dev_id`).
+    /// (re-observed through `upper_dir_path.dentry().lookup_child(name)` with
+    /// `layer_index` 0 and the upper layer's `fsid`/`container_dev_id`).
     ///
     /// The caller holds the `CUL` guard, so the publication name is passed in
     /// — the helper never re-reads the coordinate (no non-reentrant lock).
-    fn upper_real_object(&self, upper_dir: &Arc<dyn Inode>, name: &str) -> Result<RealObject> {
-        let real_inode = upper_dir.lookup(name)?;
+    fn upper_real_object(&self, upper_dir_path: &Path, name: &str) -> Result<RealObject> {
+        let child_path = Path::new(
+            upper_dir_path.mount_node().clone(),
+            upper_dir_path.dentry().as_dir_dentry_or_err()?.lookup_child(name)?,
+        );
         let fs = self.fs_arc()?;
         let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no upper layer")
         })?;
-        Ok(RealObject::new(
+        Ok(RealObject::with_path(
             0,
-            real_inode,
+            child_path,
             upper_layer.fsid,
             upper_layer.container_dev_id,
         ))
     }
 
-    /// Returns the pinned workdir staging workspace inode of this mount.
+    /// Returns the pinned workdir staging workspace path of this mount.
     ///
     /// Thin delegation to the single `OverlayFs`-level resolver
-    /// ([`OverlayFs::workdir_root`], `copyup/workdir.rs`) — the claim
+    /// ([`OverlayFs::workdir_root_path`], `copyup/workdir.rs`) — the claim
     /// resolution (and the EROFS error text) lives in exactly one helper: the
-    /// `OverlayInode` entry exists so the copy-up recipe arms and the `dir/`
-    /// recipes (`create.rs`/`link.rs`/`remove.rs`) resolve the workdir
-    /// staging workspace without re-upgrading the mount themselves. The
-    /// workdir staging workspace is the rename source of the
-    /// `File`/`SymLink`/`Special`/`Dir` publication steps, the `mknod` target
-    /// of the special-object arm, and the staging root of the three `dir/`
-    /// recipes (seven call sites across the tree).
-    pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
-        self.fs_arc()?.workdir_root()
+    /// `OverlayInode` entry exists so the copy-up recipe arms resolve the
+    /// dentry-anchored workdir staging workspace without re-upgrading the
+    /// mount themselves. The workdir path is the rename source of the
+    /// `File`/`SymLink`/`Special`/`Dir` publication steps.
+    pub(in crate::fs::fs_impls::overlayfs) fn workdir_root_path(&self) -> Result<Path> {
+        self.fs_arc()?.workdir_root_path()
     }
 
     /// Marks the transition [`CopyUpPhase::ReconcilePending`].

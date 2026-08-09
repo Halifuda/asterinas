@@ -27,12 +27,12 @@
 //! entered inside the real stage of
 //! `check_permission(AccessType::Mutating, ...)` (promotes the parent under
 //! the caller-held `DIR`). Upper/workdir physical operations
-//! (`unlink`/`rmdir`/`rename`/`set_xattr`) run in the sleep-capable `DIR`
-//! domain under the underlying filesystem's own locking; no `WL`/spin domain
-//! is entered and no `WL` payload is touched (the whiteout cache and the
-//! whiteout publish mechanics are the sibling `dir/whiteout.rs` owner). All
-//! `DIR`/`CUL`/`INODE` domains are released before any VFS-visible return;
-//! `MOUNT` is never acquired.
+//! (`unlink`/`rmdir`/`rename`/`set_xattr`) run through the base VFS `Path`
+//! layer in the sleep-capable `DIR` domain under the underlying filesystem's
+//! own locking; no `WL`/spin domain is entered and no `WL` payload is
+//! touched (the whiteout cache and the whiteout publish mechanics are the
+//! sibling `dir/whiteout.rs` owner). All `DIR`/`CUL`/`INODE` domains are
+//! released before any VFS-visible return; `MOUNT` is never acquired.
 //!
 //! No `.unwrap()`/`.expect()` appears in any production path; hard invariant
 //! failures use the `Error::with_message`/`unreachable!` precedents.
@@ -51,7 +51,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, RenameMode},
-            path::is_dot_or_dotdot,
+            path::{is_dot_or_dotdot, Path},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -94,11 +94,12 @@ impl OverlayInode {
     /// 3. **Stage B admission:** `check_permission(AccessType::Mutating,
     ///    MAY_WRITE)` promotes this parent to upper authority under the
     ///    caller-held `DIR` (stage A, the EROFS gate, is the entry's
-    ///    admission), then `upper_parent()` resolves the promoted upper real
-    ///    parent directory.
+    ///    admission), then `upper_parent_path()` resolves the promoted upper
+    ///    real parent `Path`.
     /// 4. **Pure-upper target** (upper-backed with no lower fallback and no
-    ///    opaque barrier): direct `upper_parent.unlink(name)`/`rmdir(name)`
-    ///    (no whiteout); publication inline: `BindingCache::invalidate` +
+    ///    opaque barrier): direct `upper_parent_path.rmdir(name)`/
+    ///    `unlink(name)` through the base VFS `Path` layer (no whiteout);
+    ///    publication inline: `BindingCache::invalidate` +
     ///    `readdir_index_remove` (both steps infallible, so no reconcile arm
     ///    is reachable on this path). When the fresh projection asserted an
     ///    upper object at `name` and the physical upper unlink/rmdir reports
@@ -107,7 +108,7 @@ impl OverlayInode {
     ///    `ovl_remove_and_whiteout`); every other upper error propagates
     ///    unchanged.
     /// 5. **Upper-over-lower / lower-only / opaque-over-lower target:**
-    ///    publication of a whiteout at `(upper_parent, name)` via the
+    ///    publication of a whiteout at `(upper_parent_path, name)` via the
     ///    sibling `publish_whiteout` helper (`Replace` over a present
     ///    non-dir upper object, `Exchange` + workdir cleanup of the
     ///    displaced dir for a present upper directory, `link` for an absent
@@ -209,9 +210,9 @@ impl OverlayInode {
 
         // Step 3/4 — stage B admission (promotes the parent under the held
         // `DIR`; stage A is the entry's admission) and the promoted upper
-        // real parent (the physical-operation target).
+        // real parent `Path` (the physical-operation target).
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let upper_parent = self.upper_parent()?;
+        let upper_parent_path = self.upper_parent_path()?;
 
         if is_pure_upper {
             // Branch A (Objective 2): a pure-upper rmdir may still face
@@ -226,18 +227,19 @@ impl OverlayInode {
                         "the pure-upper rmdir target has no upper real directory",
                     )
                 })?;
-                whiteout::cleanup_upper_whiteouts(target_upper_dir.real_inode())?;
+                whiteout::cleanup_upper_whiteouts(target_upper_dir.real_path()?)?;
             }
             // Step 3 — pure-upper direct removal, no whiteout: the name is
-            // genuinely gone from the upper namespace. A physical-upper
-            // `ENOENT` means the asserted upper object became stale behind
-            // the overlay and maps to `ESTALE`; every other upper error
-            // propagates as-is. Both publication seams are infallible, so no
-            // reconcile arm is structurally reachable here.
+            // genuinely gone from the upper namespace, removed through the
+            // base VFS `Path` layer. A physical-upper `ENOENT` means the
+            // asserted upper object became stale behind the overlay and maps
+            // to `ESTALE`; every other upper error propagates as-is. Both
+            // publication seams are infallible, so no reconcile arm is
+            // structurally reachable here.
             let result = if kind == RemoveKind::Rmdir {
-                upper_parent.rmdir(name)
+                upper_parent_path.rmdir(name)
             } else {
-                upper_parent.unlink(name)
+                upper_parent_path.unlink(name)
             };
             result.map_err(translate_stale_upper_enoent)?;
             fs.bindings().invalidate(&self.key(), name);
@@ -277,7 +279,7 @@ impl OverlayInode {
                         let mode = upper_obj.real_inode().mode()?;
                         Some(fs.create_workdir_temp(
                             name,
-                            &upper_parent,
+                            &upper_parent_path,
                             WorkdirTempRequest::Create {
                                 kind: InodeType::Dir,
                                 mode,
@@ -388,10 +390,15 @@ impl OverlayInode {
                     // namespace has changed (reconcile applies on any later
                     // failure). The workdir staging workspace resolves
                     // through the single shared resolver
-                    // (`OverlayInode::workdir_root`).
-                    let workdir = self.workdir_root()?;
-                    workdir
-                        .rename(temp.name(), &upper_parent, name, RenameMode::Exchange)
+                    // (`OverlayInode::workdir_root_path`).
+                    let workdir_path = self.workdir_root_path()?;
+                    workdir_path
+                        .rename(
+                            temp.name(),
+                            &upper_parent_path,
+                            name,
+                            RenameMode::Exchange,
+                        )
                         .map_err(translate_stale_upper_enoent)?;
                     marker.commit();
                     // Clean the displaced old upper dir in the workdir: every
@@ -401,20 +408,43 @@ impl OverlayInode {
                     // failure is a known workdir-cleanup debt and never
                     // becomes a visible namespace entry — the whiteout
                     // publish below proceeds with the opaque temp at `name`.
-                    if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&old_upper_dir) {
-                        warn!(
-                            "overlay clear-empty: the displaced-directory whiteout cleanup \
-                             failed (residue, never a visible source): {:?}",
-                            cleanup_err
-                        );
-                    }
-                    if let Err(cleanup_err) = workdir.rmdir(temp.name()) {
-                        warn!(
-                            "overlay clear-empty: workdir cleanup of the displaced \
-                                     directory {:?} failed (residue, never a visible source): {:?}",
-                            temp.name(),
-                            cleanup_err
-                        );
+                    // The displaced directory now lives in the workdir under
+                    // the temp name; its dentry-anchored path is re-observed
+                    // through the workdir dentry layer so the sweep and the
+                    // rmdir route through the base VFS view.
+                    match workdir_path.dentry().as_dir_dentry_or_err()?.lookup_child(temp.name()) {
+                        Ok(displaced_dentry) => {
+                            let displaced_path = Path::new(
+                                workdir_path.mount_node().clone(),
+                                displaced_dentry,
+                            );
+                            if let Err(cleanup_err) =
+                                whiteout::cleanup_upper_whiteouts(&displaced_path)
+                            {
+                                warn!(
+                                    "overlay clear-empty: the displaced-directory whiteout \
+                                     cleanup failed (residue, never a visible source): {:?}",
+                                    cleanup_err
+                                );
+                            }
+                            if let Err(cleanup_err) = workdir_path.rmdir(temp.name()) {
+                                warn!(
+                                    "overlay clear-empty: workdir cleanup of the displaced \
+                                     directory {:?} failed (residue, never a visible source): \
+                                     {:?}",
+                                    temp.name(),
+                                    cleanup_err
+                                );
+                            }
+                        }
+                        Err(reobserve_err) => {
+                            warn!(
+                                "overlay clear-empty: re-observation of the displaced \
+                                 directory {:?} failed (residue, never a visible source): {:?}",
+                                temp.name(),
+                                reobserve_err
+                            );
+                        }
                     }
                 }
                 // The whiteout publish (sibling `dir/whiteout.rs`): a present
@@ -424,7 +454,7 @@ impl OverlayInode {
                 // an absent upper name gets a whiteout linked in (`link`).
                 // Marker bytes are written by the sibling owner; no `WL`
                 // payload is touched here.
-                fs.publish_whiteout(&upper_parent, name, replace_target)
+                fs.publish_whiteout(&upper_parent_path, name, replace_target)
                     .map_err(|err| {
                         if replace_target.is_some() {
                             translate_stale_upper_enoent(err)
@@ -440,7 +470,11 @@ impl OverlayInode {
                 // name (the `readdir_index_remove` decision seam). The
                 // re-observation is fallible: on failure the whiteout is
                 // already published — reconcile.
-                let whiteout_inode = upper_parent.lookup(name)?;
+                let whiteout_path = Path::new(
+                    upper_parent_path.mount_node().clone(),
+                    upper_parent_path.dentry().as_dir_dentry_or_err()?.lookup_child(name)?,
+                );
+                let whiteout_inode = whiteout_path.inode().clone();
                 let evidence = HiddenEvidence::new(0, whiteout_inode);
                 fs.bindings().insert(
                     BindingKey::new(self.key(), String::from(name)),

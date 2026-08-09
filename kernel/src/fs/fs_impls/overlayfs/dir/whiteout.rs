@@ -61,7 +61,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
-            path::is_dot_or_dotdot,
+            path::{is_dot_or_dotdot, Path},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -173,11 +173,14 @@ impl WhiteoutCache {
 /// One cached or mutation-local workdir whiteout (the `WL` cached-item shape).
 ///
 /// `inode` is the whiteout object — a char `0:0` device or a zero-size
-/// regular file carrying the `trusted.overlay.whiteout` marker — and
-/// `workdir_name` is its name in the workdir, needed for rename-over
-/// publishes. Invariants: `workdir_name` is non-empty and unique (generated
-/// via `generate_workdir_temp_name`); the handle never outlives its use in
-/// one mutation unless re-cached.
+/// regular file carrying the `trusted.overlay.whiteout` marker (inode
+/// identity equal to `path.inode()`), `workdir_name` is its name in the
+/// workdir (needed for rename-over publishes), and `path` is its
+/// dentry-anchored workdir temp `Path` (the `Path::link`/`Path::rename`
+/// publish arms route through the base VFS dentry layer so the base view
+/// observes the published whiteout). Invariants: `workdir_name` is non-empty
+/// and unique (generated via `generate_workdir_temp_name`); the handle never
+/// outlives its use in one mutation unless re-cached.
 ///
 /// Owned by `WhiteoutCache::cached` or a mutation-local; the strong inode pin
 /// keeps the workdir object alive. Only the sibling recipes in `dir` name
@@ -186,9 +189,17 @@ impl WhiteoutCache {
 pub(super) struct WhiteoutHandle {
     /// The whiteout object (char `0:0` device or zero-size file + whiteout
     /// xattr); a strong pin keeps the workdir object alive.
+    #[expect(
+        dead_code,
+        reason = "retained frozen pin: the strong inode pin keeps the workdir object alive \
+                  while the dentry-anchored `path` routes the publish arms"
+    )]
     inode: Arc<dyn Inode>,
     /// Its name in the workdir; needed for rename-over publishes.
     workdir_name: String,
+    /// The dentry-anchored workdir temp path of the whiteout; the
+    /// `Path::link`/`Path::rename` publish arms route through it.
+    path: Path,
 }
 
 /// The closed set of physical whiteout forms.
@@ -233,8 +244,8 @@ impl OverlayFs {
     /// snapshot means the mount has no writable claim (the snapshot is probed
     /// at mount time for writable mounts only), so the defensive arm is
     /// `EROFS` — the same writable-state error the admission gate and the
-    /// `workdir_root` resolver use; both arms are unreachable for a published
-    /// writable overlay.
+    /// `workdir_root_path` resolver use; both arms are unreachable for a
+    /// published writable overlay.
     fn whiteout_representation(&self) -> Result<WhiteoutRepresentation> {
         let capabilities = self.policy().upper_capabilities().ok_or_else(|| {
             Error::with_message(
@@ -273,15 +284,15 @@ impl OverlayFs {
     fn create_whiteout_temp(&self) -> Result<WhiteoutHandle> {
         let representation = self.whiteout_representation()?;
         // The workdir staging workspace resolves through the single shared
-        // resolver (`OverlayFs::workdir_root`).
-        let workdir = self.workdir_root()?;
+        // resolver (`OverlayFs::workdir_root_path`).
+        let workdir_path = self.workdir_root_path()?;
         match representation {
             WhiteoutRepresentation::CharDevice => {
                 let node = MknodType::CharDevice(0);
-                let (workdir_name, inode) = self
+                let (workdir_name, path) = self
                     .create_workdir_temp(
                         WHITEOUT_TEMP_NAME_COMPONENT,
-                        &workdir,
+                        &workdir_path,
                         WorkdirTempRequest::Mknod {
                             mode: InodeMode::empty(),
                             node: &node,
@@ -289,8 +300,9 @@ impl OverlayFs {
                     )?
                     .into_parts();
                 Ok(WhiteoutHandle {
-                    inode,
+                    inode: path.inode().clone(),
                     workdir_name,
+                    path,
                 })
             }
             WhiteoutRepresentation::Xattr => {
@@ -305,7 +317,7 @@ impl OverlayFs {
                 );
                 let temp = self.create_workdir_temp(
                     WHITEOUT_TEMP_NAME_COMPONENT,
-                    &workdir,
+                    &workdir_path,
                     WorkdirTempRequest::Create {
                         kind: InodeType::File,
                         mode: InodeMode::empty(),
@@ -329,33 +341,36 @@ impl OverlayFs {
                     let _ = self.cleanup_workdir_temp(temp.name());
                     return Err(err);
                 }
-                let (workdir_name, inode) = temp.into_parts();
+                let (workdir_name, path) = temp.into_parts();
                 Ok(WhiteoutHandle {
-                    inode,
+                    inode: path.inode().clone(),
                     workdir_name,
+                    path,
                 })
             }
         }
     }
 
-    /// Publishes a whiteout at `(upper_parent, name)`.
+    /// Publishes a whiteout at `(upper_parent_path, name)`.
     ///
     /// Obtains a whiteout (`WL` pop of the cached handle, or a fresh
     /// [`OverlayFs::create_whiteout_temp`] outside `WL`), then publishes at
-    /// `(upper_parent, name)` per `replace_target`:
+    /// `(upper_parent_path, name)` per `replace_target`:
     ///
-    /// - `None` (target absent) → `upper_parent.link(&whiteout.inode, name)`
-    ///   keeps the workdir original, which is re-stored under `WL` (bounded
-    ///   to 1). `EMLINK`/`EOPNOTSUPP` on the link path → `disable_sharing`
-    ///   under `WL` and a retry with move semantics (rename-over; Linux
+    /// - `None` (target absent) →
+    ///   `upper_parent_path.link(&handle.path, name)` keeps the workdir
+    ///   original, which is re-stored under `WL` (bounded to 1).
+    ///   `EMLINK`/`EOPNOTSUPP` on the link path → `disable_sharing` under
+    ///   `WL` and a retry with move semantics (rename-over; Linux
     ///   `no_shared_whiteout`, `dir.c:77-119`). When sharing is already
     ///   disabled the publish starts directly with the rename-over.
-    /// - `Some(non-dir)` (target present) → `workdir.rename(temp_name,
-    ///   upper_parent, name, Replace)`; the whiteout is consumed, no re-cache.
+    /// - `Some(non-dir)` (target present) →
+    ///   `workdir_path.rename(temp_name, upper_parent_path, name, Replace)`;
+    ///   the whiteout is consumed, no re-cache.
     /// - `Some(Dir)` (target present) →
-    ///   `workdir.rename(temp_name, upper_parent, name, Exchange)` — the
-    ///   displaced directory lands in the workdir at the temp name — then
-    ///   best-effort workdir `rmdir` cleanup of the displaced dir
+    ///   `workdir_path.rename(temp_name, upper_parent_path, name, Exchange)`
+    ///   — the displaced directory lands in the workdir at the temp name —
+    ///   then best-effort workdir `rmdir` cleanup of the displaced dir
     ///   (clear-empty/rmdir paths); a cleanup failure is a known
     ///   workdir-cleanup debt and never a visible namespace entry (the
     ///   whiteout is already published, so the semantic publish succeeded).
@@ -364,11 +379,13 @@ impl OverlayFs {
     /// `create_whiteout_temp` (the `Xattr` form), which `publish_whiteout`
     /// invokes for a fresh temp; a cached whiteout carries the marker from
     /// its creation, so every published object carries it before the link/
-    /// rename. Runs in the sleep-capable `DIR` domain of the caller; `WL` is
-    /// held only for the short slot operations.
+    /// rename. All physical operations route through the base VFS `Path`
+    /// layer, so the base view observes the published whiteout. Runs in the
+    /// sleep-capable `DIR` domain of the caller; `WL` is held only for the
+    /// short slot operations.
     pub(super) fn publish_whiteout(
         &self,
-        upper_parent: &Arc<dyn Inode>,
+        upper_parent_path: &Path,
         name: &str,
         replace_target: Option<InodeType>,
     ) -> Result<()> {
@@ -390,24 +407,25 @@ impl OverlayFs {
             None => self.create_whiteout_temp()?,
         };
 
-        // Step 3 — publish at `(upper_parent, name)`. The workdir staging
-        // workspace is the physical rename source; a missing writable claim
-        // is the EROFS gate (the admission already passed for a live
-        // mutation, so this is the defensive arm) — resolved through the
-        // single shared resolver (`OverlayFs::workdir_root`).
-        let workdir = self.workdir_root()?;
+        // Step 3 — publish at `(upper_parent_path, name)`. The workdir
+        // staging workspace is the physical rename source; a missing
+        // writable claim is the EROFS gate (the admission already passed for
+        // a live mutation, so this is the defensive arm) — resolved through
+        // the single shared resolver (`OverlayFs::workdir_root_path`).
+        let workdir_path = self.workdir_root_path()?;
         // T2 (Objective 1): publishing a whiteout inside the parent makes it
         // impure — persist the marker before the physical publish (strict,
         // pre-physical-publish; read-first idempotence makes the
-        // T1-covered call chains a no-op).
-        self.xattr_policy().set_impure_marker(upper_parent)?;
+        // T1-covered call chains a no-op). The marker write is a raw-inode
+        // xattr op (allowed class) on the resolved upper parent inode.
+        self.xattr_policy().set_impure_marker(upper_parent_path.inode())?;
         match replace_target {
             // Target absent: the link path keeps the workdir original for
             // reuse (share); a link that fails the share contract degrades to
             // move semantics.
             None => {
                 if can_share_by_link {
-                    match upper_parent.link(&handle.inode, name) {
+                    match upper_parent_path.link(&handle.path, name) {
                         Ok(()) => {
                             // Re-store the workdir original under `WL`
                             // (bounded to 1); the link succeeded, so the
@@ -423,9 +441,9 @@ impl OverlayFs {
                         Err(err) => return Err(err),
                     }
                 }
-                workdir.rename(
+                workdir_path.rename(
                     &handle.workdir_name,
-                    upper_parent,
+                    upper_parent_path,
                     name,
                     RenameMode::Replace,
                 )?;
@@ -434,9 +452,9 @@ impl OverlayFs {
             // Target present (non-dir): rename the whiteout over it
             // (`Replace`); the whiteout is consumed, never re-cached.
             Some(target_type) if !target_type.is_directory() => {
-                workdir.rename(
+                workdir_path.rename(
                     &handle.workdir_name,
-                    upper_parent,
+                    upper_parent_path,
                     name,
                     RenameMode::Replace,
                 )?;
@@ -447,13 +465,13 @@ impl OverlayFs {
             // dir is then cleaned up best-effort (clear-empty/rmdir paths).
             // The whiteout is consumed, never re-cached.
             Some(_) => {
-                workdir.rename(
+                workdir_path.rename(
                     &handle.workdir_name,
-                    upper_parent,
+                    upper_parent_path,
                     name,
                     RenameMode::Exchange,
                 )?;
-                if let Err(cleanup_err) = workdir.rmdir(&handle.workdir_name) {
+                if let Err(cleanup_err) = workdir_path.rmdir(&handle.workdir_name) {
                     warn!(
                         "overlay whiteout publish: workdir cleanup of the displaced directory \
                          {:?} failed (residue, never a visible source): {:?}",
@@ -468,32 +486,39 @@ impl OverlayFs {
 
 /// Sweeps the physical whiteout residue out of an upper directory.
 ///
-/// Enumerates the real upper directory, filters `.`/`..`, and unlinks every
-/// physical child that is a whiteout (char device `0:0` or
-/// `trusted.overlay.whiteout` marker, via the shared
-/// [`is_whiteout_inode`] predicate). A physical child that is NOT a whiteout
-/// refuses the sweep with `ENOTEMPTY` (Linux `ovl_check_empty_dir` parity —
-/// unknown state is never deleted); underlying lookup/readdir/unlink errors
-/// propagate unchanged. The sweep never recurses into directories: with the
-/// caller's visible-emptiness gate holding, every deleted physical child is a
+/// Enumerates the real upper directory through a raw inode `readdir` (the
+/// allowed read class), filters `.`/`..`, and unlinks every physical child
+/// that is a whiteout (char device `0:0` or `trusted.overlay.whiteout`
+/// marker, via the shared [`is_whiteout_inode`] predicate) through the base
+/// VFS `Path` layer: each child is re-observed with
+/// `upper_dir_path.dentry().lookup_child` and removed with
+/// `upper_dir_path.unlink`, so the base view's `DentryChildren` stays
+/// coherent. A physical child that is NOT a whiteout refuses the sweep with
+/// `ENOTEMPTY` (Linux `ovl_check_empty_dir` parity — unknown state is never
+/// deleted); underlying lookup/readdir/unlink errors propagate unchanged. The
+/// sweep never recurses into directories: with the caller's
+/// visible-emptiness gate holding, every deleted physical child is a
 /// whiteout, so the bound is one physical pass.
 ///
 /// The caller holds the affected parent `DIR` transaction guard(s); the sweep
 /// runs strictly before the physical rmdir/rename (pre-commit), so a failure
 /// aborts the removal and a retry converges.
-pub(super) fn cleanup_upper_whiteouts(upper_dir: &Arc<dyn Inode>) -> Result<()> {
+pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
     let mut names = Vec::new();
-    upper_dir.readdir_at(0, &mut names)?;
+    upper_dir_path.inode().readdir_at(0, &mut names)?;
     names.retain(|name| !is_dot_or_dotdot(name));
     for name in names {
-        let child = upper_dir.lookup(&name)?;
-        if !is_whiteout_inode(&child)? {
+        let child_path = Path::new(
+            upper_dir_path.mount_node().clone(),
+            upper_dir_path.dentry().as_dir_dentry_or_err()?.lookup_child(&name)?,
+        );
+        if !is_whiteout_inode(child_path.inode())? {
             return Err(Error::with_message(
                 Errno::ENOTEMPTY,
                 "a hidden non-whiteout entry prevents the overlay directory removal",
             ));
         }
-        upper_dir.unlink(&name)?;
+        upper_dir_path.unlink(&name)?;
     }
     Ok(())
 }

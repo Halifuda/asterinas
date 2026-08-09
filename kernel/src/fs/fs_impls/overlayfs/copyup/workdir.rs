@@ -23,12 +23,12 @@
 //! no Overlay lock is acquired or held by any method here, and the underlying
 //! upper-filesystem calls run against that filesystem's own locking (proven
 //! non-re-entrant into Overlay). The EROFS gate precedes every workdir/upper
-//! side effect: the private [`OverlayFs::workdir_root`] resolver returns
-//! `Err(Errno::EROFS)` when no writable claim exists or the staging workspace
-//! was never prepared.
+//! side effect: the private [`OverlayFs::workdir_root_path`] resolver
+//! returns `Err(Errno::EROFS)` when no writable claim exists or the staging
+//! workspace was never prepared.
 //!
-//! [`OverlayFs::workdir_root`] remains the single workdir staging-workspace
-//! resolver of the overlayfs tree.
+//! [`OverlayFs::workdir_root_path`] is the dentry-anchored workdir
+//! staging-workspace resolver of the overlayfs tree.
 
 use alloc::format;
 
@@ -37,7 +37,10 @@ use crate::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::mount::OverlayFs,
         utils::NAME_MAX,
-        vfs::inode::{Inode, MknodType},
+        vfs::{
+            inode::{Inode, MknodType},
+            path::Path,
+        },
     },
     prelude::*,
 };
@@ -53,14 +56,14 @@ pub(in crate::fs::fs_impls::overlayfs) enum WorkdirTempRequest<'a> {
         node: &'a MknodType,
     },
     Link {
-        source: Arc<dyn Inode>,
+        source: Path,
     },
 }
 
 /// A successful private workdir-temp creation.
 pub(in crate::fs::fs_impls::overlayfs) struct WorkdirTemp {
     name: String,
-    inode: Arc<dyn Inode>,
+    path: Path,
 }
 
 const MAX_WORKDIR_TEMP_CREATE_ATTEMPTS: usize = 8;
@@ -70,30 +73,42 @@ impl WorkdirTemp {
         &self.name
     }
 
+    /// Returns the real inode of the staged workdir temp.
+    ///
+    /// Derived from the dentry-anchored [`Path`], so the inode and the path
+    /// always refer to the same workdir object.
     pub(in crate::fs::fs_impls::overlayfs) fn inode(&self) -> &Arc<dyn Inode> {
-        &self.inode
+        self.path.inode()
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn into_parts(self) -> (String, Arc<dyn Inode>) {
-        (self.name, self.inode)
+    /// Consumes the handle into its `(name, path)` parts.
+    ///
+    /// The dentry-anchored path remains valid after the workdir-to-upper
+    /// rename (the same dentry is renamed), so it doubles as the published
+    /// upper object's path.
+    pub(in crate::fs::fs_impls::overlayfs) fn into_parts(self) -> (String, Path) {
+        (self.name, self.path)
     }
 }
 
 impl WorkdirTempRequest<'_> {
-    fn create_in(&self, workdir: &Arc<dyn Inode>, temp_name: &str) -> Result<Arc<dyn Inode>> {
+    fn create_in(&self, workdir_path: &Path, temp_name: &str) -> Result<Path> {
         match self {
-            Self::Create { kind, mode } => workdir.create(temp_name, *kind, *mode),
+            Self::Create { kind, mode } => workdir_path.new_fs_child(temp_name, *kind, *mode),
             Self::Mknod { mode, node } => {
                 let node = match node {
                     MknodType::NamedPipe => MknodType::NamedPipe,
                     MknodType::CharDevice(device_id) => MknodType::CharDevice(*device_id),
                     MknodType::BlockDevice(device_id) => MknodType::BlockDevice(*device_id),
                 };
-                workdir.mknod(temp_name, *mode, node)
+                workdir_path.mknod(temp_name, *mode, node)
             }
             Self::Link { source } => {
-                workdir.link(source, temp_name)?;
-                Ok(source.clone())
+                workdir_path.link(source, temp_name)?;
+                Ok(Path::new(
+                    workdir_path.mount_node().clone(),
+                    workdir_path.dentry().as_dir_dentry_or_err()?.lookup_child(temp_name)?,
+                ))
             }
         }
     }
@@ -112,9 +127,9 @@ impl OverlayFs {
     pub(in crate::fs::fs_impls::overlayfs) fn generate_workdir_temp_name(
         &self,
         target_name: &str,
-        upper_parent: &Arc<dyn Inode>,
+        upper_parent: &Path,
     ) -> String {
-        let parent_ino = upper_parent.ino();
+        let parent_ino = upper_parent.inode().ino();
         let serial = self.workdir_temp_serial();
         const TEMP_NAME_SEPARATORS: usize = 3;
         const U64_DEC_DIGITS_MAX: usize = 20;
@@ -133,16 +148,16 @@ impl OverlayFs {
     pub(in crate::fs::fs_impls::overlayfs) fn create_workdir_temp(
         &self,
         target_name: &str,
-        upper_parent: &Arc<dyn Inode>,
+        upper_parent_path: &Path,
         request: WorkdirTempRequest<'_>,
     ) -> Result<WorkdirTemp> {
-        let workdir = self.workdir_root()?;
+        let workdir_path = self.workdir_root_path()?;
         let mut final_eexist = None;
 
         for _ in 0..MAX_WORKDIR_TEMP_CREATE_ATTEMPTS {
-            let name = self.generate_workdir_temp_name(target_name, upper_parent);
-            match request.create_in(&workdir, &name) {
-                Ok(inode) => return Ok(WorkdirTemp { name, inode }),
+            let name = self.generate_workdir_temp_name(target_name, upper_parent_path);
+            match request.create_in(&workdir_path, &name) {
+                Ok(path) => return Ok(WorkdirTemp { name, path }),
                 Err(err) if err.error() == Errno::EEXIST => final_eexist = Some(err),
                 Err(err) => return Err(err),
             }
@@ -163,28 +178,28 @@ impl OverlayFs {
         &self,
         temp_name: &str,
     ) -> Result<()> {
-        self.workdir_root()?.unlink(temp_name)
+        self.workdir_root_path()?.unlink(temp_name)
     }
 
-    /// Resolves the pinned workdir staging workspace inode of this writable
+    /// Resolves the pinned workdir staging workspace path of this writable
     /// mount.
     ///
-    /// The single workdir staging-workspace resolver of the overlayfs tree:
-    /// every workdir staging consumer — the three helpers in this file,
-    /// `OverlayInode::workdir_root` (`copyup/promote.rs`), the `dir/`
-    /// recipes, and the two `dir/whiteout.rs` sites — funnels through this
-    /// one entry, so the claim-resolution shape and the EROFS error text exist
-    /// exactly once. The workspace inode is pinned on the claim by
+    /// The dentry-anchored workdir staging-workspace resolver of the
+    /// overlayfs tree: every dentry-routed workdir consumer — the temp
+    /// lifecycle helpers in this file and `OverlayInode::workdir_root_path`
+    /// (`copyup/promote.rs`) — funnels through this one entry, so the
+    /// claim-resolution shape and the EROFS error text exist exactly once.
+    /// The workspace path is pinned on the claim by
     /// `UpperWorkdirClaim::prepare_workdir` during mount construction (Linux
     /// `ofs->workdir` dentry-ref parity: staging never re-resolves the `work`
     /// name); the claim is reachable via `claims()`. A missing claim or an
     /// unprepared workspace means the mount is effectively read-only (or the
     /// claims were released), so the EROFS gate fires here — before any
     /// workdir/upper side effect.
-    pub(in crate::fs::fs_impls::overlayfs) fn workdir_root(&self) -> Result<Arc<dyn Inode>> {
+    pub(in crate::fs::fs_impls::overlayfs) fn workdir_root_path(&self) -> Result<Path> {
         let claim = self.claims().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")
         })?;
-        Ok(claim.workdir_workspace()?.clone())
+        Ok(claim.workdir_workspace_path()?.clone())
     }
 }

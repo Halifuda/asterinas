@@ -19,9 +19,10 @@
 //! across an underlying call) and the `CUL` domain entered inside the real
 //! stage of `check_permission(AccessType::Mutating, ...)` (promotes the
 //! parent under the caller-held `DIR`). Upper/workdir physical operations run
-//! in the sleep-capable `DIR` domain under the underlying filesystem's own
-//! locking; no `WL`/spin domain is entered and no `WL` payload is touched
-//! (the whiteout cache is the sibling `dir/whiteout.rs` owner).
+//! through the base VFS `Path` layer in the sleep-capable `DIR` domain under
+//! the underlying filesystem's own locking; no `WL`/spin domain is entered
+//! and no `WL` payload is touched (the whiteout cache is the sibling
+//! `dir/whiteout.rs` owner).
 //!
 //! The two recipe methods are private to this module (their only caller is
 //! `create_object` in
@@ -102,10 +103,13 @@ impl OverlayInode {
     /// Runs the real admission stage (`check_permission(AccessType::Mutating,
     /// MAY_WRITE)`) — which promotes this parent to upper authority under the
     /// caller-held `DIR` — then performs the upper `create`/`mknod` directly
-    /// (no workdir) and publishes the result inline. A plain-absent or
-    /// opaque-hidden target never creates opaque. The publication steps are
-    /// infallible, so no reconcile arm is structurally reachable in this
-    /// recipe; the post-physical failure reconcile lives in
+    /// through the base VFS `Path` layer (no workdir) and publishes the
+    /// result inline. The returned dentry-anchored `Path` feeds
+    /// [`RealObject::with_path`], so the published object carries the
+    /// base-view coherence carrier. A plain-absent or opaque-hidden target
+    /// never creates opaque. The publication steps are infallible, so no
+    /// reconcile arm is structurally reachable in this recipe; the
+    /// post-physical failure reconcile lives in
     /// [`OverlayInode::create_over_whiteout`] (the one create-family recipe
     /// with a fallible step after the upper commit).
     fn create_upper_only(
@@ -120,17 +124,19 @@ impl OverlayInode {
         // EROFS check is duplicated here.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
-        let upper_parent = self.upper_parent()?;
+        let upper_parent_path = self.upper_parent_path()?;
         // The overlay-visible object kind of the request (used by the index
         // seam below). Shared mechanical mapping (the `MknodType` ->
         // `InodeType` classification is the single `mknod_object_type` helper
         // in `dir/mod.rs`, consumed by all three sites); the `None` leg keeps
         // the plain `create` object type.
         let object_type = mknod_type.as_ref().map(mknod_object_type).unwrap_or(type_);
-        // Upper physical operation: direct create/mknod in the upper parent.
-        let new_upper = match mknod_type {
-            Some(mknod) => upper_parent.mknod(name, mode, mknod)?,
-            None => upper_parent.create(name, type_, mode)?,
+        // Upper physical operation: direct create/mknod in the upper parent
+        // through the base VFS `Path` layer; the returned `Path` is the
+        // dentry-anchored published upper object.
+        let new_upper_path = match mknod_type {
+            Some(mknod) => upper_parent_path.mknod(name, mode, mknod)?,
+            None => upper_parent_path.new_fs_child(name, type_, mode)?,
         };
         // Semantic publication — inline seam composition: the new upper
         // object's facts, the projected OverlayInode, the positive binding,
@@ -140,9 +146,9 @@ impl OverlayInode {
         })?;
         let new_facts = OverlayObjectFacts::try_new(
             PositiveKind::Single,
-            Some(RealObject::new(
+            Some(RealObject::with_path(
                 0,
-                new_upper,
+                new_upper_path,
                 upper_layer.fsid,
                 upper_layer.container_dev_id,
             )),
@@ -200,7 +206,7 @@ impl OverlayInode {
         // admission).
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
-        let upper_parent = self.upper_parent()?;
+        let upper_parent_path = self.upper_parent_path()?;
         // Shared mechanical kind mapping (consumed by the opaque branch and
         // the index seam). Computed before `mknod_type` is consumed by the
         // temp creation below.
@@ -211,17 +217,17 @@ impl OverlayInode {
         let temp = match &mknod_type {
             Some(node) => fs.create_workdir_temp(
                 name,
-                &upper_parent,
+                &upper_parent_path,
                 WorkdirTempRequest::Mknod { mode, node },
             )?,
             None => fs.create_workdir_temp(
                 name,
-                &upper_parent,
+                &upper_parent_path,
                 WorkdirTempRequest::Create { kind: type_, mode },
             )?,
         };
         let (temp_name, temp) = temp.into_parts();
-        let workdir = self.workdir_root()?;
+        let workdir_path = self.workdir_root_path()?;
         // The shared recipe scaffold: the commit marker is flipped at the
         // physical upper commit point and the reconcile / pre-publication
         // cleanup classification is owned by `run_recipe`.
@@ -265,15 +271,25 @@ impl OverlayInode {
                 // for dirs `Exchange` (the displaced whiteout lands in the
                 // workdir) then the workdir unlink removes it.
                 if object_type.is_directory() {
-                    workdir.rename(&temp_name, &upper_parent, name, RenameMode::Exchange)?;
+                    workdir_path.rename(
+                        &temp_name,
+                        &upper_parent_path,
+                        name,
+                        RenameMode::Exchange,
+                    )?;
                     marker.commit();
-                    workdir.unlink(&temp_name)?;
+                    workdir_path.unlink(&temp_name)?;
                 } else {
-                    workdir.rename(&temp_name, &upper_parent, name, RenameMode::Replace)?;
+                    workdir_path.rename(
+                        &temp_name,
+                        &upper_parent_path,
+                        name,
+                        RenameMode::Replace,
+                    )?;
                     marker.commit();
                 }
                 // Semantic publication — inline seam composition. The temp
-                // handle is the object now published at `(upper_parent,
+                // handle is the object now published at `(upper_parent_path,
                 // name)` (inode identity is stable across the rename), so it
                 // is the new upper real object.
                 let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {
@@ -281,7 +297,7 @@ impl OverlayInode {
                 })?;
                 let new_facts = OverlayObjectFacts::try_new(
                     PositiveKind::Single,
-                    Some(RealObject::new(
+                    Some(RealObject::with_path(
                         0,
                         temp,
                         upper_layer.fsid,

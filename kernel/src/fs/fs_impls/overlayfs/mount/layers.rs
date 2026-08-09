@@ -63,11 +63,18 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayerStack {
 
 /// One pinned real layer root of an overlay mount.
 ///
-/// The pins keep the underlying layer roots alive for the mount lifetime.
+/// The pins keep the underlying layer roots alive for the mount lifetime:
+/// the dentry-anchored `Path` anchor and the resolved root inode are both
+/// captured at mount and never re-resolved by string afterwards.
 /// `container_dev_id` carries the `st_dev` same-filesystem evidence used by
 /// the upper/workdir validation.
 #[derive(Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayer {
+    /// Dentry-anchored layer-root `Path` anchor resolved at mount (Linux
+    /// `ovl_path_upper`/`ovl_dentry_upper` dentry-ref parity: the layer stack
+    /// pins the base mount and root dentry for the mount lifetime, and every
+    /// derived real-object path stays rooted on this anchor).
+    pub(in crate::fs::fs_impls::overlayfs) root_path: Path,
     /// Pinned real layer root (lifetime pin).
     pub(in crate::fs::fs_impls::overlayfs) root_inode: Arc<dyn Inode>,
     /// Underlying filesystem identity of the layer root.
@@ -84,15 +91,18 @@ impl OverlayLayer {
     /// The path is resolved with `lookup_no_follow` in the mounting task's
     /// filesystem context, so a missing path surfaces the resolver's `ENOENT`
     /// and a non-directory root fails with `ENOTDIR`. The resolved inode and
-    /// its filesystem are pinned for the mount lifetime. `fsid` is a
-    /// placeholder here; [`OverlayLayerStack::assemble`] assigns the real
-    /// per-unique-underlying-superblock identifier afterwards.
+    /// its filesystem are pinned for the mount lifetime; the resolved `Path`
+    /// itself is stored as the layer-root anchor (`root_path`) so sibling
+    /// modules derive every real-object path from the mount-time dentry layer.
+    /// `fsid` is a placeholder here; [`OverlayLayerStack::assemble`] assigns
+    /// the real per-unique-underlying-superblock identifier afterwards.
     pub(super) fn resolve(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Self> {
         let path = resolve_root_path(fs_creation_ctx, raw_path)?;
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
         Ok(Self {
+            root_path: path.clone(),
             root_inode: path.inode().clone(),
             fs: path.fs(),
             fsid: 0,

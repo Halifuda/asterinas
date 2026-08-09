@@ -183,8 +183,11 @@ impl OverlayInode {
     /// `Arc::new_cyclic` closure cannot upgrade its `&Weak` — the strong count
     /// stays 0 until the closure returns), so the upgrade below is
     /// guaranteed. The root facts merge the upper root (writable mounts) with
-    /// all lower roots (topmost first); the root is always a directory, so
-    /// `dir_transaction_lock` is `Some`; `object_id` is projected by
+    /// all lower roots (topmost first); each root `RealObject` is built from
+    /// its layer's dentry-anchored `Path` anchor
+    /// ([`RealObject::with_path`]), so the root carriers pin the base-mount
+    /// dentry layer for the mount lifetime. The root is always a directory,
+    /// so `dir_transaction_lock` is `Some`; `object_id` is projected by
     /// `fs.identity()` from the visible-metadata source.
     pub(in crate::fs::fs_impls::overlayfs) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
         // Construction order: `OverlayFs::new` publishes the `Arc` first (via
@@ -200,21 +203,25 @@ impl OverlayInode {
             ),
         };
         let layer_stack = fs.layer_stack();
-        let upper = layer_stack.upper.as_ref().map(|layer| RealObject {
-            layer_index: 0,
-            real_inode: layer.root_inode.clone(),
-            fsid: layer.fsid,
-            container_dev_id: layer.container_dev_id,
+        let upper = layer_stack.upper.as_ref().map(|layer| {
+            RealObject::with_path(
+                0,
+                layer.root_path.clone(),
+                layer.fsid,
+                layer.container_dev_id,
+            )
         });
         let lowers: Vec<_> = layer_stack
             .lowers
             .iter()
             .enumerate()
-            .map(|(layer_index, layer)| RealObject {
-                layer_index: layer_index + 1,
-                real_inode: layer.root_inode.clone(),
-                fsid: layer.fsid,
-                container_dev_id: layer.container_dev_id,
+            .map(|(layer_index, layer)| {
+                RealObject::with_path(
+                    layer_index + 1,
+                    layer.root_path.clone(),
+                    layer.fsid,
+                    layer.container_dev_id,
+                )
             })
             .collect();
         // Merged-root classification: a writable root merges the upper with
