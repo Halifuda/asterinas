@@ -14,10 +14,10 @@
 //! shared private reconcile entry ([`OverlayInode::invalidate_stale_cache`]).
 //! The real control flow lives in the sibling files: `create.rs` (dispatcher
 //! + upper-only/over-whiteout/opaque branches), `remove.rs` (unlink/rmdir +
-//! visible emptiness + clear-empty), `link.rs` (source promotion +
-//! target-over-whiteout fragments), `rename.rs` (EXDEV gate + upper rename +
-//! dual-parent publication), and `whiteout.rs` (whiteout cache +
-//! representation).
+//!   visible emptiness + clear-empty), `link.rs` (source promotion +
+//!   target-over-whiteout fragments), `rename.rs` (EXDEV gate + upper rename +
+//!   dual-parent publication), and `whiteout.rs` (whiteout cache +
+//!   representation).
 //!
 //! Lock contract: every mutation entry establishes the affected parent `DIR`
 //! domain(s) first (via the two lock helpers below), then runs the mutating
@@ -171,7 +171,7 @@ impl OverlayInode {
         // metadata mirrors the Linux owner-or-write check; this gates
         // `link_source`'s copy-up, so an inaccessible source is refused with
         // `EPERM` and never forced to the upper layer.
-        let source_metadata = old_overlay.metadata();
+        let source_metadata = old_overlay.metadata()?;
         // The owner probe runs through the shared `current_fsuid()`
         // accessor: the kernel-context default — no task / no posix thread
         // means "not the owner" — is handled in one place (`permission.rs`),

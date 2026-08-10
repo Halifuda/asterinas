@@ -47,7 +47,7 @@ const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
     real_inode: &Arc<dyn Inode>,
 ) -> Result<bool> {
-    let metadata = real_inode.metadata();
+    let metadata = real_inode.metadata()?;
     // A classic whiteout is a character device with device number 0:0.
     // Backends report that device number either as
     // `Some(DeviceId::null())` or — when the device number is zero

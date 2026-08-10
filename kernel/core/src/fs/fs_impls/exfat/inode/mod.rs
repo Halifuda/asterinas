@@ -69,7 +69,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-    vm::page_cache::PageCache,
+    vm::page_cache::{PageCache, Vmo},
 };
 
 pub(super) struct ExfatInode {
@@ -78,7 +78,7 @@ pub(super) struct ExfatInode {
     fs: Weak<ExfatFs>,
     entry_set_location_hint: AtomicU64,
     page_backend: Arc<page_backend::ExfatFilePageBackend>,
-    page_cache: Once<Option<PageCache>>,
+    page_cache: Once<Option<Mutex<PageCache>>>,
     weak_self: Weak<ExfatInode>,
 }
 
@@ -299,8 +299,8 @@ impl Inode for ExfatInode {
         self.resize_impl(new_size)
     }
 
-    fn metadata(&self) -> Metadata {
-        self.inode_state_read_guard().metadata()
+    fn metadata(&self) -> Result<Metadata> {
+        Ok(self.inode_state_read_guard().metadata())
     }
 
     fn ino(&self) -> u64 {
@@ -359,12 +359,13 @@ impl Inode for ExfatInode {
         self.set_ctime_impl(time);
     }
 
-    fn page_cache(&self) -> Option<PageCache> {
+    fn page_cache(&self) -> Option<Arc<Vmo>> {
         let metadata = self.inode_state_read_guard().metadata();
         if metadata.type_ != InodeType::File {
             return None;
         }
-        self.page_cache_handle(metadata).cloned()
+        self.page_cache_handle(metadata)
+            .map(|page_cache| page_cache.lock().as_vmo().clone())
     }
 
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {

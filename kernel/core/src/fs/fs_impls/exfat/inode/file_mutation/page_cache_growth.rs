@@ -19,10 +19,11 @@
 
 use core::ops::Range;
 
-use ostd::mm::io::util::HasVmReaderWriter;
-
 use super::super::ExfatInode;
-use crate::{prelude::*, vm::page_cache::PageCache};
+use crate::{
+    prelude::*,
+    vm::page_cache::{PageCache, VmoMapMode},
+};
 
 impl ExfatInode {
     pub(super) fn prepare_regular_file_page_cache_boundary_pages(
@@ -36,8 +37,8 @@ impl ExfatInode {
 
         let vmo = page_cache.as_vmo().clone();
         let prepare_page_fn = |page_idx: usize| -> Result<()> {
-            let frame = vmo.commit_on(page_idx)?;
-            frame.writer().fill_zeros(PAGE_SIZE);
+            vmo.commit_on(page_idx, VmoMapMode::SharedWrite)?;
+            page_cache.fill_zeros(page_idx * PAGE_SIZE..(page_idx + 1) * PAGE_SIZE)?;
             Ok(())
         };
 

@@ -106,7 +106,7 @@ impl OverlayLayer {
             root_inode: path.inode().clone(),
             fs: path.fs(),
             fsid: 0,
-            container_dev_id: path.metadata().container_dev_id,
+            container_dev_id: path.metadata()?.container_dev_id,
         })
     }
 }

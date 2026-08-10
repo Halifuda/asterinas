@@ -188,7 +188,7 @@ impl OverlayInode {
         };
 
         let creds = posix_thread.credentials();
-        let metadata = self.metadata();
+        let metadata = self.metadata()?;
         let mode = metadata.mode;
 
         // With DAC_OVERRIDE, read/write DACs are always overridable; the

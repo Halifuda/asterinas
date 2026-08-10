@@ -44,7 +44,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
-    vm::page_cache::PageCache,
+    vm::page_cache::Vmo,
 };
 
 /// The logical Overlay inode carrier exposed to the VFS.
@@ -455,16 +455,16 @@ impl OverlayInode {
         visible_source(&facts).real_inode().size()
     }
 
-    fn metadata_impl(&self) -> Metadata {
+    fn metadata_impl(&self) -> Result<Metadata> {
         let facts = self.facts_snapshot();
-        let mut metadata = visible_source(&facts).real_inode().metadata();
+        let mut metadata = visible_source(&facts).real_inode().metadata()?;
         // The precomputed `object_id` replaces dev/ino: copied-up objects
         // already carry the lower-id-derived identity, so no re-derivation
         // happens here. Merged directories report upper metadata only (the
         // visible source is the upper).
         metadata.ino = self.object_id.ino;
         metadata.container_dev_id = self.object_id.dev;
-        metadata
+        Ok(metadata)
     }
 
     fn ino_impl(&self) -> u64 {
@@ -592,7 +592,7 @@ impl Inode for OverlayInode {
         self.size_impl()
     }
 
-    fn metadata(&self) -> Metadata {
+    fn metadata(&self) -> Result<Metadata> {
         self.metadata_impl()
     }
 
@@ -680,7 +680,7 @@ impl Inode for OverlayInode {
         self.read_link_impl()
     }
 
-    fn page_cache(&self) -> Option<PageCache> {
+    fn page_cache(&self) -> Option<Arc<Vmo>> {
         self.page_cache_impl()
     }
 

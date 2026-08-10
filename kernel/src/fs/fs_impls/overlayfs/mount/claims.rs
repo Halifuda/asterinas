@@ -232,7 +232,7 @@ impl UpperWorkdirClaim {
                 "workdir and upperdir must reside under the same mount"
             );
         }
-        if upper.metadata().container_dev_id != workdir.metadata().container_dev_id {
+        if upper.metadata()?.container_dev_id != workdir.metadata()?.container_dev_id {
             return_errno_with_message!(
                 Errno::EINVAL,
                 "workdir and upperdir must be on the same underlying filesystem"

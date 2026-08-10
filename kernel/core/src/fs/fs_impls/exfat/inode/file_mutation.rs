@@ -262,11 +262,12 @@ impl ExfatInode {
                             new_valid_data_length,
                             timestamp,
                             |_cluster_map, zero_fill_range| {
+                                let mut page_cache = page_cache.lock();
                                 if new_data_length > data_length {
                                     page_cache.resize(new_data_length, data_length)?;
                                 }
                                 Self::prepare_regular_file_page_cache_boundary_pages(
-                                    page_cache,
+                                    &page_cache,
                                     data_length,
                                     zero_fill_range.clone(),
                                 )?;
@@ -274,7 +275,7 @@ impl ExfatInode {
                                     page_cache.fill_zeros(zero_fill_range.clone())?;
                                 }
                                 Self::prepare_regular_file_page_cache_boundary_pages(
-                                    page_cache,
+                                    &page_cache,
                                     data_length,
                                     write_offset..write_end,
                                 )?;
@@ -284,6 +285,7 @@ impl ExfatInode {
                                 Ok(())
                             },
                             || {
+                                let mut page_cache = page_cache.lock();
                                 if new_data_length > data_length {
                                     let _ = page_cache.resize(data_length, new_data_length);
                                 }
@@ -392,11 +394,12 @@ impl ExfatInode {
                         new_size,
                         timestamp,
                         |_cluster_map, zero_fill_range| {
+                            let mut page_cache = page_cache.lock();
                             if new_size > data_length {
                                 page_cache.resize(new_size, data_length)?;
                             }
                             Self::prepare_regular_file_page_cache_boundary_pages(
-                                page_cache,
+                                &page_cache,
                                 data_length,
                                 zero_fill_range.clone(),
                             )?;
@@ -406,6 +409,7 @@ impl ExfatInode {
                             Ok(())
                         },
                         || {
+                            let mut page_cache = page_cache.lock();
                             let _ = page_cache.resize(data_length, new_size);
                         },
                     )
@@ -550,6 +554,7 @@ impl ExfatInode {
 
             let mut partial_page_rollback = None;
             if let Some(page_cache) = page_cache {
+                let mut page_cache = page_cache.lock();
                 let partial_page_end = data_length.min(new_size.align_up(PAGE_SIZE));
                 if new_size < partial_page_end {
                     let mut old_bytes = vec![0; partial_page_end - new_size];
@@ -570,6 +575,7 @@ impl ExfatInode {
                 {
                     if let Some(page_cache) = page_cache {
                         let rollback_result: Result<()> = (|| {
+                            let mut page_cache = page_cache.lock();
                             page_cache.resize(data_length, new_size)?;
                             if let Some(old_bytes) = partial_page_rollback.as_ref() {
                                 let mut reader = VmReader::from(old_bytes.as_slice()).to_fallible();

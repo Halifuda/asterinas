@@ -97,7 +97,7 @@ impl OverlayInode {
     // metadata is fetched once and reused by the two probes (no double
     // fetch).
     pub(in crate::fs::fs_impls::overlayfs) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
-        let metadata = self.metadata();
+        let metadata = self.metadata()?;
         let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
         if !facts.is_owner && !facts.has_cap {
             return Err(Error::with_message(
@@ -124,7 +124,7 @@ impl OverlayInode {
     // then the `Permission::empty()` mutating admission and a
     // creator-credential forward.
     pub(in crate::fs::fs_impls::overlayfs) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
-        let metadata = self.metadata();
+        let metadata = self.metadata()?;
         if uid != metadata.uid && !self.caller_owner_facts(metadata.uid, CapSet::CHOWN).has_cap {
             return Err(Error::with_message(
                 Errno::EPERM,
@@ -142,7 +142,7 @@ impl OverlayInode {
     // exempt — then the `Permission::empty()` mutating admission and a
     // creator-credential forward.
     pub(in crate::fs::fs_impls::overlayfs) fn set_group_impl(&self, gid: Gid) -> Result<()> {
-        let metadata = self.metadata();
+        let metadata = self.metadata()?;
         if gid != metadata.gid {
             let facts = self.caller_owner_facts(metadata.uid, CapSet::CHOWN);
             // The owner-chgrp exemption (Linux `in_group_p`): the owner may
@@ -223,7 +223,9 @@ impl OverlayInode {
     /// boundary, because `EROFS` cannot surface through the infallible trait
     /// surface (known VFS dependency).
     fn best_effort_time_set(&self, operation: impl FnOnce(&Arc<dyn Inode>)) {
-        let metadata = self.metadata();
+        let Some(metadata) = self.metadata().ok() else {
+            return;
+        };
         let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
         if self
             .check_permission(AccessType::Mutating, Permission::MAY_WRITE)

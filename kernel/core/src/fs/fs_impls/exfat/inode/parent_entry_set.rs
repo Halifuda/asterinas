@@ -113,9 +113,12 @@ impl ExfatInode {
             return Ok(Ok(()));
         }
 
-        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-        })?;
+        let page_cache = self
+            .page_cache_handle(metadata)
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?
+            .lock();
         let cache_size = page_cache.size();
         let mut touched_pages = Vec::new();
         let mut previous_end = 0usize;
@@ -283,10 +286,10 @@ impl ExfatInode {
         } = mutation;
         let page_cache = self
             .page_cache_handle(parent_metadata)
-            .cloned()
             .ok_or_else(|| {
                 Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-            })?;
+            })?
+            .lock();
         let mut prefaulted_old_bytes = vec![0; slot_byte_range.len()];
         let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
         page_cache
@@ -519,10 +522,10 @@ impl ExfatInode {
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = parent_inode
             .page_cache_handle(parent_metadata)
-            .cloned()
             .ok_or_else(|| {
                 Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-            })?;
+            })?
+            .lock();
         let mut prefaulted_old_bytes = vec![0; slot_byte_range.len()];
         let mut writer = VmWriter::from(prefaulted_old_bytes.as_mut_slice()).to_fallible();
         page_cache
@@ -554,10 +557,10 @@ impl ExfatInode {
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = parent_inode
             .page_cache_handle(parent_metadata)
-            .cloned()
             .ok_or_else(|| {
                 Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-            })?;
+            })?
+            .lock();
         let apply_result = {
             let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
             page_cache
@@ -652,10 +655,10 @@ impl ExfatInode {
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = self
             .page_cache_handle(parent_metadata)
-            .cloned()
             .ok_or_else(|| {
                 Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-            })?;
+            })?
+            .lock();
         let start_page = slot_byte_range.start / PAGE_SIZE;
         let end_page = (slot_byte_range.end - 1) / PAGE_SIZE;
         // Rename persists the target entry set before it invalidates the source entry set.
@@ -728,10 +731,10 @@ impl ExfatInode {
         let slot_byte_range = direntry::slot_range_bytes(slot_range)?;
         let page_cache = self
             .page_cache_handle(parent_metadata)
-            .cloned()
             .ok_or_else(|| {
                 Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-            })?;
+            })?
+            .lock();
         let apply_result = {
             let mut reader = VmReader::from(entry_set_bytes.as_slice()).to_fallible();
             page_cache

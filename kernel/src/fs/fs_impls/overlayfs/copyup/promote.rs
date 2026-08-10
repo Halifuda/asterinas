@@ -252,7 +252,7 @@ impl OverlayInode {
                     InodeType::CharDevice => {
                         let rdev = lower
                             .real_inode()
-                            .metadata()
+                            .metadata()?
                             .self_dev_id
                             .ok_or_else(|| {
                                 Error::with_message(
@@ -266,7 +266,7 @@ impl OverlayInode {
                     InodeType::BlockDevice => {
                         let rdev = lower
                             .real_inode()
-                            .metadata()
+                            .metadata()?
                             .self_dev_id
                             .ok_or_else(|| {
                                 Error::with_message(

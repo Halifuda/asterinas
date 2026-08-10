@@ -405,7 +405,9 @@ impl ExfatInode {
             .get()
             .and_then(|page_cache| page_cache.as_ref())
         {
-            page_cache.resize(updated_allocated_size, previous_size)?;
+            page_cache
+                .lock()
+                .resize(updated_allocated_size, previous_size)?;
         }
         Ok(())
     }

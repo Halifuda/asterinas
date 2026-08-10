@@ -348,7 +348,7 @@ impl ExfatInode {
         }
 
         if has_cached_file_range && let Some(page_cache) = page_cache {
-            page_cache.flush_range(0..data_length)?;
+            page_cache.lock().flush_range(0..data_length)?;
         }
 
         if needs_regular_file_publish && !is_detached_regular_file {

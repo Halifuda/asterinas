@@ -685,6 +685,8 @@ pub(crate) fn init() {
 struct ExfatFsType;
 
 impl FsType for ExfatFsType {
+    type Key = ();
+
     fn name(&self) -> &'static str {
         "exfat"
     }
@@ -693,9 +695,9 @@ impl FsType for ExfatFsType {
         FsProperties::NEED_DISK
     }
 
-    fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
-        let block_device = fs_creation_ctx.resolve_block_device()?;
+    fn create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
         let options = MountOptions::parse(fs_creation_ctx.flags(), fs_creation_ctx.args())?;
+        let block_device = fs_creation_ctx.resolve_block_device()?.clone();
         let fs = ExfatFs::mount_candidate(&block_device, fs_creation_ctx.source(), &options)?;
         Ok(fs as Arc<dyn FileSystem>)
     }

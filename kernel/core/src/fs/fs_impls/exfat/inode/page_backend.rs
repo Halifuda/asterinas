@@ -389,9 +389,12 @@ impl ExfatInode {
         let page_cache_context =
             self.page_cache_context_for_mapping(metadata, cluster_map, logical_end, logical_end)?;
         *self.page_backend.page_cache_context.write() = Some(page_cache_context);
-        let page_cache = self.page_cache_handle(metadata).cloned().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
-        })?;
+        let page_cache = self
+            .page_cache_handle(metadata)
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "directory exFAT inode has no page cache")
+            })?
+            .lock();
         let mut directory_bytes = vec![0; logical_end];
         if directory_bytes.is_empty() {
             return Ok(directory_bytes);
@@ -442,7 +445,7 @@ impl ExfatInode {
         self.weak_self.clone()
     }
 
-    pub(super) fn page_cache_handle(&self, metadata: Metadata) -> Option<&PageCache> {
+    pub(super) fn page_cache_handle(&self, metadata: Metadata) -> Option<&Mutex<PageCache>> {
         if !matches!(metadata.type_, InodeType::File | InodeType::Dir) {
             return None;
         }
@@ -451,7 +454,9 @@ impl ExfatInode {
             .call_once(|| {
                 let backend: Arc<dyn PageCacheBackend> = self.page_backend.clone();
                 let capacity = metadata.size;
-                PageCache::new_with_backend(capacity, Arc::downgrade(&backend)).ok()
+                PageCache::new_with_backend(capacity, Arc::downgrade(&backend))
+                    .ok()
+                    .map(Mutex::new)
             })
             .as_ref()
     }

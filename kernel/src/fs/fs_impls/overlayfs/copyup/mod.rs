@@ -34,7 +34,7 @@ use crate::{
         vfs::inode::{FallocMode, Inode, SymbolicLink},
     },
     prelude::*,
-    vm::page_cache::PageCache,
+    vm::page_cache::Vmo,
 };
 
 pub(super) mod coordination;
@@ -273,7 +273,7 @@ impl OverlayInode {
     // Pure forwarder to the current authority's real page cache (upper after
     // promotion; the lower source for lower-backed read views). Never
     // promotes: the parameterless seam carries no write intent.
-    pub(in crate::fs::fs_impls::overlayfs) fn page_cache_impl(&self) -> Option<PageCache> {
+    pub(in crate::fs::fs_impls::overlayfs) fn page_cache_impl(&self) -> Option<Arc<Vmo>> {
         self.select_real_inode().page_cache()
     }
 }

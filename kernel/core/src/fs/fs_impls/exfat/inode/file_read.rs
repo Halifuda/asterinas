@@ -86,6 +86,7 @@ impl ExfatInode {
                 let mut limited_writer = writer.clone_exclusive();
                 limited_writer.limit(read_len);
                 let read_result = page_cache
+                    .lock()
                     .read(read_start, &mut limited_writer)
                     .map_err(Error::from);
                 let copied_len = read_len - limited_writer.avail();

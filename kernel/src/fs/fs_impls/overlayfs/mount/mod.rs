@@ -47,6 +47,8 @@ pub(super) const OVERLAY_FS_NAME: &str = "overlay";
 pub(super) struct OverlayFsType;
 
 impl FsType for OverlayFsType {
+    type Key = ();
+
     fn name(&self) -> &'static str {
         OVERLAY_FS_NAME
     }
@@ -55,7 +57,7 @@ impl FsType for OverlayFsType {
         FsProperties::empty()
     }
 
-    fn create(&self, fs_creation_ctx: &FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
+    fn create(&self, fs_creation_ctx: &mut FsCreationCtx) -> Result<Arc<dyn FileSystem>> {
         let overlay_fs = OverlayFs::new(fs_creation_ctx)?;
         Ok(overlay_fs)
     }
