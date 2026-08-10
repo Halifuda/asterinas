@@ -298,7 +298,7 @@ impl OverlayInode {
             .as_ref()
             .and_then(|target_facts| target_facts.upper())
         {
-            whiteout::cleanup_upper_whiteouts(target_upper_dir.real_path()?)?;
+            whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
         }
 
         // T3 (Objective 1): a cross-directory move of an origin-bearing

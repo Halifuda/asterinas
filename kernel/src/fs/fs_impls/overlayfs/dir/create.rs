@@ -36,6 +36,7 @@ use crate::{
             AccessType,
             copyup::WorkdirTempRequest,
             metadata_security::xattr::{OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME},
+            mount::RealPath,
             projection::{
                 Binding, BindingKey, NegativeBinding, OverlayInode, OverlayObjectFacts,
                 PositiveBinding, PositiveKind, RealObject,
@@ -148,7 +149,7 @@ impl OverlayInode {
             PositiveKind::Single,
             Some(RealObject::with_path(
                 0,
-                new_upper_path,
+                RealPath::from_path(&new_upper_path),
                 upper_layer.fsid,
                 upper_layer.container_dev_id,
             )),
@@ -299,7 +300,7 @@ impl OverlayInode {
                     PositiveKind::Single,
                     Some(RealObject::with_path(
                         0,
-                        temp,
+                        RealPath::from_path(&temp),
                         upper_layer.fsid,
                         upper_layer.container_dev_id,
                     )),

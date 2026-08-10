@@ -23,7 +23,7 @@ use super::{
 use crate::{
     fs::{
         file::InodeType,
-        fs_impls::overlayfs::mount::OverlayFs,
+        fs_impls::overlayfs::mount::{OverlayFs, RealPath},
         vfs::{inode::Inode, path::Path, xattr::XattrName},
     },
     prelude::*,
@@ -80,13 +80,14 @@ pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
 /// place.
 ///
 /// Invariants: the pin is strong; the fields are fixed for the lifetime of the
-/// value. The dentry-anchored [`Path`] (`real_path`) is the base-view
-/// coherence carrier: it is `Some` for every real object that participates in
-/// a namespace mutation or dentry-routed lookup (upper objects always, lower
-/// objects produced by the layer scan, root objects via the layer anchor) and
-/// `None` only for the readdir `..` identity projection, which never mutates
-/// — enforced by the checked [`RealObject::real_path`] accessor (`Err(EIO)` on
-/// `None`). The named constructor ([`RealObject::new`]) is retained for that
+/// value. The dentry-anchored [`RealPath`] carrier (`real_path`) is the
+/// base-view coherence carrier: it is `Some` for every real object that
+/// participates in a namespace mutation or dentry-routed lookup (upper
+/// objects always, lower objects produced by the layer scan, root objects
+/// via the layer anchor) and `None` only for the readdir `..` identity
+/// projection, which never mutates — enforced by the checked
+/// [`RealObject::real_path`] accessor (`Err(EIO)` on `None`). The named
+/// constructor ([`RealObject::new`]) is retained for that
 /// single identity-only producer (`readdir_index.rs`); within-`projection`
 /// builders (root facts in `inode.rs`, the lookup scan here,
 /// `RealObjectKey::from_facts`) construct through the `pub(super)` fields
@@ -100,9 +101,9 @@ pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
 pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
     pub(super) layer_index: usize,
     pub(super) real_inode: Arc<dyn Inode>,
-    /// Dentry-anchored real-object `Path`; `None` only for the readdir `..`
-    /// identity projection (see the struct doc).
-    pub(super) real_path: Option<Path>,
+    /// Dentry-anchored real-object [`RealPath`] carrier; `None` only for the
+    /// readdir `..` identity projection (see the struct doc).
+    pub(super) real_path: Option<RealPath>,
     pub(super) fsid: u64,
     pub(super) container_dev_id: DeviceId,
 }
@@ -113,7 +114,7 @@ impl RealObject {
     /// The path-less constructor is **identity-only**: its single producer is
     /// the readdir `..` identity projection (`readdir_index.rs`), which never
     /// mutates and never participates in dentry-routed lookup. Every other
-    /// real-object construction carries the dentry-anchored [`Path`] via
+    /// real-object construction carries the dentry-anchored [`RealPath`] via
     /// [`RealObject::with_path`] or a `pub(super)` field literal with
     /// `real_path: Some(..)`.
     pub(in crate::fs::fs_impls::overlayfs) fn new(
@@ -132,15 +133,17 @@ impl RealObject {
     }
 
     /// Builds a dentry-anchored real object from its layer position and the
-    /// real object's `Path`.
+    /// real object's [`RealPath`] carrier.
     ///
-    /// Derives the pinned `real_inode` from the dentry-anchored path
+    /// Derives the pinned `real_inode` from the carrier
     /// (`real_path.inode()`), so the carrier's inode and path always refer to
-    /// the same dentry-layer object. The path is the base-view coherence
-    /// carrier for every namespace-mutating or dentry-routed consumer.
+    /// the same dentry-layer object. The carrier is the base-view coherence
+    /// carrier for every namespace-mutating or dentry-routed consumer; its
+    /// anchor mount is held weakly, so the published object never pins the
+    /// parent overlay's `Mount`/`OverlayFs` lifetime.
     pub(in crate::fs::fs_impls::overlayfs) fn with_path(
         layer_index: usize,
-        real_path: Path,
+        real_path: RealPath,
         fsid: u64,
         container_dev_id: DeviceId,
     ) -> Self {
@@ -163,15 +166,22 @@ impl RealObject {
         &self.real_inode
     }
 
-    /// Returns the dentry-anchored real-object path.
+    /// Returns the dentry-anchored real-object `Path`, upgraded from the
+    /// stored weak-anchor carrier.
     ///
     /// `Err(EIO)` when this real object carries no path — the readdir `..`
     /// identity projection is the only path-less producer, and no
-    /// namespace-mutating or dentry-routed caller may operate on it.
-    pub(in crate::fs::fs_impls::overlayfs) fn real_path(&self) -> Result<&Path> {
-        self.real_path.as_ref().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "the real object carries no dentry-anchored path")
-        })
+    /// namespace-mutating or dentry-routed caller may operate on it — or
+    /// when the anchor mount is no longer alive (the parent overlay was
+    /// unmounted while this carrier survived; fail-closed, matching the
+    /// existing "mount no longer alive" convention).
+    pub(in crate::fs::fs_impls::overlayfs) fn real_path(&self) -> Result<Path> {
+        self.real_path
+            .as_ref()
+            .ok_or_else(|| {
+                Error::with_message(Errno::EIO, "the real object carries no dentry-anchored path")
+            })?
+            .upgrade()
     }
 
     /// Returns the layer filesystem identifier of this real object.
@@ -251,8 +261,8 @@ impl OverlayFs {
     /// dentry-anchored path (`Dentry::lookup_child` on the base VFS dentry
     /// layer, which revalidates cached entries and updates the base view's
     /// `DentryChildren`), and the hit carrier keeps that dentry-anchored
-    /// `Path`. The caller holds the parent `DIR` transaction lock; this
-    /// function takes no Overlay lock itself.
+    /// [`RealPath`] carrier. The caller holds the parent `DIR` transaction lock;
+    /// this function takes no Overlay lock itself.
     pub(super) fn lookup_in_layers(
         &self,
         parent_facts: &OverlayObjectFacts,
@@ -272,7 +282,7 @@ impl OverlayFs {
                     let hit = RealObject {
                         layer_index: 0,
                         real_inode: child_path.inode().clone(),
-                        real_path: Some(child_path),
+                        real_path: Some(RealPath::from_path(&child_path)),
                         fsid: upper_real.fsid(),
                         container_dev_id: upper_real.container_dev_id(),
                     };
@@ -336,7 +346,7 @@ impl OverlayFs {
                     let hit = RealObject {
                         layer_index,
                         real_inode: child_path.inode().clone(),
-                        real_path: Some(child_path),
+                        real_path: Some(RealPath::from_path(&child_path)),
                         fsid: lower_real.fsid(),
                         container_dev_id: lower_real.container_dev_id(),
                     };

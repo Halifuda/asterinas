@@ -35,7 +35,7 @@ use crate::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
             metadata_security::xattr::XattrCopyPolicy,
-            mount::OverlayFs,
+            mount::{OverlayFs, RealPath},
             projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
         },
         vfs::{
@@ -574,7 +574,7 @@ impl OverlayInode {
         })?;
         Ok(RealObject::with_path(
             0,
-            child_path,
+            RealPath::from_path(&child_path),
             upper_layer.fsid,
             upper_layer.container_dev_id,
         ))

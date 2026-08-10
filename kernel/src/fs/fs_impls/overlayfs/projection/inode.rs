@@ -239,7 +239,7 @@ impl OverlayInode {
     /// stays 0 until the closure returns), so the upgrade below is
     /// guaranteed. The root facts merge the upper root (writable mounts) with
     /// all lower roots (topmost first); each root `RealObject` is built from
-    /// its layer's dentry-anchored `Path` anchor
+    /// its layer's dentry-anchored `RealPath` anchor
     /// ([`RealObject::with_path`]), so the root carriers pin the base-mount
     /// dentry layer for the mount lifetime. The root is always a directory,
     /// so `dir_transaction_lock` is `Some`; `object_id` is projected by

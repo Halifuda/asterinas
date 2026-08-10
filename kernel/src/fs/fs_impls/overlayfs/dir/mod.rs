@@ -391,13 +391,13 @@ impl OverlayInode {
     /// invariant, so the checked `real_path()` accessor succeeds.
     /// `EROFS` surfaces when the facts carry no upper (a non-writable
     /// overlay); `EIO` propagates when the upper real object is not
-    /// dentry-anchored.
+    /// dentry-anchored or its anchor mount is no longer alive.
     pub(super) fn upper_parent_path(&self) -> Result<Path> {
         let facts = self.facts_snapshot();
         let upper = facts.upper().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
-        Ok(upper.real_path()?.clone())
+        Ok(upper.real_path()?)
     }
 
     /// Conservatively invalidates the stale projection of the affected

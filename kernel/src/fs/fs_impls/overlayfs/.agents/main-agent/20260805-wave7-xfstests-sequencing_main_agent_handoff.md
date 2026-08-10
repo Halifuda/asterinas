@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-05 Wave7 xfstests Sequencing
 
 **Date / Time:** 2026-08-05
-**Status:** `Wave7 运行中（2026-08-08 综合用例批次完成）。本轮 6 例：
+**Status:** `CLOSED — Wave7 已关闭（2026-08-10）：pass_40–pass_45 全部门禁已接受，overlay/029 嵌套挂载 claim 生命周期 bug 已由 pass_45（B1-local）修复并经单例验证通过；20 例全量回归显式推迟至 wave8 之后。以下为历史运行记录：本轮 6 例：
 029/077/038 PASS（038 经 pass_40 impure 修复后验证通过）；031 范围内
 VERIFIED（两次 ENOTEMPTY 已修复，仅剩 ls3 = Bug B 依赖失败，已登记）；
 020 NOTRUN（userns 能力门）；041 NOTRUN（xino=on 挂载选项回显缺口，已

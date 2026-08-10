@@ -69,7 +69,7 @@ impl OverlayInode {
                 "the link source has no upper real object after promotion",
             )
         })?;
-        Ok(upper.real_path()?.clone())
+        Ok(upper.real_path()?)
     }
 
     /// Replaces a published whiteout target with a hard link to the shared

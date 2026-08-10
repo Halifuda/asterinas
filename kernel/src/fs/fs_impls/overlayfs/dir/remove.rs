@@ -240,7 +240,7 @@ impl OverlayInode {
                         "the pure-upper rmdir target has no upper real directory",
                     )
                 })?;
-                whiteout::cleanup_upper_whiteouts(target_upper_dir.real_path()?)?;
+                whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
             }
             // Step 3 — pure-upper direct removal, no whiteout: the name is
             // genuinely gone from the upper namespace, removed through the

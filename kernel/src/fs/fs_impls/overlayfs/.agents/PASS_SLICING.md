@@ -1066,6 +1066,70 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     (c) alternate seeder. Receipt
     `pass_43_021_fsstress_smoke_checker.md`; evidence
     `run_evidence/fsstress_smoke_20260810/`; harness reverted (git clean).
+  - **Execution / compile gate (2026-08-10)**: Creator ACCEPTED
+    (`components/nested_mount_claim_lifetime_design/pass_45_nested_mount_claim_lifetime_creator.md`;
+    diff verified against the frozen 会签 surface: `RealPath` carrier +
+    `from_path`/`upgrade`/`inode`, `root_path`/`real_path` type deltas,
+    `lookup_in_layers` storage, 7 mechanical adaptations, zero VFS/syscall/
+    legacy touches; one incidental visibility seam `mount/mod.rs`
+    `pub(in crate::fs::fs_impls::overlayfs) use layers::RealPath;` mirroring
+    the existing `XinoMode` re-export). Container
+    `cargo check -p aster-kernel --target x86_64-unknown-none` PASSED
+    (0 errors; only the pre-existing `uuid_mode` warning). Committed
+    `c92c21b67` (12 files incl. PASS_SLICING/handoff, +251/-49).
+  - **Validation (2026-08-10, ACCEPTED — OUTCOME A)**: `task_checker_nested_mount_claim_lifetime_20260810`
+    — **scoped to `overlay/029` single-case only** (user-directed: the full
+    20-case regression matrix is deferred until after wave8; the Designer
+    validation contract's step (ii) is not run in this gate). Fresh 8 GiB
+    images, whole-case PASS expected, zero EBUSY, zero warn/oops, post-test
+    remount succeeds. Result (agent Kierkegaard; kernel `c92c21b67`):
+    `overlay/029` whole-case **PASS** — `Ran: overlay/029` / `Passed all 1
+    tests` / `All conformance tests passed.` (exit 0); no `already mounted or
+    mount point busy.`, no `try_claim`/EBUSY trace, zero kernel warn/oops/
+    panic; fresh 8 GiB TEST/SCRATCH image proof in `make_run_kernel.out` (two
+    `Creating filesystem with 2097152 4k blocks` lines); unmount→remount
+    invariant satisfied. Evidence
+    `components/nested_mount_claim_lifetime_design/run_evidence/overlay029_pass45_20260810/`;
+    receipt `pass_45_nested_mount_claim_lifetime_checker.md`. **pass_45
+    gate-accepted**; the full 20-case regression remains deferred to after
+    wave8 (recorded deferral, not a coverage gap).
+  - **Boundaries**: no VFS interface change; no static lock-topology change;
+    no ktest; no `legacy_fs.rs`; no `.agents` status edits by the Creator;
+    no build/test commands in the Creator phase.
+
+- **`pass_45_nested_mount_claim_lifetime`**
+  - **Kind**: Creator Pass (High risk; bounded repair of the overlay/029
+    nested-mount claim-lifetime / self-reference-ring regression, per the
+    ACCEPTED Designer 会签
+    `components/nested_mount_claim_lifetime_design/nested_mount_claim_lifetime_designer_spec.md`
+    + `_designer_validation.md`; task
+    `task_designer_nested_mount_claim_lifetime_20260810`; user-confirmed
+    scheme 2026-08-10: B1-local).
+  - **Parent**: `N/A` — bounded cross-meso repair (precedent: pass_40/pass_42
+    repair passes): meso 01 (`mount/layers.rs` — new `RealPath` carrier +
+    `OverlayLayer.root_path`), meso 02 (`projection/entry.rs` —
+    `RealObject.real_path`, `projection/inode.rs` — `new_root`); 7 mechanical
+    call-site adaptations (`dir/mod.rs`, `dir/link.rs`, `dir/remove.rs`,
+    `dir/rename.rs`, `copyup/promote.rs`, `dir/create.rs` ×2).
+  - **Continuation / Parent Task**: ACCEPTED Designer 会签
+    `task_designer_nested_mount_claim_lifetime_20260810` (2026-08-10).
+  - **Covered Micro-Features**: `P1-35` (direct — claim release lifetime),
+    `P0-02` (layer-stack anchor), `P0-16` (per-inode real-path carrier).
+    No new micro.
+  - **Frozen surface (ACCEPTED Designer 会签)**: `RealPath` (new, Rule D,
+    `mount/layers.rs`; `Weak<Mount>` + `Arc<Dentry>` + `Arc<dyn Inode>`;
+    `from_path` / `upgrade -> Result<Path>` / `inode`); `OverlayLayer.root_path:
+    Path -> RealPath`; `RealObject.real_path: Option<Path> -> Option<RealPath>`;
+    `RealObject::with_path` param delta + `real_path() -> Result<Path>` owned
+    return delta; 9 mechanical call-site adaptations (spec §5); zero VFS
+    change, zero new lock domain, zero new error variant, zero ktest.
+  - **Execution shape**: one Creator dispatch (no-fork, command-free) →
+    main-agent structural diff acceptance → one target-specific
+    `cargo check -p aster-kernel --target x86_64-unknown-none` (main agent
+    fixes only mechanical errors) → amend into a new commit → Checker
+    validation **scoped to `overlay/029` single-case only** (user-directed
+    2026-08-10: the full 20-case regression is deferred until after wave8;
+    the Designer validation contract's step (ii) is re-scoped accordingly).
   - **Boundaries**: no VFS interface change; no static lock-topology change;
     no ktest; no `legacy_fs.rs`; no `.agents` status edits by the Creator;
     no build/test commands in the Creator phase.

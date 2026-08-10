@@ -7,7 +7,7 @@
 //! This module provides the VFS entry point ([`OverlayFsType`] implementing
 //! `crate::fs::vfs::registry::FsType`), the macro-level carrier
 //! ([`OverlayFs`]), and the read-only carriers consumed by sibling modules
-//! (`OverlayLayerStack`/`OverlayLayer`, `MountPolicy`,
+//! (`OverlayLayerStack`/`OverlayLayer`/`RealPath`, `MountPolicy`,
 //! `CreatorCredentialPolicy`, `UpperFilesystemCapabilities`,
 //! `WriteAccessAccounting`, `UpperWorkdirClaim`). All fallible mount work
 //! happens inside `FsType::create` → `OverlayFs::new`; the only values that
@@ -21,6 +21,7 @@ mod options;
 mod policy;
 mod superblock;
 
+pub(in crate::fs::fs_impls::overlayfs) use layers::RealPath;
 pub(in crate::fs::fs_impls::overlayfs) use options::XinoMode;
 pub(super) use superblock::OverlayFs;
 

@@ -15,7 +15,7 @@ use crate::{
     fs::vfs::{
         file_system::{FileSystem, FsFlags},
         inode::Inode,
-        path::{AT_FDCWD, EmptyPathStr, FsPath, Path},
+        path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
         registry::FsCreationCtx,
     },
     prelude::*,
@@ -61,20 +61,90 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayerStack {
     pub(in crate::fs::fs_impls::overlayfs) lowers: Vec<OverlayLayer>,
 }
 
+/// A dentry-anchored real path whose anchor mount is held weakly.
+///
+/// The stored path carriers of an overlay mount — `OverlayLayer.root_path`
+/// and `RealObject.real_path` — must never pin the parent overlay's
+/// `Mount`/`OverlayFs` lifetime (overlay/029 repair, P0-02/P0-16): a carrier
+/// surviving teardown would otherwise keep the parent's claim guards from
+/// releasing on the final `Drop`. `RealPath` therefore holds the anchor
+/// mount weakly (`Weak<Mount>`), alongside the dentry anchor (strong pin: a
+/// `Dentry` holds no `Mount` reference, so the dentry chain cannot keep the
+/// mount alive) and the real inode of the dentry anchor (strong pin, derived
+/// once at construction from the live path so the inode and the path always
+/// refer to the same dentry-layer object). The anchor is upgraded per use by
+/// [`RealPath::upgrade`]; a dead anchor fails closed with `Errno::EIO`.
+#[derive(Clone, Debug)]
+pub(in crate::fs::fs_impls::overlayfs) struct RealPath {
+    /// The anchor mount; held weakly so a surviving carrier cannot pin it.
+    /// Upgraded per use by [`RealPath::upgrade`].
+    mount: Weak<Mount>,
+    /// The dentry anchor within the anchor mount (strong pin: the dentry
+    /// chain and its inodes stay alive while this carrier lives; a `Dentry`
+    /// holds no `Mount` reference, so this pin cannot keep the mount alive).
+    dentry: Arc<Dentry>,
+    /// The real inode of the dentry anchor (strong pin; derived once at
+    /// construction from the live path so the inode and the path always
+    /// refer to the same dentry-layer object).
+    inode: Arc<dyn Inode>,
+}
+
+impl RealPath {
+    /// Builds the carrier from a live, dentry-anchored path, downgrading the
+    /// anchor mount.
+    ///
+    /// The single construction path; enforces the "inode/path/dentry refer
+    /// to the same dentry-layer object" contract at one site. The carrier
+    /// pins the dentry chain and the real inode but never the anchor mount.
+    pub(in crate::fs::fs_impls::overlayfs) fn from_path(path: &Path) -> Self {
+        Self {
+            mount: Arc::downgrade(path.mount_node()),
+            dentry: path.dentry().clone(),
+            inode: path.inode().clone(),
+        }
+    }
+
+    /// Upgrades the weak anchor mount into a live `Path`.
+    ///
+    /// Returns `Err(EIO)` when the anchor mount is no longer alive (the
+    /// parent overlay was unmounted while a carrier survived); no
+    /// namespace-mutating or dentry-routed operation may proceed on a dead
+    /// anchor. Lock-free atomic `Weak::upgrade`; adds no lock edge and never
+    /// crosses a `Bio` boundary.
+    pub(in crate::fs::fs_impls::overlayfs) fn upgrade(&self) -> Result<Path> {
+        let mount = self.mount.upgrade().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "the anchor mount of the stored real path is no longer alive",
+            )
+        })?;
+        Ok(Path::new(mount, self.dentry.clone()))
+    }
+
+    /// Returns the pinned real inode without upgrading the mount (infallible).
+    pub(in crate::fs::fs_impls::overlayfs) fn inode(&self) -> &Arc<dyn Inode> {
+        &self.inode
+    }
+}
+
 /// One pinned real layer root of an overlay mount.
 ///
 /// The pins keep the underlying layer roots alive for the mount lifetime:
-/// the dentry-anchored `Path` anchor and the resolved root inode are both
-/// captured at mount and never re-resolved by string afterwards.
+/// the dentry-anchored [`RealPath`] anchor and the resolved root inode are
+/// both captured at mount and never re-resolved by string afterwards.
 /// `container_dev_id` carries the `st_dev` same-filesystem evidence used by
 /// the upper/workdir validation.
 #[derive(Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayer {
-    /// Dentry-anchored layer-root `Path` anchor resolved at mount (Linux
+    /// Dentry-anchored layer-root anchor resolved at mount (Linux
     /// `ovl_path_upper`/`ovl_dentry_upper` dentry-ref parity: the layer stack
-    /// pins the base mount and root dentry for the mount lifetime, and every
-    /// derived real-object path stays rooted on this anchor).
-    pub(in crate::fs::fs_impls::overlayfs) root_path: Path,
+    /// pins the base-mount root dentry for the mount lifetime, and every
+    /// derived real-object path stays rooted on this anchor). The anchor
+    /// mount is held weakly ([`RealPath`]), so a surviving layer stack cannot
+    /// pin the parent overlay's `Mount`/`OverlayFs` lifetime after unmount;
+    /// the layer's `root_inode`/`fs` strong pins keep the layer root and its
+    /// underlying filesystem alive while the layer lives.
+    pub(in crate::fs::fs_impls::overlayfs) root_path: RealPath,
     /// Pinned real layer root (lifetime pin).
     pub(in crate::fs::fs_impls::overlayfs) root_inode: Arc<dyn Inode>,
     /// Underlying filesystem identity of the layer root.
@@ -92,9 +162,10 @@ impl OverlayLayer {
     /// filesystem context, so a missing path surfaces the resolver's `ENOENT`
     /// and a non-directory root fails with `ENOTDIR`. The resolved inode and
     /// its filesystem are pinned for the mount lifetime; the resolved `Path`
-    /// itself is stored as the layer-root anchor (`root_path`) so sibling
-    /// modules derive every real-object path from the mount-time dentry layer.
-    /// `fsid` is a placeholder here; [`OverlayLayerStack::assemble`] assigns
+    /// itself is downgraded into the layer-root anchor [`RealPath`]
+    /// (`root_path`) so sibling modules derive every real-object path from
+    /// the mount-time dentry layer. `fsid` is a placeholder here;
+    /// [`OverlayLayerStack::assemble`] assigns
     /// the real per-unique-underlying-superblock identifier afterwards.
     pub(super) fn resolve(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Self> {
         let path = resolve_root_path(fs_creation_ctx, raw_path)?;
@@ -102,7 +173,7 @@ impl OverlayLayer {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
         Ok(Self {
-            root_path: path.clone(),
+            root_path: RealPath::from_path(&path),
             root_inode: path.inode().clone(),
             fs: path.fs(),
             fsid: 0,
