@@ -21,7 +21,7 @@
 
 use hashbrown::HashMap;
 
-use super::{inode::OverlayInode, inode_cache::RealObjectKey};
+use super::{entry::LayerLookup, inode::OverlayInode, inode_cache::RealObjectKey};
 use crate::{fs::vfs::inode::Inode, prelude::*};
 
 type BindingsByName = HashMap<Box<str>, Arc<Binding>>;
@@ -89,20 +89,36 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
     Absent,
     /// The name is hidden by a whiteout barrier.
     HiddenByWhiteout(
-        #[expect(
-            dead_code,
-            reason = "retained hidden-whiteout evidence carries barrier provenance and a lifetime pin for cached negative bindings"
-        )]
         HiddenEvidence,
     ),
     /// The name is hidden by an opaque-directory barrier.
     HiddenByOpaque(
-        #[expect(
-            dead_code,
-            reason = "retained hidden-opaque evidence carries barrier provenance and a lifetime pin for cached negative bindings"
-        )]
         HiddenEvidence,
     ),
+}
+
+impl NegativeBinding {
+    /// Compares this negative binding against `other` for identity.
+    ///
+    /// Variant + barrier identity comparison for memo verification:
+    /// `Absent` matches `Absent`; `HiddenByWhiteout`/`HiddenByOpaque` match
+    /// only against the same variant with equal barrier layer index and
+    /// `Arc::ptr_eq` barrier real inode; any other combination is a
+    /// mismatch.
+    pub(in crate::fs::fs_impls::overlayfs) fn is_same_negative(
+        &self,
+        other: &Self,
+    ) -> bool {
+        match (self, other) {
+            (Self::Absent, Self::Absent) => true,
+            (Self::HiddenByWhiteout(left), Self::HiddenByWhiteout(right))
+            | (Self::HiddenByOpaque(left), Self::HiddenByOpaque(right)) => {
+                left.layer_index == right.layer_index
+                    && Arc::ptr_eq(&left.real_inode, &right.real_inode)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The barrier evidence of a hidden name: the layer whose barrier hid the
@@ -113,16 +129,8 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
 #[derive(Clone, Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct HiddenEvidence {
     /// The layer whose barrier hid the name.
-    #[expect(
-        dead_code,
-        reason = "retained hidden-barrier provenance supports conservative cached-negative revalidation"
-    )]
     pub(super) layer_index: usize,
     /// Strong pin to the barrier object.
-    #[expect(
-        dead_code,
-        reason = "strong pin retains the hidden barrier for the cached-negative binding lifetime"
-    )]
     pub(super) real_inode: Arc<dyn Inode>,
 }
 
@@ -243,6 +251,20 @@ impl BindingCache {
             }
         }
     }
+
+    /// Removes the whole per-parent binding table for `parent_id`.
+    ///
+    /// F3 cleanup: after a parent directory's copy-up key transition
+    /// (`old_key → new_key`), the bindings published under the old parent
+    /// identity are unreachable from new-key lookups but still strongly pin
+    /// their carriers. Removing the outer map entry releases them. Absent
+    /// keys are a no-op.
+    pub(in crate::fs::fs_impls::overlayfs) fn invalidate_parent(
+        &self,
+        parent_id: &RealObjectKey,
+    ) {
+        self.entries.write().remove(parent_id);
+    }
 }
 
 impl Binding {
@@ -254,6 +276,27 @@ impl Binding {
         match self {
             Binding::Positive(positive) => Some(positive.inode),
             Binding::Negative(_) => None,
+        }
+    }
+
+    /// Returns whether this cached binding still matches the layer truth.
+    ///
+    /// The memo verification gate: a positive binding matches when the bound
+    /// carrier's facts share the visible identity of the fresh positive
+    /// truth; a negative binding matches when the negative variant and its
+    /// barrier identity agree. Any other combination is a mismatch.
+    pub(super) fn matches_truth(
+        &self,
+        truth: &LayerLookup,
+    ) -> bool {
+        match (self, truth) {
+            (Binding::Positive(positive), LayerLookup::Positive(facts)) => {
+                positive.inode.facts_snapshot().same_visible_identity(facts)
+            }
+            (Binding::Negative(negative), LayerLookup::Negative(truth_negative)) => {
+                negative.is_same_negative(truth_negative)
+            }
+            _ => false,
         }
     }
 }

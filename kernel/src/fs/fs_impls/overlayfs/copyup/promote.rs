@@ -518,13 +518,15 @@ impl OverlayInode {
         } else {
             old_facts.kind()
         };
+        // Keep `upper_real` in scope past the facts construction: it is the
+        // post-transition visible source passed to `replace_facts`.
         let new_facts =
-            OverlayObjectFacts::try_new(kind, Some(upper_real), old_facts.lowers().to_vec())
+            OverlayObjectFacts::try_new(kind, Some(upper_real.clone()), old_facts.lowers().to_vec())
                 .ok_or_else(|| {
                     Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
                 })?;
         let carrier = fs.project_new_upper(&self.facts_snapshot());
-        carrier.replace_facts(new_facts)?;
+        carrier.replace_facts(new_facts, &upper_real)?;
         Ok(())
     }
 

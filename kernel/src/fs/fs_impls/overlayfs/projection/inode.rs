@@ -170,6 +170,61 @@ impl OverlayObjectFacts {
             None
         }
     }
+
+    /// Compares this object's facts against `other` for visible identity.
+    ///
+    /// Kind-aware positive-identity comparison for the memo verification:
+    /// the kinds must match; the upper identities must match (`Arc::ptr_eq`,
+    /// or both absent); `Single` objects compare only the visible source
+    /// (post-copy-up carriers legitimately retain bookkeeping lowers that the
+    /// layer scan no longer reports), while `Merged` objects compare the full
+    /// lower composition strictly so a silent lower-layer add/remove is
+    /// detected.
+    pub(in crate::fs::fs_impls::overlayfs) fn same_visible_identity(
+        &self,
+        other: &Self,
+    ) -> bool {
+        if self.kind() != other.kind() {
+            return false;
+        }
+        let same_upper = match (self.upper(), other.upper()) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left.real_inode(), right.real_inode()),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_upper {
+            return false;
+        }
+        match self.kind() {
+            PositiveKind::Single => {
+                Arc::ptr_eq(visible_source(self).real_inode(), visible_source(other).real_inode())
+            }
+            PositiveKind::Merged => {
+                self.lowers().len() == other.lowers().len()
+                    && self.lowers().iter().zip(other.lowers()).all(|(left, right)| {
+                        Arc::ptr_eq(left.real_inode(), right.real_inode())
+                    })
+            }
+        }
+    }
+
+    /// Returns whether `real_inode` is the same logical object as this
+    /// object's visible source or any of its retained lowers.
+    ///
+    /// "Same logical object" = `Arc::ptr_eq` against the visible source OR
+    /// any retained lower (covers legal aliases: stale-facts copy-up lookups
+    /// resolve the old lower object, and post-copy-up lookups resolve the new
+    /// upper object; excludes ino-reuse newcomers).
+    pub(in crate::fs::fs_impls::overlayfs) fn contains_real_inode(
+        &self,
+        real_inode: &Arc<dyn Inode>,
+    ) -> bool {
+        Arc::ptr_eq(visible_source(self).real_inode(), real_inode)
+            || self
+                .lowers()
+                .iter()
+                .any(|lower| Arc::ptr_eq(lower.real_inode(), real_inode))
+    }
 }
 
 impl OverlayInode {
@@ -266,7 +321,8 @@ impl OverlayInode {
         // `project_inode` can never mint a duplicate root carrier. The
         // registration is a brief internal-data cache lock at single-threaded
         // mount construction.
-        fs.inodes().get_or_create(key, || inode.clone());
+        // no-op identity check: the root carrier is registered at mount construction
+        fs.inodes().get_or_create(key, |_| true, || inode.clone());
         inode
     }
 
@@ -318,7 +374,15 @@ impl OverlayInode {
     /// fallible alias runs FIRST and its `Err` propagates with `facts`/`key`
     /// untouched, so a displacement (a different live carrier already
     /// registered at the new key) fails the transition and the copy-up caller
-    /// can fail or retry instead of proceeding with a split. A live parent
+    /// can fail or retry instead of proceeding with a split. The caller
+    /// passes the post-transition visible source (`new_visible_source`) so
+    /// `alias_key` can tell the two live-occupant cases apart: a same-object
+    /// concurrent displacement keeps the error, while an ino-reuse stale
+    /// occupant at the new key is replaced and self-healed. After the
+    /// commit, a directory carrier also drops the per-parent binding table
+    /// published under the old parent identity (`invalidate_parent`),
+    /// releasing the stale bindings' strong pins; no inode-cache guard is
+    /// held when that leaf write lock is taken. A live parent
     /// resolves to exactly one carrier on every path and
     /// `OverlayFs::publication_parent`'s probe cannot miss for a live parent.
     /// Validity (`upper.is_some() || !lowers.is_empty()`) is guaranteed
@@ -336,6 +400,7 @@ impl OverlayInode {
     pub(in crate::fs::fs_impls::overlayfs) fn replace_facts(
         self: &Arc<Self>,
         facts: OverlayObjectFacts,
+        new_visible_source: &RealObject,
     ) -> Result<()> {
         let new_key = RealObjectKey::from_facts(&facts);
         // Capture the pre-transition visible-source key AND its real inode
@@ -363,7 +428,7 @@ impl OverlayInode {
         // can fail or retry. Only then is the carrier's own state committed
         // (the old-key alias stays for stale-facts in-flight projections and
         // is retired by the dead-pin sweep).
-        fs.inodes().alias_key(old_key, new_key, old_real_inode)?;
+        fs.inodes().alias_key(old_key, new_key, old_real_inode, new_visible_source)?;
         *self.facts.lock() = facts;
         *self.key.lock() = new_key;
         debug_assert!(
@@ -372,6 +437,14 @@ impl OverlayInode {
                 .is_some_and(|probe| Arc::ptr_eq(&probe, self)),
             "after replace_facts the inode cache maps the new visible-source key to THIS carrier"
         );
+        // Clean the stale per-parent binding table of the old parent identity
+        // after the semantic commit; directory-only (a non-directory carrier
+        // never owns bindings, so the write would be a no-op). No inode-cache
+        // guard is held at this point, so the binding-cache write stays a
+        // leaf acquisition (the two cache locks are never held together).
+        if self.dir_transaction_lock.is_some() {
+            fs.bindings().invalidate_parent(&old_key);
+        }
         Ok(())
     }
 }

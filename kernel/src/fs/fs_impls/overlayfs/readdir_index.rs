@@ -63,6 +63,11 @@ pub(super) struct ReaddirCookie(u64);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReaddirIndexValidity {
     /// The `Visible` entries are the complete current visible sequence.
+    ///
+    /// `Valid` guarantees completeness/consistency of the visible sequence only
+    /// against overlay-owned mutations; base-fs modifications performed outside
+    /// the overlay (silent modifications) are not observed until a rebuild is
+    /// triggered, by design (option A).
     Valid,
     /// Serving is refused; the next readdir rebuilds (the conservative
     /// invalidation outcome and the never-publish-partial fallback).

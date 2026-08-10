@@ -176,15 +176,21 @@ impl InodeCache {
     /// carrier pin (it never keeps the carrier alive) and is retired by the
     /// amortized dead-pin sweep once the carrier drops.
     ///
-    /// Fallible: when `new_key` already holds a live pin for a DIFFERENT
-    /// carrier (a concurrent early projection of the new upper between its
-    /// creation and the facts transition), the displacement is returned as
-    /// `Err` — logged and detectable, never silently clobbering the existing
-    /// registration — so the copy-up caller can fail or retry the transition
-    /// instead of proceeding with a split. Copy-up must serialize the
-    /// transition against projections of the transitioning object (e.g. hold
-    /// the object's and the parents' `DIR` transactions across
-    /// `replace_facts`).
+    /// `new_visible_source` is the post-transition visible source of the
+    /// carrier's new facts (the upper real object the copy-up published). It
+    /// tells the two live-occupant branches at `new_key` apart. When a live
+    /// pin for a DIFFERENT carrier already exists there and that occupant's
+    /// facts contain the new visible source, a concurrent early projection
+    /// of the SAME real upper displaced this transition: the registration is
+    /// never silently clobbered — the displacement is returned as `Err`,
+    /// logged and detectable — so the copy-up caller can fail or retry the
+    /// transition instead of proceeding with a split. When the occupant's
+    /// facts do NOT contain the new visible source (an ino-reuse stale
+    /// occupant), the occupant is replaced by this carrier and the `old_key`
+    /// alias retained, so the transition self-heals instead of failing.
+    /// Copy-up must serialize the transition against projections of the
+    /// transitioning object (e.g. hold the object's and the parents' `DIR`
+    /// transactions across `replace_facts`).
     ///
     /// # Stale-alias real-inode keep-alive
     ///
@@ -208,6 +214,7 @@ impl InodeCache {
         old_key: RealObjectKey,
         new_key: RealObjectKey,
         old_real_inode: Arc<dyn Inode>,
+        new_visible_source: &RealObject,
     ) -> Result<()> {
         let mut guard = self.by_key.write();
         let Some(old_entry) = guard.get(&old_key).cloned() else {
@@ -227,16 +234,56 @@ impl InodeCache {
                 if existing.carrier.strong_count() > 0
                     && !Weak::ptr_eq(&existing.carrier, &old_entry.carrier) =>
             {
-                error!(
-                    "overlay inode-cache displacement: a live carrier is already registered at \
-                     the post-transition key {:?}; the copy-up transition must fail or retry and \
-                     serialize against projections of the transitioning object",
-                    new_key
-                );
-                Err(Error::with_message(
-                    Errno::EIO,
-                    "the overlay inode cache already maps the new visible-source key to a different live carrier",
-                ))
+                // Defensive upgrade: `strong_count() > 0` implies the upgrade
+                // succeeds; a `None` here is logically unreachable and degrades to
+                // the displacement error (no `.unwrap()`/`.expect()`).
+                let Some(existing_carrier) = existing.carrier.upgrade() else {
+                    return Err(Error::with_message(
+                        Errno::EIO,
+                        "the overlay inode-cache occupant disappeared during the alias transition",
+                    ));
+                };
+                if existing_carrier
+                    .facts_snapshot()
+                    .contains_real_inode(new_visible_source.real_inode())
+                {
+                    // F2: same real object projected early under the new key by a
+                    // concurrent lookup; keep the displacement error (not repaired
+                    // this round).
+                    error!(
+                        "overlay inode-cache displacement: a live carrier for the SAME real \
+                         object is already registered at the post-transition key {:?}; the \
+                         copy-up transition must fail (F2 concurrent-displacement branch)",
+                        new_key
+                    );
+                    Err(Error::with_message(
+                        Errno::EIO,
+                        "the overlay inode cache already maps the new visible-source key to the same real object",
+                    ))
+                } else {
+                    // F1: different-object stale occupancy (ino reuse); replace the
+                    // new-key entry with this carrier and keep the old-key alias.
+                    error!(
+                        "overlay inode-cache stale identity at the post-transition key {:?}: \
+                         replacing the occupant with the transitioning carrier (ino reuse)",
+                        new_key
+                    );
+                    guard.insert(
+                        old_key,
+                        InodeCacheEntry {
+                            carrier: old_entry.carrier.clone(),
+                            keep_alive: Some(old_real_inode),
+                        },
+                    );
+                    guard.insert(
+                        new_key,
+                        InodeCacheEntry {
+                            carrier: old_entry.carrier,
+                            keep_alive: None,
+                        },
+                    );
+                    Ok(())
+                }
             }
             // `new_key` is empty, holds a dead pin, or already aliases the
             // SAME carrier (idempotent re-alias): publish the alias, and pin
@@ -268,6 +315,15 @@ impl InodeCache {
     /// Returns the cached overlay inode for `key`, or creates and publishes
     /// one via `create_fn` on a miss.
     ///
+    /// On a live hit, `is_same_object` runs as a brief validation under the
+    /// upgradeable read guard: it must take only the hit carrier's facts
+    /// snapshot and must not acquire any other overlay lock. When the cached
+    /// carrier still denotes the same logical object it is returned unchanged
+    /// (reuse); when it no longer does (backing-fs inode reuse), the stale
+    /// carrier is evicted and the create path publishes the fresh carrier in
+    /// its place, so the key is never served a carrier for a different real
+    /// object.
+    ///
     /// The check-then-publish sequence is atomic (`upread` → `upgrade`): while
     /// the upgradeable read guard is held no writer can publish another
     /// carrier for the same key, and the single upgradeable-reader slot
@@ -278,11 +334,21 @@ impl InodeCache {
     pub(super) fn get_or_create(
         &self,
         key: RealObjectKey,
+        is_same_object: impl FnOnce(&Arc<OverlayInode>) -> bool,
         create_fn: impl FnOnce() -> Arc<OverlayInode>,
     ) -> Arc<OverlayInode> {
         let guard = self.by_key.upread();
         if let Some(inode) = guard.get(&key).and_then(|entry| entry.carrier.upgrade()) {
-            return inode;
+            if is_same_object(&inode) {
+                return inode;
+            }
+            error!(
+                "overlay inode-cache stale identity at key {:?}: the cached carrier no \
+                 longer denotes the same real object (ino reuse); replacing it",
+                key
+            );
+            // Fall through to the create path: `upgrade` then `remove(key)`
+            // then insert the fresh carrier (the existing miss-path body).
         }
         let inode = create_fn();
         let mut guard = guard.upgrade();

@@ -68,23 +68,35 @@ impl OverlayFs {
     /// Resolves one `name` under `parent_facts` into a published binding.
     ///
     /// Called from `OverlayInode::lookup` (inode.rs) under the parent `DIR`
-    /// transaction lock. The flow is binding-first: a cached `(parent_id,
-    /// name)` snapshot is returned directly; on a miss the layer-ordered
-    /// lookup (`lookup_in_layers`, entry.rs) produces the single private
-    /// intermediate, the positive branch is projected into a shared
-    /// [`OverlayInode`] (`project_inode`), and the assembled binding is
-    /// published before `DIR` release (`publish_binding`). Negative variants
-    /// stay private evidence and surface as `ENOENT` at the caller.
+    /// transaction lock. The flow is verify-then-serve: the layer-ordered
+    /// lookup (`lookup_in_layers`, entry.rs) runs unconditionally to
+    /// re-observe the fresh layer truth; a cached `(parent_id, name)` binding
+    /// is served only when it matches that truth (`matches_truth`); on a miss
+    /// or a stale mismatch the binding is rebuilt from the fresh truth — the
+    /// positive branch is projected into a shared [`OverlayInode`]
+    /// (`project_inode`) — and the assembled binding is published before
+    /// `DIR` release (`publish_binding`, which replaces the stale
+    /// `Arc<Binding>` on mismatch). Negative variants stay private evidence
+    /// and surface as `ENOENT` at the caller.
     pub(super) fn lookup_binding(
         &self,
         parent_facts: &OverlayObjectFacts,
         name: &str,
     ) -> Result<Binding> {
         let parent_id = RealObjectKey::from_facts(parent_facts);
+        // Fresh layer truth first: the memo is verified before it is served.
+        let truth = self.lookup_in_layers(parent_facts, name)?;
+        // Probe the cache: a cached binding is served ONLY when it matches the
+        // fresh truth; a stale/mismatched hit falls through to the rebuild.
+        // The `BindingCache` read guard is a temporary in the `if let`
+        // condition and drops before `project_inode` runs below.
         if let Some(binding) = self.bindings().get(&parent_id, name) {
-            return Ok(binding.as_ref().clone());
+            if binding.matches_truth(&truth) {
+                return Ok(binding.as_ref().clone());
+            }
         }
-        let binding = match self.lookup_in_layers(parent_facts, name)? {
+        // Rebuild from the fresh truth.
+        let binding = match truth {
             LayerLookup::Positive(facts) => {
                 let inode = self.project_inode(&facts);
                 Binding::Positive(PositiveBinding { inode })
@@ -168,32 +180,40 @@ impl OverlayFs {
         } else {
             fallback_fn()
         };
+        // Clone the visible source before the closures move `facts`: the
+        // get-or-create predicate validates a cached hit against this real
+        // inode, replacing an ino-reuse stale occupant.
+        let source_inode = visible_source(facts).real_inode().clone();
         let fs = self.self_weak.clone();
         let facts = facts.clone();
-        self.inodes().get_or_create(key, move || {
-            Arc::new(OverlayInode {
-                fs,
-                key: Mutex::new(key),
-                facts: Mutex::new(facts),
-                dir_transaction_lock: if is_directory {
-                    Some(Mutex::new(()))
-                } else {
-                    None
-                },
-                object_id,
-                extension: Extension::new(),
-                // The readdir index is `Some` iff this object is a directory
-                // (empty initial index); the copy-up transition coordinate
-                // starts `None` (copy-up records the first positive-binding
-                // publication).
-                readdir_index: if is_directory {
-                    Some(Mutex::new(ReaddirIndex::new()))
-                } else {
-                    None
-                },
-                copyup_transition: Mutex::new(None),
-            })
-        })
+        self.inodes().get_or_create(
+            key,
+            move |carrier| carrier.facts_snapshot().contains_real_inode(&source_inode),
+            move || {
+                Arc::new(OverlayInode {
+                    fs,
+                    key: Mutex::new(key),
+                    facts: Mutex::new(facts),
+                    dir_transaction_lock: if is_directory {
+                        Some(Mutex::new(()))
+                    } else {
+                        None
+                    },
+                    object_id,
+                    extension: Extension::new(),
+                    // The readdir index is `Some` iff this object is a directory
+                    // (empty initial index); the copy-up transition coordinate
+                    // starts `None` (copy-up records the first positive-binding
+                    // publication).
+                    readdir_index: if is_directory {
+                        Some(Mutex::new(ReaddirIndex::new()))
+                    } else {
+                        None
+                    },
+                    copyup_transition: Mutex::new(None),
+                })
+            },
+        )
     }
 
     /// Creates or reuses the shared [`OverlayInode`] for a freshly created
