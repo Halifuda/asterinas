@@ -45,6 +45,22 @@ use crate::{
     prelude::*,
 };
 
+/// The result of one `(parent_id, name)` lookup: the binding to serve plus
+/// the stale-upper signal.
+///
+/// `is_stale_upper` is true when the fresh layer truth no longer contains the
+/// upper entry of a previously published upper-backed positive binding and no
+/// whiteout covers the name. Most consumers ignore the signal (the binding is
+/// already rebuilt from the fresh truth); the remove path consumes it to
+/// surface `ESTALE` instead of re-exposing the lower counterpart.
+pub(in crate::fs::fs_impls::overlayfs) struct LookupOutcome {
+    /// The binding to serve: a verified cached binding, or the freshly
+    /// rebuilt binding from the layer truth.
+    pub(in crate::fs::fs_impls::overlayfs) binding: Binding,
+    /// Whether this lookup observed the stale-upper class.
+    pub(in crate::fs::fs_impls::overlayfs) is_stale_upper: bool,
+}
+
 impl OverlayFs {
     /// Returns the mount-wide binding cache.
     ///
@@ -65,24 +81,33 @@ impl OverlayFs {
         &self.identity
     }
 
-    /// Resolves one `name` under `parent_facts` into a published binding.
+    /// Resolves one `name` under `parent_facts` into a [`LookupOutcome`]:
+    /// the binding to serve plus the stale-upper signal.
     ///
-    /// Called from `OverlayInode::lookup` (inode.rs) under the parent `DIR`
-    /// transaction lock. The flow is verify-then-serve: the layer-ordered
-    /// lookup (`lookup_in_layers`, entry.rs) runs unconditionally to
-    /// re-observe the fresh layer truth; a cached `(parent_id, name)` binding
-    /// is served only when it matches that truth (`matches_truth`); on a miss
-    /// or a stale mismatch the binding is rebuilt from the fresh truth — the
-    /// positive branch is projected into a shared [`OverlayInode`]
-    /// (`project_inode`) — and the assembled binding is published before
-    /// `DIR` release (`publish_binding`, which replaces the stale
-    /// `Arc<Binding>` on mismatch). Negative variants stay private evidence
-    /// and surface as `ENOENT` at the caller.
+    /// Called from `OverlayInode::lookup` (inode.rs) and the `dir/` recipes
+    /// under the parent `DIR` transaction lock. The flow is verify-then-serve:
+    /// the layer-ordered lookup (`lookup_in_layers`, entry.rs) runs
+    /// unconditionally to re-observe the fresh layer truth; a cached
+    /// `(parent_id, name)` binding is served only when it matches that truth
+    /// (`matches_truth`); on a miss or a stale mismatch the binding is
+    /// rebuilt from the fresh truth — the positive branch is projected into a
+    /// shared [`OverlayInode`] (`project_inode`) — and the assembled binding
+    /// is published before `DIR` release (`publish_binding`, which replaces
+    /// the stale `Arc<Binding>` on mismatch). Negative variants stay private
+    /// evidence and surface as `ENOENT` at the caller.
+    ///
+    /// The carrier's `is_stale_upper` signal is derived on the mismatch
+    /// branch only (`Binding::is_stale_upper`): a previously published
+    /// upper-backed positive binding whose physical upper object vanished
+    /// behind the overlay with no whiteout left. The binding is still rebuilt
+    /// from the fresh truth (the next operation observes the honest truth);
+    /// the remove path consumes the signal to surface `ESTALE` instead of
+    /// re-exposing the lower counterpart; every other consumer ignores it.
     pub(super) fn lookup_binding(
         &self,
         parent_facts: &OverlayObjectFacts,
         name: &str,
-    ) -> Result<Binding> {
+    ) -> Result<LookupOutcome> {
         let parent_id = RealObjectKey::from_facts(parent_facts);
         // Fresh layer truth first: the memo is verified before it is served.
         let truth = self.lookup_in_layers(parent_facts, name)?;
@@ -90,11 +115,21 @@ impl OverlayFs {
         // fresh truth; a stale/mismatched hit falls through to the rebuild.
         // The `BindingCache` read guard is a temporary in the `if let`
         // condition and drops before `project_inode` runs below.
-        if let Some(binding) = self.bindings().get(&parent_id, name) {
+        let is_stale_upper = if let Some(binding) = self.bindings().get(&parent_id, name) {
             if binding.matches_truth(&truth) {
-                return Ok(binding.as_ref().clone());
+                return Ok(LookupOutcome {
+                    binding: binding.as_ref().clone(),
+                    is_stale_upper: false,
+                });
             }
-        }
+            // The cached binding mismatches the fresh truth: derive the
+            // stale-upper signal on this mismatch branch only (same temporary
+            // read guard; the brief `INODE` facts snapshot lives inside the
+            // predicate and drops before any write).
+            binding.is_stale_upper(&truth)
+        } else {
+            false
+        };
         // Rebuild from the fresh truth.
         let binding = match truth {
             LayerLookup::Positive(facts) => {
@@ -124,7 +159,7 @@ impl OverlayFs {
             }
         }
         self.publish_binding(&parent_id, name, binding.clone());
-        Ok(binding)
+        Ok(LookupOutcome { binding, is_stale_upper })
     }
 
     /// Creates or reuses the shared [`OverlayInode`] for `facts`.

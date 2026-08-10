@@ -82,7 +82,7 @@ impl OverlayInode {
     ) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
         let parent_facts = self.facts_snapshot();
-        let binding = fs.lookup_binding(&parent_facts, name)?;
+        let binding = fs.lookup_binding(&parent_facts, name)?.binding;
         match binding {
             Binding::Negative(NegativeBinding::Absent)
             | Binding::Negative(NegativeBinding::HiddenByOpaque(_)) => {

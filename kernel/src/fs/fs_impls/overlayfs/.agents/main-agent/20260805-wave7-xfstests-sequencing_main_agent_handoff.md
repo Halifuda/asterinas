@@ -12,6 +12,78 @@ VERIFIED（两次 ENOTEMPTY 已修复，仅剩 ls3 = Bug B 依赖失败，已登
 修复前每例重建镜像。078 与 stress 用例（001/021/019）按用户指示排除。
 生产 `.rs`（pass_40，9 文件）未提交待用户指示。`
 
+**2026-08-10 状态更新（修正，取代上段中 031/Bug B 的旧表述）：**
+- **031 已整例 PASS（2026-08-09 单跑 `Passed all 1 tests`）**——Bug B 的
+  ls3 缺口在 pass_42 + VFS 可见性放宽（commit `e3da18bd9`）后已修复；
+  任何"031 仅剩 ls3 / Bug B 阻塞"的表述均过时。**Wave7 已整例通过 20 例**
+  （含候选增补 022/063），完整清单见 §8.5 / §8 统一账。
+- **pass_43_wave7_cache_consistency 已完成并 compile-accepted**（commit
+  `7d6b5c960`；三阶段 Creator + 编译门 0 错误，仅预存 `uuid_mode` 警告）。
+- **overlay/021 已定案（2026-08-10 冒烟）**：FAIL 根因 = **Asterinas 内核缺
+  aio 能力**（`io_setup` syscall 206 → ENOSYS）→ fsstress 在任何文件操作前
+  退出 → 021 种植 0 文件 → glob 全空；**非 overlayfs 缺陷**，无 overlayfs
+  修复动作（记录见 §8 统一账 021 行 / NEXT ACTION）。
+- **pass_43 meso-integration Checker 已验收（OUTCOME A，2026-08-10）**：
+  12 例可调度回归批次 `002/003/006/007/010/011/012/014/024/031/038/077`
+  初跑 11 PASS / 1 FAIL（012，Change 1 stale-upper 回归）→ pass_44 修复
+  （`cd29d9c17`）→ 复验 **12/12 PASS、0 NOTRUN、0 HANG**。pass_43 +
+  pass_44 **gate-accepted**；§8 统一账 012 恢复绿色（20/43）。
+
+
+**2026-08-09 更新（Bug B Path 设计派发 + 结构性验收）：**
+`task_designer_wave7_bug_b_path_20260809` 经 V2 派发 lane 执行（用户贴派发轮 →
+spawn `fork_turns="1"`），产物结构性 **ACCEPTED**：
+`components/wave7_bug_b_path_design/wave7_bug_b_path_designer_spec.md` +
+`_designer_validation.md`。冻结面：layer-root `Path` 锚点
+（`OverlayLayer.root_path`）、`RealObject.real_path: Option<Path>`（唯一 `None`
+= readdir `..` 身份投影）、`WorkdirTemp`/`WhiteoutHandle` 改 dentry 锚定 `Path`、
+`upper_parent_path()`/`workdir_root_path()` owner-private 包装 + 全部写点直接
+`Path` 方法调用；unmount 双向处置（overlay 先卸 = last-Drop RAII；base 先卸 =
+「实际无所谓就不管」，`Mount::do_unmount` 无引用门、持有引用对卸载与 `Path`
+有效性无差别，不设计失效机制）；确认零 VFS 接口改动、无新锁域、无 ktest。
+下一步：Creator pass 切片已记录（`PASS_SLICING.md` `pass_42_wave7_bug_b_path_repair`，
+一 pass 三阶段：A 载体/锚点/查找路由、B workdir temp + copy-up/link 腿、C dir 系
+语义扫尾；中途不编译，Phase C 后主代理只修机械编译错误，每阶段 git diff 单阶段
+呈现、B/C amend Phase A commit）；Phase A 已验收并提交（`f68ecdcec`，
+codex/overlayfs-refactor，5 文件 +182/-38）；Phase B 已验收并 amend 进同一
+commit（`c5d7e36db`，11 文件 +369/-143）；Phase C 已执行并 amend 进同一
+commit（`4830cd007`，12 文件 +582/-314），但首次编译失败：8 处
+`Dentry::lookup_child` 不可达（方法实际在 `DirDentry` 上、构造器
+`pub(super)`）——Designer 修订（改用 pub 的 `PathResolver::lookup_at_path`）
+已派发并返回**阻断性升级**（同线程 resolver 写锁自死锁），见 §4。
+
+**2026-08-10 更新（Cache 一致性设计派发 + 结构性验收）：**
+`task_designer_wave7_cache_consistency_20260810` 经普通 spawn（fork_context=false
+平台试验；首个 fork 模式子代理误读父上下文已关闭）完成，产物结构性
+**ACCEPTED**：`components/wave7_cache_consistency_design/wave7_cache_consistency_designer_spec.md`
++ `_designer_validation.md`。四项代码设计 + 一项文档边界：Change 1 BindingCache
+验证式 memo（lookup_binding 每次层扫描 + `Binding::matches_truth` 身份一致才
+serve）；Change 2 `InodeCache::get_or_create` 同对象校验 + 陈旧条目替换
+（F1）；Change 3 `alias_key`/`replace_facts` 位移分支细化（同对象=F2 保留
+Err；异对象=ino 复用陈旧占用替换自愈）；Change 4 `BindingCache::invalidate_parent`
++ 父 copy-up 旧 key 清理（F3）；Change 5 readdir 边界 A（文档）。新函数全部为
+最优持有者方法；(a)(b)(c) 三表逐项 file:line disposition（lookup_binding 8 个
+调用方核实）；零 VFS 改动、无新锁域、无 ktest；micro 9 个 ID 已核对。下一步：
+Creator pass 切片（待用户指示）。
+
+**2026-08-10 更新（派发通道升级：Direct Spawn Lane 优先，V2 备选）：**
+普通 spawn（`fork_context=false` + 自包含初始消息）经 3 次验证可重复：Designer
+任务（Planck，精确 write-set 完成）+ pingpong round1（Carson）/ round2（Russell）
+均正确收到消息并回复；fork 模式（Galileo）误读父上下文、违反 write-set 已弃用。
+已修订 `PROTOCOL.md` §1.3 与 Core Terms：**Direct Spawn Lane 为优先项**（无需
+用户贴派发轮；初始消息携带角色声明/task_id/规则路径/packet 路径/write-set/
+禁止项/报告契约），**V2 User Dispatch Turn lane 降为备选**（严格零载荷指针
+路由时使用）。`.agents/skills/ovfs-main/SKILL.md` 因只读未改（skill 声明以
+PROTOCOL.md 为准）。
+
+**2026-08-10 更新（061 归因修正，主代理亲自全量打点）：** `overlay/061`
+经 3 轮单例打点运行（全量 overlay 探针 + VM 缺页/回写/munmap 探针）定位到
+**通用 VM/page-cache 缺陷**：MAP_SHARED mmap 写不标记 CachePage dirty →
+unmount 回写丢失 → after-cycle 读旧数据。2026-08-09 的"双 copy-up/同 key
+双载体"归因未复现；overlayfs 投影/InodeCache 侧本场景无缺陷（单载体、单
+promote、alias 15→17 OK）。详见 §8.4 与
+`components/wave7-xfstests-sequencing/overlay061_reinvestigation_20260810.md`。
+
 ## 1. Global State Pointer
 
 - **Current Active Wave / Pass:** Wave7 xfstests sequencing
@@ -723,6 +795,191 @@ need large scratch images and long runtime.
 - **Escalations / Deadlocks:** None. The UUID mapping discrepancy is recorded
   above as a pre-start reconciliation item, not a runtime failure.
 
+- **Bug B Path 设计任务派发与验收（2026-08-09，user-directed；V2 lane）：**
+  packet `subagent-tasks/wave7_bug_b_path_design/task_designer_wave7_bug_b_path_20260809_dispatch.md`
+  （§3 清单 9 项 + 用户补充的 unmount 双向研讨环节 + `~/linux` 源码树提醒）；
+  用户贴派发轮后按协议 spawn `fork_turns="1"`。Designer 完成并产出：
+  `components/wave7_bug_b_path_design/wave7_bug_b_path_designer_spec.md`（45.9
+  KB）与 `_designer_validation.md`（11.4 KB）。主代理结构性验收 PASS：模板小节
+  齐全、清单 1-9 逐项处置、micro ID 对照 inventory（P1-26/P1-36/P1-01..07/
+  P1-34/P0-14/P1-31/P1-33 + 邻接表）、抽查 file:line 引用一致（`Path::new`/
+  `dentry()`/`lookup_child` 可达性、`Path::link/rename` same-Mount EXDEV、
+  `Mount::do_unmount` 无引用门、`OverlayLayer`/`RealObject`/`WorkdirTemp` 现状）。
+  冻结面摘要：`OverlayLayer.root_path`；`RealObject.real_path: Option<Path>`
+  （None 仅 readdir `..`，accessor 检查返回）；`WorkdirTemp.path`/
+  `WhiteoutHandle.path`；`upper_parent_path()`/`workdir_root_path()`/
+  `workdir_workspace_path()` 三个 owner-private 包装；≈20 个裸 inode 写点改走
+  `Path` 方法（lookup_child/mknod/link/unlink/rmdir/rename(Exchange)/
+  new_fs_child），内容元数据类（read/write、xattr 含 impure、mode/times、
+  overlay `readdir_at`）保留裸 inode；unmount 双向：overlay 先卸 = 现有
+  last-Drop RAII（Asterinas 无 VFS unmount 回调，加回调属 VFS 接口改动、
+  本 packet 禁止），base 先卸 = 「实际无所谓就不管」（`Mount::do_unmount` 无
+  引用/EBUSY 门 + 无 mount-liveness API，持有引用对卸载成功与后续 `Path`
+  有效性均无差别），不设计失效机制；新增 mount 期 same-`Mount` `EINVAL`
+  校验（Linux super.c:806-811 对齐，`no upstream coverage` 已记录）。零 VFS
+  接口改动、零新锁域、零 ktest、无 Creator 切片。验证契约：`overlay/031`
+  direct（ls3 + 跨用例残留；rm1/2/3 回归守卫）+ 邻接 010/024/012/003/006/
+  011/029/077/038；020/041/013 明确越界。下一步：待用户授权 Creator pass
+  切片（届时先记 `PASS_SLICING.md`，再按 V2 lane 派发）。
+
+- **pass_42 切片与 Phase A 派发准备（2026-08-09，user-directed）：**
+  `PASS_SLICING.md` 已记录 `pass_42_wave7_bug_b_path_repair`（一 pass 三阶段：
+  Phase A 载体/锚点/查找路由 — `mount/{layers,claims}.rs`,
+  `projection/{entry,inode}.rs`, `dir/mod.rs` 仅加 `upper_parent_path()`；
+  Phase B workdir temp + copy-up/link 腿 — `copyup/{workdir,promote}.rs`,
+  `dir/link.rs` + create/whiteout/remove 三处 `create_workdir_temp` 传参机械
+  替换；Phase C dir 系语义扫尾 — `dir/{create,whiteout,remove,rename,mod}.rs`，
+  删 `upper_parent`/`workdir_root`）。执行纪律（用户确认）：每阶段 = V2 派发轮
+  + spawn `fork_turns="1"`（task_id 带 `_phase_a/b/c` 后缀，B/C 携带
+  Continuation / Parent Task 指针）；Creator command-free、中途不编译；阶段
+  验收 = 纯 diff 审查；Phase C 后主代理跑目标 `cargo check` 并只修机械编译
+  错误（语义/缺失面错误退回 Creator 修复轮）；Git：Phase A 新建 commit、
+  B/C amend 同一 commit，`git diff HEAD` 单阶段呈现；`.agents` 记录不提交。
+  Phase A packet：
+  `subagent-tasks/wave7_bug_b_path_design/task_creator_wave7_bug_b_path_20260809_phase_a_dispatch.md`
+  （含冻结清单、实体普查期望、禁止面）。派发轮已生成，待用户贴出。
+
+- **Phase A 执行与验收（2026-08-09，V2 lane；ACCEPTED）：**
+  Creator `task_creator_wave7_bug_b_path_20260809_phase_a` 完成，产出报告
+  `components/wave7_bug_b_path_design/pass_42_wave7_bug_b_path_phase_a_creator.md`
+  + 5 个生产 `.rs`（`mount/{layers,claims}.rs`、`projection/{entry,inode}.rs`、
+  `dir/mod.rs`）。主代理结构性 diff 验收 PASS：`OverlayLayer.root_path` 锚点、
+  `UpperWorkdirClaim.workdir_workspace_path`（与 `workdir_workspace` 同语句写入）、
+  `validate_pair` same-`Mount` `EINVAL`（Linux `ovl_get_workdir` 依据）、
+  `RealObject.real_path` + `with_path`/`real_path()`（`Err(EIO)` on None）、
+  `lookup_in_layers` 上/下层改 `Dentry::lookup_child` + `Path::new`、
+  `new_root` 经 `layer.root_path`、`upper_parent_path()` 新增（`upper_parent`/
+  `link_impl` 保留）；实体普查 = 3 字段 + 4 方法 + 0 新 struct/enum/中间体 +
+  0 删除，两个暂无可调用者的新访问器按 Wave6 先例加 `#[expect(dead_code)]`
+  （记录为 incidental，B/C 接线后移除）；禁止面零改动（`copyup/`、
+  `dir/{create,link,remove,rename,whiteout}.rs`、`readdir_index.rs`、
+  `metadata_security/`、`mount/build.rs` 均无 diff）。中途未编译（用户纪律）。
+  Git（用户纪律）：Phase A 新建 commit `f68ecdcec`（仅 5 个生产 `.rs`，
+  `.agents` 记录未提交）；Phase B/C 将 amend 该 commit。
+
+- **Phase B 执行与验收（2026-08-09，V2 lane continuation；ACCEPTED）：**
+  Creator `task_creator_wave7_bug_b_path_20260809_phase_b` 完成，产出报告
+  `components/wave7_bug_b_path_design/pass_42_wave7_bug_b_path_phase_b_creator.md`
+  + 6 个生产 `.rs`（`copyup/{workdir,promote}.rs`、`dir/link.rs`，
+  `dir/{create,whiteout,remove}.rs` 仅 `create_workdir_temp` 传参机械替换）。
+  主代理结构性 diff 验收 PASS：`WorkdirTempRequest::Link` 载荷改 `Path`、
+  `WorkdirTemp.inode` → `path`（`inode()` 派生、`into_parts() -> (String,
+  Path)`）、`create_in`/`create_workdir_temp`/`cleanup_workdir_temp` 转
+  `&Path`、新增 `OverlayFs`/`OverlayInode::workdir_root_path`（旧 inode
+  访问器保留给 create/whiteout/remove 余下消费者）、promote 四臂
+  `workdir_path.rename(&temp_name, &upper_dir_path, name, Replace)` +
+  `upper_real_object` 经 `lookup_child` + `with_path`、`link_source` 返回
+  `Result<Path>`、`link_over_whiteout` 走 `Path::rename`；whiteout 站点
+  第二参数按原语义传 `&workdir_path`（temp 名以 workdir ino 作种，doc 明示
+  非 (parent,name) 属主），create/remove 传 `&upper_parent_path`，行为保持。
+  实体普查：0 新 struct/enum/命名中间体、0 删除；`verify_upper_target` 参数
+  `&Path`、两处局部绑定、whiteout 局部改名记为 incidental（行为保持）；
+  禁止面（`dir/{rename,mod}.rs`、`readdir_index.rs`、`metadata_security/`、
+  `mount/build.rs`）零改动。已知三个中间态断点（whiteout `into_parts`→
+  `WhiteoutHandle.inode`、create `RealObject::new` 收 `Path` temp、`link_impl`
+  直链分支收 `Path`）为 Phase C 消解面，Creator 报告 §5 明示；中途未编译
+  （用户纪律）。Git：amend 进 Phase A commit → `c5d7e36db`（11 文件
+  +369/-143，`.agents` 记录未提交）。
+
+- **Phase C 执行、首次编译失败与 lookup 修订决策（2026-08-09，V2 lane
+  continuation；compile BLOCKED on lookup_child）：**
+  Creator `task_creator_wave7_bug_b_path_20260809_phase_c` 完成，产出报告
+  `components/wave7_bug_b_path_design/pass_42_wave7_bug_b_path_phase_c_creator.md`
+  + 8 个生产 `.rs`（`dir/{mod,create,whiteout,remove,rename}.rs`、
+  `copyup/{workdir,promote}.rs` 删 `workdir_root`、`mount/claims.rs` 移除
+  expect）。主代理结构性 diff 验收 PASS：`link_impl` 走 `Path::link`、
+  create 两臂 `with_path`、`WhiteoutHandle.path`、publish/sweep/clear-empty/
+  Exchange/重观测全走 `Path`、三访问器删除 + 两 expect 移除；完成不变量
+  （除 readdir `..` 外无裸 inode 命名空间变更）。随后容器内首次编译
+  （Checker 已验证方式，主代理亲自执行）→ **8 个 E0599 全部是
+  `dentry().lookup_child` 不可达**：`lookup_child` 定义在 `impl DirDentry`
+  （dentry.rs:398-953）而非 `Dentry`，唯一构造器 `as_dir_dentry_or_err`
+  与 `DirDentry` 均为 `pub(super)`，`Dentry::new` 私有；探针证实
+  `pub(crate)` 放宽也不可调用（非可见性问题，是接收者类型错误）。
+  只读调研发现可达替代：**`PathResolver::lookup_at_path(&base_path, name)`
+  （resolver.rs:555，`pub`）** 内部即 `as_dir_dentry_or_err → lookup_child →
+  Path::new → get_top_path`，返回 dentry 锚定 `Path`，零 VFS 改动；resolver
+  经 `current_thread!().as_posix_thread().read_fs().resolver().read()` 获取
+  （procfs maps.rs:99 先例）。语义差异 3 项（MAY_EXEC/EACCES、dot/dotdot、
+  get_top_path 挂载点解析）均更贴近 base 视图；新关注点 = overlay Inode
+  方法内获取 resolver 读锁与 VFS 解析路径同线程重入的锁序，待 Designer
+  确认。证据：`components/wave7_bug_b_path_design/compile_failure_lookup_child_20260809.md`。
+  决策（user-directed）：Phase C 现状 amend 进 commit → `4830cd007`（12
+  文件 +582/-314）；派发 bounded Designer 修订
+  `task_designer_wave7_bug_b_lookup_revision_20260809` 确认 lookup 替换面
+  （8 处）与锁序/MAY_EXEC，验收后 Creator 机械替换 8 处再编译。
+
+- **lookup 修订 Designer 派发与阻断性升级（2026-08-09，V2 lane；
+  ESCALATED — 非正常冻结）：**
+  Designer `task_designer_wave7_bug_b_lookup_revision_20260809` 完成，产出
+  `components/wave7_bug_b_path_design/wave7_bug_b_lookup_revision_designer_spec.md`
+  + `_designer_validation.md`。结论：`PathResolver::lookup_at_path`
+  （resolver.rs:555，`pub`）机制确认可用（内部即 as_dir_dentry_or_err →
+  lookup_child → Path::new → get_top_path，返回 dentry 锚定 `Path`，零 VFS
+  接口改动），但**锁序裁定为可证明的自死锁**：
+  `sys_chdir`（chdir.rs:21-27）/`sys_chroot`（chroot.rs:17-24）/
+  `sys_pivot_root`（pivot_root.rs:34）在持有 `resolver().write()` 期间执行
+  `lookup`；路径穿过 overlay 时经 lookup_child → OverlayInode::lookup →
+  lookup_in_layers 进入 8 个替换点，嵌套 `resolver().read()` 因
+  `try_read` 检测本线程 WRITER 位失败（ostd rwmutex.rs:146-153）、
+  `wait_until` 永久睡眠（wait.rs:69-82）——含 `cd $SCRATCH_MNT` 这类
+  xfstests 核心操作。排队 writer 不阻塞读者（reader-barging）非死锁源；
+  活跃同线程 writer 才是。无 overlay 本地规避（try_read 报错破坏
+  chdir/chroot/pivot_root 经 overlay；raw inode 无法构建 dentry 锚定载体）。
+  8 站点替换面以**条件冻结**记录（统一 `lookup_at_path` 表达式，纯读 3 处
+  亦统一走 lookup_at_path——理由：sweep 重观测清除陈旧负缓存、HiddenEvidence
+  观测刚发布名字需与 base 视图一致；raw 读会读到 fs 真值而 base 缓存仍陈旧，
+  属对 §5.4 的回归）。MAY_EXEC 裁定：upper 臂冗余等价、lower 臂新增窄
+  EACCES 接受并记录；dot/dotdot/NAME_MAX/get_top_path 无回归。主代理核实
+  证据属实（三个 syscall 持写锁解析 + rwmutex 同线程 writer 位）。解除
+  blocker 的两个方向（Designer §6 给出）：(A) 三个 syscall 改为 read 解析
+  + write 仅做状态变更；(B) VFS 暴露可达的 dentry 产出 API——其中最小形态
+  即此前发现的 2 行可见性放宽（`DirDentry` + `as_dir_dentry_or_err`
+  `pub(super)` → `pub(in crate::fs)`，零行为、无 resolver 锁、无死锁）。
+  待用户决策。
+
+- **可见性放宽落地 + overlay/031 单次实测 PASS（2026-08-09，user-directed；
+  亲自执行，无 subagent）：**
+  VFS 2 行放宽（`DirDentry` + `Dentry::as_dir_dentry_or_err`
+  `pub(super)` → `pub(in crate::fs)`，dentry.rs:365/:394）+ 8 处机械改
+  `path.dentry().as_dir_dentry_or_err()?.lookup_child(name)`（entry.rs ×2、
+  workdir.rs、promote.rs、whiteout.rs、remove.rs ×2、rename.rs）。容器
+  `cargo check -p aster-kernel --target x86_64-unknown-none` 通过（仅预存
+  `MountPolicy::uuid_mode` 警告）；amend → `e3da18bd9`（13 文件
+  +584/-316）。随后用记录中的复现命令（pass_41 §3）**只跑一次**
+  `overlay/031`（临时 `wave7-single.list` + 全新 8 GiB ext2 镜像，
+  RELEASE=1 MEM=12G）：**PASS** —— `Ran: overlay/031 / Passed all 1
+  tests / All conformance tests passed`。即 Bug B 的 ls3 缺口（base 视图
+  一致性）在 pass_42 + 可见性放宽后**已修复**。证据归档
+  `run_evidence/overlay031/pass42_visibility_fix_20260809/{qemu.log,
+  qemu-serial.log}`；临时 runlist 与生成镜像已按卫生要求删除。另执行了
+  只读调研构造零 VFS 改动的完整 Resolver 方案，结论记录于
+  `components/wave7_bug_b_path_design/resolver_zero_vfs_research_20260809.md`
+  （见该文件；核心：raw lookup + 每对象路径链 + 变更时从层锚点经
+  `lookup_at_path` 逐级解析父路径，可完全避开 resolver 写锁死锁，但需
+  Designer 级载体重做与 rename/失效链同步确认，成本远高于 2 行放宽）。
+
+- **未测四例补齐（2026-08-09，user-directed；亲自执行，无 subagent；
+  单例 runlist + 全新镜像，每例一次，10 分钟上限无 HANG）：**
+  `overlay/078`（8G）→ **NOTRUN**：`file system doesn't support chattr
+  +ASai`（内核无 fileattr，符合预期）。
+  `overlay/001`（16G 重建镜像）→ **FAIL（内核 panic）**：
+  `Uncaught panic: called Result::unwrap() on an Err value: NoMemory at
+  kernel/comps/block/src/bio.rs:429`，发生于 >4GiB 大文件 copy-up 期间
+  （guest 45s 处），QEMU 未超时——真实内核缺陷（block BIO 层对 NoMemory
+  直接 unwrap）。
+  `overlay/021`（16G）→ **FAIL**：并发 copy-up 炸弹，输出不匹配——
+  `ovl-lower/arena/p{0..3}/*` 大量 `No such file or directory`、`find:
+  'p3'/'p2' No such file or directory`；`Failed 1 of 1 tests`。无 panic、
+  非 hang——疑似并发 copy-up（CUL）正确性缺陷，待后续归因。
+  `overlay/019`（16G，fsstress）→ **PASS**：`Passed all 1 tests`。
+  证据：`run_evidence/{overlay078,overlay001,overlay021,overlay019}/
+  untested_four_20260809/{qemu.log,qemu-serial.log}`；临时 runlist 与生成
+  镜像已删除。Wave7 台账更新（当时口径）：**PASS 18 / NOTRUN 11 /
+  FAIL 2（001、021）/ 013 分歧 1 = 32 可调度全部有结果**，无遗留未测。
+  （2026-08-10 注：此 PASS 18 为候选增补前口径；063/022 候选 PASS 后累计
+  20，见 §8.2/§8.5。）
+
 ## 5. Explicit Agent-Level Decisions
 
 1. Wave7 is started per explicit user authorization. The first run
@@ -753,6 +1010,136 @@ need large scratch images and long runtime.
 
 ## 6. Next Actions for the Next Thread (CRITICAL)
 
+**2026-08-10 NEXT ACTION → 已完成（2026-08-10 下午）：`pass_43_wave7_cache_consistency`
+Creator pass 三阶段全部落地并 compile-accepted。** 设计产物：
+`components/wave7_cache_consistency_design/wave7_cache_consistency_designer_spec.md`
++ `_designer_validation.md`（Change 1 BindingCache verified memo；Change 2
+get_or_create 同对象校验+陈旧替换；Change 3 alias_key F1/F2 位移细化；
+Change 4 invalidate_parent；Change 5 readdir 边界 A；零 VFS、无新锁域、无 ktest）。
+按用户指示（2026-08-10）做 **一 pass 三阶段**（pass 号不增长；同一 Creator
+内部 Phase A/B/C，B/C `--amend` Phase A commit，最终一个 commit
+`7d6b5c960`，6 文件 +284/-75）：Phase A = 身份判定/memo 验证原语
+（`projection/inode.rs` `same_visible_identity` + `contains_real_inode`；
+`projection/binding_cache.rs` `matches_truth` + `is_same_negative` +
+`invalidate_parent`；5 个新方法带 `#[expect(dead_code)]` 待接线，零调用点）；
+Phase B = 载体缓存校验与失效接线（`inode_cache.rs` `get_or_create` 3 参 +
+`alias_key` 4 参 F1/F2、`inode.rs` `replace_facts`/`new_root`、`mod.rs`
+`project_inode`、`promote.rs` 一行传参）；Phase C = `lookup_binding` memo 化
+（无条件层扫描 + `matches_truth` verify-then-serve）+ `readdir_index.rs`
+文档（Change 5）+ 剩余 dead-code 解除。每阶段结构 diff 验收通过后
+commit/amend（Phase A `fc8507a2a` → B amend `dac6c65da` → C amend
+`deda45635` → 编译机械修复 amend `7d6b5c960`）。派发走 **Direct Spawn Lane**
+（PROTOCOL §1.3 优先项，平台验证；三个 Creator：Godel/Franklin/Sagan）。
+
+**2026-08-10 编译门（主代理执行）：** 容器
+`cargo check -p aster-kernel --target x86_64-unknown-none` **PASSED（0 错误，
+10s）**。机械修复（Wave5/pass_42 先例）：移除 `HiddenEvidence::{
+layer_index,real_inode}` 与 `NegativeBinding::{HiddenByWhiteout,
+HiddenByOpaque}` 载荷上 4 个已失效的 `#[expect(dead_code, reason=...)]`
+（这些字段现被 `is_same_negative` 真实读取）；`Binding::matches_truth`
+可见性收窄为 `pub(super)`（其 `&LayerLookup` 参数为 projection 内部类型，
+spec §4.4 允许 projection 内部方法用 `pub(super)`）。剩余警告 = 预存
+`MountPolicy::uuid_mode`（不属本 pass）。Creator 报告：
+`components/wave7_cache_consistency_design/pass_43_wave7_cache_consistency_
+{phase_a,phase_b,phase_c}_creator.md`；packets：
+`subagent-tasks/wave7_cache_consistency_design/task_creator_wave7_cache_
+consistency_20260810_phase_{a,b,c}_dispatch.md`。
+
+**NEXT ACTION（下一线程，待用户授权；2026-08-10 修正回归范围）**：派发
+pass_43 的 meso-integration Checker（`$ovfs-checker` lane），按
+`wave7_cache_consistency_designer_validation.md` §2 跑**可调度回归批次**
+（新鲜镜像、每例一个 QEMU；expected `PASS`，其中 031 已于 2026-08-09 整例
+PASS——Bug B ls3 已修复，本次期望整例 PASS，若回归按新缺陷归因）：必跑
+`002/003/010/012/014/024/031/038/077`，
+推荐低成本加跑 `006/007/011`（§1 mapped、PASS、直接覆盖 Change 1 白名单/
+opaque/readdir 表面）。**mapped 但不可调度/不跑**（记入 not-run 列注明原因）：
+`001`（≥8GiB；已知底层 block 缺陷，仅用户授权才 combined 复跑）、`004`
+（fsgqa 环境门）、`005`（loop+XFS harness 缺口）、`017`（redirect_dir
+P2-02 deferred）、`018`/`037`（index=on deferred）、`020`（userns 能力门）、
+`021`（F2 out-of-scope + ≥16GiB）、`061`（VM 缺陷关闭）；`019`（fsstress）
+仅作可选锁序/死锁观察（用户授权）。Checker 交付 mapped/observed/not-run
+三列 + 每例 qemu.log；运行前每例重建镜像（Bug B 未落地）。
+
+**2026-08-10 Checker 返回（OUTCOME B — ACTIONABLE REPAIR BATCH）：** 12 例
+11 PASS / 1 FAIL / 0 NOTRUN / 0 HANG；031 整例 PASS（ls3 含，Bug B 未重开）。
+**FAIL = overlay/012**（期望 ESTALE，实得 EISDIR），归因 pass_43 Change 1
+（lookup_binding 无条件层扫描后重建把 stale-upper 情形落到 lower 目录，
+remove_target 的 ESTALE 臂不可达）。完整三字段 + 逐字诊断 + 修复批次见
+`components/wave7_cache_consistency_design/pass_43_wave7_cache_consistency_checker.md`
+（§4）与 PASS_SLICING pass_43。**NEXT：** 有界 Designer 会签（冻结
+lookup_binding 新鲜真值派生中 stale-upper 与真回落 lower 的区分 + remove_target
+路由 ESTALE）→ Creator 修复 pass → 单跑 overlay/012（fresh 8 GiB）确认
+ESTALE + 无 warn/oops → 复跑 12 例全表确认其余 11 例仍绿。
+**2026-08-10 已派发（用户授权）：** `task_designer_wave7_cache_consistency_012_repair_20260810`
+（Direct Spawn Lane，agent Pasteur）冻结 stale-upper 区分 + ESTALE 路由 +
+验证契约；packet `subagent-tasks/wave7_cache_consistency_design/
+task_designer_wave7_cache_consistency_012_repair_20260810_dispatch.md`。
+**Designer 会签 ACCEPTED（2026-08-10）：** 冻结 `Binding::is_stale_upper` +
+`LookupOutcome` 载体 + `lookup_binding -> Result<LookupOutcome>`（探针在
+matches_truth 失败时派生信号）+ `remove_target` step-1 在类型门之前路由
+ESTALE（translate_stale_upper_enoent）+ 7 处机械 `.binding`；零 VFS、无新
+锁域、无 ktest。**pass_44_wave7_cache_consistency_012_repair Creator 已派发**
+（Direct Spawn Lane，agent Euler；packet
+`subagent-tasks/wave7_cache_consistency_design/
+task_creator_wave7_cache_consistency_012_repair_20260810_dispatch.md`；记录见
+PASS_SLICING pass_44）。
+**pass_44 Creator ACCEPTED + 编译门 PASSED（2026-08-10）：** diff 对照冻结面
+逐项核验（is_stale_upper 逐字、LookupOutcome + 探针 delta、remove_target
+step-1 ESTALE 路由、7 处机械 .binding）；容器 cargo check 0 错误（仅预存
+uuid_mode 警告）；提交 `cd29d9c17`（8 文件 +112/-26）。**复验 Checker 已派发**
+（agent Peirce；step (i) 012 单跑 + step (ii) 12 例全表，期望 12/12 PASS；
+packet `subagent-tasks/wave7_cache_consistency_design/
+task_checker_wave7_cache_consistency_012_repair_20260810_dispatch.md`）。
+**复验返回（2026-08-10，OUTCOME A — VERIFIED ACCEPTANCE）：** step (i)
+`overlay/012` 单跑 PASS（ESTALE，serial 无 warn/oops）；step (ii) 12 例全表
+**12/12 PASS、0 NOTRUN、0 HANG**（evidence
+`run_evidence/pass44_012_repair_20260810/`，13 runs；receipt
+`pass_44_wave7_cache_consistency_012_repair_checker.md`）。**pass_43 +
+pass_44 gate-accepted**；§8 统一账 012 恢复绿色（20/43）。Wave7 可调度面
+剩余未处理项（用户决策）：`041`（show_options 回显，VFS 接口门）、`013`
+（ETXTBSY 分歧，已记录）、`001`/`019`（重负载，用户可选）、`028`
+（flock 候选未测）；`legacy_fs.rs` 移交决策未做。
+**2026-08-10 021 定向重试（user-directed；运行中）：** `overlay/021`（并发
+copy-up 炸弹）在 pass_43/44 修复面下重跑——单例 16 GiB 镜像、1500s 预算、
+必须报告到达阶段（种植/并发/终态）。packet
+`subagent-tasks/wave7_cache_consistency_design/
+task_checker_wave7_overlay021_retry_20260810_dispatch.md`（agent Banach）。
+**021 重试结果（2026-08-10）：FAIL，与 2026-08-09 同阶段（炸弹种植/前置）同症状**
+——4 个 glob `*0/*4/*8/*b` 全部 `No such file or directory` + `find: 'p2'/'p3'`
+缺失；无 panic/hang/CORRUPT；pass_43/44 未改变结果或阶段，**非 overlayfs
+回归，harness/前置归因不变**。未出现更晚阶段（并发 copy-up 正确性）证据。
+证据 `run_evidence/overlay021_retry_20260810/`（16 GiB 镜像、无残留）；收据
+`pass_43_021_retry_checker.md`。下一步候选（用户决策）：只读排查种植前置
+（fsstress/`xfs_io` 在 ext2 上的文件创建/持久性与上游 `*0/*4/*8/*b` glob 的
+命名/可见性是否匹配），而非 overlayfs 代码修复。
+**2026-08-10 方案 A（user-directed；运行中）：** 最小 guest 冒烟——临时把
+`test/initramfs/src/boot_hello.sh` 换成 fsstress 冒烟脚本（guest 内直跑
+`/opt/xfstests/ltp/fsstress -d /tmp/x -p 4 -z -f creat=1 -n 16/-n 256 -v`，
+打印 errno/tree/counts），`AUTO_TEST=boot ENABLE_CONFORMANCE_TEST=true
+CONFORMANCE_TEST_SUITE=xfstests` 构建含 xfstests 的 initramfs，跑完精确还原。
+packet `subagent-tasks/wave7_cache_consistency_design/
+task_checker_wave7_fsstress_smoke_20260810_dispatch.md`（agent Hume）。
+**冒烟结果（2026-08-10，根因已定）：** guest 内直跑
+`/opt/xfstests/ltp/fsstress -d /tmp/x -p 4 -z -f creat=1 -n 16/-n 256 -v`——每进程
+`io_setup failed`（恰 4 条），0 个文件、0 个 p{0..3}，`FSSTRESS_RC=0` 是父进程
+掩码（子进程 exit(1)）。Asterinas 无 aio `io_setup`（syscall 206）→
+`kernel/src/syscall/mod.rs` 默认分支 ENOSYS；fsstress 在任何文件操作前退出。
+**这直接解释 021 种植 0 文件 → glob 全空 → overlay 镜像 find 缺失。**
+归属：**`内核能力缺口（aio io_setup ENOSYS）`**（与 §8 统一账 021 行一致），**非 overlayfs**；
+pass_43/44 既非因也非解。证据 `run_evidence/fsstress_smoke_20260810/`；
+收据 `pass_43_021_fsstress_smoke_checker.md`；boot_hello.sh 已精确还原（sha256
+匹配），git 无 harness 改动。路由选项（用户决策）：(a) 内核补 `io_setup`/
+`io_destroy`（超 overlayfs 范围，需另行授权）；(b) 重打包无 AIO 的 fsstress；
+(c) 用 touch 循环等替代播种 021 lower。无 overlayfs Creator 修复指向。
+**2026-08-10 定案（user-directed）：不再路由任何选项；021 记为「内核缺少 aio
+能力导致 FAIL（io_setup ENOSYS，非 overlayfs）」。Wave7 case 记录收尾。**
+
+0. **061 已关闭（非 overlayfs 缺陷，不修）**：机理记录于
+`components/wave7-xfstests-sequencing/overlay061_reinvestigation_20260810.md`
+（handoff §8.4；证据 run_evidence/overlay061/ovfs061d_20260810/）。根因 =
+通用 VM/page-cache 缺陷（MAP_SHARED mmap 写不标 CachePage dirty → unmount
+回写丢失，`kernel/src/vm`）；用户决定不修，061 从 overlayfs wave 关闭。
+
 1. **pass_40 impure + whiteout-cleanup fix IMPLEMENTED, ACCEPTED, VALIDATED
    (2026-08-08):** `overlay/038` PASS (impure set/clear/filter verified);
    `overlay/031` in-scope objectives verified (both `ENOTEMPTY` fixed by the
@@ -760,9 +1147,13 @@ need large scratch images and long runtime.
    `pass_40_wave7_impure_cleanup_creator.md` +
    `pass_41_wave7_impure_cleanup_checker.md`; per-case evidence
    `run_evidence/{overlay031,overlay038}/impure_cleanup_20260808/`.
-2. **Bug B — base-fs↔overlayfs view coherence (REGISTERED; direction studied
-   2026-08-08, see §4):** root cause of 031 ls3 `ENOENT` and the 031→020
-   cross-run `_scratch_mkfs` residue. **Candidate A (primary):** retain the
+2. **Bug B — base-fs↔overlayfs view coherence (REGISTERED 2026-08-08; 031 ls3
+   CLOSED 2026-08-09 — see §8.5):** root cause of 031 ls3 `ENOENT` and the
+   031→020 cross-run `_scratch_mkfs` residue. The 031 ls3 portion is FIXED:
+   pass_42 (Path-anchored `RealObject.real_path` + dentry-routed
+   namespace-mutating upper writes) plus the 2-line VFS visibility widening
+   (`e3da18bd9`) produced a whole-case `overlay/031` PASS on 2026-08-09.
+   Historical analysis of the original root cause: **Candidate A (primary):** retain the
    layer-root `Path`s at mount (anchors) and route every namespace-mutating
    physical upper write (whiteout publish `mknod`/`link`, copy-up workdir→
    upper `rename`, clear-empty `Exchange`, remove/sweep `unlink`/`rmdir`,
@@ -810,3 +1201,204 @@ need large scratch images and long runtime.
 - **Supersedes / Replaces:**
   `20260804-wave6-documentation-lint_main_agent_handoff.md`, closed / handed
   over on 2026-08-05.
+
+## 8. Case Classification Ledger — 统一用例总账（2026-08-10 修订；43 例）
+
+**43 例统一账 = 原始 38 例（32 可调度 + 6 不可调度）+ 5 例候选增补
+（063/066/061/022/028，源自 §8.1 未覆盖扫描，实测结果见 §8.2）。**
+每行 = 归属分类（by attribution，fixed-or-not 不是判据）+ 当前状态
+（PASS 口径见 §8.5）。当前无任何遗留 FAIL/NOTRUN 归属于 overlayfs 重构本身。
+
+| 用例 | 归属分类 | 当前状态 | 备注/证据 |
+| :--- | :--- | :--- | :--- |
+| 001 | **底层 block 缺陷**（bio.rs:429 NoMemory unwrap） | FAIL（非 overlayfs） | §8 台账 / `run_evidence/overlay001/` |
+| 002 | **行为正确** | PASS | §8.5 |
+| 003 | **行为正确** | PASS | §8.5 |
+| 004 | **环境门 + 内核缺口**（缺 fsgqa） | NOTRUN | §8 台账 |
+| 005 | **harness 缺口**（需 loop+XFS lane） | 不可调度 | §2.2 |
+| 006 | **行为正确** | PASS | §8.5 |
+| 007 | **行为正确** | PASS | §8.5 |
+| 008 | **环境门 + 内核缺口**（缺 fsgqa） | NOTRUN | §8 台账 |
+| 009 | **行为正确** | PASS | §8.5 |
+| 010 | **overlayfs 缺陷**（whiteout 残留）→ 已修复 | PASS | §8.5 |
+| 011 | **行为正确** | PASS | §8.5 |
+| 012 | **overlayfs 缺陷**（stale-upper ESTALE）→ 已修复 | **PASS（pass_44 修复后复验通过，2026-08-10）** | §8.5 / pass_43 gate + pass_44 复验 |
+| 013 | **VFS 职责**（ETXTBSY，文档化分歧） | 分歧（非 overlayfs 缺陷） | §8 台账 |
+| 014 | **overlayfs 缺陷**（lowerdir 顺序 + readdir opaque 屏障）→ 已修复 | PASS | §8.5 |
+| 015 | **环境门 + 内核缺口**（缺 fsgqa） | NOTRUN | §8 台账 |
+| 016 | **行为正确** | PASS | §8.5 |
+| 019 | **行为正确**（fsstress） | PASS | §8.5 |
+| 020 | **内核能力缺口**（无 userns/unshare） | NOTRUN | §8 台账 |
+| 021 | **内核能力缺口（aio）**（Asterinas 无 `io_setup` → ENOSYS → fsstress 0 文件；2026-08-10 冒烟定因） | FAIL（非 overlayfs；pass_43/44 面下重试同症状） | §8 台账 / pass_43_021_retry_checker.md + fsstress_smoke_checker.md |
+| 022 | **行为正确**（overlay 作 upperdir 被拒） | PASS | 候选增补 §8.2 / §8.5 |
+| 023 | **环境门 + 内核缺口**（缺 chacl/POSIX ACL） | NOTRUN | §8 台账 |
+| 024 | **overlayfs 缺陷**（workdir 清理/残留）→ 已修复 | PASS | §8.5 |
+| 025 | **环境门 + 内核缺口**（缺 fsgqa） | NOTRUN | §8 台账 |
+| 026 | **overlayfs 缺陷**（xattr errno）→ 已修复 | PASS | §8.5 |
+| 027 | **内核能力缺口**（无 fileattr/FS_IOC_*） | NOTRUN | §8 台账 |
+| 028 | **未测候选**（flock over copy-up；低-中置信） | 未测 | 候选增补 §8.1 |
+| 029 | **行为正确**（嵌套 overlay d_real） | PASS | §8.5 |
+| 031 | **overlayfs 缺陷**（whiteout sweep+Bug B）→ 已修复 | **PASS（整例）** | §8.5；Bug B ls3 2026-08-09 已修 |
+| 032 | **deferred 功能**（index=on） | 不可调度 | §2.2 |
+| 033 | **deferred 功能**（index=on） | 不可调度 | §2.2 |
+| 034 | **deferred 功能**（index=on） | 不可调度 | §2.2 |
+| 035 | **内核能力缺口**（无 fileattr/FS_IOC_*） | NOTRUN | §8 台账 |
+| 037 | **deferred 功能**（index=on） | 不可调度 | §2.2 |
+| 038 | **overlayfs 缺陷**（impure 标记）→ 已修复 | PASS | §8.5 |
+| 039 | **行为正确**（relatime） | PASS | §8.5 |
+| 040 | **内核能力缺口**（无 fileattr/FS_IOC_*） | NOTRUN | §8 台账 |
+| 041 | **内核/VFS 缺口**（挂载选项回显 show_options） | NOTRUN | §8 台账 |
+| 042 | **deferred 功能**（index=on） | 不可调度 | §2.2 |
+| 061 | **非 overlayfs 内核缺陷**（通用 VM/page-cache） | 已关闭（不修） | 候选增补 §8.2/§8.4 |
+| 063 | **行为正确**（create-over-whiteout 回归） | PASS | 候选增补 §8.2 / §8.5 |
+| 066 | **内核能力缺口**（FS_IOC_GETXATTR ioctl） | FAIL（ioctl 缺口） | 候选增补 §8.2 |
+| 077 | **行为正确**（readdir 缓存失效） | PASS | §8.5 |
+| 078 | **内核能力缺口**（无 fileattr/FS_IOC_*） | NOTRUN | §8 台账 |
+
+**分类口径汇总（2026-08-10 修正；原「deferred 6」为计数错误，实为 5）：**
+overlayfs 缺陷 7（全部已修复 → PASS）/ 行为正确 13 / VFS 职责 1 /
+底层 block 1 / 非 overlayfs 内核缺陷（VM）1 /
+内核能力缺口 8（含 021：aio `io_setup` ENOSYS）/ 环境门+内核缺口 5 /
+harness 缺口 1 / deferred 5 / 未测候选 1 = **43**。§8.5 按「至少一次整例通过」计 20；012 在 pass_43 门
+（2026-08-10）曾回归 FAIL（Change 1），经 pass_44 修复 + 复验（12/12 PASS）
+后恢复绿色，**当前绿色 = 20/43**。
+## 8.1 Un-covered overlay cases (full.list 80 − ledger 43 = 37; feasibility
+scan 2026-08-09, read-only, from the packaged suite source; **2026-08-10 修订：
+5 个「值得跑」候选（063/066/061/022/028）已并入 §8 统一账，其中
+063/066/061/022 实测结果见 §8.2，028 仍未测**）
+
+- **值得跑（可能通过）5**：`063`（create-over-whiteout 无崩溃回归，robust，
+  高置信）、`066`（sparse copy-up 后 `diff -qr` 内容一致性；xfs_io 在，
+  中高）、`061`（016 的 mmap 写后读变体；需 mmap/page-cache 路径 OK，中）、
+  `028`（flock over copy-up；工具在，需锁委托，低-中）、`022`
+  （overlay 作 upperdir 的 mount 拒绝；无门，需 mount 已实现该校验，低）。
+- **可运行但预计 FAIL 1**：`072`（offline 加 upper 硬链接后 nlink 记账，
+  P2-07/deferred 语义未实现）。
+- **门控 NOTRUN 36**：index=on（018/036/047/048/065/073）、
+  index+nfs_export 文件句柄/嵌套（050-055/058/062/068-071/074）、
+  redirect_dir（017/043/049/057/059）、metacopy（060/064）、
+  挂载选项门（044 index=on,xino=on；067 xino=off）、fsck.overlay 工具缺失
+  （045/046/056）、unionmount 套件缺失（100/101）、fileattr（030/075/076）。
+- 结论（2026-08-10 修订）：5 个「值得跑」候选的实测结果为 2 PASS
+  （063/022）、1 ioctl 缺口 FAIL（066）、1 关闭（061，非 overlayfs VM 缺陷），
+  028 未测；其余未涉及 37 例要么 deferred 功能（index/nfs_export/
+  redirect/metacopy/xino 选项），要么内核能力（fileattr/ioctl），要么工具/lane
+  缺失（fsck.overlay/unionmount/loop）。
+
+## 8.2 Un-covered candidates — test results (2026-08-09, user-directed; one
+run each, fresh 8G images, no HANG)
+
+- `overlay/063` **PASS** — create-over-whiteout 无崩溃回归（rm→whiteout、
+  移除 upper whiteout、mkdir over stale whiteout），符合预期。
+- `overlay/066` **FAIL** — `FS_IOC_GETXATTR: Inappropriate ioctl for device`
+  刷屏：xfs_io 打开文件时探测该 ioctl，Asterinas 未实现 → VFS/ioctl 能力
+  缺口，非 sparse copy-up 内容问题（内容断言未实际走到）。
+- `overlay/061` **FAIL — 2026-08-10 归因修正并关闭：通用 VM/page-cache
+  缺陷，非 overlayfs 缺陷（不修）**。原记录"mmap 写后 copy-up 内容仍为旧值 /
+  真实 overlayfs 缺陷"经 3 轮全量打点改为：mmap 写实际发生在 upper VMO，但
+  CachePage 未标 dirty → unmount 回写丢失 → after-cycle 读旧值。机理见
+  `overlay061_reinvestigation_20260810.md`（§8.4）。
+- `overlay/022` **PASS** — overlay 作 upperdir 的二次挂载被正确拒绝
+  （`Silence is golden`）；原以为需要补的 mount 校验目前已被现有逻辑挡下。
+
+证据均归档 `run_evidence/{overlay063,overlay066,overlay061,overlay022}/
+candidates_20260809/{qemu.log,qemu-serial.log}`；临时 runlist 与生成镜像
+已删除。台账更新：Wave7 累计 **PASS 20 / FAIL 4（原始结果口径：001/021/061/
+066；其中 061 = 非 overlayfs VM/page-cache 缺陷、§8.4 关闭，066 = ioctl
+能力缺口，均非 overlayfs 重构缺陷）**；5 候选中实测 4 例：2 PASS
+（063/022）、1 非 overlayfs 内核缺陷（061，关闭）、1 内核 ioctl 缺口（066），
+028 未测。
+
+## 8.3 overlay/061 双 copy-up 缺陷定位（2026-08-09；三轮临时打点
+`[ovfs061]`/`[ovfs061b]`/`[ovfs061c]`，已全部还原；无代码残留）
+
+061（mmap 写后读一致性）FAIL 根因已从"待归因"升级为**已定位的 overlay
+投影/InodeCache 一致性缺陷**：
+
+1. **key 跨 copy-up 不稳定**：`RealObjectKey::from_facts` =
+   `from_source(visible_source(facts))`（projection/inode_cache.rs:79）——
+   lower-backed 时 key=lower 原始 ino（foo=15），upper-backed 后 key=upper
+   原始 ino（17），同一逻辑对象 copy-up 前后换 key，无跨对象唯一性保证。
+2. **InodeCache 同 key 双载体**：key 17 已被 harness 的 "358.xfs_io" 文件
+   载体占用（0x…c22010），foo 的 upper 投影 `get_or_create(key17)` 仍新建
+   载体 0x…5e2810 —— 去重/别名失效（撞车）。
+3. **陈旧 lower 载体滞留**：BindingCache 曾把 `(root,foo)` 指向 lower-backed
+   载体 A（key15, facts.upper=None）；写意图路径命中 A →
+   `ensure_upper_authority` Step 2 看到 upper=None → 第二次完整 promote
+   （copy-up #2，`replace_facts` 15→17）。
+4. **两次 mmap 落两个不同载体/不同 page cache** → mwrite 写进一个、
+   mread/重挂载读另一个 → "This is old news"。
+
+触发执行流程与机制文档：
+`components/wave7-xfstests-sequencing/overlay061_bug_trigger_flow_20260809.md`
+（含逐步骤 flow、三处打点关键行、候选修复方向）。后续行动 = §6 NEXT
+ACTION：继续探究并研究解决此 bug。
+
+## 8.4 overlay/061 归因修正（2026-08-10；主代理亲自全量打点，3 轮单例运行）
+
+- **结论**：`overlay/061` after-cycle FAIL 的根因是**通用 VM/page-cache
+  缺陷**：MAP_SHARED mmap 写缺页（`vm_mapping.rs::handle_single_page_fault`
+  → `prepare_page`）只置 PTE DIRTY，从不调 `CachePage::set_dirty()`；
+  `BackedVmo::flush_dirty_pages` 只回写 `is_dirty()` 页 → unmount 时
+  `dirty_pages=0` → mmap 写全部丢失。证据：mwrite 在 upper VMO 上产生
+  write fault（PF），unmount flush upper VMO `dirty_pages=0`，after-cycle
+  读到旧内容；Linux 同序列（容器真实 overlay + C 程序）after-cycle 为
+  `aaaaaaaaaaaaaaaa`。
+- **overlayfs 投影侧无缺陷（本场景）**：3 轮均为单载体、单 promote、
+  `alias_key` 15→17 OK、binding 不换载体；2026-08-09 的双 copy-up/同 key
+  双载体归因未复现（其探针未区分两个 overlay mount 的独立 InodeCache）。
+- **in-place mread 读旧数据 = 与 Linux 一致**：copy-up 前建立的 ro 映射
+  绑定 lower page cache，copy-up 后仍读 lower（Linux `ovl_mmap` 同样行为）；
+  测试 in-place 断言依赖 xfs_io 映射表语义（版本相关），非 Asterinas
+  overlayfs 缺陷。
+- 详细文档（061 错误机理唯一记录）：
+  `components/wave7-xfstests-sequencing/overlay061_reinvestigation_20260810.md`；
+  证据：`run_evidence/overlay061/ovfs061d_20260810/`（run1 全量 overlay 探针、
+  run2 +PF/+FLUSH、run3 +MUNMAP/+PFA）。所有临时探针已还原，工作树干净。
+- **处置（用户决定 2026-08-10）：非 overlayfs 缺陷，不修，061 关闭**；
+  归因为通用 VM/page-cache 缺陷（`kernel/src/vm`），与 overlayfs wave 台账
+  解耦。
+
+## 8.5 已通过用例总表（2026-08-10 修正；当前状态）
+
+Wave7 至今**整例通过（PASS）共 20 例**（每例至少一次整例 `PASS`；证据见
+§4 对应批次与 `run_evidence/<case>/`）：
+
+| 用例 | 首次通过批次 | 当前状态 | 证据 |
+| :--- | :--- | :--- | :--- |
+| 002 | 单纯用例批次 / Run4（2026-08-07） | PASS | `run_evidence/overlay002/` |
+| 003 | 单纯用例批次（2026-08-07） | PASS | `run_evidence/overlay003/` |
+| 006 | 单纯用例批次（2026-08-07） | PASS | `run_evidence/overlay006/` |
+| 007 | 单纯用例批次（2026-08-07） | PASS | `run_evidence/overlay007/` |
+| 009 | 单纯用例批次 / Run3（2026-08-07，首个行为 PASS） | PASS | `run_evidence/overlay009/` |
+| 010 | pass_38 修复复跑（2026-08-07） | PASS | `run_evidence/overlay010/rerun_20260807/` |
+| 011 | 单纯用例批次（2026-08-07） | PASS | `run_evidence/overlay011/` |
+| 012 | pass_38 修复复跑（2026-08-07，stale-upper ESTALE） | PASS（pass_38）→ pass_43 门回归 FAIL → **pass_44 修复后 PASS（2026-08-10）** | `run_evidence/overlay012/rerun_20260807/` + pass44_012_repair_20260810/ |
+| 014 | pass_38 修复复跑（2026-08-07，lowerdir 顺序修复后） | PASS | `run_evidence/overlay014/rerun_20260807/` |
+| 016 | 单纯用例批次（2026-08-07） | PASS | `run_evidence/overlay016/` |
+| 019 | 未测四例补齐（2026-08-09，fsstress 16G） | PASS | `run_evidence/overlay019/untested_four_20260809/` |
+| 022 | 候选增补 §8.2（2026-08-10，overlay 作 upperdir 拒绝） | PASS | `run_evidence/overlay022/candidates_20260809/` |
+| 024 | pass_38 修复复跑（2026-08-07，workdir 清理） | PASS | `run_evidence/overlay024/rerun_20260807/` |
+| 026 | pass_38 修复复跑（2026-08-07，xattr errno） | PASS | `run_evidence/overlay026/rerun_20260807/` |
+| 029 | 综合用例批次 pass_39（2026-08-08，嵌套 overlay d_real） | PASS | `run_evidence/overlay029/comprehensive_20260808/` |
+| 031 | **整例通过 2026-08-09**（pass_42 + VFS 可见性放宽修复 Bug B ls3 后单跑；pass_41 已 VERIFIED in-scope，仅剩 ls3） | **PASS（整例）** | `run_evidence/overlay031/pass42_visibility_fix_20260809/` |
+| 038 | pass_41 修复验证（2026-08-08，impure set/clear/filter） | PASS | `run_evidence/overlay038/impure_cleanup_20260808/` |
+| 039 | 单纯用例批次（2026-08-07，relatime） | PASS | `run_evidence/overlay039/` |
+| 063 | 候选增补 §8.2（2026-08-09，create-over-whiteout） | PASS | `run_evidence/overlay063/candidates_20260809/` |
+| 077 | 综合用例批次 pass_39（2026-08-08，readdir 缓存失效） | PASS | `run_evidence/overlay077/comprehensive_20260808/` |
+
+**031 状态修正（2026-08-10）：** 031 **整例 PASS**（2026-08-09 单跑
+`Ran: overlay/031 / Passed all 1 tests`）——Bug B 的 ls3 缺口在 pass_42 +
+VFS 可见性放宽（`DirDentry` + `as_dir_dentry_or_err` 放宽至
+`pub(in crate::fs)`，commit `e3da18bd9`）后已修复。任何仍把 031 描述为
+"ls3 被 Bug B 阻塞 / 整例未通过"的表述均为过时，以本表为准。pass_43 回归
+批次中 031 期望整例 PASS；若回归，按新缺陷归因，不再默认是 Bug B 依赖。
+
+**说明：** 本表按"至少一次整例 PASS"口径（20 例）；§8 统一账（43 例）的
+归属分类与之正交——例如 031/038 归 overlayfs 缺陷类但已修复并通过。
+未整例通过的其余用例（与 §8 统一账一致）：`013`（VFS 职责分歧，非
+overlayfs 缺陷）、`001`（底层 block 缺陷）、`021`（内核 aio 能力缺口：`io_setup` ENOSYS）、
+`066`（ioctl 能力缺口 FAIL）、`061`（非 overlayfs VM 缺陷，关闭）、
+`020`/`041`/`035`/`040`/`027`/`078`/`004`/`008`/`015`/`025`/`023`
+（内核能力或环境门 NOTRUN）、`005`/`032`/`033`/`034`/`037`/`042`
+（不可调度：loop 或 index=on deferred）、`028`（未测候选）。

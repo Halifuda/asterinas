@@ -148,7 +148,7 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         // Fresh target projection under `DIR` (never from a stale VFS
         // dentry): a visible target is never silently replaced.
-        let binding = fs.lookup_binding(&self.facts_snapshot(), name)?;
+        let binding = fs.lookup_binding(&self.facts_snapshot(), name)?.binding;
         if matches!(&binding, Binding::Positive(_)) {
             return Err(Error::new(Errno::EEXIST));
         }
@@ -280,7 +280,7 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         // Fresh source projection under `DIR`: the `DIR`-domain projection is
         // authoritative over a stale VFS dentry; a negative source is ENOENT.
-        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?;
+        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?.binding;
         let _source_inode = match &source_binding {
             Binding::Positive(positive) => positive.inode(),
             Binding::Negative(_) => return Err(Error::new(Errno::ENOENT)),

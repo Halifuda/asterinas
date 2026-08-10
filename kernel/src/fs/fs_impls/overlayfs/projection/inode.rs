@@ -525,7 +525,7 @@ impl OverlayInode {
         let fs = self.fs.upgrade().ok_or_else(|| {
             Error::with_message(Errno::EIO, "the overlay mount is no longer alive")
         })?;
-        let binding = fs.lookup_binding(&facts, name)?;
+        let binding = fs.lookup_binding(&facts, name)?.binding;
         match binding.into_inode() {
             Some(inode) => Ok(inode),
             // Every negative variant (`Absent`/`HiddenByWhiteout`/

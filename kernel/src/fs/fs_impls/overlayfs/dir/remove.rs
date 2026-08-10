@@ -148,8 +148,21 @@ impl OverlayInode {
         // the `DIR`-domain projection is authoritative. A negative projection
         // (absent or hidden) is `ENOENT`; the target must be visible.
         let parent_facts = self.facts_snapshot();
-        let target_inode = fs
-            .lookup_binding(&parent_facts, name)?
+        let lookup = fs.lookup_binding(&parent_facts, name)?;
+        // Stale-upper routing (step 1): a previously published upper-backed
+        // positive binding whose physical upper object vanished behind the
+        // overlay with no whiteout left surfaces `ESTALE` (Linux
+        // `ovl_remove_and_whiteout`) before the rmdir emptiness gate and the
+        // unlink `EISDIR` type gate below — the fresh projection already
+        // established that the asserted upper object is gone.
+        if lookup.is_stale_upper {
+            return Err(translate_stale_upper_enoent(Error::with_message(
+                Errno::ENOENT,
+                "the overlay target became stale behind the overlay",
+            )));
+        }
+        let target_inode = lookup
+            .binding
             .into_inode()
             .ok_or_else(|| {
                 Error::with_message(Errno::ENOENT, "the overlay target does not exist")

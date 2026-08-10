@@ -299,4 +299,42 @@ impl Binding {
             _ => false,
         }
     }
+
+    /// Returns whether this cached binding is a "stale upper" for `truth`.
+    ///
+    /// Separates the stale-upper class from the true lower fall-back in the
+    /// fresh-truth derivation (Change 1 repair): a cached positive binding
+    /// that was published upper-backed (`facts_snapshot().upper()` is `Some`)
+    /// is stale when the fresh layer truth no longer contains that upper
+    /// entry and no whiteout now covers the name — the physical upper object
+    /// vanished behind the overlay. A whiteout-covered truth is a legitimate
+    /// overlay removal (rebuild from the negative truth); a fresh positive
+    /// truth that still carries an upper entry is an overlay-owned
+    /// replacement at the name (rebuild and serve). The remove path surfaces
+    /// `ESTALE` for this class instead of re-exposing the lower counterpart
+    /// (Linux `ovl_remove_and_whiteout`).
+    pub(super) fn is_stale_upper(&self, truth: &LayerLookup) -> bool {
+        let Binding::Positive(positive) = self else {
+            return false;
+        };
+        // Only a previously published upper-backed positive binding can be a
+        // stale upper; a lower-backed cached positive is never in this class.
+        if positive.inode.facts_snapshot().upper().is_none() {
+            return false;
+        }
+        match truth {
+            // A whiteout now covers the name: the upper was legitimately
+            // removed through the overlay; the rebuild serves the negative
+            // truth (not stale).
+            LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(_)) => false,
+            // A fresh positive truth that still carries an upper entry is an
+            // overlay-owned replacement at the name (not stale).
+            LayerLookup::Positive(fresh) => fresh.upper().is_none(),
+            // The name is absent from every layer, or hidden by an opaque
+            // barrier with no upper entry at the name: the previously
+            // published upper object has vanished behind the overlay with no
+            // whiteout left (stale).
+            LayerLookup::Negative(_) => true,
+        }
+    }
 }

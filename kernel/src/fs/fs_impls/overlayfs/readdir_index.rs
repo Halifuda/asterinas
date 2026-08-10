@@ -734,7 +734,7 @@ impl OverlayInode {
                 // Per-name visibility resolution: a positive binding
                 // contributes the shared Overlay inode; a negative binding
                 // (whiteout/opaque evidence) hides the name.
-                if let Some(inode) = fs.lookup_binding(facts, &name)?.into_inode() {
+                if let Some(inode) = fs.lookup_binding(facts, &name)?.binding.into_inode() {
                     let file_type = inode.type_();
                     sequence.push((name, inode, file_type));
                 }

@@ -768,3 +768,304 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     (expected to remain FAIL until the base-view coherence fix). No repair
     batch for pass_40. Evidence under
     `components/wave7-xfstests-sequencing/run_evidence/{overlay031,overlay038}/impure_cleanup_20260808/`.
+
+- **`pass_42_wave7_bug_b_path_repair`**
+  - **Kind**: Creator Pass (High risk; bounded cross-meso implementation of
+    the ACCEPTED `wave7_bug_b_path_design` contract —
+    `components/wave7_bug_b_path_design/wave7_bug_b_path_designer_spec.md` +
+    `_designer_validation.md`; user-directed 3-phase execution).
+  - **Parent**: `N/A` — cross-meso (precedent: `pass_40_wave7_impure_cleanup`);
+    per-objective owners preserved (meso 01 anchors/claims, meso 02
+    `RealObject` carrier, meso 04 workdir/copy-up leg, meso 06 dir arms,
+    meso 03 readdir adjacency).
+  - **Covered Micro-Features**: `P1-26`, `P1-36`, `P1-01..P1-07`, `P1-34`,
+    `P0-14`, `P1-31`, `P1-33`. Adjacency surface (touched call sites, NOT
+    claimed): `P1-22`, `P1-23`, `P1-25`, `P1-27`, `P1-28`, `P1-29`,
+    `P1-30` (recorded in the Designer spec §0.1).
+  - **Phase slicing (user-directed 2026-08-09; one pass number, three serial
+    phases for bounded acceptance; command-free, no per-phase compile):**
+    - **Phase A — 载体/锚点/查找路由** (foundation seam; no standalone
+      micro-feature claim, precedent `pass_03_shared_carrier_seams`).
+      Write-set: `mount/layers.rs`, `mount/claims.rs`,
+      `projection/entry.rs`, `projection/inode.rs`, `dir/mod.rs`
+      (add `upper_parent_path()` only).
+    - **Phase B — workdir temp 载体 + copy-up/link 腿**.
+      Write-set: `copyup/workdir.rs`, `copyup/promote.rs`, `dir/link.rs`;
+      mechanical `create_workdir_temp` call-site param swaps only at
+      `dir/create.rs`, `dir/whiteout.rs`, `dir/remove.rs`.
+    - **Phase C — dir 系语义扫尾 + 旧接口删除**.
+      Write-set: `dir/create.rs`, `dir/whiteout.rs`, `dir/remove.rs`,
+      `dir/rename.rs`, `dir/mod.rs` (link_impl + deletion of `upper_parent`),
+      `copyup/workdir.rs` + `copyup/promote.rs` (deletion of the now-dead
+      `workdir_root` inode accessors), `mount/claims.rs` (removal of the
+      Phase A `#[expect(dead_code)]` on `workdir_workspace_path`).
+  - **Execution shape**: one Creator dispatch per phase via the V2 lane
+    (new User Dispatch Turn + spawn `fork_turns="1"`; Phase B/C carry the
+    Continuation / Parent Task pointer). Main-agent structural diff
+    acceptance per phase; NO compile during phases. After Phase C, one
+    target-specific `cargo check -p aster-kernel --target
+    x86_64-unknown-none`; the main agent fixes only mechanical compile
+    errors (imports/unused/visibility mechanicals per Wave5 precedent);
+    any missing-surface or semantic error routes back to the Creator as a
+    new repair dispatch turn.
+  - **Git discipline (user-directed)**: Phase A creates a new commit; Phase
+    B and Phase C each `--amend` that same commit (stage only the phase's
+    production `.rs` write-set), so each phase's `git diff HEAD` shows only
+    that phase and the final history is one new commit for the whole pass.
+    `.agents` records stay uncommitted unless the user directs otherwise.
+  - **Execution / compile gate (2026-08-09)**: Phases A/B/C all landed and
+    were structurally accepted; the working tree is amended into one commit
+    (`4830cd007`, 12 files, +582/-314). The first container compile
+    (`cargo check -p aster-kernel --target x86_64-unknown-none`) FAILED with
+    exactly 8 `E0599` errors — `Dentry::lookup_child` is unreachable from
+    overlayfs (method is on `DirDentry`; its producer `as_dir_dentry_or_err`
+    and the `DirDentry` struct are `pub(super)`; `Dentry::new` is private).
+    Root cause + probe evidence:
+    `components/wave7_bug_b_path_design/compile_failure_lookup_child_20260809.md`.
+    A bounded Designer revision (`task_designer_wave7_bug_b_lookup_revision_20260809`)
+    is dispatched to confirm the reachable replacement
+    (`PathResolver::lookup_at_path`, resolver.rs:555) across the 8 sites,
+    the resolver-acquisition lock discipline, and the MAY_EXEC verdict.
+    The pass is NOT compile-accepted until the revision lands and the 8
+    sites are replaced; no per-phase compile was run before this gate.
+  - **Boundaries**: no VFS interface change; no static lock-topology or
+    Meso-owner change; no ktest surface; no `legacy_fs.rs`; no Creator
+    pass slicing or `.agents` status edits; no build/test commands in
+    Creator phases. Frozen surface per the Designer spec §1/§4 and the
+    per-phase rows of spec §5.7; every deviation must be recorded in the
+    Creator report.
+  - **Validation gate (2026-08-10, user-authorized; OUTCOME B — actionable
+    repair batch):** `task_checker_wave7_cache_consistency_20260810` ran the
+    12-case schedulable regression (fresh 8 GiB ext2 images, one QEMU per
+    case, per-case evidence under
+    `components/wave7_cache_consistency_design/run_evidence/pass43_regression_20260810/`;
+    receipt `components/wave7_cache_consistency_design/pass_43_wave7_cache_consistency_checker.md`).
+    **11 PASS / 1 FAIL / 0 NOTRUN / 0 HANG** — PASS: 002 003 006 007 010 011
+    014 024 031 (whole-case, ls3 included — Bug B NOT re-opened) 038 077;
+    **FAIL: overlay/012** — expected `rm: cannot remove 'SCRATCH_MNT/test':
+    Stale file handle` (ESTALE), got `Is a directory` (EISDIR). Attribution:
+    pass_43 **Change 1** (`lookup_binding` always-scan + verify-then-serve,
+    projection/mod.rs L88/94) — the unconditional fresh scan re-derives the
+    lower `test` directory instead of serving the cached Positive(upper file),
+    so `remove_target` hits the EISDIR defensive gate (dir/remove.rs L191-194)
+    and the `translate_stale_upper_enoent` ESTALE arm (dir/remove.rs L518) is
+    unreachable. No panic/oops/warn; no infrastructure failure. **Repair
+    batch (Checker §4):** bounded follow-up Creator pass with Designer
+    sign-off — distinguish in `lookup_binding`'s fresh-truth derivation
+    between true lower fall-back and stale-upper (a Positive upper binding was
+    published for `(parent_id,name)` and the upper object was deleted behind
+    the overlay with no whiteout residue); the stale-upper case must route
+    `remove_target` through `translate_stale_upper_enoent` → ESTALE. Fix then
+    single-run `overlay/012` (fresh 8 GiB) to confirm ESTALE + no warn/oops,
+    then re-run the full 12-case table to confirm the other 11 stay green.
+    No ktest, no VFS change, no Bug B routing. pass_43 is NOT gate-accepted
+    until the repair lands and the re-run passes.
+  - **Validation (later, user-authorized)**: meso-integration Checker per
+    `wave7_bug_b_path_designer_validation.md` — `overlay/031` direct (ls3 +
+    cross-run residue; rm1/2/3 regression guards) + adjacency
+    `010/024/012/003/006/011/029/077/038`; `020/041/013` out of scope.
+
+- **`pass_43_wave7_cache_consistency`**
+  - **Kind**: Creator Pass (High risk; bounded cross-meso implementation of
+    the ACCEPTED `wave7_cache_consistency_design` contract —
+    `components/wave7_cache_consistency_design/wave7_cache_consistency_designer_spec.md`
+    + `_designer_validation.md`; user-directed 3-phase execution 2026-08-10).
+  - **Parent**: `N/A` — cross-meso (precedent:
+    `pass_42_wave7_bug_b_path_repair`); per-change owners preserved: meso 02
+    (`projection/{inode,inode_cache,binding_cache,mod}.rs`), meso 04
+    (`copyup/promote.rs` — one-line `replace_facts` parameter), meso 03
+    (`readdir_index.rs` — doc-only Change 5).
+  - **Covered Micro-Features**: `P0-08`, `P0-09`, `P0-10`, `P0-11`,
+    `P0-16` (Direct); `P0-14`, `P1-31` (Supporting, unchanged seams);
+    `P1-36`, `P1-07` (Adjacency, untouched) — reconciled in Designer spec
+    §0.1. No micro ID is invented.
+  - **Phase slicing (user-directed 2026-08-10; one pass number, three serial
+    phases for bounded acceptance; command-free, no per-phase compile):**
+    - **Phase A — 身份判定 / memo 验证原语** (foundation primitive seam; no
+      standalone micro-feature claim, precedent `pass_03_shared_carrier_seams`
+      / `pass_42` Phase A). Write-set: `projection/inode.rs`
+      (`OverlayObjectFacts::same_visible_identity`,
+      `OverlayObjectFacts::contains_real_inode`),
+      `projection/binding_cache.rs` (`Binding::matches_truth`,
+      `NegativeBinding::is_same_negative`,
+      `BindingCache::invalidate_parent`). All five new methods carry
+      `#[expect(dead_code)]` pending their wiring phases; NO call-site or
+      control-flow change.
+    - **Phase B — 载体缓存校验与失效接线**. Write-set:
+      `projection/inode_cache.rs` (`get_or_create` 3-arg same-object
+      validation + stale replacement; `alias_key` 4-arg F1/F2 displacement
+      refinement), `projection/inode.rs` (`replace_facts` gains
+      `new_visible_source: &RealObject` + directory-gated
+      `invalidate_parent` call; `new_root` call site passes `|_| true`),
+      `projection/mod.rs` (`project_inode` call site passes the
+      `contains_real_inode` closure), `copyup/promote.rs` (one-line
+      `carrier.replace_facts(new_facts, &upper_real)` at promote.rs:527).
+      Remove `#[expect(dead_code)]` from `contains_real_inode` and
+      `invalidate_parent` (wired here); keep on `same_visible_identity` /
+      `matches_truth` / `is_same_negative`.
+    - **Phase C — lookup_binding memo 化 + readdir 边界文档**.
+      Write-set: `projection/mod.rs` (`lookup_binding` rewritten to always
+      scan `lookup_in_layers` then serve only on `matches_truth`), 
+      `projection/binding_cache.rs` (remove the remaining
+      `#[expect(dead_code)]` — now wired), `readdir_index.rs` (doc-only
+      Change 5 paragraph on `ReaddirIndexValidity::Valid`).
+  - **Execution shape**: one Creator dispatch per phase via the Direct Spawn
+    Lane (PROTOCOL §1.3 preferred, platform-verified; continuation rounds are
+    new spawns carrying the Continuation / Parent Task pointer). Main-agent
+    structural diff acceptance per phase; NO compile during phases. After
+    Phase C, one target-specific `cargo check -p aster-kernel --target
+    x86_64-unknown-none`; the main agent fixes only mechanical compile errors
+    (imports/unused/visibility mechanicals per Wave5 precedent); any
+    missing-surface or semantic error routes back to the Creator as a new
+    repair dispatch.
+  - **Git discipline (user-directed)**: Phase A creates a new commit; Phase
+    B and Phase C each `--amend` that same commit (stage only the phase's
+    production `.rs` write-set), so each phase's `git diff HEAD` shows only
+    that phase and the final history is one new commit for the whole pass.
+    `.agents` records stay uncommitted.
+  - **Boundaries**: zero VFS interface change; no new lock domain / no
+    static lock-topology change (Designer spec §3.4 acyclicity: cache locks
+    are leaf locks, never nested with each other or with `DIR`/`CUL`);
+    no ktest surface; no `legacy_fs.rs`; no Creator pass slicing or `.agents`
+    status edits; no build/test commands in Creator phases. Frozen surface
+    per Designer spec §2 (Hoare cases + frozen Rust representation) / §4
+    (signatures / owner placement); every deviation recorded in the Creator
+    report.
+  - **Execution / compile gate (2026-08-10)**: Phases A/B/C all landed and
+    were structurally accepted per phase; the working tree is amended into one
+    commit (`7d6b5c960`, 6 files, +284/-75). Container compile
+    (`cargo check -p aster-kernel --target x86_64-unknown-none`) PASSED with
+    zero errors. Compile-gate warning cleanup (main-agent mechanicals per
+    Wave5/pass_42 precedent): removed the four now-obsolete
+    `#[expect(dead_code, reason = ...)]` attributes on
+    `HiddenEvidence::{layer_index, real_inode}` and the
+    `NegativeBinding::{HiddenByWhiteout,HiddenByOpaque}` payloads (both
+    fields/variants are genuinely read by `is_same_negative` after Phase C),
+    and narrowed `Binding::matches_truth` visibility to `pub(super)`
+    (its `&LayerLookup` parameter is projection-internal — the frozen
+    `pub(in crate::fs::fs_impls::overlayfs)` widened the interface past the
+    parameter type; `pub(super)` matches the spec §4.4 allowance for
+    projection-internal methods). Remaining warning is the pre-existing
+    `MountPolicy::uuid_mode` (recorded; not part of this pass). The pass is
+    compile-accepted.
+  - **Validation gate (2026-08-10, user-authorized; OUTCOME B — actionable
+    repair batch):** `task_checker_wave7_cache_consistency_20260810` ran the
+    12-case schedulable regression (fresh 8 GiB ext2 images, one QEMU per
+    case, per-case evidence under
+    `components/wave7_cache_consistency_design/run_evidence/pass43_regression_20260810/`;
+    receipt `components/wave7_cache_consistency_design/pass_43_wave7_cache_consistency_checker.md`).
+    **11 PASS / 1 FAIL / 0 NOTRUN / 0 HANG** — PASS: 002 003 006 007 010 011
+    014 024 031 (whole-case, ls3 included — Bug B NOT re-opened) 038 077;
+    **FAIL: overlay/012** — expected `rm: cannot remove 'SCRATCH_MNT/test':
+    Stale file handle` (ESTALE), got `Is a directory` (EISDIR). Attribution:
+    pass_43 **Change 1** (`lookup_binding` always-scan + verify-then-serve,
+    projection/mod.rs L88/94) — the unconditional fresh scan re-derives the
+    lower `test` directory instead of serving the cached Positive(upper file),
+    so `remove_target` hits the EISDIR defensive gate (dir/remove.rs L191-194)
+    and the `translate_stale_upper_enoent` ESTALE arm (dir/remove.rs L518) is
+    unreachable. No panic/oops/warn; no infrastructure failure. **Repair
+    batch (Checker §4):** bounded follow-up Creator pass with Designer
+    sign-off — distinguish in `lookup_binding`'s fresh-truth derivation
+    between true lower fall-back and stale-upper (a Positive upper binding was
+    published for `(parent_id,name)` and the upper object was deleted behind
+    the overlay with no whiteout residue); the stale-upper case must route
+    `remove_target` through `translate_stale_upper_enoent` → ESTALE. Fix then
+    single-run `overlay/012` (fresh 8 GiB) to confirm ESTALE + no warn/oops,
+    then re-run the full 12-case table to confirm the other 11 stay green.
+    No ktest, no VFS change, no Bug B routing. pass_43 is NOT gate-accepted
+    until the repair lands and the re-run passes.
+  - **Validation (later, user-authorized)**: meso-integration Checker per
+    `wave7_cache_consistency_designer_validation.md` §2 — **schedulable
+    regression batch** (fresh images, one QEMU per case; expected `PASS`
+    incl. 031 whole-case — Bug B ls3 fixed 2026-08-09, see handoff §8.5):
+    required `002/003/010/012/014/024/031/038/077`; recommended cheap additions
+    `006/007/011` (validation §1 mapped, `PASS`, same surfaces). **Mapped
+    but NOT schedulable / not-run** (recorded in the `not-run` column with
+    reason, NOT run): `001` (H ≥8 GiB; known underlying block defect —
+    combined only if user authorizes), `004` (fsgqa env gate), `005`
+    (loop+XFS harness gap), `017` (redirect_dir P2-02 deferred), `018`/`037`
+    (index=on deferred), `020` (userns capability gate), `021` (F2
+    out-of-scope + ≥16 GiB), `061` (closed VM/page-cache defect); `019`
+    (fsstress) only as an optional user-authorized lock-order observation.
+
+- **`pass_44_wave7_cache_consistency_012_repair`**
+  - **Kind**: Creator Pass (High risk; bounded repair of the pass_43 Change 1
+    stale-upper regression, per the Checker OUTCOME B repair batch + the
+    ACCEPTED Designer 会签
+    `components/wave7_cache_consistency_design/wave7_cache_consistency_012_repair_designer_spec.md`
+    + `_designer_validation.md`; task
+    `task_designer_wave7_cache_consistency_012_repair_20260810`).
+  - **Parent**: `N/A` — bounded cross-meso repair (precedent: pass_40/pass_42
+    repair passes): meso 02 (`projection/binding_cache.rs`
+    `Binding::is_stale_upper`, `projection/mod.rs` `LookupOutcome` +
+    `lookup_binding` return), meso 06 (`dir/remove.rs` `remove_target` step-1
+    ESTALE routing); 7 mechanical `.binding` call-site adaptations in
+    `projection/inode.rs`, `readdir_index.rs`, `dir/create.rs`,
+    `dir/rename.rs`, `dir/mod.rs`.
+  - **Continuation / Parent Task**: pass_43_wave7_cache_consistency
+    meso-integration Checker gate (2026-08-10 OUTCOME B; receipt
+    `components/wave7_cache_consistency_design/pass_43_wave7_cache_consistency_checker.md`
+    §4 — verbatim diagnostics preserved in the 012_repair spec §0).
+  - **Covered Micro-Features**: `P0-08`, `P0-11` (the pass_43 direct micros
+    exercised by `overlay/012`'s stale-upper sequence). No new micro.
+  - **Frozen surface (ACCEPTED Designer 会签)**: `Binding::is_stale_upper`
+    (pub(super), Rule A; stale ⇔ cached positive upper-backed binding whose
+    fresh truth no longer contains that upper entry with no whiteout left);
+    `LookupOutcome { binding, is_stale_upper }` (Rule D publication-result
+    carrier); `lookup_binding -> Result<LookupOutcome>` (probe derives the
+    signal when `matches_truth` fails; rebuild + publish + copy-up hook
+    unchanged); `remove_target` step 1 consumes `is_stale_upper` BEFORE the
+    rmdir-emptiness and EISDIR gates and routes `Err(ESTALE)` via the
+    unchanged `translate_stale_upper_enoent`; 7 mechanical `.binding`
+    adaptations; zero VFS change, zero new lock domain, zero new error
+    variant, zero ktest.
+  - **Execution shape**: one Creator dispatch (Direct Spawn Lane, command-
+    free) → main-agent structural diff acceptance → one target-specific
+    `cargo check -p aster-kernel --target x86_64-unknown-none` (main agent
+    fixes only mechanical errors) → amend into a new commit → Checker
+    re-validation per `wave7_cache_consistency_012_repair_designer_validation.md`:
+    step (i) single-case `overlay/012` (fresh 8 GiB; expect
+    `Stale file handle` + no warn/oops), step (ii) full 12-case pass_43 table
+    (11 stay green, 012 becomes PASS; 0 NOTRUN, 0 HANG). No Bug B routing
+    (031 passed whole-case on the gate).
+  - **Execution / compile gate (2026-08-10)**: Creator ACCEPTED
+    (`pass_44_wave7_cache_consistency_012_repair_creator.md`; diff verified
+    against the frozen 会签 surface: `is_stale_upper` verbatim,
+    `LookupOutcome` + probe delta, `remove_target` step-1 ESTALE routing, 7
+    mechanical `.binding` sites; one mechanical double-blank-line fixed).
+    Container `cargo check -p aster-kernel --target x86_64-unknown-none`
+    PASSED (0 errors; only the pre-existing `uuid_mode` warning). Committed
+    `cd29d9c17` (8 files, +112/-26).
+  - **Re-validation (2026-08-10, ACCEPTED — OUTCOME A)**: `task_checker_wave7_cache_consistency_012_repair_20260810`
+    (agent Peirce; kernel `cd29d9c17`). Step (i) `overlay/012` single-case
+    **PASS** — `Ran: overlay/012` / `Passed all 1 tests` / `All conformance
+    tests passed`, zero mismatch, guest golden `012.out` verbatim
+    `rm: cannot remove 'SCRATCH_MNT/test': Stale file handle` (ESTALE);
+    serial warn/oops scan 0 hits. Step (ii) full 12-case table **12/12 PASS,
+    0 NOTRUN, 0 HANG** (all rc=0; `RESULTS_step2.txt`); `overlay/031` whole
+    case incl. `ls3`, no Bug B routing. Evidence:
+    `components/wave7_cache_consistency_design/run_evidence/pass44_012_repair_20260810/`
+    (13 runs); receipt
+    `pass_44_wave7_cache_consistency_012_repair_checker.md`. **pass_43 +
+    pass_44 gate-accepted**; §8 unified ledger 012 restored to green (20/43).
+  - **overlay/021 targeted retry (2026-08-10, user-directed; evidence run):**
+    re-ran `overlay/021` (16 GiB images, commit `cd29d9c17`) to test whether
+    the pass_43/44 cache/identity fixes changed the concurrent copy-up
+    outcome. Result: FAIL at the SAME seeding/precondition stage with the
+    SAME symptom as 2026-08-09 (4 lower-arena globs `*0/*4/*8/*b` miss +
+    `find: 'p2'/'p3'`); no panic/hang; no later-stage concurrency evidence.
+    Attribution unchanged (`harness/前置`, non-overlayfs); NOT a pass_43/44
+    regression. Receipt `components/wave7_cache_consistency_design/pass_43_021_retry_checker.md`;
+    evidence `run_evidence/overlay021_retry_20260810/`. **Root cause pinned
+    (2026-08-10 guest fsstress smoke, user-directed):** fsstress exits at
+    `io_setup` (aio, syscall 206) → ENOSYS (no Asterinas aio handler;
+    `kernel/src/syscall/mod.rs` default branch) BEFORE any file op → 0 files
+    seeded → 021 globs empty. Attribution refined to `前置/内核 syscall 缺口`,
+    non-overlayfs; routing options (a) implement io_setup/io_destroy
+    (out-of-scope, separate authorization), (b) repackage AIO-less fsstress,
+    (c) alternate seeder. Receipt
+    `pass_43_021_fsstress_smoke_checker.md`; evidence
+    `run_evidence/fsstress_smoke_20260810/`; harness reverted (git clean).
+  - **Boundaries**: no VFS interface change; no static lock-topology change;
+    no ktest; no `legacy_fs.rs`; no `.agents` status edits by the Creator;
+    no build/test commands in the Creator phase.

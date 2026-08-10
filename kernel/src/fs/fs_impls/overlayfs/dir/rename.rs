@@ -212,7 +212,7 @@ impl OverlayInode {
         // domain(s) (never from a stale VFS dentry). The source must be
         // visible — the `DIR`-domain projection is authoritative over the VFS
         // dentry that may have triggered the call.
-        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?;
+        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?.binding;
         let source_inode = source_binding.clone().into_inode().ok_or_else(|| {
             Error::with_message(
                 Errno::ENOENT,
@@ -225,7 +225,7 @@ impl OverlayInode {
         // and `lowers` is retained across copy-up, so the value is stable
         // through the per-branch promotion below.
         let source_has_lower = !source_inode.facts_snapshot().lowers().is_empty();
-        let target_binding = fs.lookup_binding(&target.facts_snapshot(), new_name)?;
+        let target_binding = fs.lookup_binding(&target.facts_snapshot(), new_name)?.binding;
         let target_is_whiteout = matches!(
             &target_binding,
             Binding::Negative(NegativeBinding::HiddenByWhiteout(_))
