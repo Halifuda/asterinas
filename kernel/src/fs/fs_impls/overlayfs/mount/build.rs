@@ -166,19 +166,20 @@ impl OverlayFs {
             UpperWorkdirClaim::validate_pair(&upper_path, &workdir_path)?;
             // D24 — lower/workdir overlap validation (the workdir is not a
             // layer, so `assemble`'s upper+lowers pairwise check cannot cover
-            // it; the same `layers::is_same_or_descendant` predicate and the
-            // same identity checks are reused here). A workdir that is
-            // identical to or an ancestor/descendant of a lower layer root
-            // would place the staging workspace inside the lower tree —
-            // `prepare_workdir` would then write into the lower layers — so
-            // it is rejected with `EINVAL` (Linux
-            // `ovl_check_overlapping_layers` parity).
+            // it; the same dentry object ancestor-chain predicate
+            // (`Dentry::is_equal_or_descendant_of`) and the same identity
+            // checks are reused here). A workdir that is identical to or an
+            // ancestor/descendant of a lower layer root would place the
+            // staging workspace inside the lower tree — `prepare_workdir`
+            // would then write into the lower layers — so it is rejected with
+            // `EINVAL` (Linux `ovl_check_overlapping_layers` parity). The
+            // object chain respects mount boundaries (mount roots have no
+            // parent), so a workdir in another mount is never misjudged as
+            // nested under a lower layer root.
             let workdir_dentry = workdir_path.dentry();
-            let workdir_name = workdir_dentry.path_name();
             for lower in &layer_stack.lowers {
                 let lower_path = lower.root_path.upgrade()?;
                 let lower_dentry = lower_path.dentry();
-                let lower_name = lower_dentry.path_name();
                 if Arc::ptr_eq(lower_dentry, workdir_dentry)
                     || Arc::ptr_eq(&lower.root_inode, workdir_path.inode())
                 {
@@ -187,8 +188,8 @@ impl OverlayFs {
                         "workdir must be distinct from every lower layer root"
                     );
                 }
-                if layers::is_same_or_descendant(&workdir_name, &lower_name)
-                    || layers::is_same_or_descendant(&lower_name, &workdir_name)
+                if workdir_dentry.is_equal_or_descendant_of(lower_dentry)
+                    || lower_dentry.is_equal_or_descendant_of(workdir_dentry)
                 {
                     return_errno_with_message!(
                         Errno::EINVAL,

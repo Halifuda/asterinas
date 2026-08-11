@@ -213,3 +213,11 @@
 - **修复**：新增模块私有 type alias `LayerParts`（保持 tuple 形状、不引入载体类型，符合 D22「返回 Designer 命名 4 元组」决策）；`resolve_parts` 返回 `Result<LayerParts>`、`lower_parts: Vec<LayerParts>`。行为零变化。
 - **复验**：plain clippy exit 0、0 warnings；`RUSTFLAGS="-Dwarnings" cargo clippy`（make check 门形式）exit 0；`git diff --check` clean。
 - **提交**：本 commit（3 文件 +29/−20：workdir.rs/remove.rs 格式重排、layers.rs type alias）。
+
+## 4.11 Continuation 2026-08-11 — overlay/029 回归修复 + 单例复验 PASS
+
+- **回归**：wave8 20 例矩阵 19/20 PASS，唯一 FAIL = overlay/029（nested overlay d_real）。根因：D24 重叠校验用 `Dentry::path_name()` 字符串前缀判定，挂载根 dentry 的 path_name 恒 "/"，`is_same_or_descendant` 的 `ancestor=="/"` 早退把挂载根误作全局祖先 → 029 第 3 次嵌套挂载（lowerdir=overlay 挂载根）被 EINVAL 误拒。引入点 = `70fa24c17`（Creator round B D24）。
+- **修复（Creator `task_creator_wave8_fix029_overlap_20260811`，agent Fermat）**：按 Linux `ovl_check_layer`（对象级父链 + inuse/trap，非字符串）对齐——`Dentry::is_equal_or_descendant_of` 可见性 `pub(super)`→`pub(in crate::fs)`（dentry.rs 唯一一行）；`mount/{layers,build,claims}.rs` 三处重叠判定从 path_name 字符串切换为双向对象祖先链；删除 `is_same_or_descendant` 字符串谓词；`Arc::ptr_eq` 同一性检查保留。无新实体；编译 exit 0 / 0 warnings。报告 `pass_53_wave8_fix029_creator.md`。
+- **复验（Checker `task_checker_wave8_fix029_rerun_20260811`，agent Kuhn）**：overlay/029 单例 **PASS**（Ran: overlay/029 / Passed all 1 tests / exit 0；0 FAIL / 0 NOTRUN / 0 HANG；无 panic/oops/mount EINVAL）。证据 `run_evidence/20260811_fix029_rerun/`；receipt `pass_53_wave8_fix029_checker.md`。
+- **提交**：本 commit（4 文件 +37/−65）。
+- **待办**：20 例矩阵全量复跑（029 修复后，确认无次生回归）；overlay/030（C7 D31/D30 身份类）仍为 deferral。

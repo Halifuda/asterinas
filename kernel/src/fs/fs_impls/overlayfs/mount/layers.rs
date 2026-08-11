@@ -219,21 +219,24 @@ impl OverlayLayer {
     /// physical directory, e.g. a symlink or bind-mount alias; the inode
     /// identity is instance-stable for pinned roots) — or when one is an
     /// ancestor/descendant of the other in the resolved hierarchy (the
-    /// `path_name()` prefix discipline shared with
-    /// [`super::claims::UpperWorkdirClaim::validate_pair`] through
-    /// [`is_same_or_descendant`]). Violations return `EINVAL`. Only the layer
-    /// roots themselves are compared, so legal nested subdirectories (a lower
-    /// tree that merely contains the upper's parent directory, the normal
-    /// deployment shape) are never rejected. The workdir is not a layer and
-    /// is covered by the same predicate through the sibling `build.rs` hook.
+    /// dentry object ancestor chain, [`Dentry::is_equal_or_descendant_of`],
+    /// shared with [`super::claims::UpperWorkdirClaim::validate_pair`] and
+    /// the sibling `build.rs` workdir hook). The object chain naturally
+    /// respects mount boundaries: parent chains never cross a mount root (a
+    /// mount root has no parent), so a layer root that is another mount's
+    /// root is neither an ancestor nor a descendant of anything in that mount
+    /// (lowerdir = a nested overlay's mount root is legal, overlay/029).
+    /// Violations return `EINVAL`. Only the layer roots themselves are
+    /// compared, so legal nested subdirectories (a lower tree that merely
+    /// contains the upper's parent directory, the normal deployment shape)
+    /// are never rejected. The workdir is not a layer and is covered by the
+    /// same predicate through the sibling `build.rs` hook.
     fn validate_layer_overlap(new: &OverlayLayer, others: &[&OverlayLayer]) -> Result<()> {
         let new_path = new.root_path.upgrade()?;
         let new_dentry = new_path.dentry();
-        let new_name = new_dentry.path_name();
         for other in others {
             let other_path = other.root_path.upgrade()?;
             let other_dentry = other_path.dentry();
-            let other_name = other_dentry.path_name();
             if Arc::ptr_eq(new_dentry, other_dentry)
                 || Arc::ptr_eq(&new.root_inode, &other.root_inode)
             {
@@ -242,8 +245,8 @@ impl OverlayLayer {
                     "overlay layer roots must be distinct directories"
                 );
             }
-            if is_same_or_descendant(&other_name, &new_name)
-                || is_same_or_descendant(&new_name, &other_name)
+            if new_dentry.is_equal_or_descendant_of(other_dentry)
+                || other_dentry.is_equal_or_descendant_of(new_dentry)
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -253,32 +256,6 @@ impl OverlayLayer {
         }
         Ok(())
     }
-}
-
-/// Returns whether `candidate` is the same directory as `ancestor` or a
-/// descendant of it in the resolved hierarchy.
-///
-/// The `path_name()` overlap discipline shared by the upper/workdir
-/// validation ([`super::claims::UpperWorkdirClaim::validate_pair`]) and the
-/// layer/workdir overlap validation ([`OverlayLayer::validate_layer_overlap`]
-/// plus the `build.rs` workdir hook). The absolute dentry `path_name()` is
-/// the only `pub(in crate::fs)` dentry surface usable from the mount tree;
-/// both paths are resolved with `lookup_no_follow` (which follows
-/// intermediate symlink components), so these names reflect the resolved
-/// hierarchy: symlink aliases of the same tree canonicalize to the same
-/// name, and exact aliases are additionally rejected by the inode-identity
-/// check at each call site. The remaining exotic case (ancestor/descendant
-/// directories reached only through distinct dentry/inode objects) is a
-/// known limitation — there is no VFS canonicalize API.
-pub(super) fn is_same_or_descendant(candidate: &str, ancestor: &str) -> bool {
-    if ancestor == "/" {
-        // The filesystem root is an ancestor of every dentry.
-        return true;
-    }
-    candidate == ancestor
-        || candidate
-            .strip_prefix(ancestor)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 impl OverlayLayerStack {

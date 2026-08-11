@@ -272,22 +272,16 @@ impl UpperWorkdirClaim {
         }
 
         // Workdir and upperdir must not be each other's ancestor/descendant.
-        // The dentry walking APIs are private to `vfs::path`, so the only
-        // `pub(in crate::fs)` dentry surface usable from this module is the
-        // absolute `path_name()`. Both paths were resolved with
-        // `lookup_no_follow` (which follows intermediate symlink components),
-        // so these names reflect the resolved hierarchy: symlink aliases of
-        // the same tree canonicalize to the same name, and exact aliases are
-        // additionally rejected by the inode-identity check above. The
-        // remaining exotic case (ancestor/descendant directories reached only
-        // through distinct dentry/inode objects) is a known limitation — there
-        // is no VFS canonicalize API. The predicate itself is the shared
-        // `layers::is_same_or_descendant` helper, reused by the layer-root
-        // overlap validation (`layers.rs`) and the `build.rs` workdir hook.
-        let upper_name = upper.dentry().path_name();
-        let workdir_name = workdir.dentry().path_name();
-        if layers::is_same_or_descendant(&workdir_name, &upper_name)
-            || layers::is_same_or_descendant(&upper_name, &workdir_name)
+        // The dentry object ancestor chain (`Dentry::is_equal_or_descendant_of`)
+        // is reused here — the same predicate as the layer-root overlap
+        // validation (`layers.rs`) and the `build.rs` workdir hook — and it
+        // respects mount boundaries: parent chains never cross a mount root
+        // (a mount root has no parent), so an upper/workdir pair in different
+        // mounts is never misjudged as nested (the same-mount check above
+        // already requires one mount node). Exact aliases are additionally
+        // rejected by the inode-identity check above.
+        if workdir.dentry().is_equal_or_descendant_of(upper.dentry())
+            || upper.dentry().is_equal_or_descendant_of(workdir.dentry())
         {
             return_errno_with_message!(
                 Errno::EINVAL,
