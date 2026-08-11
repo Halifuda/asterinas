@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// LEGACY — FROZEN, NOT A DESIGN SOURCE.
+// LEGACY — FROZEN HISTORICAL REFERENCE, NOT COMPILED, NOT A DESIGN SOURCE.
 //
 // This is the old single-file overlayfs implementation, renamed from `fs.rs`
 // (2026-08-03) so it cannot collide with the refactor module tree under
 // `kernel/src/fs/fs_impls/overlayfs/` (`mount/`, `projection/`, `copyup/`,
 // `metadata_security/`, `dir/`, `readdir_index.rs`).
 //
-// It remains the ACTIVE registered overlay filesystem until the refactor
-// explicitly schedules a takeover (see `mod.rs::init()`). The ONLY permitted
-// use of this file by the refactor is the registration wiring: `OverlayFsType`
-// (the `FsType` impl) and how `register()` is invoked. All other content —
-// layout, structures, lock handling, recipes — must NOT be referenced by any
-// Architect/Designer/Creator/Checker/Reviewer packet; the authoritative
-// sources are the Designer specs, the design documents (`designdoc/`), and the
-// staged priors (`priors/`).
-
-#![expect(dead_code)]
+// FROZEN STATUS (2026-08-11): this file is no longer declared as a module —
+// `overlayfs/mod.rs` does not contain `mod legacy_fs;` — so it is NOT compiled
+// into the kernel crate and its `OverlayFsType` is never registered. The
+// active registered filesystem is `mount::OverlayFsType` (registered by
+// `mod.rs::init()`). This file is retained as frozen historical reference
+// material and is scheduled for deletion.
+//
+// It must NOT be referenced by any Architect/Designer/Creator/Checker/Reviewer
+// packet as a design source; the authoritative sources are the Designer specs,
+// the design documents (`designdoc/`), and the staged priors (`priors/`). Any
+// defect found in this file is informational only and must not be carried into
+// the refactor.
 
 use alloc::format;
 use core::{
@@ -36,6 +38,10 @@ use ostd::{
 use crate::{
     fs::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, mkmod},
+        fs_impls::overlayfs::metadata_security::xattr::{
+            OPAQUE_XATTR_FULL_NAME as OPAQUE_DIR_XATTR_NAME,
+            WHITEOUT_XATTR_FULL_NAME as WHITEOUT_XATTR_NAME,
+        },
         pseudofs::AnonDeviceId,
         utils::{DirentCounter, DirentVisitor, NAME_MAX},
         vfs::{
@@ -55,6 +61,12 @@ use crate::{
 };
 
 const OVERLAY_FS_MAGIC: u64 = 0x794C7630;
+
+/// The upper layer is the index-0 layer of the merged view.
+const UPPER_LAYER_IDX: LayerIdx = 0;
+
+/// The first lower layer is the index-1 layer (upper = 0, lowers start at 1).
+const FIRST_LOWER_LAYER_IDX: LayerIdx = 1;
 
 /// An `OverlayFs` is a union pseudo file system employed to merge
 /// upper and lower directories that potentially comes from different
@@ -350,7 +362,8 @@ impl OverlayInode {
     /// Visits the children objects in a unified view.
     ///
     /// Returns the offset increment needed to advance `offset` to the next unread
-    /// entry. If no entries have been visited, returns an error.
+    /// entry. If no entries have been visited, returns `Ok(0)`; an error is
+    /// returned only when the very first `visitor.visit` fails.
     pub fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
         if self.type_ != InodeType::Dir {
             return_errno!(Errno::ENOTDIR);
@@ -740,9 +753,9 @@ impl OverlayInode {
         }
 
         let ino = if let Some(upper) = &upper_child {
-            UniqueNoGenerator::gen_unique_ino(0 as LayerIdx, upper.ino())?
+            UniqueNoGenerator::gen_unique_ino(UPPER_LAYER_IDX, upper.ino())?
         } else {
-            UniqueNoGenerator::gen_unique_ino(1 as LayerIdx, lower_children[0].ino())?
+            UniqueNoGenerator::gen_unique_ino(FIRST_LOWER_LAYER_IDX, lower_children[0].ino())?
         };
         let child_ovl_inode = Arc::new_cyclic(|weak| OverlayInode {
             ino,
@@ -939,8 +952,8 @@ impl OverlayInode {
     }
 }
 
-const WHITEOUT_XATTR_NAME: &str = "trusted.overlay.whiteout";
-const OPAQUE_DIR_XATTR_NAME: &str = "trusted.overlay.opaque";
+// The marker names are imported from `metadata_security/xattr.rs` (single
+// declaration); only the marker value stays local to this legacy file.
 const WHITEOUT_AND_OPAQUE_XATTR_VALUE: [u8; 1] = [121u8]; // "y", represents the xattr is set
 
 const WHITEOUT_PREFIX: &str = ".wh.";

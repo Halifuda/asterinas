@@ -40,7 +40,7 @@
 //! lock crosses the entry boundary, and no `.unwrap()`/`.expect()` is used
 //! anywhere in this security gate.
 
-use ostd::task::Task;
+use ostd::task::{CurrentTask, Task};
 
 use crate::{
     fs::{
@@ -49,7 +49,11 @@ use crate::{
         vfs::inode::Inode,
     },
     prelude::*,
-    process::{Gid, Uid, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
+    process::{
+        Gid, Uid,
+        credentials::capabilities::CapSet,
+        posix_thread::{AsPosixThread, PosixThread},
+    },
     security::lsm::hooks as lsm_hooks,
 };
 
@@ -87,6 +91,25 @@ impl OverlayInode {
         Ok(())
     }
 
+    /// Runs `operation_fn` with the current task's posix thread.
+    ///
+    /// The two-step lookup shared by every kernel-context gate of this
+    /// module: `Task::current()` then `as_posix_thread()`. The [`CurrentTask`]
+    /// guard is passed to `operation_fn` alongside the borrowed
+    /// [`PosixThread`] so the guard outlives the borrow. `None` means no
+    /// current task or no posix thread (a kernel-internal operation, not a
+    /// user process); each caller maps `None` to its own kernel-context
+    /// default (fail-open `true` for the capability probe, `None` for the
+    /// fsuid probe, fail-closed `false` for the group probe, and the
+    /// no-DAC-demand `Ok(())` for the local DAC block).
+    fn with_current_posix_thread<T>(
+        operation_fn: impl FnOnce(&CurrentTask, &PosixThread) -> T,
+    ) -> Option<T> {
+        let task = Task::current()?;
+        let posix_thread = task.as_posix_thread()?;
+        Some(operation_fn(&task, posix_thread))
+    }
+
     /// Returns whether the current task holds `cap` in its user namespace
     /// (the single shared capability probe of this module).
     ///
@@ -103,21 +126,21 @@ impl OverlayInode {
     /// the permission stage (`check_local_permission`, DAC_OVERRIDE) and by
     /// the metadata ownership gates (`metadata.rs`).
     pub(super) fn current_task_has_capability(cap: CapSet) -> bool {
-        let Some(task) = Task::current() else {
+        let Some(has_cap) = Self::with_current_posix_thread(|task, posix_thread| {
+            task.as_thread_local().is_some_and(|thread_local| {
+                let user_ns = thread_local.borrow_user_ns();
+                lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+                    user_ns.as_ref(),
+                    posix_thread,
+                    cap,
+                ))
+                .is_ok()
+            })
+        }) else {
+            // Kernel contexts fail open: there is no user to gate.
             return true;
         };
-        let Some(posix_thread) = task.as_posix_thread() else {
-            return true;
-        };
-        task.as_thread_local().is_some_and(|thread_local| {
-            let user_ns = thread_local.borrow_user_ns();
-            lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
-                user_ns.as_ref(),
-                posix_thread,
-                cap,
-            ))
-            .is_ok()
-        })
+        has_cap
     }
 
     /// Returns the current task's filesystem UID (`None` in a kernel context
@@ -128,9 +151,9 @@ impl OverlayInode {
     /// `metadata.rs::caller_owner_facts` and `dir/mod.rs::link`'s source-side
     /// admission.
     pub(in crate::fs::fs_impls::overlayfs) fn current_fsuid() -> Option<Uid> {
-        let task = Task::current()?;
-        let posix_thread = task.as_posix_thread()?;
-        Some(posix_thread.credentials().fsuid())
+        let fsuid =
+            Self::with_current_posix_thread(|_, posix_thread| posix_thread.credentials().fsuid())?;
+        Some(fsuid)
     }
 
     /// Returns whether the current task's filesystem group ID or
@@ -145,14 +168,13 @@ impl OverlayInode {
     /// supplementary set omits it would be denied the owner-chgrp exemption.
     /// Consumed by `metadata.rs::set_group`'s owner-chgrp exemption.
     pub(in crate::fs::fs_impls::overlayfs) fn current_in_group(gid: Gid) -> bool {
-        let Some(task) = Task::current() else {
+        let Some(in_group) = Self::with_current_posix_thread(|_, posix_thread| {
+            let credentials = posix_thread.credentials();
+            gid == credentials.fsgid() || credentials.groups().contains(&gid)
+        }) else {
             return false;
         };
-        let Some(posix_thread) = task.as_posix_thread() else {
-            return false;
-        };
-        let credentials = posix_thread.credentials();
-        gid == credentials.fsgid() || credentials.groups().contains(&gid)
+        in_group
     }
 
     /// PRIVATE STAGE A — the lock-free local half of the two-stage check.
@@ -180,14 +202,11 @@ impl OverlayInode {
         // (mirror's `Option`-based guards, fail-open for non-user contexts;
         // the DAC_OVERRIDE probe is fail-closed when the thread-local is
         // absent — no `.unwrap()`/`.expect()` anywhere in this gate).
-        let Some(task) = Task::current() else {
+        let Some(creds) =
+            Self::with_current_posix_thread(|_, posix_thread| posix_thread.credentials())
+        else {
             return Ok(());
         };
-        let Some(posix_thread) = task.as_posix_thread() else {
-            return Ok(());
-        };
-
-        let creds = posix_thread.credentials();
         let metadata = self.metadata()?;
         let mode = metadata.mode;
 

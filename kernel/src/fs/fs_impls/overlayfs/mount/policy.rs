@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use aster_rights::ReadDupOp;
 
 use super::{
-    claims::{OVERLAY_UUID_SIZE, OverlayUuid},
+    claims::{OVERLAY_UUID_SIZE, OverlayUuid, TRUSTED_OVERLAY_UUID},
     options::{OverlayMountOptions, UuidMode, XinoMode},
 };
 use crate::{
@@ -43,14 +43,6 @@ use crate::{
     prelude::*,
     process::Credentials,
 };
-
-/// The private xattr name used by the read-only xattr-capability probe.
-///
-/// The probe reads the same private overlay namespace the unified identity is
-/// persisted in (`trusted.overlay.uuid`). A backend that answers `ENODATA`
-/// (no value yet) or returns the value supports the private namespace;
-/// `EOPNOTSUPP` means it does not (fail-closed).
-const PRIVATE_XATTR_PROBE_NAME: &str = "trusted.overlay.uuid";
 
 /// Prefix of the uniquely-named temporary char-device probe entry created in
 /// the workdir staging workspace for the `can_mknod_char` probe.
@@ -302,7 +294,7 @@ impl UpperFilesystemCapabilities {
     /// supported so `UuidMode::Auto` degrades instead of failing on an
     /// over-long foreign value.
     fn probe_private_xattr(upper_inode: &Arc<dyn Inode>) -> Result<bool> {
-        let name = XattrName::try_from_full_name(PRIVATE_XATTR_PROBE_NAME).ok_or_else(|| {
+        let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID).ok_or_else(|| {
             Error::with_message(Errno::EINVAL, "invalid overlay xattr probe name")
         })?;
         // The probe buffer is sized at the persisted `trusted.overlay.uuid`

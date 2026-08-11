@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-11 Wave8 Format + Clippy
 
 **Date / Time:** 2026-08-11 09:50 CST
-**Status:** `ACTIVE — Wave8 静态门（user-directed）完成：rustfmt 已作用于范围文件；3 个 clippy warning 已按用户指示修复（uuid_mode 保留字段 + #[expect(dead_code)]，2 处 needless_question_mark）；clippy 复验 0 warning（plain 与 -Dwarnings 均 exit 0）；本波改动已提交（见 §3.3）。`
+**Status:** `ACTIVE — Wave8 静态门（899ac24ef）+ 全量 review（74 条）+ Designer 研判完成（ACCEPT 27 / AWS 8 / IGNORE 5，簇 C1–C11，spec 含用户反馈修订 R1）；Creator 机械批已随 WIP commit 3fb122613 落地并经主代理编译修复（check/fmt/clippy 全绿）。下一动作：按 6-Creator 切片执行（见 §3.6/§4/§5）。`
 
 ## 1. Global State Pointer
 
@@ -45,21 +45,57 @@
 - **复验（container 内）：** `cargo clippy -p aster-kernel --target x86_64-unknown-none` → **exit 0、0 warning**（6.50s）；`RUSTFLAGS="-Dwarnings" cargo clippy -p aster-kernel --target x86_64-unknown-none`（make check 门形式）→ **exit 0**（14.70s）；`cargo fmt --check` → PASS。日志 `components/wave8-format-lint/clippy_aster-kernel_20260811_after-fix.log`（0 warning）。
 - **提交：** wave8 静态门 commit（12 个 overlayfs `.rs` + handoff），记录于 git log。
 
+## 3.5 Overlayfs 全量 aster-code-review（user-directed 2026-08-11；multi-agent V1 派发）
+
+- **用户指示：** 启动 aster-code-review 对 overlayfs 做 files 模式全量审查；skill 要求 codex CLI，用户明确要求改用 multi-agent V1 spawn subagent 实现，不启动命令行。
+- **执行方式（遵循 skill 管线，替换 spawn 原语为 V1）：**
+  1. `resolve_target.sh --meta` / `resolve_target.sh` 生成 meta + review input（files 模式）。
+  2. 全量 input 683KB（≈170k tokens）超出单 pass 上下文 → 按 meso 组件切 6 块（mount/projection/dir/copyup/metadata_security/toplevel+legacy），每块独立 files 模式，全量覆盖 32 个 .rs（12,970 行）。
+  3. `build_pass_prompt.sh` 为 6 块 × 3 persona（maintainability/development/security；hardware/documentation 未激活——无 asm/arch/md）生成 18 个 pass prompt（84–199KB）。
+  4. 18 个 reviewer pass 子代理经 **multi-agent V1 spawn（fork_context=false）** 派发，每批 6 个（平台并发上限），初始消息为 pointer（读取 prompt 文件全文并作为唯一指令）；批次 2/3 增加"把 JSON 写入 frag 文件"要求，fragment 自动落盘。
+  5. `assemble_review.sh` 组装 6 份 chunk review；再合并为主 review（跨 chunk 去重、按 persona 分组、file→line 排序）。
+- **产物：**
+  - 主 review：`components/wave8-full-review/wave8_overlayfs_full_review_20260811.md`（gitignored）
+  - 6 份 chunk review + 18 个 persona fragment + prompts/input/meta（同目录）
+- **结果：74 条唯一评论（0 critical / 18 major / 45 minor / 11 nit）：maintainability 43 / development 19 / security 12。**
+- **验证（step 6）：** 18 条 major 全部对树核对确认，0 refuted / 0 uncertain。关键证实：default_permissions 跳过 ensure_upper_authority（permission.rs:84）；copy-up 时间戳在数据流前设置（promote.rs:180/439）；目录 temp 用 unlink 清理且错误被吞（workdir.rs:184 + run_recipe）；stale-upper rebuild 复用旧 carrier（projection/mod.rs:229，pass_44 只修了 ESTALE 路由未修此路）；layer_index=offset+1 对 gap lowers 错标（entry.rs:346）；origin 记录 real_ino 未校验（lower_id.rs:263）；xattr get/list 用 Permission::empty()（xattr.rs:636）；listxattr 零容量探针缺失（xattr.rs:280）；remove_work_entries 单次 readdir_at（claims.rs:413）；lower 层无 overlap/RDONLY 校验（layers.rs:232/212）；ensure_upper_authority 无界递归（trigger.rs:88）；legacy_fs 已不被 mod.rs 声明（死代码）。
+- **整合（step 7）：** 7 个修复簇 C1–C7（workdir temp 生命周期 ×4；mount 边界校验 ×2；stale-upper rebuild；xattr/权限 DRY；qualified-fn-imports ×5；dead-code 纪律；legacy_fs 处置）。细节在主 review Summary。
+- **注意：** legacy_fs.rs 全部发现均为死代码（未编译），信息性，不得带入重构。
+
+## 3.6 Designer 研判 + 用户反馈修订 R1 + Creator 机械批落地（2026-08-11）
+
+- **三向分类（review 接收）：** 主代理把 74 条发现按「从简单到难」分为 Creator 机械批 34 项 + Designer 复杂批 40 项（`components/wave8-full-review/findings_triage_simple_to_hard.md`）；派发 Creator（Kierkegaard）改机械批、Designer（Archimedes）研判复杂批。
+- **Designer 判定（task_designer_wave8_complex_findings_20260811）：** **ACCEPT 27 / ACCEPT-WITH-SCOPE 8 / IGNORE 5**。IGNORE 全为 legacy_fs 死代码缺陷（文件不编译、重构已带修复、评审自身要求不得带入）。AWS 8 项（D11/D13/D15/D18/D23/D25/D29/D31）均为「评审有理但完整修法风险高 → 缩到安全子集」，逐项理由见 spec。11 个修复簇 C1–C11，每簇含统一方案/write-set/Rust 表面/micro/顺序/风险。
+  - spec：`components/wave8-full-review/wave8_complex_findings_designer_spec.md`
+- **Creator 机械批（task_creator_wave8_mechanical_fixes_20260811）：** 18 个生产文件 +712/−531（文档/常量/import/重命名/DRY/结构调整）；agent 编辑后卡住未交编译收据，主代理接手修复。
+- **WIP commit + 主代理机械编译修复（user 提交 WIP 后指示 amend）：** 用户提交 `6f1dcc487 wave-8: aster-code-review (WIP)`；主代理修复 6 编译错误（`projection/mod.rs` re-export `LowerLayerIdentity`；`dir/create.rs` 补 `OverlayFs` import；`mount/claims.rs` 给 `WorkdirWorkspace` 加 `#[derive(Debug)]`；`lower_id.rs` 3 处 `read_payload_u64`→`Self::`）+ 3 unused import + 2 clippy（`policy.rs` 悬空 doc、`permission.rs` let-else→`?`）+ `cargo fmt`，**amend 为 `3fb122613`**（19 文件 +722/−543）。复验：`cargo check -p aster-kernel` exit 0 且 0 警告；`cargo fmt --check` PASS；`cargo clippy -p aster-kernel` 0 警告。工作树干净。
+- **C11 legacy_fs 处置已由主代理执行（2026-08-11，user 指示主代理先改）：** 按 D34 重写文件头为「FROZEN HISTORICAL REFERENCE, NOT COMPILED, NOT A DESIGN SOURCE」（明确不再被 `mod.rs` 声明、不编译、被 `mount::OverlayFsType` 取代、安排删除、缺陷信息性不得带入重构）+ 按 D35 删除文件级 `#![expect(dead_code)]`；`rustfmt --check` 通过。已并入 WIP commit（amend 后去 WIP 字样）。
+- **用户反馈修订 R1（Designer 已回应并写回 spec §4）：**
+  - **R1.1 顺序：C3/C7 留到最后。** 新序：C1→C2→C4→C5→C6→C8→C9→C10→C11→C3→C7（C3 先于 C7）。C5/D23「overlay 永不写 lower」措辞降级为「待 C3(D14) 补全」；C3/C7 簇内自洽保持；其他簇无功能阻塞（仅 D23/D18 措辞、C2 调用点名、同文件串行三处触碰点）。残余风险 = 延长暴露既有缺陷，非新回归。
+  - **R1.2 C8 不加新锁。** 采纳复用 `OverlayInode.facts`（INODE 域）锁：O_APPEND 分支持 INODE 跨 `real.size()`+`write_at`，全局锁序第 3 位、底层 fs 锁为叶子、无新边。实现约束：方法放 `projection/inode.rs`（facts 为 pub(super)）、守卫内不得调 `select_real_inode()`（非重入 Mutex）、同步 Lock contract 文档。
+  - **R1.3 C9 仅 max depth。** 采纳简化：`MAX_COPYUP_DEPTH = 1024`（保留递归；256 B/帧悲观 × 1024 = 256 KiB = 半栈，安全），超出 `ELOOP` fail-closed；迭代/promote_self 降级为未来选项；CI 栈 <128 页时按 `stack_pages×4096/(2×256)` 重算。
+
 ## 4. Explicit Agent-Level Decisions
 
 - 范围口径：exFAT 不纳入本轮格式范围（fork 既有 exFAT 重构，与 overlayfs/VFS 影响无关）；如用户希望连 exFAT 一起格式化，可单独一轮。
 - `uuid_mode` 按用户指示**保留字段**并加 `#[expect(dead_code)]`，不删除（此前主代理建议删除，被用户否决）。
 - clippy 复验同时跑 plain 与 `-Dwarnings` 两形式；全 workspace `cargo osdk clippy` 门未跑（如需全 CI 门复验可下一轮执行）。
+- **Creator 切片决策（user 指示：简单修改合并为同一 Creator）：全部修改由 6 个 Creator 执行**——
+  1. **Creator M（简单修改合并）**：机械批 34 项 + C11（D34/D35 legacy 处置）。**已完成**：机械批随 WIP commit `3fb122613` 落地（主代理编译修复）；C11 由主代理直接执行（见 §3.6）。
+  2. **Creator A = C1+C2**（D2,D3,D4,D5,D7,D8,D10,D11）：共用 promote.rs 编辑窗口，必须同一 Creator。
+  3. **Creator B = C4+C5+C6**（D16,D17,D18,D20,D21,D22,D23,D24,D26,D27）：同属 mount/准备主题，区域不相交、无跨依赖。
+  4. **Creator C = C8+C9+C10**（D1,D6,D33）：三个独立小语义修复，文件完全不相交。
+  5. **Creator D = C3**（D9,D14,D15,D19,D25）：最后；含 VFS `fs_apis/inode.rs` 改动，高风险单独。
+  6. **Creator E = C7**（D12,D13,D28,D29,D30,D31,D32）：最后；身份/可见性语义，单独。
+  - 实施顺序：M（已落地）→ A → B → C → D(C3) → E(C7)。每个 Creator 配同步 Checker（可合并批次验证）。切片依据 = 写集相干 + 依赖顺序 + 简单合并；6 个为最小合理数（B/C 若拆分各 +2，均不必要）。
 
 ## 5. Next Actions for the Next Thread (CRITICAL)
 
-1. **Wave8 静态门已完成并提交**（rustfmt 12 文件 + clippy 0 warning + handoff）。
-2. **进入 Wave8 运行时回归**（Wave7 显式推迟项）：先 `make kernel` 全量构建，再按 `nested_mount_claim_lifetime_designer_validation.md` / Wave7 §6 跑 20 例可调度回归矩阵（overlay/029 为首例，期望 PASS 保持）。
-3. （可选）如用户要求全 CI 门复验：`make check` 或 `RUSTFLAGS="-Dwarnings" cargo osdk clippy -- --no-deps`。
-4. （可选）exFAT 格式化如需纳入，另开一轮。
+> **交接说明（2026-08-11）：** 本任期结束，用户将开空上下文 main-agent 继续。以下为续任者第一动作。
 
-## 6. Live File Discipline
+1. **继续 6-Creator 切片执行**（Designer spec §4 R1.1 顺序 + 本 handoff §4 切片）：A(C1+C2) → B(C4+C5+C6) → C(C8+C9+C10) → D(C3，最后) → E(C7，最后)。C11 已完成（见 §3.6）。每个 Creator 派发前在 `subagent-tasks/wave8-full-review/` 写 packet（write-set 精确到文件+函数、covered micro、compile_preflight 授权），配同步 Checker（可合并批次）。C3 的 VFS `inode.rs` 改动需在 packet 中标注需用户/主代理授权（行为必须逐位保持）。
+2. **基线**：`codex/overlayfs-refactor` HEAD = `3fb122613`（wave-8: aster-code-review，已去 WIP 字样；含机械批 + C11 + handoff）。工作树干净（若 handoff 在 amend 后有未提交改动，先并入再开工）。
+3. **Wave8 运行时回归**（Wave7 显式推迟项）：全部修复批次后先 `make kernel`，再跑 20 例可调度矩阵（overlay/029 首例）。C7 的 D31（origin 保守回退）与 D30（layer_index）需 overlay/030 类身份用例验证。
+4. （可选）全 CI 门复验：`make check` 或 `RUSTFLAGS="-Dwarnings" cargo osdk clippy -- --no-deps`。
+5. （可选）exFAT 格式化如需纳入，另开一轮。
 
-- **This file is the live handoff for:** Wave8 主代理任期（`wave8_format_lint_20260811` 起）。
-- **Update rule:** 在同一文件内就地更新，直至 Wave8 所有权移交。
-- **Supersedes / Replaces:** `20260805-wave7-xfstests-sequencing_main_agent_handoff.md`（已 CLOSED）与 `20260810-rebase-upstream-api-repair_main_agent_handoff.md`（RECORD，已并入历史）。

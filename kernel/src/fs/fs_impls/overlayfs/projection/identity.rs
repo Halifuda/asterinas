@@ -58,11 +58,19 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectId {
     pub(in crate::fs::fs_impls::overlayfs) ino: u64,
 }
 
-#[derive(Debug)]
-struct LowerLayerIdentity {
-    fsid: u64,
-    container_dev_id: DeviceId,
-    lower_layer_root_ino: u64,
+/// One published layer's identity triplet — the named carrier of the
+/// construction-local `layer_devs` input of [`IdentityPolicy::new`].
+///
+/// `fsid` is the per-mount layer ordinal, `container_dev_id` the backend
+/// device id, and `lower_layer_root_ino` the layer root's real inode number.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::fs::fs_impls::overlayfs) struct LowerLayerIdentity {
+    /// The per-mount layer ordinal.
+    pub(in crate::fs::fs_impls::overlayfs) fsid: u64,
+    /// The backend container device id of the layer.
+    pub(in crate::fs::fs_impls::overlayfs) container_dev_id: DeviceId,
+    /// The layer root's real inode number.
+    pub(in crate::fs::fs_impls::overlayfs) lower_layer_root_ino: u64,
 }
 
 /// The immutable per-mount dev/ino projection policy.
@@ -102,10 +110,9 @@ impl IdentityPolicy {
     ///
     /// `overlay_dev_id` is the overlay `AnonDeviceId` acquired in the extended
     /// `OverlayFs::new`; the construction-local `layer_devs` input carries one
-    /// `(fsid, container_dev_id,
-    /// lower_layer_root_ino)` entry per published layer, from the same
-    /// snapshot that feeds `is_all_layers_same_fs`. Only the derived
-    /// same-fs state and fsid-sorted lower snapshot survive construction.
+    /// [`LowerLayerIdentity`] per published layer, from the same snapshot that
+    /// feeds `is_all_layers_same_fs`. Only the derived same-fs state and
+    /// fsid-sorted lower snapshot survive construction.
     /// `upper_layer_dev_index` is the position of the upper's entry in
     /// `layer_devs` (the builder pushes the upper first when present; `None`
     /// on a read-only mount): the LOWER-only view is derived by excluding
@@ -121,7 +128,7 @@ impl IdentityPolicy {
     /// Constructed once in the extended `OverlayFs::new` (`mount/build.rs`).
     pub(in crate::fs::fs_impls::overlayfs) fn new(
         overlay_dev_id: DeviceId,
-        layer_devs: &[(u64, DeviceId, u64)],
+        layer_devs: &[LowerLayerIdentity],
         upper_layer_dev_index: Option<usize>,
         xino_shift: u32,
         // `xino_mode` is the parsed `xino=` option value.
@@ -130,23 +137,17 @@ impl IdentityPolicy {
         if xino_shift > 63 {
             return_errno_with_message!(Errno::EINVAL, "invalid overlay xino shift");
         }
-        let is_all_layers_same_fs = layer_devs.first().is_some_and(|(_, first_dev, _)| {
+        let is_all_layers_same_fs = layer_devs.first().is_some_and(|first| {
             layer_devs
                 .iter()
-                .all(|(_, container_dev_id, _)| container_dev_id == first_dev)
+                .all(|layer| layer.container_dev_id == first.container_dev_id)
         });
         let mut lower_layer_devs: Vec<LowerLayerIdentity> = layer_devs
             .iter()
             .copied()
             .enumerate()
             .filter(|(index, _)| Some(*index) != upper_layer_dev_index)
-            .map(
-                |(_, (fsid, container_dev_id, lower_layer_root_ino))| LowerLayerIdentity {
-                    fsid,
-                    container_dev_id,
-                    lower_layer_root_ino,
-                },
-            )
+            .map(|(_, layer)| layer)
             .collect();
         lower_layer_devs.sort_by_key(|layer| layer.fsid);
         Ok(Self {

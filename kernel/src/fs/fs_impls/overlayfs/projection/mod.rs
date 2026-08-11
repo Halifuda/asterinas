@@ -35,7 +35,7 @@ pub(in crate::fs::fs_impls::overlayfs) use binding_cache::{
 };
 use entry::LayerLookup;
 pub(in crate::fs::fs_impls::overlayfs) use entry::{RealObject, is_whiteout_inode};
-pub(in crate::fs::fs_impls::overlayfs) use identity::{IdentityPolicy, OverlayObjectId};
+pub(in crate::fs::fs_impls::overlayfs) use identity::{IdentityPolicy, LowerLayerIdentity};
 pub(in crate::fs::fs_impls::overlayfs) use inode::{OverlayInode, OverlayObjectFacts};
 pub(in crate::fs::fs_impls::overlayfs) use inode_cache::{InodeCache, RealObjectKey};
 
@@ -134,7 +134,7 @@ impl OverlayFs {
         let binding = match truth {
             LayerLookup::Positive(facts) => {
                 let inode = self.project_inode(&facts);
-                Binding::Positive(PositiveBinding { inode })
+                Binding::Positive(PositiveBinding::new(inode))
             }
             LayerLookup::Negative(negative) => Binding::Negative(negative),
         };
@@ -272,10 +272,17 @@ impl OverlayFs {
 
     /// Publishes `binding` for `(parent_id, name)` into the binding cache.
     ///
-    /// Called by `lookup_binding` under the parent `DIR` transaction, so the
+    /// Called by `lookup_binding` under the parent `DIR` transaction — and by
+    /// the namespace-mutation recipes' shared publication seam
+    /// (`dir/create.rs::publish_positive_binding`) — so the
     /// check-act-publish sequence stays atomic per directory; the entry is an
     /// immutable `Arc<Binding>` snapshot (replaced, never mutated in place).
-    fn publish_binding(&self, parent_id: &RealObjectKey, name: &str, binding: Binding) {
+    pub(in crate::fs::fs_impls::overlayfs) fn publish_binding(
+        &self,
+        parent_id: &RealObjectKey,
+        name: &str,
+        binding: Binding,
+    ) {
         let key = BindingKey {
             parent_id: *parent_id,
             name: name.into(),

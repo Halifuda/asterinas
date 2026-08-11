@@ -768,3 +768,212 @@ impl Inode for OverlayInode {
         self.rename_impl(old_name, target, new_name, mode)
     }
 }
+
+impl OverlayInode {
+    /// Resolves the identity published for this directory's `..` entry — the
+    /// `..` parent-identity projection policy of the readdir head section.
+    ///
+    /// The served value is the CHILD-SOURCE-LAYER real parent identity: the
+    /// projection, at the child's visible-source layer, of the real parent
+    /// reached by the child's visible source's `..` (the upper-backed case
+    /// prefers the durable origin record when present; that record read is
+    /// caller-credential-gated, a known limitation the `Err` arm logs
+    /// explicitly). Exact when the overlay parent's visible source is on the
+    /// SAME layer as the child's; otherwise an approximation. The
+    /// `d_ino("..") == d_ino(".")` self-parent approximation is served when
+    /// no stable, disclosure-safe projection exists (overlay root,
+    /// xino-off/overflow directory branch, unresolvable real parent, or
+    /// unavailable owning mount). The result is stable across readdir calls.
+    pub(in crate::fs::fs_impls::overlayfs) fn resolve_parent_object_id(
+        &self,
+        facts: &OverlayObjectFacts,
+    ) -> OverlayObjectId {
+        // The overlay root's `..` is itself by Unix convention; the topmost
+        // layer root may be an arbitrary subdirectory, so the underlying `..`
+        // could escape the layer tree and disclose the backing-store parent —
+        // see the doc above for the remaining arms.
+        let fs = match self.fs_arc() {
+            Ok(fs) => fs,
+            Err(err) => {
+                warn!(
+                    "overlay readdir: the owning mount is unavailable ({:?}); \
+                     falling back to d_ino(\"..\") == d_ino(\".\")",
+                    err
+                );
+                return self.parent_fallback();
+            }
+        };
+        // Overlay-root special case: `..` is the root itself (Unix
+        // self-parent); the root carrier's stored `object_id` is served and
+        // the underlying `lookup("..")` is skipped entirely.
+        if self.is_mount_root(&fs) {
+            return self.parent_fallback();
+        }
+        // Determinism short-circuit: on a multi-fs xino-off mount the
+        // projection matrix takes the xino-off/overflow directory branch for
+        // EVERY parent (a fresh fallback ino per call — unstable), so the
+        // whole route is predetermined to serve the stable self-parent
+        // approximation; skip the underlying `lookup("..")`/origin read whose
+        // result would only be discarded.
+        if !fs.identity().is_xino_effective() && !fs.identity().is_all_layers_same_fs() {
+            return self.parent_fallback();
+        }
+        let visible = visible_source(facts);
+        let parent_real_inode = match visible.real_inode().lookup("..") {
+            Ok(parent) => parent,
+            Err(err) => {
+                warn!(
+                    "overlay readdir: `..` resolution on the visible source failed \
+                     ({:?}); falling back to d_ino(\"..\") == d_ino(\".\")",
+                    err
+                );
+                return self.parent_fallback();
+            }
+        };
+        // Upper-backed real parent: prefer the durable lower-id record so the
+        // `..` identity matches the parent's record-derived `stat("..")`,
+        // gated on deterministic projection.
+        if visible.layer_index() == 0
+            && let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode)
+        {
+            return object_id;
+        }
+        // Deterministic-projection gate: under xino-off or a per-object
+        // overflow the directory branch allocates a fresh fallback ino per
+        // call — unstable — so the stable approximation
+        // `d_ino("..") == d_ino(".")` is served instead.
+        if !fs
+            .identity()
+            .is_directory_projection_deterministic(visible.fsid(), parent_real_inode.ino())
+        {
+            return self.parent_fallback();
+        }
+        let parent_real = RealObject::new(
+            visible.layer_index(),
+            parent_real_inode,
+            visible.fsid(),
+            visible.container_dev_id(),
+        );
+        fs.identity().project_object_id(&parent_real, true)
+    }
+
+    /// Projects the upper-backed real parent's identity from its durable
+    /// origin record, gated on deterministic projection.
+    ///
+    /// Returns `None` when the parent carries no readable record, the record
+    /// pair does not resolve to a current lower layer, or the record projection
+    /// would take the xino-off/overflow directory branch (which allocates a
+    /// fresh fallback ino per call — unstable); the caller then attempts the
+    /// visible-source projection, which itself falls back to the stable
+    /// `d_ino("..") == d_ino(".")` approximation when non-deterministic.
+    ///
+    /// Known limitation: the underlying `read_lower_id` —
+    /// `get_xattr("trusted.overlay.origin")` on the real upper inode — is
+    /// caller-credential-gated (both supported uppers, ramfs and ext2,
+    /// enforce `MAY_READ` in `get_xattr`), so on `EACCES`/`EPERM` an
+    /// unprivileged reader falls back to the visible-source projection while
+    /// a privileged reader gets the record-derived identity: `d_ino("..")`
+    /// may differ between privileged and unprivileged readers until the
+    /// credential-swap VFS support lands (same class of known gap). The
+    /// `Err` arm logs at `debug!` — the divergence is never
+    /// silent, and a caller looping `getdents` on such a directory cannot
+    /// flood the kernel log with per-call warnings.
+    pub(in crate::fs::fs_impls::overlayfs) fn project_parent_from_lower_record(
+        &self,
+        fs: &OverlayFs,
+        parent_real_inode: &Arc<dyn Inode>,
+    ) -> Option<OverlayObjectId> {
+        match fs.read_lower_id(parent_real_inode) {
+            Ok(Some(record)) => {
+                // Determinism gate: the record projection under
+                // xino-off/overflow allocates a fresh fallback ino per call —
+                // the same instability the visible-source branch gates
+                // against. On an all-layers-same-fs stack the projection
+                // matrix branch 1 (same-fs passthrough) is deterministic and
+                // needs no additional layer-id lookup here: `read_lower_id`
+                // has already validated the record's device/root pair. The
+                // gate therefore short-circuits there; only the
+                // xino-effective branch re-resolves its layer id for the fit
+                // check.
+                // Delegating to the projection keeps `d_ino("..")` consistent
+                // with the parent's record-derived `stat("..")`.
+                if !fs.identity().is_all_layers_same_fs() {
+                    let layer_id = fs.identity().resolve_layer_id_for_record(
+                        record.container_dev_id(),
+                        record.lower_layer_root_ino(),
+                    )?;
+                    if !fs
+                        .identity()
+                        .is_directory_projection_deterministic(layer_id, record.real_ino())
+                    {
+                        return None;
+                    }
+                }
+                fs.identity().project_object_id_from_lower_id(&record, true)
+            }
+            Ok(None) => None,
+            // Explicit `EACCES`/`EPERM` arm: the origin-record read is
+            // caller-credential-gated, so the served `d_ino("..")` may differ
+            // between privileged and unprivileged readers until the
+            // credential-swap seam lands. Logged at `debug!` so the
+            // divergence is never silent without letting an unprivileged
+            // caller flood the kernel log via repeated `getdents`.
+            Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
+                debug!(
+                    "overlay readdir: the parent's origin record is \
+                     credential-gated ({:?}); d_ino(\"..\") may differ between \
+                     privileged and unprivileged readers until the \
+                     credential-swap seam lands; falling back to the \
+                     visible-source projection",
+                    err
+                );
+                None
+            }
+            Err(err) => {
+                debug!(
+                    "overlay readdir: the parent's origin record is unreadable \
+                     ({:?}); falling back to the visible-source projection",
+                    err
+                );
+                None
+            }
+        }
+    }
+
+    /// Returns whether this inode is the overlay mount root (the self-parent
+    /// special case of the `..` route).
+    ///
+    /// The root carrier is the `OverlayInode` created by
+    /// `OverlayInode::new_root` in every configuration; the check
+    /// compares the root carrier's inode-cache key against `self.key()` (the
+    /// same-carrier test: the cache is keyed by `RealObjectKey`). A root
+    /// carrier of any other concrete type is an unexpected configuration and
+    /// is surfaced loudly here AND FAILS CLOSED: `true` is returned so the
+    /// caller serves the self-parent fallback — never a fall-through to the
+    /// backing-store `lookup("..")` on a misclassified root, which could
+    /// disclose the backing-store parent.
+    pub(in crate::fs::fs_impls::overlayfs) fn is_mount_root(&self, fs: &OverlayFs) -> bool {
+        match Arc::downcast::<OverlayInode>(fs.root_inode()) {
+            Ok(root_carrier) => root_carrier.key() == self.key(),
+            Err(_) => {
+                warn!(
+                    "overlay readdir: the mount root carrier is not an OverlayInode; \
+                     serving the self-parent fallback"
+                );
+                // Fail closed: never fall through to the backing-store `..`
+                // lookup, which could disclose the backing-store parent.
+                true
+            }
+        }
+    }
+
+    /// Returns the `d_ino("..") == d_ino(".")` approximation: the
+    /// stable fallback identity served when the real parent cannot be
+    /// resolved disclosure-safely or deterministically (overlay root,
+    /// xino-off/overflow directory branch, unresolvable real parent, or
+    /// unavailable owning mount). One named fallback is shared by all five
+    /// decision arms, so the stable approximation has one implementation.
+    pub(in crate::fs::fs_impls::overlayfs) fn parent_fallback(&self) -> OverlayObjectId {
+        self.object_id()
+    }
+}

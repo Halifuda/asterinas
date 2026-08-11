@@ -25,10 +25,8 @@
 //! `dir/whiteout.rs` owner).
 //!
 //! The two recipe methods are private to this module (their only caller is
-//! `create_object` in
-//! this file).
+//! `create_object` in this file).
 
-use super::mknod_object_type;
 use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
@@ -36,10 +34,10 @@ use crate::{
             AccessType,
             copyup::WorkdirTempRequest,
             metadata_security::xattr::{OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME},
-            mount::RealPath,
+            mount::{OverlayFs, RealPath},
             projection::{
-                Binding, BindingKey, NegativeBinding, OverlayInode, OverlayObjectFacts,
-                PositiveBinding, PositiveKind, RealObject,
+                Binding, NegativeBinding, OverlayInode, OverlayObjectFacts, PositiveBinding,
+                PositiveKind, RealObject,
             },
         },
         vfs::{
@@ -128,10 +126,13 @@ impl OverlayInode {
         let upper_parent_path = self.upper_parent_path()?;
         // The overlay-visible object kind of the request (used by the index
         // seam below). Shared mechanical mapping (the `MknodType` ->
-        // `InodeType` classification is the single `mknod_object_type` helper
-        // in `dir/mod.rs`, consumed by all three sites); the `None` leg keeps
-        // the plain `create` object type.
-        let object_type = mknod_type.as_ref().map(mknod_object_type).unwrap_or(type_);
+        // `InodeType` classification is the single `super::mknod_object_type`
+        // helper in `dir/mod.rs`, consumed by all three sites); the `None`
+        // leg keeps the plain `create` object type.
+        let object_type = mknod_type
+            .as_ref()
+            .map(super::mknod_object_type)
+            .unwrap_or(type_);
         // Upper physical operation: direct create/mknod in the upper parent
         // through the base VFS `Path` layer; the returned `Path` is the
         // dentry-anchored published upper object.
@@ -162,11 +163,7 @@ impl OverlayInode {
             )
         })?;
         let inode = fs.project_new_upper(&new_facts);
-        fs.bindings().insert(
-            BindingKey::new(self.key(), String::from(name)),
-            Arc::new(Binding::Positive(PositiveBinding::new(inode.clone()))),
-        );
-        self.readdir_index_insert(name, inode.clone(), object_type);
+        self.publish_positive_binding(&fs, name, inode.clone(), object_type);
         Ok(inode)
     }
 
@@ -211,7 +208,10 @@ impl OverlayInode {
         // Shared mechanical kind mapping (consumed by the opaque branch and
         // the index seam). Computed before `mknod_type` is consumed by the
         // temp creation below.
-        let object_type = mknod_type.as_ref().map(mknod_object_type).unwrap_or(type_);
+        let object_type = mknod_type
+            .as_ref()
+            .map(super::mknod_object_type)
+            .unwrap_or(type_);
         // Private staging: the temp is never a lookup/readdir/ReaddirIndex
         // source. The typed request selects either the `mknod` or create
         // operation while the shared owner performs every retry.
@@ -313,13 +313,34 @@ impl OverlayInode {
                     )
                 })?;
                 let inode = fs.project_new_upper(&new_facts);
-                fs.bindings().insert(
-                    BindingKey::new(self.key(), String::from(name)),
-                    Arc::new(Binding::Positive(PositiveBinding::new(inode.clone()))),
-                );
-                self.readdir_index_insert(name, inode.clone(), object_type);
+                self.publish_positive_binding(&fs, name, inode.clone(), object_type);
                 Ok(inode)
             },
         )
+    }
+
+    /// Publishes a freshly created upper object as the positive binding of
+    /// `(self, name)` and records it in the readdir index — the semantic
+    /// publication seam shared by the two create recipes (and by `link_impl`
+    /// in `dir/mod.rs`).
+    ///
+    /// The `BindingCache::insert` half reuses the shared
+    /// [`OverlayFs::publish_binding`] seam (projection/mod.rs) so the
+    /// publication key is constructed in one place; the
+    /// `readdir_index_insert` half keeps the `(name, inode)` index entry in
+    /// sync with the binding.
+    fn publish_positive_binding(
+        &self,
+        fs: &OverlayFs,
+        name: &str,
+        inode: Arc<OverlayInode>,
+        kind: InodeType,
+    ) {
+        fs.publish_binding(
+            &self.key(),
+            name,
+            Binding::Positive(PositiveBinding::new(inode.clone())),
+        );
+        self.readdir_index_insert(name, inode, kind);
     }
 }

@@ -73,8 +73,8 @@ use crate::{
 /// The ownership/capability facts of the current caller against one projected
 /// owner.
 ///
-/// Named carrier replacing the positional `(bool, bool)` return of the
-/// round-3 probe: the `is_owner`/`has_cap` pair is the gate decision of the
+/// Named carrier replacing the earlier positional `(bool, bool)` return of
+/// the ownership probe: the `is_owner`/`has_cap` pair is the gate decision of the
 /// ownership-sensitive setters and is consumed by name at every call site
 /// (`set_mode`/`set_owner`/`set_group`). Module-private to `metadata.rs`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -222,7 +222,7 @@ impl OverlayInode {
     /// dropped; a local or real failure is a silent no-op at the overlay
     /// boundary, because `EROFS` cannot surface through the infallible trait
     /// surface (known VFS dependency).
-    fn best_effort_time_set(&self, operation: impl FnOnce(&Arc<dyn Inode>)) {
+    fn best_effort_time_set(&self, operation_fn: impl FnOnce(&Arc<dyn Inode>)) {
         let Some(metadata) = self.metadata().ok() else {
             return;
         };
@@ -246,7 +246,7 @@ impl OverlayInode {
             }
         }
         let _ = self.delegate_to_real(|real| {
-            operation(real);
+            operation_fn(real);
             Ok(())
         });
     }

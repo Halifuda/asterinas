@@ -51,7 +51,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, RenameMode},
-            path::{Path, is_dot_or_dotdot},
+            path::{self, Path},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -282,7 +282,7 @@ impl OverlayInode {
                 Some(upper_obj) => {
                     let mut upper_names = Vec::new();
                     upper_obj.real_inode().readdir_at(0, &mut upper_names)?;
-                    upper_names.retain(|entry| !is_dot_or_dotdot(entry));
+                    upper_names.retain(|entry| !path::is_dot_or_dotdot(entry));
                     if upper_names.is_empty() {
                         None
                     } else {

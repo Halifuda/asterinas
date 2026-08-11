@@ -122,11 +122,10 @@ const ESCAPED_OVERLAY_PREFIX: &str = "overlay.overlay.";
 
 /// The xattr full name of the opaque-directory marker (Linux `OVL_XATTR_OPAQUE`).
 ///
-/// This module already centralizes the overlay-private name knowledge
-/// (`OVERLAY_PRIVATE_SUFFIXES` lists the `opaque` suffix), so the name/value
-/// pair lives here as the single declaration; the `dir/create.rs` and
-/// `dir/remove.rs` recipes reference these constants instead of redeclaring
-/// them.
+/// This module declares the marker name (the `opaque` suffix is a known
+/// overlay-private record in `OVERLAY_PRIVATE_SUFFIXES`); the `dir/create.rs`
+/// and `dir/remove.rs` recipes reference it instead of redeclaring it.
+/// `projection/entry.rs` still carries its own copy of the name.
 pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_XATTR_FULL_NAME: &str =
     "trusted.overlay.opaque";
 
@@ -134,13 +133,22 @@ pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_XATTR_FULL_NAME: &str =
 /// byte `b'y'`).
 pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
 
+/// The xattr full name of the xattr-based whiteout marker (Linux
+/// `OVL_XATTR_XWHITEOUT`).
+///
+/// Central declaration of the marker name: `dir/whiteout.rs` (the owning
+/// operation) and `legacy_fs.rs` import it from here instead of redeclaring
+/// it. `projection/entry.rs` still carries its own copy of the name.
+pub(in crate::fs::fs_impls::overlayfs) const WHITEOUT_XATTR_FULL_NAME: &str =
+    "trusted.overlay.whiteout";
+
 /// The xattr full name of the impure-directory marker (Linux `OVL_XATTR_IMPURE`).
 ///
 /// The `impure` suffix is already a known overlay-private record
 /// (`OVERLAY_PRIVATE_SUFFIXES`), so the name/value pair lives here as the
 /// single declaration; the marker is only ever read/written/cleared through
 /// the internal [`OverlayXattrPolicy`] seam — never through the user-facing
-/// xattr entries (`P1-33`).
+/// xattr entries.
 pub(in crate::fs::fs_impls::overlayfs) const IMPURE_XATTR_FULL_NAME: &str =
     "trusted.overlay.impure";
 
@@ -481,6 +489,14 @@ impl OverlayXattrPolicy {
         Ok(value)
     }
 
+    /// Parses the impure marker's full name — the shared parse of the three
+    /// marker methods (one name constant, one error literal).
+    fn impure_marker_name() -> Result<XattrName<'static>> {
+        XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
+        })
+    }
+
     /// Returns whether `real_dir` carries the persisted impure marker.
     ///
     /// Presence probe on the real upper directory (Linux
@@ -492,10 +508,8 @@ impl OverlayXattrPolicy {
         &self,
         real_dir: &Arc<dyn Inode>,
     ) -> Result<bool> {
-        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
-        })?;
-        let mut value = [0u8; 1];
+        let name = Self::impure_marker_name()?;
+        let mut value = [0u8; IMPURE_MARKER_VALUE.len()];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match real_dir.get_xattr(name, &mut writer) {
             Ok(_) => Ok(true),
@@ -513,7 +527,7 @@ impl OverlayXattrPolicy {
     /// again (Linux `ovl_set_impure` no-op parity). The internal write goes
     /// directly through the underlying inode — never through the user-facing
     /// `OverlayInode` xattr entries, whose `Private` refusal surface is
-    /// untouched (`P1-33`).
+    /// untouched.
     pub(in crate::fs::fs_impls::overlayfs) fn set_impure_marker(
         &self,
         real_dir: &Arc<dyn Inode>,
@@ -525,9 +539,7 @@ impl OverlayXattrPolicy {
             self.is_private(IMPURE_XATTR_FULL_NAME),
             "the impure marker name must classify as an overlay-private record"
         );
-        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
-        })?;
+        let name = Self::impure_marker_name()?;
         let mut marker_reader = VmReader::from(IMPURE_MARKER_VALUE).to_fallible();
         real_dir.set_xattr(name, &mut marker_reader, XattrSetFlags::CREATE_OR_REPLACE)
     }
@@ -541,9 +553,7 @@ impl OverlayXattrPolicy {
         &self,
         real_dir: &Arc<dyn Inode>,
     ) -> Result<()> {
-        let name = XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
-        })?;
+        let name = Self::impure_marker_name()?;
         match real_dir.remove_xattr(name) {
             Ok(()) => Ok(()),
             Err(err) if err.error() == Errno::ENODATA => Ok(()),
@@ -608,6 +618,25 @@ impl OverlayInode {
         xattr_policy.clear_impure_marker(upper_real.real_inode())
     }
 
+    /// Ensures `name` classifies as `Public` (the classification-refusal
+    /// guard shared by the three generic xattr entries).
+    ///
+    /// A non-`Public` overlay-private name is refused BEFORE any admission
+    /// side effect. Each entry supplies its own refusal error: `EOPNOTSUPP`
+    /// for `get_xattr` (Linux v4.10+ `ovl_xattr_get` semantics — the
+    /// pre-v4.10 `ENODATA` is not returned) and `EPERM` for
+    /// `set_xattr`/`remove_xattr` (a private record cannot be forged or
+    /// removed through the generic path).
+    fn ensure_public_xattr(&self, name: &XattrName, refusal: (Errno, &'static str)) -> Result<()> {
+        if matches!(
+            self.fs_arc()?.xattr_policy().classify(name.full_name()),
+            XattrClass::Public
+        ) {
+            return Ok(());
+        }
+        Err(Error::with_message(refusal.0, refusal.1))
+    }
+
     // Xattr get: classification refusal runs first (before the admission, so
     // no authority side effect ever starts for a private name); the refusal
     // returns `EOPNOTSUPP` for every non-`Public` name (Linux v4.10+
@@ -624,15 +653,13 @@ impl OverlayInode {
         name: XattrName,
         value_writer: &mut VmWriter,
     ) -> Result<usize> {
-        if !matches!(
-            self.fs_arc()?.xattr_policy().classify(name.full_name()),
-            XattrClass::Public
-        ) {
-            return Err(Error::with_message(
+        self.ensure_public_xattr(
+            &name,
+            (
                 Errno::EOPNOTSUPP,
                 "the overlay-private xattr is not exposed through the generic get path",
-            ));
-        }
+            ),
+        )?;
         self.check_permission(AccessType::ReadOnly, Permission::empty())?;
         self.delegate_to_real(|real| real.get_xattr(name, value_writer))
     }
@@ -650,15 +677,13 @@ impl OverlayInode {
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
-        if !matches!(
-            self.fs_arc()?.xattr_policy().classify(name.full_name()),
-            XattrClass::Public
-        ) {
-            return Err(Error::with_message(
+        self.ensure_public_xattr(
+            &name,
+            (
                 Errno::EPERM,
                 "overlay-private records cannot be forged through the generic set path",
-            ));
-        }
+            ),
+        )?;
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.delegate_to_real(|real| real.set_xattr(name, value_reader, flags))
     }
@@ -692,15 +717,13 @@ impl OverlayInode {
         &self,
         name: XattrName,
     ) -> Result<()> {
-        if !matches!(
-            self.fs_arc()?.xattr_policy().classify(name.full_name()),
-            XattrClass::Public
-        ) {
-            return Err(Error::with_message(
+        self.ensure_public_xattr(
+            &name,
+            (
                 Errno::EPERM,
                 "overlay-private records cannot be removed through the generic path",
-            ));
-        }
+            ),
+        )?;
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.delegate_to_real(|real| real.remove_xattr(name))
     }

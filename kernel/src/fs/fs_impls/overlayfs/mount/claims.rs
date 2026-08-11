@@ -13,7 +13,7 @@
 //! plus the guard `Drop` order. All claim operations are single-word atomic
 //! CASes: non-blocking and safe in `Drop`.
 
-use super::{layers::resolve_root_path, options::UuidMode};
+use super::{layers, options::UuidMode};
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
@@ -35,7 +35,11 @@ use crate::{
 pub(super) const OVERLAY_UUID_SIZE: usize = 8;
 
 /// The private xattr name carrying the effective overlay UUID.
-const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
+///
+/// `pub(super)` so the sibling `policy.rs` xattr-capability probe reads the
+/// same name the unified identity is persisted in (single representation of
+/// the private overlay namespace key).
+pub(super) const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
 
 /// The overlay-internal staging workspace name under the workdir root.
 ///
@@ -58,6 +62,14 @@ const WORKDIR_NAME: &str = "work";
 /// between runs must also be able to remove leftover staging temps under the
 /// workspace.
 const WORKDIR_MODE: InodeMode = InodeMode::from_bits_truncate(0o700);
+
+/// The maximum recursion depth of the workdir residue cleanup.
+///
+/// Directories at `level >= WORKDIR_CLEANUP_MAX_DEPTH` are rmdir'd without
+/// descending, so a deeper non-empty directory surfaces the underlying
+/// `ENOTEMPTY` instead of unbounded recursion (Linux
+/// `ovl_workdir_cleanup`/`ovl_workdir_cleanup_recurse` three-level contract).
+const WORKDIR_CLEANUP_MAX_DEPTH: usize = 2;
 
 /// The unified 64-bit identity of one writable overlay mount.
 ///
@@ -189,20 +201,28 @@ pub(in crate::fs::fs_impls::overlayfs) struct UpperWorkdirClaim {
     upper: InodeClaimGuard,
     /// Unified identity; persisted iff effective.
     identity: OverlayUuid,
-    /// The pinned staging workspace inode (`<workdir>/work`); `Some` only
-    /// after [`prepare_workdir`](Self::prepare_workdir) completed on the
-    /// writable branch (Linux `ofs->workdir` dentry-ref parity: staging never
+    /// The prepared staging workspace (`<workdir>/work`); `Some` only after
+    /// [`prepare_workdir`](Self::prepare_workdir) completed on the writable
+    /// branch (Linux `ofs->workdir` dentry-ref parity: staging never
     /// re-resolves the name, and an upper-side unlink of the name does not
     /// invalidate the pinned inode). Written exactly once during mount
-    /// construction, before publication; no lock domain.
-    workdir_workspace: Option<Arc<dyn Inode>>,
-    /// The dentry-anchored staging workspace `Path` (`<workdir>/work`);
-    /// `Some` exactly when [`Self::workdir_workspace`] is `Some` — both
-    /// written once in [`prepare_workdir`](Self::prepare_workdir) at the same
-    /// statement. Keeps the staging workspace routed through the base VFS
-    /// dentry layer so every workdir mutation updates the base view's cached
-    /// directory state.
-    workdir_workspace_path: Option<Path>,
+    /// construction, before publication; no lock domain. The pinned inode
+    /// and its dentry-anchored `Path` travel together (one value), so the
+    /// half-prepared state is unrepresentable.
+    workdir_workspace: Option<WorkdirWorkspace>,
+}
+
+/// The prepared `<workdir>/work` staging workspace — the pinned inode plus
+/// its dentry-anchored `Path`.
+///
+/// Keeps the staging workspace routed through the base VFS dentry layer so
+/// every workdir mutation updates the base view's cached directory state.
+#[derive(Debug)]
+struct WorkdirWorkspace {
+    /// The pinned staging workspace inode (`<workdir>/work`).
+    inode: Arc<dyn Inode>,
+    /// The dentry-anchored staging workspace `Path` (`<workdir>/work`).
+    path: Path,
 }
 
 impl UpperWorkdirClaim {
@@ -337,7 +357,6 @@ impl UpperWorkdirClaim {
             upper,
             identity,
             workdir_workspace: None,
-            workdir_workspace_path: None,
         })
     }
 
@@ -396,8 +415,10 @@ impl UpperWorkdirClaim {
         // traverse directories even for root; 0o700 keeps the workspace
         // usable and removable by the harness cleanup (see [`WORKDIR_MODE`]).
         let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
-        self.workdir_workspace = Some(workspace.inode().clone());
-        self.workdir_workspace_path = Some(workspace);
+        self.workdir_workspace = Some(WorkdirWorkspace {
+            inode: workspace.inode().clone(),
+            path: workspace,
+        });
         Ok(())
     }
 
@@ -415,7 +436,7 @@ impl UpperWorkdirClaim {
         for name in names {
             let child = dir.lookup(&name)?;
             if child.type_().is_directory() {
-                if level < 2 {
+                if level < WORKDIR_CLEANUP_MAX_DEPTH {
                     self.remove_work_entries(&child, level + 1)?;
                 }
                 dir.rmdir(&name)?;
@@ -457,12 +478,15 @@ impl UpperWorkdirClaim {
     /// effective read-only mount) — the claim exists but staging must still
     /// fail closed.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
-        self.workdir_workspace.as_ref().ok_or_else(|| {
-            Error::with_message(
-                Errno::EROFS,
-                "the overlay workdir workspace is not prepared",
-            )
-        })
+        self.workdir_workspace
+            .as_ref()
+            .map(|workspace| &workspace.inode)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EROFS,
+                    "the overlay workdir workspace is not prepared",
+                )
+            })
     }
 
     /// Returns the dentry-anchored staging workspace path.
@@ -472,12 +496,15 @@ impl UpperWorkdirClaim {
     /// effective read-only mount) — the claim exists but staging must still
     /// fail closed.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
-        self.workdir_workspace_path.as_ref().ok_or_else(|| {
-            Error::with_message(
-                Errno::EROFS,
-                "the overlay workdir workspace is not prepared",
-            )
-        })
+        self.workdir_workspace
+            .as_ref()
+            .map(|workspace| &workspace.path)
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EROFS,
+                    "the overlay workdir workspace is not prepared",
+                )
+            })
     }
 }
 
@@ -495,13 +522,13 @@ pub(super) fn verify_inode_instance_stability(
     raw_path: &str,
     pinned_inode: &Arc<dyn Inode>,
 ) -> Result<()> {
-    // Both resolutions go through the shared `resolve_root_path` helper; each
+    // Both resolutions go through the shared `layers::resolve_root_path` helper; each
     // resolution is compared both to the other and to the layer-pinned inode
     // that is claimed downstream.
-    let first = resolve_root_path(fs_creation_ctx, raw_path)?
+    let first = layers::resolve_root_path(fs_creation_ctx, raw_path)?
         .inode()
         .clone();
-    let second = resolve_root_path(fs_creation_ctx, raw_path)?
+    let second = layers::resolve_root_path(fs_creation_ctx, raw_path)?
         .inode()
         .clone();
     if !Arc::ptr_eq(&first, &second) || !Arc::ptr_eq(&first, pinned_inode) {

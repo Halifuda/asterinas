@@ -27,23 +27,21 @@
 //! `INODE` (no `CUL`, `WL`, `UPPER`, or `MOUNT`).
 //!
 //! `..` identity note: the `..` entry carries the resolved overlay-parent
-//! identity. The approximation (`d_ino("..") == d_ino(".")`) applies when
-//! the parent identity cannot be resolved deterministically and
-//! disclosure-safely — overlay root, xino-off/overflow directory branch,
-//! unresolvable real parent, or unavailable owning mount.
+//! identity; the projection policy lives in `projection/inode.rs`
+//! ([`OverlayInode::resolve_parent_object_id`]) and the head section below
+//! only serves its result.
 
 use hashbrown::HashSet;
 
 use super::{
     mount::OverlayFs,
-    projection,
-    projection::{OverlayInode, OverlayObjectFacts, OverlayObjectId, PositiveKind, RealObject},
+    projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
 };
 use crate::{
     fs::{
         file::InodeType,
         utils::DirentVisitor,
-        vfs::{file_system::FileSystem, inode::Inode, path::is_dot_or_dotdot},
+        vfs::{inode::Inode, path::is_dot_or_dotdot},
     },
     prelude::*,
 };
@@ -126,17 +124,16 @@ pub(super) enum ReaddirIndexEntry {
 impl OverlayInode {
     /// The VFS readdir entry.
     ///
-    /// Flow (top-down reading): guard directory type → acquire the payload-less
-    /// `DIR` transaction lock → brief `facts_snapshot()` (`DIR -> INODE`) →
-    /// `ensure_readdir_index` (serve a `Valid` index, or rebuild out-of-lock
-    /// and publish a complete sequence; returns the facts the index was
-    /// published from) → serve the synthesized `.`/`..` head entries under
-    /// `DIR` only (the `..` parent identity is resolved lazily in that head
-    /// section — only when `..` is actually served — and before any `INODE`
-    /// guard) → take the index `INODE` lock and walk the real entries via
-    /// `first_entry_after(input)` / `partition_point`, skipping `Tombstone`
-    /// slots and visiting `Visible` entries only, with `d_ino` application
-    /// and visitor-stop handling (procfs-slot convention).
+    /// Serves the synthesized `.`/`..` head entries (the `..` parent identity
+    /// is projected by `projection/inode.rs`) and then the index's visible
+    /// real entries in cookie order, skipping `Tombstone` slots. The
+    /// serve-or-rebuild contract is [`OverlayInode::ensure_readdir_index`]: a
+    /// `Valid` index is served from the cache, a `NeedsRebuild` index is
+    /// rebuilt under the same `DIR` transaction. The returned delta advances
+    /// the per-FD offset to the next unvisited cookie (`Ok(0)` = end of
+    /// sequence); a visitor stop (e.g. user buffer full) is not propagated
+    /// (ext2 precedent) — the consumed delta is returned. Lock-order details
+    /// are documented inline at each step.
     pub(in crate::fs::fs_impls::overlayfs) fn readdir_at_impl(
         &self,
         offset: usize,
@@ -254,216 +251,6 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Resolves the identity published for this directory's `..` entry.
-    ///
-    /// The served value is the CHILD-SOURCE-LAYER real parent identity: the
-    /// projection, at the child's visible-source layer, of the real parent
-    /// reached by the child's visible source's `..` (the upper-backed case
-    /// prefers the durable origin record when present — that record read is
-    /// caller-credential-gated, so on `EACCES`/`EPERM` the served
-    /// `d_ino("..")` may differ between privileged and unprivileged readers
-    /// until the credential-swap VFS support lands; a known limitation — the
-    /// `Err` arm logs explicitly, never silently diverges).
-    /// That projection is exact when the overlay parent's visible source is
-    /// on the SAME layer as the child's visible source (the same-layer real
-    /// parent); otherwise — a merged parent owned by a higher layer with
-    /// lower-only children — the served value is an approximation:
-    /// `d_ino("..")` may not equal the overlay parent's published `st_ino`;
-    /// there is no parent-handle facility. The `d_ino("..") == d_ino(".")`
-    /// self-parent approximation is served when no stable, disclosure-safe
-    /// projection exists (overlay root, xino-off/overflow directory branch,
-    /// unresolvable real parent, or unavailable owning mount). The result is
-    /// stable across readdir calls — it never allocates a fresh fallback ino.
-    fn resolve_parent_object_id(&self, facts: &OverlayObjectFacts) -> OverlayObjectId {
-        // The overlay root's `..` is itself by Unix convention; the topmost
-        // layer root may be an arbitrary subdirectory, so the underlying `..`
-        // could escape the layer tree and disclose the backing-store parent —
-        // see the doc above for the remaining arms.
-        let fs = match self.fs_arc() {
-            Ok(fs) => fs,
-            Err(err) => {
-                warn!(
-                    "overlay readdir: the owning mount is unavailable ({:?}); \
-                     falling back to d_ino(\"..\") == d_ino(\".\")",
-                    err
-                );
-                return self.parent_fallback();
-            }
-        };
-        // Overlay-root special case: `..` is the root itself (Unix
-        // self-parent); the root carrier's stored `object_id` is served and
-        // the underlying `lookup("..")` is skipped entirely.
-        if self.is_mount_root(&fs) {
-            return self.parent_fallback();
-        }
-        // Determinism short-circuit: on a multi-fs xino-off mount the
-        // projection matrix takes the xino-off/overflow directory branch for
-        // EVERY parent (a fresh fallback ino per call — unstable), so the
-        // whole route is predetermined to serve the stable self-parent
-        // approximation; skip the underlying `lookup("..")`/origin read whose
-        // result would only be discarded.
-        if !fs.identity().is_xino_effective() && !fs.identity().is_all_layers_same_fs() {
-            return self.parent_fallback();
-        }
-        let visible = projection::visible_source(facts);
-        let parent_real_inode = match visible.real_inode().lookup("..") {
-            Ok(parent) => parent,
-            Err(err) => {
-                warn!(
-                    "overlay readdir: `..` resolution on the visible source failed \
-                     ({:?}); falling back to d_ino(\"..\") == d_ino(\".\")",
-                    err
-                );
-                return self.parent_fallback();
-            }
-        };
-        // Upper-backed real parent: prefer the durable lower-id record so the
-        // `..` identity matches the parent's record-derived `stat("..")`,
-        // gated on deterministic projection.
-        if visible.layer_index() == 0
-            && let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode)
-        {
-            return object_id;
-        }
-        // Deterministic-projection gate: under xino-off or a per-object
-        // overflow the directory branch allocates a fresh fallback ino per
-        // call — unstable — so the stable approximation
-        // `d_ino("..") == d_ino(".")` is served instead.
-        if !fs
-            .identity()
-            .is_directory_projection_deterministic(visible.fsid(), parent_real_inode.ino())
-        {
-            return self.parent_fallback();
-        }
-        let parent_real = RealObject::new(
-            visible.layer_index(),
-            parent_real_inode,
-            visible.fsid(),
-            visible.container_dev_id(),
-        );
-        fs.identity().project_object_id(&parent_real, true)
-    }
-
-    /// Projects the upper-backed real parent's identity from its durable
-    /// origin record, gated on deterministic projection.
-    ///
-    /// Returns `None` when the parent carries no readable record, the record
-    /// pair does not resolve to a current lower layer, or the record projection
-    /// would take the xino-off/overflow directory branch (which allocates a
-    /// fresh fallback ino per call — unstable); the caller then attempts the
-    /// visible-source projection, which itself falls back to the stable
-    /// `d_ino("..") == d_ino(".")` approximation when non-deterministic.
-    ///
-    /// Known limitation: the underlying `read_lower_id` —
-    /// `get_xattr("trusted.overlay.origin")` on the real upper inode — is
-    /// caller-credential-gated (both supported uppers, ramfs and ext2,
-    /// enforce `MAY_READ` in `get_xattr`), so on `EACCES`/`EPERM` an
-    /// unprivileged reader falls back to the visible-source projection while
-    /// a privileged reader gets the record-derived identity: `d_ino("..")`
-    /// may differ between privileged and unprivileged readers until the
-    /// credential-swap VFS support lands (same class of known gap). The
-    /// `Err` arm logs at `debug!` — the divergence is never
-    /// silent, and a caller looping `getdents` on such a directory cannot
-    /// flood the kernel log with per-call warnings.
-    fn project_parent_from_lower_record(
-        &self,
-        fs: &OverlayFs,
-        parent_real_inode: &Arc<dyn Inode>,
-    ) -> Option<OverlayObjectId> {
-        match fs.read_lower_id(parent_real_inode) {
-            Ok(Some(record)) => {
-                // Determinism gate: the record projection under
-                // xino-off/overflow allocates a fresh fallback ino per call —
-                // the same instability the visible-source branch gates
-                // against. On an all-layers-same-fs stack the projection
-                // matrix branch 1 (same-fs passthrough) is deterministic and
-                // needs no additional layer-id lookup here: `read_lower_id`
-                // has already validated the record's device/root pair. The
-                // gate therefore short-circuits there; only the
-                // xino-effective branch re-resolves its layer id for the fit
-                // check.
-                // Delegating to the projection keeps `d_ino("..")` consistent
-                // with the parent's record-derived `stat("..")`.
-                if !fs.identity().is_all_layers_same_fs() {
-                    let layer_id = fs.identity().resolve_layer_id_for_record(
-                        record.container_dev_id(),
-                        record.lower_layer_root_ino(),
-                    )?;
-                    if !fs
-                        .identity()
-                        .is_directory_projection_deterministic(layer_id, record.real_ino())
-                    {
-                        return None;
-                    }
-                }
-                fs.identity().project_object_id_from_lower_id(&record, true)
-            }
-            Ok(None) => None,
-            // Explicit `EACCES`/`EPERM` arm: the origin-record read is
-            // caller-credential-gated, so the served `d_ino("..")` may differ
-            // between privileged and unprivileged readers until the
-            // credential-swap seam lands. Logged at `debug!` so the
-            // divergence is never silent without letting an unprivileged
-            // caller flood the kernel log via repeated `getdents`.
-            Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
-                debug!(
-                    "overlay readdir: the parent's origin record is \
-                     credential-gated ({:?}); d_ino(\"..\") may differ between \
-                     privileged and unprivileged readers until the \
-                     credential-swap seam lands; falling back to the \
-                     visible-source projection",
-                    err
-                );
-                None
-            }
-            Err(err) => {
-                debug!(
-                    "overlay readdir: the parent's origin record is unreadable \
-                     ({:?}); falling back to the visible-source projection",
-                    err
-                );
-                None
-            }
-        }
-    }
-
-    /// Returns whether this inode is the overlay mount root (the self-parent
-    /// special case of the `..` route).
-    ///
-    /// The root carrier is the `OverlayInode` created by
-    /// `OverlayInode::new_root` in every configuration; the check
-    /// compares the root carrier's inode-cache key against `self.key()` (the
-    /// same-carrier test: the cache is keyed by `RealObjectKey`). A root
-    /// carrier of any other concrete type is an unexpected configuration and
-    /// is surfaced loudly here AND FAILS CLOSED: `true` is returned so the
-    /// caller serves the self-parent fallback — never a fall-through to the
-    /// backing-store `lookup("..")` on a misclassified root, which could
-    /// disclose the backing-store parent.
-    fn is_mount_root(&self, fs: &OverlayFs) -> bool {
-        match Arc::downcast::<OverlayInode>(fs.root_inode()) {
-            Ok(root_carrier) => root_carrier.key() == self.key(),
-            Err(_) => {
-                warn!(
-                    "overlay readdir: the mount root carrier is not an OverlayInode; \
-                     serving the self-parent fallback"
-                );
-                // Fail closed: never fall through to the backing-store `..`
-                // lookup, which could disclose the backing-store parent.
-                true
-            }
-        }
-    }
-
-    /// Returns the `d_ino("..") == d_ino(".")` approximation: the
-    /// stable fallback identity served when the real parent cannot be
-    /// resolved disclosure-safely or deterministically (overlay root,
-    /// xino-off/overflow directory branch, unresolvable real parent, or
-    /// unavailable owning mount). One named fallback is shared by all five
-    /// decision arms, so the stable approximation has one implementation.
-    fn parent_fallback(&self) -> OverlayObjectId {
-        self.object_id()
-    }
-
     /// Invalidates the index: marks it `NeedsRebuild`.
     ///
     /// Called by the namespace-mutation module — and by copy-up after a
@@ -572,19 +359,14 @@ impl OverlayInode {
     /// Ensures the directory's index is `Valid` under the caller's `DIR`
     /// transaction (the build leg).
     ///
-    /// A brief index `INODE` lock serves a `Valid` index's cached visible
-    /// real-entry sequence; it does not establish a common build epoch for
-    /// synthesized heads. The returned current facts feed only those `.`/`..`
-    /// entries under the same caller-held `DIR` transaction. Otherwise the
-    /// lock is released and the source observation (`readdir_sequence`) runs
-    /// out-of-lock (it may sleep on underlying reads). After the
-    /// released-lock segment the facts snapshot is re-checked — the sole
-    /// race-revalidation signal, since no index `version` exists — and on
-    /// mismatch the scan is discarded, `NeedsRebuild` is kept, and the
-    /// rebuild retries once; a persistent mismatch never publishes. The
-    /// complete sequence is published only under the index lock; a failed
-    /// scan leaves the index `NeedsRebuild` and never tears down a previously
-    /// `Valid` index (the rebuild path replaces only on success).
+    /// Returns the facts the index was published from — the passed-in
+    /// snapshot on a plain serve of a `Valid` index, or the revalidated
+    /// snapshot the rebuild scanned — so the caller serves `.`/`..` from the
+    /// same facts as the index. A `NeedsRebuild` index is rebuilt
+    /// out-of-lock (the source observation may sleep) with a race-revalidation
+    /// retry; a persistent mismatch surfaces `EIO` and never publishes a stale
+    /// index, and a failed scan leaves the previous `Valid` index intact
+    /// (lock-order details are documented inline).
     pub(super) fn ensure_readdir_index(
         &self,
         facts: &OverlayObjectFacts,

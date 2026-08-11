@@ -57,31 +57,31 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::{
-            copyup::WorkdirTempRequest, mount::OverlayFs, projection::is_whiteout_inode,
+            copyup::WorkdirTempRequest, metadata_security::xattr::WHITEOUT_XATTR_FULL_NAME,
+            mount::OverlayFs, projection::is_whiteout_inode,
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
-            path::{Path, is_dot_or_dotdot},
+            path::{self, Path},
             xattr::{XattrName, XattrSetFlags},
         },
     },
     prelude::*,
 };
 
-/// The xattr name of the xattr-based whiteout marker (Linux `OVL_XATTR_XWHITEOUT`).
-///
-/// Written by the owning operation on the zero-size regular file of the
-/// `Xattr` representation. The suffix `whiteout` is a known overlay-private
-/// record (`metadata_security/xattr.rs` `OVERLAY_PRIVATE_SUFFIXES`), so the
-/// name classifies as `Private` through the
-/// `OverlayXattrPolicy::classify`/`is_private` classification.
-const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
-
 /// The marker value of the xattr-based whiteout (the single byte `"y"`).
 ///
 /// The whiteout reader is presence-based; the first byte `b'y'` is the Linux
 /// `OVL_XATTR_XWHITEOUT` value (confirmed against `projection/entry.rs`).
 const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
+
+/// The classic-whiteout char device `0:0` (Linux `OVL_XATTR` whiteout).
+///
+/// The device number `0` is the `makedev(0, 0)` encoding of the kernel's
+/// whiteout device identity. The xattr reader is presence-based and never
+/// inspects the number, but the char-device whiteout form is exactly this
+/// contract.
+const WHITEOUT_CHAR_DEV: u64 = 0;
 
 /// The target-name component of workdir whiteout temp names.
 ///
@@ -288,7 +288,7 @@ impl OverlayFs {
         let workdir_path = self.workdir_root_path()?;
         match representation {
             WhiteoutRepresentation::CharDevice => {
-                let node = MknodType::CharDevice(0);
+                let node = MknodType::CharDevice(WHITEOUT_CHAR_DEV);
                 let (workdir_name, path) = self
                     .create_workdir_temp(
                         WHITEOUT_TEMP_NAME_COMPONENT,
@@ -507,7 +507,7 @@ impl OverlayFs {
 pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
     let mut names = Vec::new();
     upper_dir_path.inode().readdir_at(0, &mut names)?;
-    names.retain(|name| !is_dot_or_dotdot(name));
+    names.retain(|name| !path::is_dot_or_dotdot(name));
     for name in names {
         let child_path = Path::new(
             upper_dir_path.mount_node().clone(),

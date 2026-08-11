@@ -140,7 +140,7 @@ impl OverlayInode {
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
-                    || self.mark_reconcile_pending(coordinate),
+                    || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
@@ -175,7 +175,7 @@ impl OverlayInode {
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
-                    || self.mark_reconcile_pending(coordinate),
+                    || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
@@ -220,7 +220,7 @@ impl OverlayInode {
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
-                    || self.mark_reconcile_pending(coordinate),
+                    || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.promote_symlink(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
@@ -299,7 +299,7 @@ impl OverlayInode {
                 self.run_recipe(
                     &fs,
                     Some(&temp_name),
-                    || self.mark_reconcile_pending(coordinate),
+                    || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
@@ -384,10 +384,10 @@ impl OverlayInode {
         let lower = self.lower_source()?;
         let size = lower.real_inode().size();
         let mut offset = 0usize;
+        let mut buffer = vec![0u8; COPY_CHUNK_SIZE];
         while offset < size {
             let chunk = min(COPY_CHUNK_SIZE, size - offset);
-            let mut buffer = vec![0u8; chunk];
-            let mut writer = VmWriter::from(buffer.as_mut_slice()).to_fallible();
+            let mut writer = VmWriter::from(&mut buffer[..chunk]).to_fallible();
             let read_len = lower
                 .real_inode()
                 .read_at(offset, &mut writer, StatusFlags::empty())?;
@@ -607,7 +607,7 @@ impl OverlayInode {
     /// is written through the passed coordinate borrow — no re-lock
     /// (non-reentrant mutex). Invoked by the `File`/`SymLink`/`Special`/`Dir`
     /// recipe arms (four call sites).
-    fn mark_reconcile_pending(&self, coordinate: &mut CopyUpTransition) {
+    fn mark_reconcile_pending(coordinate: &mut CopyUpTransition) {
         coordinate.phase = CopyUpPhase::ReconcilePending;
     }
 
@@ -617,9 +617,9 @@ impl OverlayInode {
     /// the topmost lower exists for a lower-backed object; the checked access
     /// surfaces a structural violation as `EIO` instead of panicking (no
     /// `.unwrap()`/`.expect()` in production paths). The identical selection
-    /// runs in `promote` (all four recipe arms), `promote_regular_file`,
+    /// runs once in `promote` plus in `promote_regular_file`,
     /// `promote_symlink`, `transfer_metadata`, `copy_eligible_xattrs`, and
-    /// `verify_upper_target` (seven call sites).
+    /// `verify_upper_target` (six call sites).
     fn lower_source(&self) -> Result<RealObject> {
         self.facts_snapshot()
             .lowers()

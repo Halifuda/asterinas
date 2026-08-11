@@ -56,12 +56,10 @@
 
 use core::sync::atomic::AtomicU64;
 
-use device_id::DeviceId;
-
 use super::{
     OVERLAY_FS_NAME,
-    claims::{OverlayUuid, UpperWorkdirClaim, verify_inode_instance_stability},
-    layers::{OverlayLayerStack, resolve_root_path},
+    claims::{self, OverlayUuid, UpperWorkdirClaim},
+    layers::{self, OverlayLayerStack},
     options::{OverlayMountOptions, UuidMode},
     policy::{
         CreatorCredentialPolicy, MountPolicy, UpperFilesystemCapabilities, WriteAccessAccounting,
@@ -73,11 +71,14 @@ use crate::{
         fs_impls::overlayfs::{
             dir::whiteout::WhiteoutCache,
             metadata_security::xattr::OverlayXattrPolicy,
-            projection::{BindingCache, IdentityPolicy, InodeCache, OverlayInode},
+            projection::{
+                BindingCache, IdentityPolicy, InodeCache, LowerLayerIdentity, OverlayInode,
+            },
         },
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FsEventSubscriberStats, FsFlags},
+            inode::Inode,
             registry::FsCreationCtx,
         },
     },
@@ -169,27 +170,29 @@ impl OverlayFs {
             // and the resolved workdir inode) against fresh resolutions, so
             // the checked objects are exactly the objects claimed in step 6
             // (check/use alignment). Both paths go through the shared
-            // `resolve_root_path` helper.
-            let upper_path = resolve_root_path(fs_creation_ctx, upper_dir)?;
-            let workdir_path = resolve_root_path(fs_creation_ctx, work_dir)?;
+            // `layers::resolve_root_path` helper.
+            let upper_path = layers::resolve_root_path(fs_creation_ctx, upper_dir)?;
+            let workdir_path = layers::resolve_root_path(fs_creation_ctx, work_dir)?;
             UpperWorkdirClaim::validate_pair(&upper_path, &workdir_path)?;
-            verify_inode_instance_stability(fs_creation_ctx, upper_dir, &upper.root_inode)?;
-            verify_inode_instance_stability(fs_creation_ctx, work_dir, workdir_path.inode())?;
+            claims::verify_inode_instance_stability(fs_creation_ctx, upper_dir, &upper.root_inode)?;
+            claims::verify_inode_instance_stability(
+                fs_creation_ctx,
+                work_dir,
+                workdir_path.inode(),
+            )?;
 
             // Step 5 — determine the unified identity before the claim step
-            // (the token must be known at claim time).
-            //
-            // Effective read-only overlays never persist (steps 7-9 are
-            // skipped, so `uuid` stays `None`): a fresh non-zero claim token
-            // is generated directly, so `UuidMode::On` cannot fail closed on
-            // an xattr read that would only matter for persistence. Writable
-            // overlays go through the full `determine_identity`
-            // (reuse-or-generate, per `uuid_mode`).
-            let identity = if is_effective_read_only {
-                OverlayUuid::generate()
-            } else {
-                UpperWorkdirClaim::determine_identity(&upper.root_inode, options.uuid_mode)?
-            };
+            // (the token must be known at claim time). Effective read-only
+            // overlays never persist (steps 7-9 are skipped, so `uuid` stays
+            // `None`): a fresh non-zero claim token is generated directly, so
+            // `UuidMode::On` cannot fail closed on an xattr read that would
+            // only matter for persistence. Writable overlays go through the
+            // full reuse-or-generate decision (per `uuid_mode`).
+            let identity = Self::determine_identity(
+                is_effective_read_only,
+                &upper.root_inode,
+                options.uuid_mode,
+            )?;
 
             // Step 6 — claim the upper slot first, then the workdir slot; a
             // workdir conflict rolls back the upper claim.
@@ -209,42 +212,16 @@ impl OverlayFs {
                 claimed_pair.prepare_workdir(&workdir_path)?;
 
                 // Step 8 — probe the upper capabilities post-claim against
-                // the workdir staging workspace and apply the d_type/whiteout
-                // gates (Linux `ovl_make_workdir` probes `ofs->workdir`, the
-                // `work` subdirectory).
+                // the workdir staging workspace, then apply the d_type/
+                // whiteout gates and derive UUID-mode effectiveness (Linux
+                // `ovl_make_workdir` probes `ofs->workdir`, the `work`
+                // subdirectory).
                 let capabilities = UpperFilesystemCapabilities::probe(
                     &upper.root_inode,
                     claimed_pair.workdir_workspace()?,
                 )?;
-                if !capabilities.can_report_directory_type() {
-                    return_errno_with_message!(
-                        Errno::EOPNOTSUPP,
-                        "the upper filesystem cannot report directory entry types"
-                    );
-                }
-                // Whiteout-capability gate: a writable overlay needs at least
-                // one whiteout form to delete lower-backed names.
-                if !capabilities.can_mknod_char() && !capabilities.can_store_private_xattr() {
-                    return_errno_with_message!(
-                        Errno::EOPNOTSUPP,
-                        "the upper filesystem supports no whiteout form"
-                    );
-                }
-                // UUID-mode effectiveness: `On` fails closed without xattr
-                // persistence; `Auto` degrades; `Off`/`Null` never persist.
-                let is_uuid_effective = match options.uuid_mode {
-                    UuidMode::On => {
-                        if !capabilities.can_store_private_xattr() {
-                            return_errno_with_message!(
-                                Errno::EOPNOTSUPP,
-                                "the upper filesystem cannot persist the overlay uuid"
-                            );
-                        }
-                        true
-                    }
-                    UuidMode::Auto => capabilities.can_store_private_xattr(),
-                    UuidMode::Off | UuidMode::Null => false,
-                };
+                let is_uuid_effective =
+                    Self::apply_capability_gates(&capabilities, options.uuid_mode)?;
 
                 // Step 9 — persist the UUID when effective. `On` persist
                 // failure fails closed; `Auto` degrades to not-effective. A
@@ -311,32 +288,12 @@ impl OverlayFs {
         })?;
         let overlay_dev_id = anon_device_id.id();
 
-        // `layer_devs` is construction-local `(fsid, container_dev_id,
-        // lower_layer_root_ino)` input from the published snapshot (upper
-        // first when present, then lowers topmost-first). `IdentityPolicy`
-        // derives all-layer same-fs state and retains only its fsid-sorted
-        // lower snapshot; no all-layer table remains stored after `new`.
-        let layer_capacity =
-            layer_stack.lowers.len() + if layer_stack.upper.is_some() { 1 } else { 0 };
-        let mut layer_devs: Vec<(u64, DeviceId, u64)> = Vec::with_capacity(layer_capacity);
-        // The upper's entry position in `layer_devs`, when an upper exists:
-        // the LOWER-only snapshot that serves origin-record device/root-pair
-        // resolution is derived inside `IdentityPolicy::new`
-        // by excluding exactly this entry — one construction, so the two
-        // views can never diverge. The exclusion is by position, not by
-        // value: an upper sharing an underlying filesystem with a lower must
-        // not also drop the lower's entry. The explicit branch keeps the
-        // index capture next to the push it describes.
-        let upper_layer_dev_index = if let Some(upper) = layer_stack.upper.as_ref() {
-            let index = layer_devs.len();
-            layer_devs.push((upper.fsid, upper.container_dev_id, upper.root_inode.ino()));
-            Some(index)
-        } else {
-            None
-        };
-        for lower in &layer_stack.lowers {
-            layer_devs.push((lower.fsid, lower.container_dev_id, lower.root_inode.ino()));
-        }
+        // `layer_devs` is the construction-local layer-identity input from
+        // the published snapshot (upper first when present, then lowers
+        // topmost-first). `IdentityPolicy` derives all-layer same-fs state
+        // and retains only its fsid-sorted lower snapshot; no all-layer table
+        // remains stored after `new`.
+        let (layer_devs, upper_layer_dev_index) = Self::collect_layer_devs(&layer_stack);
 
         // The xino mask width ("e.g. 64 - 16 = 48-bit payload"); the policy
         // value is owned by the build packet. `new` is fallible only to
@@ -417,5 +374,108 @@ impl OverlayFs {
         let root_inode = OverlayInode::new_root(Arc::downgrade(&overlay_fs));
         *overlay_fs.root_inode.lock() = Some(root_inode);
         Ok(overlay_fs)
+    }
+
+    /// Determines the unified overlay identity before the claim step.
+    ///
+    /// Effective read-only overlays never persist (steps 7-9 are skipped, so
+    /// `uuid` stays `None`): a fresh non-zero claim token is generated
+    /// directly, so `UuidMode::On` cannot fail closed on an xattr read that
+    /// would only matter for persistence. Writable overlays go through the
+    /// full `UpperWorkdirClaim::determine_identity` (reuse-or-generate, per
+    /// `uuid_mode`).
+    fn determine_identity(
+        is_effective_read_only: bool,
+        upper_root_inode: &Arc<dyn Inode>,
+        uuid_mode: UuidMode,
+    ) -> Result<OverlayUuid> {
+        if is_effective_read_only {
+            Ok(OverlayUuid::generate())
+        } else {
+            UpperWorkdirClaim::determine_identity(upper_root_inode, uuid_mode)
+        }
+    }
+
+    /// Applies the post-claim capability gates and derives UUID-mode
+    /// effectiveness (the step-8 sub-step of `OverlayFs::new`).
+    ///
+    /// The d_type gate and the whiteout-capability gate (Linux
+    /// `ovl_make_workdir` semantics) run first; a writable overlay needs at
+    /// least one whiteout form to delete lower-backed names. The UUID-mode
+    /// effectiveness then follows: `On` fails closed without xattr
+    /// persistence, `Auto` degrades, and `Off`/`Null` never persist. Returns
+    /// whether the UUID is effective; the caller owns the capabilities probe
+    /// and the step-9 persistence.
+    fn apply_capability_gates(
+        capabilities: &UpperFilesystemCapabilities,
+        uuid_mode: UuidMode,
+    ) -> Result<bool> {
+        if !capabilities.can_report_directory_type() {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "the upper filesystem cannot report directory entry types"
+            );
+        }
+        // Whiteout-capability gate: a writable overlay needs at least one
+        // whiteout form to delete lower-backed names.
+        if !capabilities.can_mknod_char() && !capabilities.can_store_private_xattr() {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "the upper filesystem supports no whiteout form"
+            );
+        }
+        // UUID-mode effectiveness: `On` fails closed without xattr
+        // persistence; `Auto` degrades; `Off`/`Null` never persist.
+        match uuid_mode {
+            UuidMode::On => {
+                if !capabilities.can_store_private_xattr() {
+                    return_errno_with_message!(
+                        Errno::EOPNOTSUPP,
+                        "the upper filesystem cannot persist the overlay uuid"
+                    );
+                }
+                Ok(true)
+            }
+            UuidMode::Auto => Ok(capabilities.can_store_private_xattr()),
+            UuidMode::Off | UuidMode::Null => Ok(false),
+        }
+    }
+
+    /// Collects the construction-local layer identity inputs for
+    /// [`IdentityPolicy::new`].
+    ///
+    /// Returns the per-published-layer [`LowerLayerIdentity`] list (upper
+    /// first when present, then lowers topmost-first) together with the
+    /// upper's entry position when an upper exists. The LOWER-only snapshot
+    /// that serves origin-record device/root-pair resolution is derived
+    /// inside `IdentityPolicy::new` by excluding exactly that entry — one
+    /// construction, so the two views can never diverge. The exclusion is by
+    /// position, not by value: an upper sharing an underlying filesystem with
+    /// a lower must not also drop the lower's entry.
+    fn collect_layer_devs(
+        layer_stack: &OverlayLayerStack,
+    ) -> (Vec<LowerLayerIdentity>, Option<usize>) {
+        let layer_capacity =
+            layer_stack.lowers.len() + if layer_stack.upper.is_some() { 1 } else { 0 };
+        let mut layer_devs: Vec<LowerLayerIdentity> = Vec::with_capacity(layer_capacity);
+        let upper_layer_dev_index = if let Some(upper) = layer_stack.upper.as_ref() {
+            let index = layer_devs.len();
+            layer_devs.push(LowerLayerIdentity {
+                fsid: upper.fsid,
+                container_dev_id: upper.container_dev_id,
+                lower_layer_root_ino: upper.root_inode.ino(),
+            });
+            Some(index)
+        } else {
+            None
+        };
+        for lower in &layer_stack.lowers {
+            layer_devs.push(LowerLayerIdentity {
+                fsid: lower.fsid,
+                container_dev_id: lower.container_dev_id,
+                lower_layer_root_ino: lower.root_inode.ino(),
+            });
+        }
+        (layer_devs, upper_layer_dev_index)
     }
 }

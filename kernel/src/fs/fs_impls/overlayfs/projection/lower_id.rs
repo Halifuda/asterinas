@@ -92,23 +92,17 @@ const ORIGIN_WIRE_FLAGS_KNOWN: u8 = 0;
 impl LowerIdRecord {
     /// Constructs the record from a lower [`RealObject`].
     ///
-    /// Returns `Ok(Some(record))` from the lower's published
+    /// Returns the native record from the lower's published
     /// `container_dev_id`, configured lower root inode, and real inode
     /// number — all infallible fields, so the native record is always
     /// constructible. The per-mount `fsid` ordinal is deliberately
     /// NOT persisted: it is derived at read time from the device/root pair.
-    /// `Ok(None)` is reserved for the absent export-file-handle case
-    /// (unreachable),
-    /// and `Err` is reserved for genuine source failures (none expected).
-    pub(super) fn try_from_lower(
-        lower: &RealObject,
-        lower_layer_root_ino: u64,
-    ) -> Result<Option<Self>> {
-        Ok(Some(Self {
+    pub(super) fn try_from_lower(lower: &RealObject, lower_layer_root_ino: u64) -> Result<Self> {
+        Ok(Self {
             container_dev_id: lower.container_dev_id(),
             lower_layer_root_ino,
             real_ino: lower.real_inode().ino(),
-        }))
+        })
     }
 
     /// Serializes the record into the native 32-byte wire buffer.
@@ -129,6 +123,28 @@ impl LowerIdRecord {
         wire.extend_from_slice(&self.lower_layer_root_ino.to_ne_bytes());
         wire.extend_from_slice(&self.real_ino.to_ne_bytes());
         wire
+    }
+
+    /// Reads one native-endian `u64` payload field at the 8-byte slot `slot`
+    /// of the wire payload (slot 0 = `container_dev_id`).
+    ///
+    /// The slot offset is anchored at [`ORIGIN_WIRE_HEADER_LEN`]
+    /// (`ORIGIN_WIRE_HEADER_LEN + slot * 8`), single-sourcing the decode
+    /// offsets from the wire-layout constants used by `serialize`. Callers
+    /// have already validated `bytes.len() == ORIGIN_WIRE_TOTAL_LEN`, so the
+    /// indexes are in bounds (no `.unwrap()`/`.expect()`).
+    fn read_payload_u64(bytes: &[u8], slot: usize) -> u64 {
+        let offset = ORIGIN_WIRE_HEADER_LEN + slot * 8;
+        u64::from_ne_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ])
     }
 
     /// Conservatively decodes a wire buffer into a record.
@@ -156,17 +172,15 @@ impl LowerIdRecord {
         if flags & !ORIGIN_WIRE_FLAGS_KNOWN != 0 || type_ != 0 || bytes[7] != 0 {
             return Ok(None);
         }
-        let Some(container_dev_id) = DeviceId::from_encoded_u64(u64::from_ne_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ])) else {
+        // Payload fields at fixed 8-byte slots anchored at the header length
+        // (`ORIGIN_WIRE_HEADER_LEN + n * 8`), derived from the wire-layout
+        // constants so the encode and decode directions cannot drift.
+        let Some(container_dev_id) = DeviceId::from_encoded_u64(Self::read_payload_u64(bytes, 0))
+        else {
             return Ok(None);
         };
-        let lower_layer_root_ino = u64::from_ne_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
-        ]);
-        let real_ino = u64::from_ne_bytes([
-            bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
-        ]);
+        let lower_layer_root_ino = Self::read_payload_u64(bytes, 1);
+        let real_ino = Self::read_payload_u64(bytes, 2);
         Ok(Some(Self {
             container_dev_id,
             lower_layer_root_ino,
@@ -199,9 +213,8 @@ impl OverlayFs {
     /// `EOPNOTSUPP`; other errors propagate. The record is persisted with
     /// exactly one `set_xattr(..., CREATE_OR_REPLACE)` call under the
     /// `trusted.overlay.origin` full name, so a store is never partially
-    /// written. The unreachable `try_from_lower` `None` arm maps defensively
-    /// to `EINVAL` (never `.unwrap()`). Ordering: copy-up invokes this before
-    /// its facts replacement (caller obligation).
+    /// written. Ordering: copy-up invokes this before its facts replacement
+    /// (caller obligation).
     pub(in crate::fs::fs_impls::overlayfs) fn store_lower_id(
         &self,
         upper: &Arc<dyn Inode>,
@@ -214,12 +227,7 @@ impl OverlayFs {
         if !capabilities.can_store_private_xattr() {
             return Ok(());
         }
-        let Some(record) = LowerIdRecord::try_from_lower(lower, lower_layer_root_ino)? else {
-            return Err(Error::with_message(
-                Errno::EINVAL,
-                "the lower-id record is not constructible",
-            ));
-        };
+        let record = LowerIdRecord::try_from_lower(lower, lower_layer_root_ino)?;
         let name = XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME).ok_or_else(|| {
             Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name")
         })?;

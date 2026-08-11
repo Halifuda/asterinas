@@ -22,7 +22,6 @@
 //! the rename-over failure path — an explicit fallible operation, never an
 //! RAII-durable-rollback.
 //!
-//!
 //! Degradation note: without a persistent origin index, two lower aliases of
 //! one lower inode that copy up separately may become two distinct upper
 //! inodes; upper-authoritative sources always share one upper inode (the real

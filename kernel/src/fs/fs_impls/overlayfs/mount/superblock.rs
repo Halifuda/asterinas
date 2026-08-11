@@ -54,6 +54,7 @@ use crate::{
 /// mutation — `workdir_temp_serial`, `xattr_policy`, `whiteout_cache` — are
 /// also owned here and consumed by their owning modules.
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
+    /// The immutable resolved layer stack (upper + lowers).
     pub(super) layer_stack: OverlayLayerStack,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
@@ -62,6 +63,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// prepared workdir staging workspace inode (`<workdir>/work`) once
     /// `prepare_workdir` completes — a plain `Arc` pin with no lock domain.
     pub(super) claims: Option<UpperWorkdirClaim>,
+    /// The immutable published mount policy snapshot.
     pub(super) policy: MountPolicy,
     /// The reported mount source.
     pub(super) mount_source: String,
@@ -77,6 +79,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     pub(super) root_inode: Mutex<Option<Arc<dyn Inode>>>,
     /// The `MOUNT` level-1 lifecycle domain; phase only, sleep-capable.
     pub(super) lifecycle: Mutex<MountLifecycle>,
+    /// Mount-wide filesystem event subscriber statistics.
     pub(super) fs_event_stats: FsEventSubscriberStats,
     /// The canonical weak mount reference.
     ///
