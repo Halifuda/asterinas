@@ -61,7 +61,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
-            path::{is_dot_or_dotdot, Path},
+            path::{Path, is_dot_or_dotdot},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -418,7 +418,8 @@ impl OverlayFs {
         // pre-physical-publish; read-first idempotence makes the
         // T1-covered call chains a no-op). The marker write is a raw-inode
         // xattr op (allowed class) on the resolved upper parent inode.
-        self.xattr_policy().set_impure_marker(upper_parent_path.inode())?;
+        self.xattr_policy()
+            .set_impure_marker(upper_parent_path.inode())?;
         match replace_target {
             // Target absent: the link path keeps the workdir original for
             // reuse (share); a link that fails the share contract degrades to
@@ -510,7 +511,10 @@ pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
     for name in names {
         let child_path = Path::new(
             upper_dir_path.mount_node().clone(),
-            upper_dir_path.dentry().as_dir_dentry_or_err()?.lookup_child(&name)?,
+            upper_dir_path
+                .dentry()
+                .as_dir_dentry_or_err()?
+                .lookup_child(&name)?,
         );
         if !is_whiteout_inode(child_path.inode())? {
             return Err(Error::with_message(

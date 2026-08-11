@@ -225,7 +225,9 @@ impl OverlayInode {
         // and `lowers` is retained across copy-up, so the value is stable
         // through the per-branch promotion below.
         let source_has_lower = !source_inode.facts_snapshot().lowers().is_empty();
-        let target_binding = fs.lookup_binding(&target.facts_snapshot(), new_name)?.binding;
+        let target_binding = fs
+            .lookup_binding(&target.facts_snapshot(), new_name)?
+            .binding;
         let target_is_whiteout = matches!(
             &target_binding,
             Binding::Negative(NegativeBinding::HiddenByWhiteout(_))
@@ -376,7 +378,10 @@ impl OverlayInode {
                 if source_whiteout_published {
                     let whiteout_path = Path::new(
                         upper_parent_path.mount_node().clone(),
-                        upper_parent_path.dentry().as_dir_dentry_or_err()?.lookup_child(old_name)?,
+                        upper_parent_path
+                            .dentry()
+                            .as_dir_dentry_or_err()?
+                            .lookup_child(old_name)?,
                     );
                     let whiteout_real = whiteout_path.inode().clone();
                     fs.bindings().insert(

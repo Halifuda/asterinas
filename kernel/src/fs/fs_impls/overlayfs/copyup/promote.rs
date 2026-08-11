@@ -520,11 +520,14 @@ impl OverlayInode {
         };
         // Keep `upper_real` in scope past the facts construction: it is the
         // post-transition visible source passed to `replace_facts`.
-        let new_facts =
-            OverlayObjectFacts::try_new(kind, Some(upper_real.clone()), old_facts.lowers().to_vec())
-                .ok_or_else(|| {
-                    Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
-                })?;
+        let new_facts = OverlayObjectFacts::try_new(
+            kind,
+            Some(upper_real.clone()),
+            old_facts.lowers().to_vec(),
+        )
+        .ok_or_else(|| {
+            Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
+        })?;
         let carrier = fs.project_new_upper(&self.facts_snapshot());
         carrier.replace_facts(new_facts, &upper_real)?;
         Ok(())
@@ -566,7 +569,10 @@ impl OverlayInode {
     fn upper_real_object(&self, upper_dir_path: &Path, name: &str) -> Result<RealObject> {
         let child_path = Path::new(
             upper_dir_path.mount_node().clone(),
-            upper_dir_path.dentry().as_dir_dentry_or_err()?.lookup_child(name)?,
+            upper_dir_path
+                .dentry()
+                .as_dir_dentry_or_err()?
+                .lookup_child(name)?,
         );
         let fs = self.fs_arc()?;
         let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {

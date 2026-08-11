@@ -179,7 +179,10 @@ impl RealObject {
         self.real_path
             .as_ref()
             .ok_or_else(|| {
-                Error::with_message(Errno::EIO, "the real object carries no dentry-anchored path")
+                Error::with_message(
+                    Errno::EIO,
+                    "the real object carries no dentry-anchored path",
+                )
             })?
             .upgrade()
     }
@@ -275,10 +278,13 @@ impl OverlayFs {
         // Layer 0: the upper component of the parent, when present.
         if let Some(upper_real) = &parent_facts.upper {
             let upper_path = upper_real.real_path()?;
-            match upper_path.dentry().as_dir_dentry_or_err()?.lookup_child(name) {
+            match upper_path
+                .dentry()
+                .as_dir_dentry_or_err()?
+                .lookup_child(name)
+            {
                 Ok(child_dentry) => {
-                    let child_path =
-                        Path::new(upper_path.mount_node().clone(), child_dentry);
+                    let child_path = Path::new(upper_path.mount_node().clone(), child_dentry);
                     let hit = RealObject {
                         layer_index: 0,
                         real_inode: child_path.inode().clone(),
@@ -339,10 +345,13 @@ impl OverlayFs {
         for (offset, lower_real) in parent_facts.lowers.iter().enumerate() {
             let layer_index = offset + 1;
             let lower_path = lower_real.real_path()?;
-            match lower_path.dentry().as_dir_dentry_or_err()?.lookup_child(name) {
+            match lower_path
+                .dentry()
+                .as_dir_dentry_or_err()?
+                .lookup_child(name)
+            {
                 Ok(child_dentry) => {
-                    let child_path =
-                        Path::new(lower_path.mount_node().clone(), child_dentry);
+                    let child_path = Path::new(lower_path.mount_node().clone(), child_dentry);
                     let hit = RealObject {
                         layer_index,
                         real_inode: child_path.inode().clone(),

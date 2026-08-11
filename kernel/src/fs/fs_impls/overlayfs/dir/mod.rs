@@ -397,7 +397,7 @@ impl OverlayInode {
         let upper = facts.upper().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
-        Ok(upper.real_path()?)
+        upper.real_path()
     }
 
     /// Conservatively invalidates the stale projection of the affected

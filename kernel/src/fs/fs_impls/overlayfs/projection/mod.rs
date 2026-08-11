@@ -159,7 +159,10 @@ impl OverlayFs {
             }
         }
         self.publish_binding(&parent_id, name, binding.clone());
-        Ok(LookupOutcome { binding, is_stale_upper })
+        Ok(LookupOutcome {
+            binding,
+            is_stale_upper,
+        })
     }
 
     /// Creates or reuses the shared [`OverlayInode`] for `facts`.

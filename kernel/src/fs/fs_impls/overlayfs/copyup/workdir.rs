@@ -107,7 +107,10 @@ impl WorkdirTempRequest<'_> {
                 workdir_path.link(source, temp_name)?;
                 Ok(Path::new(
                     workdir_path.mount_node().clone(),
-                    workdir_path.dentry().as_dir_dentry_or_err()?.lookup_child(temp_name)?,
+                    workdir_path
+                        .dentry()
+                        .as_dir_dentry_or_err()?
+                        .lookup_child(temp_name)?,
                 ))
             }
         }

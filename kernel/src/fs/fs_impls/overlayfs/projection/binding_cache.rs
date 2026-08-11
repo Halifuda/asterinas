@@ -88,13 +88,9 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
     /// The name is absent from every layer.
     Absent,
     /// The name is hidden by a whiteout barrier.
-    HiddenByWhiteout(
-        HiddenEvidence,
-    ),
+    HiddenByWhiteout(HiddenEvidence),
     /// The name is hidden by an opaque-directory barrier.
-    HiddenByOpaque(
-        HiddenEvidence,
-    ),
+    HiddenByOpaque(HiddenEvidence),
 }
 
 impl NegativeBinding {
@@ -105,10 +101,7 @@ impl NegativeBinding {
     /// only against the same variant with equal barrier layer index and
     /// `Arc::ptr_eq` barrier real inode; any other combination is a
     /// mismatch.
-    pub(in crate::fs::fs_impls::overlayfs) fn is_same_negative(
-        &self,
-        other: &Self,
-    ) -> bool {
+    pub(in crate::fs::fs_impls::overlayfs) fn is_same_negative(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Absent, Self::Absent) => true,
             (Self::HiddenByWhiteout(left), Self::HiddenByWhiteout(right))
@@ -259,10 +252,7 @@ impl BindingCache {
     /// identity are unreachable from new-key lookups but still strongly pin
     /// their carriers. Removing the outer map entry releases them. Absent
     /// keys are a no-op.
-    pub(in crate::fs::fs_impls::overlayfs) fn invalidate_parent(
-        &self,
-        parent_id: &RealObjectKey,
-    ) {
+    pub(in crate::fs::fs_impls::overlayfs) fn invalidate_parent(&self, parent_id: &RealObjectKey) {
         self.entries.write().remove(parent_id);
     }
 }
@@ -285,10 +275,7 @@ impl Binding {
     /// carrier's facts share the visible identity of the fresh positive
     /// truth; a negative binding matches when the negative variant and its
     /// barrier identity agree. Any other combination is a mismatch.
-    pub(super) fn matches_truth(
-        &self,
-        truth: &LayerLookup,
-    ) -> bool {
+    pub(super) fn matches_truth(&self, truth: &LayerLookup) -> bool {
         match (self, truth) {
             (Binding::Positive(positive), LayerLookup::Positive(facts)) => {
                 positive.inode.facts_snapshot().same_visible_identity(facts)

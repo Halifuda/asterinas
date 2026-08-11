@@ -82,6 +82,10 @@ pub(in crate::fs::fs_impls::overlayfs) struct MountPolicy {
     /// Effective read-only state, fixed before any claim is taken.
     is_effective_read_only: bool,
     /// The UUID/fsid mode.
+    #[expect(
+        dead_code,
+        reason = "the uuid mode policy is not read yet; reserved for the future UUID/fsid policy surface"
+    )]
     uuid_mode: UuidMode,
     /// The unified overlay identity; `Some` iff effective.
     uuid: Option<OverlayUuid>,

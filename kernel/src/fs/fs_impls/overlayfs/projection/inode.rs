@@ -180,10 +180,7 @@ impl OverlayObjectFacts {
     /// layer scan no longer reports), while `Merged` objects compare the full
     /// lower composition strictly so a silent lower-layer add/remove is
     /// detected.
-    pub(in crate::fs::fs_impls::overlayfs) fn same_visible_identity(
-        &self,
-        other: &Self,
-    ) -> bool {
+    pub(in crate::fs::fs_impls::overlayfs) fn same_visible_identity(&self, other: &Self) -> bool {
         if self.kind() != other.kind() {
             return false;
         }
@@ -196,14 +193,17 @@ impl OverlayObjectFacts {
             return false;
         }
         match self.kind() {
-            PositiveKind::Single => {
-                Arc::ptr_eq(visible_source(self).real_inode(), visible_source(other).real_inode())
-            }
+            PositiveKind::Single => Arc::ptr_eq(
+                visible_source(self).real_inode(),
+                visible_source(other).real_inode(),
+            ),
             PositiveKind::Merged => {
                 self.lowers().len() == other.lowers().len()
-                    && self.lowers().iter().zip(other.lowers()).all(|(left, right)| {
-                        Arc::ptr_eq(left.real_inode(), right.real_inode())
-                    })
+                    && self
+                        .lowers()
+                        .iter()
+                        .zip(other.lowers())
+                        .all(|(left, right)| Arc::ptr_eq(left.real_inode(), right.real_inode()))
             }
         }
     }
@@ -428,7 +428,8 @@ impl OverlayInode {
         // can fail or retry. Only then is the carrier's own state committed
         // (the old-key alias stays for stale-facts in-flight projections and
         // is retired by the dead-pin sweep).
-        fs.inodes().alias_key(old_key, new_key, old_real_inode, new_visible_source)?;
+        fs.inodes()
+            .alias_key(old_key, new_key, old_real_inode, new_visible_source)?;
         *self.facts.lock() = facts;
         *self.key.lock() = new_key;
         debug_assert!(

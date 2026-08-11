@@ -51,7 +51,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, RenameMode},
-            path::{is_dot_or_dotdot, Path},
+            path::{Path, is_dot_or_dotdot},
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -161,12 +161,9 @@ impl OverlayInode {
                 "the overlay target became stale behind the overlay",
             )));
         }
-        let target_inode = lookup
-            .binding
-            .into_inode()
-            .ok_or_else(|| {
-                Error::with_message(Errno::ENOENT, "the overlay target does not exist")
-            })?;
+        let target_inode = lookup.binding.into_inode().ok_or_else(|| {
+            Error::with_message(Errno::ENOENT, "the overlay target does not exist")
+        })?;
         let target_facts = target_inode.facts_snapshot();
 
         if kind == RemoveKind::Rmdir {
@@ -406,12 +403,7 @@ impl OverlayInode {
                     // (`OverlayInode::workdir_root_path`).
                     let workdir_path = self.workdir_root_path()?;
                     workdir_path
-                        .rename(
-                            temp.name(),
-                            &upper_parent_path,
-                            name,
-                            RenameMode::Exchange,
-                        )
+                        .rename(temp.name(), &upper_parent_path, name, RenameMode::Exchange)
                         .map_err(translate_stale_upper_enoent)?;
                     marker.commit();
                     // Clean the displaced old upper dir in the workdir: every
@@ -425,12 +417,14 @@ impl OverlayInode {
                     // the temp name; its dentry-anchored path is re-observed
                     // through the workdir dentry layer so the sweep and the
                     // rmdir route through the base VFS view.
-                    match workdir_path.dentry().as_dir_dentry_or_err()?.lookup_child(temp.name()) {
+                    match workdir_path
+                        .dentry()
+                        .as_dir_dentry_or_err()?
+                        .lookup_child(temp.name())
+                    {
                         Ok(displaced_dentry) => {
-                            let displaced_path = Path::new(
-                                workdir_path.mount_node().clone(),
-                                displaced_dentry,
-                            );
+                            let displaced_path =
+                                Path::new(workdir_path.mount_node().clone(), displaced_dentry);
                             if let Err(cleanup_err) =
                                 whiteout::cleanup_upper_whiteouts(&displaced_path)
                             {
@@ -485,7 +479,10 @@ impl OverlayInode {
                 // already published — reconcile.
                 let whiteout_path = Path::new(
                     upper_parent_path.mount_node().clone(),
-                    upper_parent_path.dentry().as_dir_dentry_or_err()?.lookup_child(name)?,
+                    upper_parent_path
+                        .dentry()
+                        .as_dir_dentry_or_err()?
+                        .lookup_child(name)?,
                 );
                 let whiteout_inode = whiteout_path.inode().clone();
                 let evidence = HiddenEvidence::new(0, whiteout_inode);
