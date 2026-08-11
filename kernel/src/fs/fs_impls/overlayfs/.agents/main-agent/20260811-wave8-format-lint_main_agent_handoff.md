@@ -228,3 +228,10 @@
 - **overlay/030 实际内容**：`t_immutable` immutable/append-only flags 测试（需 FS_IOC_GETFLAGS/SETFLAGS ioctl），wave7 台账归 **fileattr 能力缺口类**（`030/075/076`，Do not schedule，deferred P2-06）——**非身份类**。
 - **真正身份类用例**：`overlay/059`（multiple origin references → 相同 lower 的多重 origin 引用不得伪造相同 st_ino/st_dev；需 `_require_scratch_feature redirect_dir`）与 `overlay/062`（file handle decode multi lower layers；需 exportfs/encode_fh）。两者当前**均不可调度**（redirect_dir 为 deferred 功能；VFS 无 file-handle 表面——与 D31 的 VFS 缺口一致）。
 - **结论**：D31/D30 的身份验证目前**无现成可调度 xfstests 单例**，只能依赖 20 例矩阵的间接覆盖（031/014 等）；完整身份验证待 redirect_dir / file-handle 能力落地后另行调度。030 保持 NOTRUN（fileattr 缺口），与 C7 无关。
+
+## 4.13 Continuation 2026-08-11 — overlay 内部 rustfmt + clippy 维护（029 修复后）
+
+- **user 指示**：不跑 20 例矩阵复跑；维护 overlay 内部 rustfmt 与 clippy 即可。
+- **rustfmt**（容器内，32 个 overlayfs .rs + 受影响的 `kernel/src/fs/vfs/path/dentry.rs`）：exit 0，**零改动**（029 修复提交 6befa4f79 后全部已格式良好）；`rustfmt --check` exit 0。
+- **clippy**（`cargo clippy -p aster-kernel --target x86_64-unknown-none`）：plain exit 0、**0 warnings**；`RUSTFLAGS="-Dwarnings"` 门 exit 0。`git diff --check` clean。
+- **结论**：029 修复（dentry 对象祖先链）无新 lint/格式问题；工作树干净，无生产改动需提交（本 commit 仅 handoff 记录）。
