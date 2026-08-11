@@ -6,10 +6,11 @@
 //! object-kind recipe arms ([`OverlayInode::promote_regular_file`],
 //! [`OverlayInode::promote_symlink`] and the inline `Dir` arm), the
 //! metadata/xattr transfer steps ([`OverlayInode::transfer_metadata`],
-//! [`OverlayInode::copy_eligible_xattrs`]), the ReconcilePending
-//! verification ([`OverlayInode::verify_upper_target`],
-//! [`OverlayInode::upper_real_object`]), and the semantic publication step
-//! ([`OverlayInode::publish_upper_authority`]).
+//! [`OverlayInode::transfer_timestamps`], [`OverlayInode::copy_eligible_xattrs`]),
+//! the ReconcilePending verification ([`OverlayInode::verify_upper_target`],
+//! [`OverlayInode::upper_real_object`]), and the publication steps — the
+//! shared atomic-rename tail ([`OverlayInode::publish_via_rename`]) and the
+//! semantic authority publication ([`OverlayInode::publish_upper_authority`]).
 //!
 //! Lock contract: the trigger (trigger.rs) acquires the `CUL` guard
 //! (`OverlayInode::copyup_transition`) and HOLDS it across this whole winner
@@ -127,33 +128,33 @@ impl OverlayInode {
                 // atomically replaced instead of failing `create` with
                 // `EEXIST`). No children are copied.
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = fs
-                    .create_workdir_temp(
-                        name,
-                        &upper_dir_path,
-                        WorkdirTempRequest::Create {
-                            kind: InodeType::Dir,
-                            mode,
-                        },
-                    )?
-                    .into_parts();
+                let temp = fs.create_workdir_temp(
+                    name,
+                    &upper_dir_path,
+                    WorkdirTempRequest::Create {
+                        kind: InodeType::Dir,
+                        mode,
+                    },
+                )?;
+                let temp_kind = temp.kind();
+                let (temp_name, temp) = temp.into_parts();
                 self.run_recipe(
                     &fs,
-                    Some(&temp_name),
+                    Some((&temp_name, temp_kind)),
                     || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        self.transfer_timestamps(temp.inode())?;
                         let workdir_path = self.workdir_root_path()?;
-                        workdir_path.rename(
+                        self.publish_via_rename(
+                            &workdir_path,
                             &temp_name,
                             &upper_dir_path,
                             name,
-                            RenameMode::Replace,
-                        )?;
-                        marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
-                        self.publish_upper_authority(upper_real, lower.clone())
+                            marker,
+                            lower.clone(),
+                        )
                     },
                 )
             }
@@ -162,24 +163,30 @@ impl OverlayInode {
                 // metadata/data/xattr transfer, durability, then atomic
                 // publication via rename.
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = fs
-                    .create_workdir_temp(
-                        name,
-                        &upper_dir_path,
-                        WorkdirTempRequest::Create {
-                            kind: InodeType::File,
-                            mode,
-                        },
-                    )?
-                    .into_parts();
+                let temp = fs.create_workdir_temp(
+                    name,
+                    &upper_dir_path,
+                    WorkdirTempRequest::Create {
+                        kind: InodeType::File,
+                        mode,
+                    },
+                )?;
+                let temp_kind = temp.kind();
+                let (temp_name, temp) = temp.into_parts();
                 self.run_recipe(
                     &fs,
-                    Some(&temp_name),
+                    Some((&temp_name, temp_kind)),
                     || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
                         self.promote_regular_file(temp.inode())?;
+                        // Timestamps are replayed after the data stream and
+                        // the xattr copy: the upper filesystem refreshed
+                        // mtime/ctime on each write/resize, so the replay
+                        // restores the lower timestamps before durability and
+                        // publication (D3).
+                        self.transfer_timestamps(temp.inode())?;
                         // Durability (fsync=auto default; strict/volatile are
                         // future insertion points): the data file is synced
                         // before publication.
@@ -189,15 +196,14 @@ impl OverlayInode {
                         // stale-upper-entry case; a whiteout at the name is
                         // impossible for authority-only promotion.
                         let workdir_path = self.workdir_root_path()?;
-                        workdir_path.rename(
+                        self.publish_via_rename(
+                            &workdir_path,
                             &temp_name,
                             &upper_dir_path,
                             name,
-                            RenameMode::Replace,
-                        )?;
-                        marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
-                        self.publish_upper_authority(upper_real, lower.clone())
+                            marker,
+                            lower.clone(),
+                        )
                     },
                 )
             }
@@ -207,33 +213,39 @@ impl OverlayInode {
                 // (only the symlink object itself is copied, never its
                 // target).
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = fs
-                    .create_workdir_temp(
-                        name,
-                        &upper_dir_path,
-                        WorkdirTempRequest::Create {
-                            kind: InodeType::SymLink,
-                            mode,
-                        },
-                    )?
-                    .into_parts();
+                let temp = fs.create_workdir_temp(
+                    name,
+                    &upper_dir_path,
+                    WorkdirTempRequest::Create {
+                        kind: InodeType::SymLink,
+                        mode,
+                    },
+                )?;
+                let temp_kind = temp.kind();
+                let (temp_name, temp) = temp.into_parts();
                 self.run_recipe(
                     &fs,
-                    Some(&temp_name),
+                    Some((&temp_name, temp_kind)),
                     || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.promote_symlink(temp.inode())?;
+                        // Symlink metadata transfer (D4): owner/group are
+                        // applied; the mode is skipped for symlinks (Linux
+                        // `ovl_set_attr` never sets a symlink mode) and the
+                        // timestamps are replayed after the xattr copy so no
+                        // intermediate step refreshes them.
+                        self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
+                        self.transfer_timestamps(temp.inode())?;
                         let workdir_path = self.workdir_root_path()?;
-                        workdir_path.rename(
+                        self.publish_via_rename(
+                            &workdir_path,
                             &temp_name,
                             &upper_dir_path,
                             name,
-                            RenameMode::Replace,
-                        )?;
-                        marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
-                        self.publish_upper_authority(upper_real, lower.clone())
+                            marker,
+                            lower.clone(),
+                        )
                     },
                 )
             }
@@ -285,33 +297,37 @@ impl OverlayInode {
                     }
                 };
                 let mode = lower.real_inode().mode()?;
-                let (temp_name, temp) = fs
-                    .create_workdir_temp(
-                        name,
-                        &upper_dir_path,
-                        WorkdirTempRequest::Mknod {
-                            mode,
-                            node: &mknod_type,
-                        },
-                    )?
-                    .into_parts();
-                let workdir_path = self.workdir_root_path()?;
+                let temp = fs.create_workdir_temp(
+                    name,
+                    &upper_dir_path,
+                    WorkdirTempRequest::Mknod {
+                        mode,
+                        node: &mknod_type,
+                    },
+                )?;
+                let temp_kind = temp.kind();
+                let (temp_name, temp) = temp.into_parts();
                 self.run_recipe(
                     &fs,
-                    Some(&temp_name),
+                    Some((&temp_name, temp_kind)),
                     || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.transfer_metadata(temp.inode())?;
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
-                        workdir_path.rename(
+                        self.transfer_timestamps(temp.inode())?;
+                        // The workdir staging workspace resolves inside the
+                        // recipe closure (D5): a resolution failure is a
+                        // pre-commit failure, so `run_recipe` best-effort
+                        // cleans the staged temp instead of leaking it.
+                        let workdir_path = self.workdir_root_path()?;
+                        self.publish_via_rename(
+                            &workdir_path,
                             &temp_name,
                             &upper_dir_path,
                             name,
-                            RenameMode::Replace,
-                        )?;
-                        marker.commit();
-                        let upper_real = self.upper_real_object(&upper_dir_path, name)?;
-                        self.publish_upper_authority(upper_real, lower.clone())
+                            marker,
+                            lower.clone(),
+                        )
                     },
                 )
             }
@@ -329,6 +345,35 @@ impl OverlayInode {
         Ok(())
     }
 
+    /// Publishes the staged workdir temp onto the upper target name via an
+    /// atomic rename.
+    ///
+    /// The shared publication tail of the four `promote` recipe arms
+    /// (Dir/File/SymLink/Special): renames the private workdir temp onto the
+    /// upper target name with `RenameMode::Replace` (the stale-upper /
+    /// `ReconcilePending` residue is atomically replaced instead of failing
+    /// `create` with `EEXIST`), commits the physical-upper marker, re-observes
+    /// the published upper real object, and runs the semantic authority
+    /// publication. The caller holds the `CUL` guard, so the publication
+    /// coordinate and the workdir staging workspace are passed in (no `CUL`
+    /// re-read); the workdir resolution itself happens inside the recipe
+    /// closure (D5), so a resolution failure is classified as a pre-commit
+    /// failure and `run_recipe` best-effort cleans the staged temp.
+    fn publish_via_rename(
+        &self,
+        workdir_path: &Path,
+        temp_name: &str,
+        upper_dir_path: &Path,
+        name: &str,
+        marker: &mut CommitMarker,
+        lower: RealObject,
+    ) -> Result<()> {
+        workdir_path.rename(temp_name, upper_dir_path, name, RenameMode::Replace)?;
+        marker.commit();
+        let upper_real = self.upper_real_object(upper_dir_path, name)?;
+        self.publish_upper_authority(upper_real, lower)
+    }
+
     /// Runs a fallible upper-mutation recipe with the shared commit scaffold.
     ///
     /// The recipe closure receives the [`CommitMarker`] and calls
@@ -342,17 +387,20 @@ impl OverlayInode {
     /// a failure AFTER the commit runs the `reconcile` closure
     /// (`mark_reconcile_pending` for the copy-up arms,
     /// `invalidate_stale_cache` for the `dir/` recipes); a failure BEFORE the
-    /// commit best-effort cleans the staged workdir temp named by `temp_name`
-    /// when one exists (`Some(..)`; the cleanup of a never-created name is an
-    /// ignored `ENOENT`, and `None` — the plain rename recipe, which stages
-    /// nothing — is a no-op). The classification scaffold is used at seven
-    /// sites (the four `promote` arms plus `create_over_whiteout`,
-    /// `remove_target`, and `rename_upper`), which justifies this single
-    /// private helper.
+    /// commit best-effort cleans the staged workdir temp named by `temp`
+    /// (`Some((name, kind))`) when one exists — the kind-aware
+    /// `cleanup_workdir_temp` dispatches `rmdir` for a directory temp and
+    /// `unlink` otherwise, so a directory temp no longer leaks on a
+    /// pre-commit failure (its `EISDIR` was previously swallowed); the
+    /// cleanup of a never-created name is an ignored `ENOENT`, and `None` —
+    /// the plain rename recipe, which stages nothing — is a no-op. The
+    /// classification scaffold is used at seven sites (the four `promote`
+    /// arms plus `create_over_whiteout`, `remove_target`, and
+    /// `rename_upper`), which justifies this single private helper.
     pub(in crate::fs::fs_impls::overlayfs) fn run_recipe<T>(
         &self,
         fs: &Arc<OverlayFs>,
-        temp_name: Option<&str>,
+        temp: Option<(&str, InodeType)>,
         reconcile: impl FnOnce(),
         recipe: impl FnOnce(&mut CommitMarker) -> Result<T>,
     ) -> Result<T> {
@@ -363,11 +411,11 @@ impl OverlayInode {
             Err(err) => {
                 if marker.is_committed() {
                     reconcile();
-                } else if let Some(temp_name) = temp_name {
+                } else if let Some((temp_name, kind)) = temp {
                     // Pre-commit failure (pre-publication arm): best-effort
-                    // temp cleanup; residue is a known cleanup debt, never a
-                    // visible source.
-                    let _ = fs.cleanup_workdir_temp(temp_name);
+                    // kind-aware temp cleanup; residue is a known cleanup
+                    // debt, never a visible source.
+                    let _ = fs.cleanup_workdir_temp(temp_name, kind);
                 }
                 Err(err)
             }
@@ -431,23 +479,48 @@ impl OverlayInode {
     }
 
     /// Transfers the lower metadata onto the upper object: owner, group,
-    /// mode, timestamps, and — for regular files — size.
+    /// mode, and — for regular files — size.
     ///
     /// The size transfer applies to regular files only: directories report
     /// their own table size and device/socket/FIFO objects have no settable
-    /// size.
+    /// size. The mode transfer skips symlinks — Linux `ovl_set_attr` never
+    /// sets a symlink mode, and the backing filesystems treat a symlink
+    /// `set_mode` as a no-op or reject it, so the copy-up skips it rather
+    /// than depending on that per-fs behavior (D4). Timestamps are NOT
+    /// applied here: the regular-file data stream (`promote_regular_file`)
+    /// and the resize refresh mtime/ctime on the upper filesystem, so the
+    /// timestamps are replayed by [`OverlayInode::transfer_timestamps`]
+    /// after every data/xattr step that could refresh them (D3).
     fn transfer_metadata(&self, temp: &Arc<dyn Inode>) -> Result<()> {
         let lower = self.lower_source()?;
         let lower_inode = lower.real_inode();
         temp.set_owner(lower_inode.owner()?)?;
         temp.set_group(lower_inode.group()?)?;
-        temp.set_mode(lower_inode.mode()?)?;
-        temp.set_atime(lower_inode.atime());
-        temp.set_mtime(lower_inode.mtime());
-        temp.set_ctime(lower_inode.ctime());
+        if !matches!(lower_inode.type_(), InodeType::SymLink) {
+            temp.set_mode(lower_inode.mode()?)?;
+        }
         if lower_inode.type_().is_regular_file() {
             temp.resize(lower_inode.size())?;
         }
+        Ok(())
+    }
+
+    /// Replays the lower timestamps (atime/mtime/ctime) onto the upper
+    /// object.
+    ///
+    /// Split out of [`OverlayInode::transfer_metadata`] (D3) so the copy-up
+    /// preserves the lower timestamps instead of publishing the copy-up
+    /// instant: the File arm replays after the data stream (and the xattr
+    /// copy) and before `sync_all`/publication; the data-less arms
+    /// (Dir/SymLink/Special) replay after the xattr copy and right before
+    /// publication. Every intermediate data/metadata/xattr step that could
+    /// refresh mtime/ctime runs before the replay.
+    fn transfer_timestamps(&self, temp: &Arc<dyn Inode>) -> Result<()> {
+        let lower = self.lower_source()?;
+        let lower_inode = lower.real_inode();
+        temp.set_atime(lower_inode.atime());
+        temp.set_mtime(lower_inode.mtime());
+        temp.set_ctime(lower_inode.ctime());
         Ok(())
     }
 

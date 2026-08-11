@@ -338,7 +338,7 @@ impl OverlayFs {
                 ) {
                     // Best-effort temp cleanup on the pre-publication failure
                     // (the cleanup debt never becomes a visible entry).
-                    let _ = self.cleanup_workdir_temp(temp.name());
+                    let _ = self.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
                 let (workdir_name, path) = temp.into_parts();

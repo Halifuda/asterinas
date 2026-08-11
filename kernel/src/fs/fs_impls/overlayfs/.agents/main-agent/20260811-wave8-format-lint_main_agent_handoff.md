@@ -99,3 +99,15 @@
 4. （可选）全 CI 门复验：`make check` 或 `RUSTFLAGS="-Dwarnings" cargo osdk clippy -- --no-deps`。
 5. （可选）exFAT 格式化如需纳入，另开一轮。
 
+
+---
+
+## 3.7 Continuation 2026-08-11 (after-handoff) — Creator Round A (C1+C2) ACCEPTED
+
+- **Dispatch (V1 Direct Spawn Lane, no-fork):** Creator A `task_creator_wave8_A_C1C2_20260811` (agent Godel) — packet `subagent-tasks/wave8-full-review/task_creator_wave8_A_C1C2_20260811_dispatch.md`; Checker A `task_checker_wave8_A_C1C2_20260811` (agent Parfit); Reviewer A `task_reviewer_wave8_A_C1C2_20260811` (agent Banach). 全部按 handoff §3 的 multi-agent V1 架构启动（直接 spawn 消息，未用 V2 user-dispatch-turn lane）。
+- **Creator A 交付:** C1 (D5 D7 D8 D10 D11) + C2 (D2 D3 D4) 全部落地，无跳过。write-set 六文件：`copyup/{promote,workdir}.rs`、`dir/{create,link,remove,whiteout}.rs` (+405/−242)。容器内 `cargo check -p aster-kernel --target x86_64-unknown-none` exit 0、0 warnings（Creator 自测 + Checker 强制重编译双证据）。未触碰 C4/C5/C6/C8/C9/C10/C3/C7 区域。
+- **Checker A 编译门:** ACCEPTED。强制重编译证据 `components/wave8-full-review/run_evidence/20260811_checker_c1c2_compile/`（cargo_check_..._fresh.log，exit 0，0 warnings）。
+- **Reviewer A 单独验收:** ACCEPT（line-level only；唯一直接编辑为 `dir/remove.rs` clear_empty_exchange 文档注释修正，行为保持）。复用纪律逐项通过（四分支 publish_via_rename、四臂 transfer_timestamps、三处 cleanup_workdir_temp、复用 mknod_object_type；无变体复制/继续内联）。非阻塞观察已记录（rename.rs 旧注释、copyup→dir 只读 import 反向边、D3 sync_all 时间戳留待集成 Checker）。
+- **关闭:** Creator A / Checker A / Reviewer A 均已关闭。
+- **提交:** 本 commit（Round A 单独 commit）。
+- **基线更新:** 下一轮 Creator B (C4+C5+C6) 从此 commit 起算。

@@ -35,7 +35,7 @@ use alloc::format;
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::mount::OverlayFs,
+        fs_impls::overlayfs::{dir::mknod_object_type, mount::OverlayFs},
         utils::NAME_MAX,
         vfs::{
             inode::{Inode, MknodType},
@@ -61,9 +61,16 @@ pub(in crate::fs::fs_impls::overlayfs) enum WorkdirTempRequest<'a> {
 }
 
 /// A successful private workdir-temp creation.
+///
+/// The handle carries the staged object's [`InodeType`], derived from the
+/// request at creation time: the kind-aware cleanup dispatcher
+/// ([`OverlayFs::cleanup_workdir_temp`]) needs to know whether the staged
+/// object is a directory (`rmdir`) or not (`unlink`), and the kind is a
+/// known fact of the request — never a later re-derivation.
 pub(in crate::fs::fs_impls::overlayfs) struct WorkdirTemp {
     name: String,
     path: Path,
+    kind: InodeType,
 }
 
 const MAX_WORKDIR_TEMP_CREATE_ATTEMPTS: usize = 8;
@@ -71,6 +78,17 @@ const MAX_WORKDIR_TEMP_CREATE_ATTEMPTS: usize = 8;
 impl WorkdirTemp {
     pub(in crate::fs::fs_impls::overlayfs) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the object kind of the staged workdir temp.
+    ///
+    /// The kind is the request-derived [`InodeType`] written at creation;
+    /// consumers that perform their own best-effort cleanup
+    /// ([`OverlayFs::cleanup_workdir_temp`]) pass it through so the cleanup
+    /// dispatches on `InodeType::Dir` (`rmdir`) vs everything else
+    /// (`unlink`).
+    pub(in crate::fs::fs_impls::overlayfs) fn kind(&self) -> InodeType {
+        self.kind
     }
 
     /// Returns the real inode of the staged workdir temp.
@@ -92,6 +110,22 @@ impl WorkdirTemp {
 }
 
 impl WorkdirTempRequest<'_> {
+    /// Returns the object kind of the staged workdir temp.
+    ///
+    /// A known fact of the request, never a re-derivation: `Create` carries
+    /// the kind directly, `Mknod` maps the node kind through the shared
+    /// [`mknod_object_type`](crate::fs::fs_impls::overlayfs::dir::mknod_object_type)
+    /// mapping (the single `MknodType` -> `InodeType` classification), and
+    /// `Link` inherits the hard-linked source's type. The kind feeds the
+    /// [`WorkdirTemp`] handle and the kind-aware cleanup dispatcher.
+    fn kind(&self) -> InodeType {
+        match self {
+            Self::Create { kind, .. } => *kind,
+            Self::Mknod { node, .. } => mknod_object_type(node),
+            Self::Link { source } => source.inode().type_(),
+        }
+    }
+
     fn create_in(&self, workdir_path: &Path, temp_name: &str) -> Result<Path> {
         match self {
             Self::Create { kind, mode } => workdir_path.new_fs_child(temp_name, *kind, *mode),
@@ -160,7 +194,7 @@ impl OverlayFs {
         for _ in 0..MAX_WORKDIR_TEMP_CREATE_ATTEMPTS {
             let name = self.generate_workdir_temp_name(target_name, upper_parent_path);
             match request.create_in(&workdir_path, &name) {
-                Ok(path) => return Ok(WorkdirTemp { name, path }),
+                Ok(path) => return Ok(WorkdirTemp { name, path, kind: request.kind() }),
                 Err(err) if err.error() == Errno::EEXIST => final_eexist = Some(err),
                 Err(err) => return Err(err),
             }
@@ -172,16 +206,29 @@ impl OverlayFs {
         }
     }
 
-    /// Removes a workdir temp object.
+    /// Removes a workdir temp object, dispatching on its known kind.
     ///
-    /// The recipe calls this best-effort on any pre-publication failure; a
+    /// A directory temp (a staged directory copy-up or the clear-empty
+    /// staging directory) is removed with `rmdir`; every other object kind
+    /// is removed with `unlink` — the underlying filesystem refuses to
+    /// `unlink` a directory (`EISDIR`), so without the kind dispatch a
+    /// pre-commit failure of a directory temp would leak residue in the
+    /// workdir. The kind is supplied by the caller from the request-derived
+    /// [`WorkdirTemp::kind`] (a known fact, never a re-derivation). The
+    /// recipe calls this best-effort on any pre-publication failure; a
     /// cleanup failure propagates as a known workdir-cleanup debt and never
     /// becomes a visible namespace entry.
     pub(in crate::fs::fs_impls::overlayfs) fn cleanup_workdir_temp(
         &self,
         temp_name: &str,
+        kind: InodeType,
     ) -> Result<()> {
-        self.workdir_root_path()?.unlink(temp_name)
+        let workdir_path = self.workdir_root_path()?;
+        if kind.is_directory() {
+            workdir_path.rmdir(temp_name)
+        } else {
+            workdir_path.unlink(temp_name)
+        }
     }
 
     /// Resolves the pinned workdir staging workspace path of this writable

@@ -227,14 +227,16 @@ impl OverlayInode {
                 WorkdirTempRequest::Create { kind: type_, mode },
             )?,
         };
+        let temp_kind = temp.kind();
         let (temp_name, temp) = temp.into_parts();
         let workdir_path = self.workdir_root_path()?;
         // The shared recipe scaffold: the commit marker is flipped at the
         // physical upper commit point and the reconcile / pre-publication
-        // cleanup classification is owned by `run_recipe`.
+        // cleanup classification is owned by `run_recipe` (the staged temp's
+        // request-derived kind makes the pre-commit cleanup dir-aware).
         self.run_recipe(
             &fs,
-            Some(&temp_name),
+            Some((&temp_name, temp_kind)),
             || self.invalidate_stale_cache(&[(self, name)]),
             |marker| {
                 if object_type == InodeType::Dir {

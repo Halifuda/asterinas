@@ -47,7 +47,11 @@ use crate::{
             metadata_security::xattr::{
                 OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME, XattrCopyPolicy,
             },
-            projection::{Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode},
+            mount::OverlayFs,
+            projection::{
+                Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode,
+                OverlayObjectFacts,
+            },
         },
         vfs::{
             inode::{Inode, RenameMode},
@@ -302,157 +306,38 @@ impl OverlayInode {
         } else {
             None
         };
-        let staged_temp_name = clear_empty_temp.as_ref().map(|temp| temp.name());
+        let staged_temp = clear_empty_temp.as_ref().map(|temp| (temp.name(), temp.kind()));
         // The shared recipe scaffold: the commit marker is flipped at each
         // physical upper commit point and the reconcile / pre-publication
         // cleanup classification is owned by `run_recipe`.
         self.run_recipe(
             &fs,
-            staged_temp_name,
+            staged_temp,
             || self.invalidate_stale_cache(&[(self, name)]),
             |marker| {
                 if let Some(temp) = clear_empty_temp.as_ref() {
-                    // Clear-empty probe: the upper directory of a lower-backed
-                    // directory may hold entries that the merged view hides
-                    // (whiteouts — the emptiness gate has already refused
-                    // visible children). Those entries must not leak and would
-                    // defeat `publish_whiteout`'s displaced-dir workdir
-                    // cleanup (`ENOTEMPTY`), so the clear-empty path replaces
-                    // the upper dir first.
-                    let Some(upper_obj) = target_facts.upper() else {
-                        return Err(Error::with_message(
-                            Errno::EIO,
-                            "the clear-empty workdir temp has no upper directory",
-                        ));
-                    };
-                    // Clear-empty: the upper dir is replaced by a
-                    // workdir-prepared opaque temp dir (atomic exchange); the
-                    // old upper dir is cleaned up in the workdir; the whiteout
-                    // is then published at the name by the recipe's common
-                    // publish step below. The temp is never a visible source.
-                    let old_upper_dir = upper_obj.real_inode().clone();
-                    // The opaque marker is part of the replacement
-                    // directory's complete preparation: it keeps the name a
-                    // lower-search barrier at every instant of the swap
-                    // (crash window included), gated by the private-xattr
-                    // capability.
-                    let can_store_private_xattr = fs
-                        .policy()
-                        .upper_capabilities()
-                        .is_some_and(|caps| caps.can_store_private_xattr());
-                    if !can_store_private_xattr {
-                        return Err(Error::with_message(
-                            Errno::EOPNOTSUPP,
-                            "the upper filesystem cannot store the opaque marker \
-                                     required for the clear-empty directory exchange",
-                        ));
-                    }
-                    let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME)
-                        .ok_or_else(|| {
-                            Error::with_message(
-                                Errno::EINVAL,
-                                "invalid overlay opaque marker xattr name",
-                            )
-                        })?;
-                    let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
-                    temp.inode().set_xattr(
-                        marker_name,
-                        &mut marker_reader,
-                        XattrSetFlags::CREATE_OR_REPLACE,
+                    // Clear-empty exchange (sibling helper): the upper
+                    // directory of a lower-backed directory may hold entries
+                    // that the merged view hides (whiteouts — the emptiness
+                    // gate has already refused visible children). The helper
+                    // replaces the upper dir with a workdir-prepared opaque
+                    // temp dir (atomic exchange) and cleans the displaced old
+                    // upper dir in the workdir; the whiteout is then
+                    // published at the name by the recipe's common publish
+                    // step below. The temp is never a visible source. The
+                    // physical-upper commit is the exchange itself, so the
+                    // commit marker flips immediately after the helper
+                    // returns (a helper failure keeps the pre-commit
+                    // classification for `run_recipe`'s best-effort cleanup).
+                    self.clear_empty_exchange(
+                        &fs,
+                        &target_facts,
+                        name,
+                        &upper_parent_path,
+                        temp.name(),
+                        temp.inode(),
                     )?;
-                    // The xattr buffer copy runs BEFORE the owner/group/mode
-                    // are applied, while the temp is still owned by the caller
-                    // (the creating task), so a non-owner rmdir of a
-                    // directory carrying xattrs does not fail `EACCES` on the
-                    // temp `set_xattr`. `XattrName::try_from_full_name`
-                    // failure in the copy helper is `EINVAL` before its policy
-                    // branch and propagates. The remaining VFS list/read/write
-                    // failures use the BEST-EFFORT
-                    // `XattrCopyPolicy::BestEffort` variant (the `ClearEmpty`
-                    // path): because the displaced upper dir is being deleted,
-                    // they degrade to warn-and-skip and the non-owner rmdir
-                    // succeeds. See
-                    // `OverlayXattrPolicy::copy_eligible_xattrs` for the
-                    // credential-seam and failure-policy discussion. The copy
-                    // is filtered through the `OverlayXattrPolicy` (private /
-                    // escaped / reserved names never copy; the temp's own
-                    // markers are written explicitly by the recipe).
-                    fs.policy()
-                        .credential_policy()
-                        .with_creator_credentials_fn(|| {
-                            fs.xattr_policy().copy_eligible_xattrs(
-                                &old_upper_dir,
-                                temp.inode(),
-                                XattrCopyPolicy::BestEffort,
-                            )
-                        })?;
-                    // Metadata copy: owner/group/mode/times from the old upper
-                    // dir onto the temp.
-                    temp.inode().set_owner(old_upper_dir.owner()?)?;
-                    temp.inode().set_group(old_upper_dir.group()?)?;
-                    temp.inode().set_mode(old_upper_dir.mode()?)?;
-                    temp.inode().set_atime(old_upper_dir.atime());
-                    temp.inode().set_mtime(old_upper_dir.mtime());
-                    temp.inode().set_ctime(old_upper_dir.ctime());
-                    // Atomic exchange: the opaque temp becomes the upper
-                    // object at `name` and the old upper dir moves to the
-                    // workdir temp name. From this point the visible upper
-                    // namespace has changed (reconcile applies on any later
-                    // failure). The workdir staging workspace resolves
-                    // through the single shared resolver
-                    // (`OverlayInode::workdir_root_path`).
-                    let workdir_path = self.workdir_root_path()?;
-                    workdir_path
-                        .rename(temp.name(), &upper_parent_path, name, RenameMode::Exchange)
-                        .map_err(translate_stale_upper_enoent)?;
                     marker.commit();
-                    // Clean the displaced old upper dir in the workdir: every
-                    // remaining entry is a whiteout (the emptiness gate
-                    // refused visible children), so sweep them through the
-                    // shared seam and rmdir the dir. Best-effort: a cleanup
-                    // failure is a known workdir-cleanup debt and never
-                    // becomes a visible namespace entry — the whiteout
-                    // publish below proceeds with the opaque temp at `name`.
-                    // The displaced directory now lives in the workdir under
-                    // the temp name; its dentry-anchored path is re-observed
-                    // through the workdir dentry layer so the sweep and the
-                    // rmdir route through the base VFS view.
-                    match workdir_path
-                        .dentry()
-                        .as_dir_dentry_or_err()?
-                        .lookup_child(temp.name())
-                    {
-                        Ok(displaced_dentry) => {
-                            let displaced_path =
-                                Path::new(workdir_path.mount_node().clone(), displaced_dentry);
-                            if let Err(cleanup_err) =
-                                whiteout::cleanup_upper_whiteouts(&displaced_path)
-                            {
-                                warn!(
-                                    "overlay clear-empty: the displaced-directory whiteout \
-                                     cleanup failed (residue, never a visible source): {:?}",
-                                    cleanup_err
-                                );
-                            }
-                            if let Err(cleanup_err) = workdir_path.rmdir(temp.name()) {
-                                warn!(
-                                    "overlay clear-empty: workdir cleanup of the displaced \
-                                     directory {:?} failed (residue, never a visible source): \
-                                     {:?}",
-                                    temp.name(),
-                                    cleanup_err
-                                );
-                            }
-                        }
-                        Err(reobserve_err) => {
-                            warn!(
-                                "overlay clear-empty: re-observation of the displaced \
-                                 directory {:?} failed (residue, never a visible source): {:?}",
-                                temp.name(),
-                                reobserve_err
-                            );
-                        }
-                    }
                 }
                 // The whiteout publish (sibling `dir/whiteout.rs`): a present
                 // non-dir upper object is replaced (`Replace`), a present dir
@@ -505,6 +390,162 @@ impl OverlayInode {
                  whiteout publish (best-effort): {:?}",
                 err
             );
+        }
+        Ok(())
+    }
+
+    /// Executes the clear-empty directory exchange of the lower-backed rmdir
+    /// recipe (D10/D11).
+    ///
+    /// Extracted from `remove_target`'s recipe closure to drop one nesting
+    /// level (the `minimize-nesting` guideline) without changing the recipe
+    /// semantics. When the upper directory of a lower-backed directory holds
+    /// entries the merged view hides (necessarily whiteouts — the emptiness
+    /// gate has already refused visible children), those entries must not
+    /// leak and would defeat `publish_whiteout`'s displaced-dir workdir
+    /// cleanup (`ENOTEMPTY`), so this helper replaces the upper dir with a
+    /// workdir-prepared opaque temp dir (atomic `Exchange`), cleans the
+    /// displaced old upper dir in the workdir, and lets the recipe's common
+    /// publish step publish the whiteout over the opaque temp. The temp is
+    /// never a visible source.
+    ///
+    /// The physical-upper commit point is the `Exchange` rename; the caller
+    /// flips the [`CommitMarker`](crate::fs::fs_impls::overlayfs::copyup::promote::CommitMarker)
+    /// immediately after this helper returns. The staged temp arrives as
+    /// its `(name, inode)` parts, keeping this `dir`-module helper decoupled
+    /// from the `copyup::workdir` handle type (the helper needs only the
+    /// name and the staged inode). The displaced-dir cleanup is
+    /// best-effort (warn-and-continue, never a visible entry); the one
+    /// fallible re-observation (`as_dir_dentry_or_err`) is the defensive
+    /// guard that the workdir staging workspace is a directory (it is, by
+    /// `UpperWorkdirClaim::prepare_workdir` construction), and on that
+    /// unreachable path the error propagates as a pre-commit failure — a
+    /// documented residual divergence from the pre-extraction code, where the
+    /// marker already committed classified the same error as reconcile.
+    fn clear_empty_exchange(
+        &self,
+        fs: &Arc<OverlayFs>,
+        target_facts: &OverlayObjectFacts,
+        name: &str,
+        upper_parent_path: &Path,
+        temp_name: &str,
+        temp_inode: &Arc<dyn Inode>,
+    ) -> Result<()> {
+        let Some(upper_obj) = target_facts.upper() else {
+            return Err(Error::with_message(
+                Errno::EIO,
+                "the clear-empty workdir temp has no upper directory",
+            ));
+        };
+        // Clear-empty: the upper dir is replaced by a workdir-prepared opaque
+        // temp dir (atomic exchange); the old upper dir is cleaned up in the
+        // workdir; the whiteout is then published at the name by the recipe's
+        // common publish step below. The temp is never a visible source.
+        let old_upper_dir = upper_obj.real_inode().clone();
+        // The opaque marker is part of the replacement directory's complete
+        // preparation: it keeps the name a lower-search barrier at every
+        // instant of the swap (crash window included), gated by the
+        // private-xattr capability.
+        let can_store_private_xattr = fs
+            .policy()
+            .upper_capabilities()
+            .is_some_and(|caps| caps.can_store_private_xattr());
+        if !can_store_private_xattr {
+            return Err(Error::with_message(
+                Errno::EOPNOTSUPP,
+                "the upper filesystem cannot store the opaque marker \
+                         required for the clear-empty directory exchange",
+            ));
+        }
+        let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
+        })?;
+        let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
+        temp_inode.set_xattr(
+            marker_name,
+            &mut marker_reader,
+            XattrSetFlags::CREATE_OR_REPLACE,
+        )?;
+        // The xattr buffer copy runs BEFORE the owner/group/mode are applied,
+        // while the temp is still owned by the caller (the creating task), so
+        // a non-owner rmdir of a directory carrying xattrs does not fail
+        // `EACCES` on the temp `set_xattr`. `XattrName::try_from_full_name`
+        // failure in the copy helper is `EINVAL` before its policy branch and
+        // propagates. The remaining VFS list/read/write failures use the
+        // BEST-EFFORT `XattrCopyPolicy::BestEffort` variant (the `ClearEmpty`
+        // path): because the displaced upper dir is being deleted, they
+        // degrade to warn-and-skip and the non-owner rmdir succeeds. See
+        // `OverlayXattrPolicy::copy_eligible_xattrs` for the credential-seam
+        // and failure-policy discussion. The copy is filtered through the
+        // `OverlayXattrPolicy` (private / escaped / reserved names never
+        // copy; the temp's own markers are written explicitly by the recipe).
+        fs.policy()
+            .credential_policy()
+            .with_creator_credentials_fn(|| {
+                fs.xattr_policy().copy_eligible_xattrs(
+                    &old_upper_dir,
+                    temp_inode,
+                    XattrCopyPolicy::BestEffort,
+                )
+            })?;
+        // Metadata copy: owner/group/mode/times from the old upper dir onto
+        // the temp.
+        temp_inode.set_owner(old_upper_dir.owner()?)?;
+        temp_inode.set_group(old_upper_dir.group()?)?;
+        temp_inode.set_mode(old_upper_dir.mode()?)?;
+        temp_inode.set_atime(old_upper_dir.atime());
+        temp_inode.set_mtime(old_upper_dir.mtime());
+        temp_inode.set_ctime(old_upper_dir.ctime());
+        // Atomic exchange: the opaque temp becomes the upper object at `name`
+        // and the old upper dir moves to the workdir temp name. From this
+        // point the visible upper namespace has changed (reconcile applies on
+        // any later failure). The workdir staging workspace resolves through
+        // the single shared resolver (`OverlayInode::workdir_root_path`).
+        let workdir_path = self.workdir_root_path()?;
+        workdir_path
+            .rename(temp_name, upper_parent_path, name, RenameMode::Exchange)
+            .map_err(translate_stale_upper_enoent)?;
+        // Clean the displaced old upper dir in the workdir: every remaining
+        // entry is a whiteout (the emptiness gate refused visible children),
+        // so sweep them through the shared seam and rmdir the dir.
+        // Best-effort: a cleanup failure is a known workdir-cleanup debt and
+        // never becomes a visible namespace entry — the whiteout publish
+        // below proceeds with the opaque temp at `name`. The displaced
+        // directory now lives in the workdir under the temp name; its
+        // dentry-anchored path is re-observed through the workdir dentry
+        // layer so the sweep and the rmdir route through the base VFS view.
+        match workdir_path
+            .dentry()
+            .as_dir_dentry_or_err()?
+            .lookup_child(temp_name)
+        {
+            Ok(displaced_dentry) => {
+                let displaced_path =
+                    Path::new(workdir_path.mount_node().clone(), displaced_dentry);
+                if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&displaced_path) {
+                    warn!(
+                        "overlay clear-empty: the displaced-directory whiteout \
+                         cleanup failed (residue, never a visible source): {:?}",
+                        cleanup_err
+                    );
+                }
+                if let Err(cleanup_err) = workdir_path.rmdir(temp_name) {
+                    warn!(
+                        "overlay clear-empty: workdir cleanup of the displaced \
+                         directory {:?} failed (residue, never a visible source): {:?}",
+                        temp_name,
+                        cleanup_err
+                    );
+                }
+            }
+            Err(reobserve_err) => {
+                warn!(
+                    "overlay clear-empty: re-observation of the displaced \
+                     directory {:?} failed (residue, never a visible source): {:?}",
+                    temp_name,
+                    reobserve_err
+                );
+            }
         }
         Ok(())
     }

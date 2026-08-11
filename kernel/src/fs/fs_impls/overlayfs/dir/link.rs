@@ -117,7 +117,7 @@ impl OverlayInode {
         if let Err(err) =
             workdir_path.rename(temp.name(), &upper_parent_path, name, RenameMode::Replace)
         {
-            let _ = fs.cleanup_workdir_temp(temp.name());
+            let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
             return Err(err);
         }
         Ok(())
