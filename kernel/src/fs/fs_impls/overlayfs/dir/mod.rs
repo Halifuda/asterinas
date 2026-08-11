@@ -44,6 +44,7 @@ use crate::{
         },
     },
     prelude::*,
+    process::credentials::capabilities::CapSet,
 };
 
 pub(super) mod whiteout;
@@ -162,15 +163,19 @@ impl OverlayInode {
         let old_overlay = Arc::downcast::<OverlayInode>(old.clone()).map_err(|_| {
             Error::with_message(Errno::EIO, "the link source is not an overlay inode")
         })?;
-        // Source-side admission (Linux `may_linkat` under
-        // `fs.protected_hardlinks`): the `link` syscall performs no source
-        // check of its own (VFS gap), so before the source promotion trigger
-        // runs, the caller must either own the source or hold write-DAC on
-        // it. The read-only admission surface (the 1-param `check_permission`
-        // leg — never promotes) evaluated against the source's projected
-        // metadata mirrors the Linux owner-or-write check; this gates
+        // Source-side admission — a mirror of the base VFS
+        // `check_hardlink_source` (`kernel/src/fs/vfs/path/mod.rs:281-330`,
+        // Linux `may_linkat` under `fs.protected_hardlinks`): the `link`
+        // syscall performs no source check of its own (VFS gap), so before
+        // the source promotion trigger runs, the caller must either own the
+        // source or hold read+write DAC on it; non-owners may only link
+        // regular files; and non-owners linking a setuid or executable-setgid
+        // source need `CAP_FOWNER`. The read-only admission surface (the
+        // 2-param `check_permission` leg — never promotes) evaluated against
+        // the source's projected metadata mirrors the base checks; this gates
         // `link_source`'s copy-up, so an inaccessible source is refused with
-        // `EPERM` and never forced to the upper layer.
+        // `EPERM` and never forced to the upper layer. The base
+        // `check_hardlink_source` remains as the second gate.
         let source_metadata = old_overlay.metadata()?;
         // The owner probe runs through the shared `current_fsuid()`
         // accessor: the kernel-context default — no task / no posix thread
@@ -179,15 +184,40 @@ impl OverlayInode {
         // locally is gone.
         let source_owned =
             OverlayInode::current_fsuid().is_some_and(|fsuid| fsuid == source_metadata.uid);
-        if !source_owned
-            && old_overlay
-                .check_permission(AccessType::ReadOnly, Permission::MAY_WRITE)
+        // Non-owner source: mirror the base `check_hardlink_source`
+        // rejections — read+write DAC demand, regular-file-only, and
+        // setuid/setgid+group-exec sources require `CAP_FOWNER` via the
+        // shared capability helper (kernel contexts fail open, matching the
+        // base no-posix-thread `Ok(())`).
+        if !source_owned {
+            if old_overlay
+                .check_permission(
+                    AccessType::ReadOnly,
+                    Permission::MAY_READ | Permission::MAY_WRITE,
+                )
                 .is_err()
-        {
-            return Err(Error::with_message(
-                Errno::EPERM,
-                "the link source is not accessible to the caller",
-            ));
+            {
+                return Err(Error::with_message(
+                    Errno::EPERM,
+                    "the link source is not accessible to the caller",
+                ));
+            }
+            if old_overlay.type_() != InodeType::File {
+                return Err(Error::with_message(
+                    Errno::EPERM,
+                    "the link source is not a regular file",
+                ));
+            }
+            if (source_metadata.mode.has_set_uid()
+                || (source_metadata.mode.has_set_gid()
+                    && source_metadata.mode.is_group_executable()))
+                && !OverlayInode::current_task_has_capability(CapSet::FOWNER)
+            {
+                return Err(Error::with_message(
+                    Errno::EPERM,
+                    "the link source is set-id and the caller lacks CAP_FOWNER",
+                ));
+            }
         }
         // Source promotion (link.rs): `ensure_upper_authority` then the
         // shared upper real object's dentry-anchored `Path`. Without an

@@ -203,6 +203,10 @@ impl CreatorCredentialPolicy {
     /// that facility lands, `operation_fn` runs with the caller's current
     /// credentials and the stashed snapshot is published for sibling modules
     /// but cannot be installed; no signature is changed.
+    ///
+    /// TODO(D25): currently a passthrough — callers must not rely on it for
+    /// permission decisions; once the VFS scoped credential-swap API lands
+    /// (P1-19), restore the scope switch here.
     pub(in crate::fs::fs_impls::overlayfs) fn with_creator_credentials_fn<T>(
         &self,
         operation_fn: impl FnOnce() -> Result<T>,

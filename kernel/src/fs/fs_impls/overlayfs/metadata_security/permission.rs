@@ -8,29 +8,33 @@
 //! wrong), the lock-free local stage
 //! [`OverlayInode::check_local_permission`] (EROFS gate for the `Mutating`
 //! class + the projected-DAC block), the real-handle stage
-//! [`OverlayInode::check_real_permission`] (copy-up promotion via the
-//! authority promotion, then the explicit real check under the
-//! creator-credential scope). The canonical read-only
-//! `Inode::check_permission` forwarder lives
-//! in `projection/inode.rs`; it calls this two-parameter inherent admission
-//! entry with `AccessType::ReadOnly` and never promotes.
+//! [`OverlayInode::check_real_permission`] (the explicit real re-check under
+//! the creator-credential scope; the copy-up promotion lives in the entry,
+//! not here). The canonical read-only `Inode::check_permission` forwarder
+//! lives in `projection/inode.rs`; it calls this two-parameter inherent
+//! admission entry with `AccessType::ReadOnly` and never promotes.
 //!
-//! Pipeline: the local stage always runs first and is entirely lock-free;
-//! `default_permissions` skips only the real/creator-credential stage, never
-//! the local stage (`MountPolicy::is_default_permissions`); the real stage
-//! places the copy-up inside `ensure_upper_authority()` and then evaluates
-//! the current real authority (`select_real_inode()`) under the mount's
-//! creator-credential scope. The explicit real check is authoritative for
-//! entries whose underlying real ops do not self-evaluate (ext2/ramfs
-//! metadata setters) and is a benign double evaluation for xattr ops that
-//! self-evaluate under the same scope (kept for gate independence).
+//! Pipeline: the local stage always runs first and is entirely lock-free.
+//! For the `Mutating` class the entry then promotes unconditionally via
+//! `ensure_upper_authority()` — the copy-up lives between the stages, and the
+//! elevation is independent of the permission skip
+//! (`MountPolicy::is_default_permissions`); the real stage
+//! [`OverlayInode::check_real_permission`] then evaluates the current real
+//! authority (`select_real_inode()`) under the mount's creator-credential
+//! scope. `default_permissions` skips only the real/creator-credential
+//! re-check, never the local stage and never the promotion. The explicit real
+//! check is authoritative for entries whose underlying real ops do not
+//! self-evaluate (ext2/ramfs metadata setters) and is a benign double
+//! evaluation for xattr ops that self-evaluate under the same scope (kept for
+//! gate independence).
 //!
 //! The local DAC block mirrors the VFS default `Inode::check_permission`
-//! algorithm (`kernel/src/fs/vfs/fs_apis/inode.rs:556-611`) against the
+//! algorithm (`kernel/src/fs/vfs/fs_apis/inode.rs:573-640`) against the
 //! projected `OverlayInode::metadata()` (mode/uid/gid), with the
 //! `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`. It is inlined here
-//! because no reusable kernel helper exists; the protected-state admission is
-//! an insertion point (no-op).
+//! because no reusable kernel helper exists (VFS gap — see the `TODO(D15)`
+//! at the Projected-DAC block); the protected-state admission is an
+//! insertion point (no-op).
 //!
 //! Lock contract: this module acquires no Overlay lock. The local stage is
 //! lock-free (brief `INODE` facts snapshot inside `metadata()`, released
@@ -64,15 +68,17 @@ impl OverlayInode {
     /// The local stage (lock-free) always runs first and may reject with
     /// `EROFS` (mutating class on an effective read-only mount) or `EACCES`
     /// (projected-DAC demand denied) with no real handle and no copy-up/
-    /// workdir/temp/upper side effect. Unless the mount was created with
-    /// `default_permissions`, the real stage then promotes mutating requests
-    /// (`ensure_upper_authority()` — the copy-up lives between the stages) and
-    /// re-evaluates the current real authority under the creator-credential
-    /// scope. The `default_permissions` skip omits only the real/creator-
-    /// credential stage, never the local stage. A real-stage failure
-    /// propagates as-is with no invented rollback (the authority promotion
-    /// owns any already-started transition cleanup). Verdicts are never
-    /// cached.
+    /// workdir/temp/upper side effect. For the `Mutating` class the entry
+    /// then promotes unconditionally via `ensure_upper_authority()` (the
+    /// copy-up lives between the stages) — the elevation is independent of
+    /// the `default_permissions` skip. Unless the mount was created with
+    /// `default_permissions`, the real stage then re-evaluates the current
+    /// real authority under the creator-credential scope. The
+    /// `default_permissions` skip omits only the real/creator-credential
+    /// re-check, never the promotion and never the local stage. A real-stage
+    /// failure propagates as-is with no invented rollback (the authority
+    /// promotion owns any already-started transition cleanup). Verdicts are
+    /// never cached.
     ///
     /// This two-parameter inherent method coexists with the one-parameter
     /// `Inode::check_permission` forwarder in `projection/inode.rs`; Rust
@@ -85,6 +91,9 @@ impl OverlayInode {
         perm: Permission,
     ) -> Result<()> {
         self.check_local_permission(access, perm)?;
+        if access == AccessType::Mutating {
+            self.ensure_upper_authority()?;
+        }
         if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(access, perm)?;
         }
@@ -125,7 +134,7 @@ impl OverlayInode {
     /// no namespace against which the capability can be scoped. Consumed by
     /// the permission stage (`check_local_permission`, DAC_OVERRIDE) and by
     /// the metadata ownership gates (`metadata.rs`).
-    pub(super) fn current_task_has_capability(cap: CapSet) -> bool {
+    pub(in crate::fs::fs_impls::overlayfs) fn current_task_has_capability(cap: CapSet) -> bool {
         let Some(has_cap) = Self::with_current_posix_thread(|task, posix_thread| {
             task.as_thread_local().is_some_and(|thread_local| {
                 let user_ns = thread_local.borrow_user_ns();
@@ -184,7 +193,7 @@ impl OverlayInode {
     /// read-only mount fails with no real handle, no copy-up, and no
     /// workdir/temp/upper side effect. The projected-DAC block then mirrors
     /// the VFS default `Inode::check_permission` algorithm
-    /// (`inode.rs:556-611`, inlined) against the projected `metadata()`
+    /// (`inode.rs:573-640`, inlined) against the projected `metadata()`
     /// (mode/uid/gid) and the current task's credentials (`fsuid`/`fsgid`),
     /// with the `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`.
     /// `Permission::empty()` passes trivially. The protected-state admission
@@ -196,7 +205,13 @@ impl OverlayInode {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
 
-        // Projected-DAC block (the `inode.rs:556-611` mirror, inlined). No
+        // TODO(D15): this block is a mirror of the VFS default
+        // `Inode::check_permission` (`kernel/src/fs/vfs/fs_apis/inode.rs:
+        // 573-640`); the VFS exposes no shared mode-DAC evaluator (VFS gap),
+        // so the algorithm is inlined here. Once the VFS interface
+        // stabilizes, extract a shared `check_mode_dac` and consume it here
+        // to eliminate the drift.
+        // Projected-DAC block (the `inode.rs:573-640` mirror, inlined). No
         // task / no posix thread / no thread-local: the kernel
         // context is not a user process, so there is no DAC demand to check
         // (mirror's `Option`-based guards, fail-open for non-user contexts;
@@ -212,7 +227,7 @@ impl OverlayInode {
 
         // With DAC_OVERRIDE, read/write DACs are always overridable; the
         // executable DAC is overridable only when at least one exec bit is
-        // set (the VFS reduction, `inode.rs:569-583`). The probe runs through
+        // set (the VFS reduction, `inode.rs:585-604`). The probe runs through
         // the shared user-namespace capability helper: at this point the task
         // and posix thread are known to exist, so the helper's kernel-context
         // fail-open arm is unreachable here and the thread-local-absent case
@@ -236,7 +251,7 @@ impl OverlayInode {
         }
 
         // Owner / group / other mode-DAC checks against the projected
-        // metadata (the `inode.rs:585-607` mirror).
+        // metadata (the `inode.rs:606-625` mirror).
         if metadata.uid == creds.fsuid() {
             if (perm.may_read() && !mode.is_owner_readable())
                 || (perm.may_write() && !mode.is_owner_writable())
@@ -265,20 +280,19 @@ impl OverlayInode {
 
     /// PRIVATE STAGE B — the real-handle half of the two-stage check.
     ///
-    /// For the `Mutating` class the copy-up lives here, between the two
-    /// stages: `ensure_upper_authority()` promotes the object first, then the
-    /// current real authority is re-resolved per call (`select_real_inode()`)
-    /// and evaluated under the mount's creator-credential scope
+    /// The copy-up promotion no longer lives here: the entry
+    /// [`OverlayInode::check_permission`] already ran `ensure_upper_authority()`
+    /// for the `Mutating` class, unconditionally (elevation is independent of
+    /// the `default_permissions` skip). This stage only re-resolves the
+    /// current real authority per call (`select_real_inode()`) and evaluates
+    /// it under the mount's creator-credential scope
     /// (`with_creator_credentials_fn`). The explicit real stage is
     /// authoritative for entries whose underlying ops do not self-evaluate
     /// (metadata setters) and a benign double evaluation for xattr ops that
     /// self-evaluate under the same scope. A failure propagates as-is with no
     /// invented rollback (the authority promotion owns any already-started
     /// transition cleanup/reconcile).
-    fn check_real_permission(&self, access: AccessType, perm: Permission) -> Result<()> {
-        if access == AccessType::Mutating {
-            self.ensure_upper_authority()?;
-        }
+    fn check_real_permission(&self, _access: AccessType, perm: Permission) -> Result<()> {
         let fs = self.fs_arc()?;
         let real = self.select_real_inode();
         fs.policy()

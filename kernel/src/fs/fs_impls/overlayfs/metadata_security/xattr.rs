@@ -31,10 +31,15 @@
 //! `EPERM` for `set_xattr`/`remove_xattr`); `list_xattr` streams the underlying raw
 //! name list through [`OverlayXattrPolicy::filter_private_names`] so no
 //! private record ever reaches the caller. `get_xattr`/`list_xattr` carry the
-//! empty permission demand (`AccessType::ReadOnly`, `Permission::empty()`);
+//! read-class admission demand (`AccessType::ReadOnly`): `get_xattr` uses
+//! `Permission::MAY_READ` (a real read-DAC gate) and `list_xattr` uses
+//! `Permission::MAY_ACCESS` (a placeholder — the current DAC block does not
+//! evaluate `MAY_ACCESS`, so the list gate is a no-op until DAC supports it);
 //! `set_xattr`/`remove_xattr` use the uniform mutating shape
-//! (`AccessType::Mutating`, `Permission::MAY_WRITE`) with the copy-up inside
-//! the real permission stage, then forward under the creator-credential scope
+//! (`AccessType::Mutating`, `Permission::MAY_WRITE`): the EROFS gate runs in
+//! the local stage and the copy-up runs in the entry `check_permission`
+//! (both independent of the `default_permissions` skip), then forward under
+//! the creator-credential scope
 //! through the single private delegation helper `delegate_to_real` (defined
 //! in `mod.rs` so the three sibling files share it).
 //!
@@ -703,8 +708,8 @@ impl OverlayInode {
     // no authority side effect ever starts for a private name); the refusal
     // returns `EOPNOTSUPP` for every non-`Public` name (Linux v4.10+
     // `ovl_xattr_get` semantics — the pre-v4.10 `ENODATA` is not returned),
-    // then the empty permission demand (`AccessType::ReadOnly`,
-    // `Permission::empty()`; namespace gating already ran in the syscall
+    // then the read-DAC demand (`AccessType::ReadOnly`,
+    // `Permission::MAY_READ`; namespace gating already ran in the syscall
     // layer), then a creator-credential forward to the current real
     // authority. The underlying `get_xattr` self-evaluates under the
     // creator-credential scope (ext2/ramfs evidence); the explicit real stage
@@ -722,17 +727,18 @@ impl OverlayInode {
                 "the overlay-private xattr is not exposed through the generic get path",
             ),
         )?;
-        self.check_permission(AccessType::ReadOnly, Permission::empty())?;
+        self.check_permission(AccessType::ReadOnly, Permission::MAY_READ)?;
         self.delegate_to_real(|real| real.get_xattr(name, value_writer))
     }
 
     // Xattr set: the classification stage runs BEFORE the mutating admission
     // so a non-`Public` name is refused with no promotion side effect, then
     // the uniform mutating shape (`AccessType::Mutating`,
-    // `Permission::MAY_WRITE` — the EROFS gate and the copy-up live inside
-    // the real stage), then a creator-credential forward. The underlying
-    // `set_xattr` self-evaluates under the creator-credential scope; the
-    // explicit real stage is the benign double evaluation.
+    // `Permission::MAY_WRITE` — the EROFS gate runs in the local stage and
+    // the copy-up runs in the entry `check_permission`, both independent of
+    // the `default_permissions` skip), then a creator-credential forward.
+    // The underlying `set_xattr` self-evaluates under the creator-credential
+    // scope; the explicit real stage is the benign double evaluation.
     pub(in crate::fs::fs_impls::overlayfs) fn set_xattr_impl(
         &self,
         name: XattrName,
@@ -750,17 +756,25 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_xattr(name, value_reader, flags))
     }
 
-    // Xattr list: the empty permission demand (no mode-DAC demand), then the
-    // real listing into the bounded `XATTR_LIST_MAX_LEN` intermediate, then
-    // the private-name filter streaming pass so `Private`/`Escaped`/`Reserved`
-    // records never reach the caller. The filtered length returned by
-    // `filter_private_names` is the number of bytes written to `list_writer`.
+    // Xattr list: the read-class admission demand `Permission::MAY_ACCESS`
+    // (the spec semantic bit, matching the underlying ext2/ramfs list
+    // self-evaluation), then the real listing into the bounded
+    // `XATTR_LIST_MAX_LEN` intermediate, then the private-name filter
+    // streaming pass so `Private`/`Escaped`/`Reserved` records never reach
+    // the caller. The filtered length returned by `filter_private_names` is
+    // the number of bytes written to `list_writer`.
+    //
+    // TODO(D19): the current DAC block (VFS `inode.rs:573-640` / overlay
+    // Projected-DAC) does not evaluate `MAY_ACCESS`, so this gate is a no-op
+    // for now; it becomes effective only after DAC support for `MAY_ACCESS`
+    // lands. The actual read-side constraint is carried by the `get`'s
+    // `MAY_READ` gate plus the underlying list self-evaluation.
     pub(in crate::fs::fs_impls::overlayfs) fn list_xattr_impl(
         &self,
         namespace: XattrNamespace,
         list_writer: &mut VmWriter,
     ) -> Result<usize> {
-        self.check_permission(AccessType::ReadOnly, Permission::empty())?;
+        self.check_permission(AccessType::ReadOnly, Permission::MAY_ACCESS)?;
         self.delegate_to_real(|real| {
             let mut raw_list = vec![0u8; XATTR_LIST_MAX_LEN];
             let mut raw_writer = VmWriter::from(&mut raw_list[..]).to_fallible();

@@ -159,3 +159,10 @@
 - **D15 VFS 缺口事件（user 指示记录）**：D15 的根因是 **VFS 层缺口**——Asterinas 的 VFS 默认 `Inode::check_permission`（`kernel/src/fs/vfs/fs_apis/inode.rs:573-640`）未提供可复用的 mode-DAC 求值原语（无 `check_mode_dac` 类共享助手），导致 overlay 的 `check_local_permission` Projected-DAC 块（`permission.rs:193-260`）不得不整段内联镜像 VFS 算法，构成 dry 漂移隐患。经 user 决定：**本波不修改 VFS 接口**，overlay 侧仅以注释 TODO 标注镜像关系与未来提取计划；**该缺口仍在 VFS 侧**，待 VFS 提供共享 DAC 求值助手后消除镜像（TODO 触发条件）。同类 VFS 依赖：D25 的 scoped credential-switch API（P1-19）已在 `policy.rs:184/191` TODO 与 `#[expect(dead_code)]` 中记录。
 - **C3 派发决定（user 指示）**：客观代码行数少（约 20–40 行逻辑 + 注释），**不拆分多 Creator，单 Creator 承载 C3 全部 5 项**（D9 D14 D15 D19 D25）——拆多轮的目的本是控制上下文长度，行数少则无必要。仍走完整流程：单 Creator → Checker 容器编译门 → Reviewer 单独验收（Reviewer 须核对 D15/D25 的 TODO 注释是否确实写入）。
 - **执行范围（已确认决策）**：D14 按 spec 改；D19 get→MAY_READ、list→MAY_ACCESS + 显式 TODO；D15 纯注释 TODO（不碰 VFS）；D25 纯注释 TODO（不改名不改签名）。写集 = `metadata_security/{permission,xattr}.rs`、`dir/mod.rs`、`mount/policy.rs`（仅注释）。
+
+## 4.5 Continuation 2026-08-11 — 防跳闸 checkpoint（user 指示：先 commit + push 再继续）
+
+- **触发**：用户指示「家里要下雷雨，先 commit 再 push 一次，然后再工作，免得跳闸（曾跳闸过）」。
+- **checkpoint 内容**：Creator D（task_creator_wave8_D_C3_20260811，agent Boyle）4 文件改动（`metadata_security/{permission,xattr}.rs`、`dir/mod.rs`、`mount/policy.rs`，125+/66-）+ Checker D 编译门已 ACCEPTED（exit 0 / 0 warnings，强制重编译证据 `run_evidence/20260811_checker_c3_compile/`）+ handoff 决策记录。
+- **状态**：Reviewer D（task_reviewer_wave8_D_C3_20260811，agent Socrates）**验收进行中**，尚未 ACCEPT/REJECT。本 checkpoint commit 不代表 Round D 正式接受；Reviewer 结论出来后按结果继续（ACCEPT → 关闭 subagent + 收尾；REJECT → 原样发回 Creator D 修复后复验）。
+- **push**：分支 `codex/overlayfs-refactor` push 到 origin（防跳闸后可从远端恢复）。
