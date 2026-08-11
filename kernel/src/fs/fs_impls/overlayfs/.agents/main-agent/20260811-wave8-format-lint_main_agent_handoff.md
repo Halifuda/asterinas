@@ -189,3 +189,18 @@
 - **关闭:** Creator E1 / Checker E1 / Reviewer E1 均已关闭。
 - **提交:** 本 commit（Round E1 单独 commit）。
 - **基线更新:** 下一轮 Creator E2 (C7 whiteout 侧 D12 D13) 从此 commit 起算；E2 write-set = `dir/whiteout.rs`（与 E1 不相交）。
+
+## 4.8 Continuation 2026-08-11 — Creator E2 (C7 whiteout 侧 D12 D13) ACCEPTED — C7 全部完成
+
+- **Dispatch (V1 Direct Spawn Lane, no-fork):** Creator E2 `task_creator_wave8_E2_C7_whiteout_20260811` (agent Ramanujan) — packet `subagent-tasks/wave8-full-review/task_creator_wave8_E2_C7_whiteout_20260811_dispatch.md`; Checker E2 `task_checker_wave8_E2_C7_whiteout_20260811` (agent Kierkegaard); Reviewer E2 `task_reviewer_wave8_E2_C7_whiteout_20260811` (agent Hooke)。
+- **Creator E2 交付:** D12（publish_whiteout 前置 impure marker 改 best-effort warn-and-continue）+ D13（cleanup_upper_whiteouts 两阶段 + 私有 helper：is_whiteout_child Rule B、validate_whiteout_children / unlink_rechecked_whiteouts Designer 指定拆分；薄入口；不新增锁；文档注明残余窗口与 upper 外部并发前提）全部落地。write-set 单文件 `dir/whiteout.rs` (+87/−25)。容器 cargo check exit 0 / 0 warnings（Creator 自测 + Checker 强制重编译双证据）。
+- **Checker E2 编译门:** ACCEPTED。证据 `components/wave8-full-review/run_evidence/20260811_checker_c7_whiteout_compile/`（warm + fresh 双 log）。
+- **Reviewer E2 单独验收:** ACCEPT（零直接编辑）。术语纪律通过（\bD[0-9]{2}\b 零命中；旧 T1/T2 编号术语已随修改移除）；复用纪律通过（复用 E1 收紧的 is_whiteout_inode、lookup_child/unlink/readdir_at 既有路径）；实体 census 独立核对通过（3 新私有 free fn 全部列出、Rule B / Designer 指定成立）。非阻塞观察：census 行区近似漂移 ~5 行，语义一致。
+- **关闭:** Creator E2 / Checker E2 / Reviewer E2 均已关闭。
+- **提交:** 本 commit（Round E2 单独 commit）。
+
+## 4.9 Continuation 2026-08-11 — C7 (Creator E) 全部落地，wave8 修复簇收尾
+
+- **C7 完成 = E1（投影侧 D28 D30 D31 D32 D29，commit 8928e05c1）+ E2（whiteout 侧 D12 D13，本 commit）**。E1 术语/TODO 纪律通过（resolves + TODO(origin-verify) 升级路径；无 D 编号）；E2 术语纪律通过。
+- **wave8 全部修复簇至此完成**：C1 C2 C3 C4 C5 C6 C7 C8 C9 C10 C11 全部落地（含用户决策：C3 的 D15/D25 降级注释 TODO、D19 list=MAY_ACCESS+TODO；C7 的 D31 resolves+TODO、D13 两阶段+helper、D32 最小化、D29 for_lookup_child）。累计 D 项：D1–D35 中 ACCEPT 项全部落地（除 IGNORE 的 D36–D40 死代码项按决策不处理）+ 机械批 34 项 + C11。
+- **遗留事项（后续，非本目标范围）**：① `mount/mod.rs:12` 模块文档提及已删 WriteAccessAccounting（统一 doc pass）；② Wave8 运行时回归（Wave7 推迟的 20 例可调度矩阵，overlay/029 首例；C7 的 D31/D30 需 overlay/030 类身份用例）——由 Checker 角色另行调度；③ 全 CI 门 `make check` 复验（可选）；④ exFAT 格式化（可选，另开一轮）。

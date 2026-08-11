@@ -413,13 +413,25 @@ impl OverlayFs {
         // a live mutation, so this is the defensive arm) — resolved through
         // the single shared resolver (`OverlayFs::workdir_root_path`).
         let workdir_path = self.workdir_root_path()?;
-        // T2 (Objective 1): publishing a whiteout inside the parent makes it
-        // impure — persist the marker before the physical publish (strict,
-        // pre-physical-publish; read-first idempotence makes the
-        // T1-covered call chains a no-op). The marker write is a raw-inode
-        // xattr op (allowed class) on the resolved upper parent inode.
-        self.xattr_policy()
-            .set_impure_marker(upper_parent_path.inode())?;
+        // Publishing a whiteout inside the parent makes it impure, so the
+        // marker is refreshed before the physical publish (read-first
+        // idempotent; the marker write is a raw-inode xattr op on the
+        // resolved upper parent inode). The marker is a cache hint whose
+        // consumer refreshes it best-effort, so a marker failure must not
+        // abort the physical publish: warn and continue (an upper that can
+        // host whiteouts but cannot store private xattrs keeps lower-backed
+        // removals usable instead of failing them outright).
+        if let Err(err) = self
+            .xattr_policy()
+            .set_impure_marker(upper_parent_path.inode())
+        {
+            warn!(
+                "overlay whiteout publish: failed to set the impure marker on {:?} \
+                 (best-effort cache hint; continuing with the physical publish): {:?}",
+                upper_parent_path.inode(),
+                err
+            );
+        }
         match replace_target {
             // Target absent: the link path keeps the workdir original for
             // reuse (share); a link that fails the share contract degrades to
@@ -488,16 +500,22 @@ impl OverlayFs {
 /// Sweeps the physical whiteout residue out of an upper directory.
 ///
 /// Enumerates the real upper directory through a raw inode `readdir` (the
-/// allowed read class), filters `.`/`..`, and unlinks every physical child
-/// that is a whiteout (char device `0:0` or `trusted.overlay.whiteout`
-/// marker, via the shared [`is_whiteout_inode`] predicate) through the base
-/// VFS `Path` layer: each child is re-observed with
-/// `upper_dir_path.dentry().lookup_child` and removed with
-/// `upper_dir_path.unlink`, so the base view's `DentryChildren` stays
-/// coherent. A physical child that is NOT a whiteout refuses the sweep with
+/// allowed read class), filters `.`/`..`, and runs a two-phase sweep. The
+/// first phase validates every physical child: each name is re-observed with
+/// `lookup_child` and classified with the shared [`is_whiteout_inode`]
+/// predicate (char device `0:0` or the `trusted.overlay.whiteout` marker
+/// value `b'y'`), and any non-whiteout child refuses the whole sweep with
 /// `ENOTEMPTY` (Linux `ovl_check_empty_dir` parity — unknown state is never
-/// deleted); underlying lookup/readdir/unlink errors propagate unchanged. The
-/// sweep never recurses into directories: with the caller's
+/// deleted) **before any entry is removed**. The second phase re-observes and
+/// re-classifies each child immediately before its `unlink`, so an entry
+/// replaced between the two phases is detected instead of deleted. The two
+/// phases are not atomic: a concurrent modification of the upper directory
+/// (an overlay mutation or a direct upper-layer writer that lives outside
+/// every overlay lock domain) can still slip an entry in between the
+/// phase-2 check and the unlink, so the sweep relies on the upper directory
+/// not being modified concurrently and the re-check only shortens that
+/// residual window. Underlying lookup/readdir/unlink errors propagate
+/// unchanged. The sweep never recurses into directories: with the caller's
 /// visible-emptiness gate holding, every deleted physical child is a
 /// whiteout, so the bound is one physical pass.
 ///
@@ -508,21 +526,65 @@ pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
     let mut names = Vec::new();
     upper_dir_path.inode().readdir_at(0, &mut names)?;
     names.retain(|name| !path::is_dot_or_dotdot(name));
+    // First pass — full validation: refuse the sweep before removing
+    // anything if any physical child is not a whiteout.
+    validate_whiteout_children(upper_dir_path, &names)?;
+    // Second pass — re-check then unlink: each child is re-observed and
+    // re-classified immediately before its removal.
+    unlink_rechecked_whiteouts(upper_dir_path, &names)?;
+    Ok(())
+}
+
+/// Returns whether the named physical child of `upper_dir_path` is a whiteout.
+///
+/// The child is re-observed through the base VFS `Path` layer (`lookup_child`)
+/// and classified with the shared [`is_whiteout_inode`] predicate, keeping
+/// the base view's `DentryChildren` coherent. Underlying lookup errors
+/// propagate unchanged.
+fn is_whiteout_child(upper_dir_path: &Path, name: &str) -> Result<bool> {
+    let child_path = Path::new(
+        upper_dir_path.mount_node().clone(),
+        upper_dir_path
+            .dentry()
+            .as_dir_dentry_or_err()?
+            .lookup_child(name)?,
+    );
+    is_whiteout_inode(child_path.inode())
+}
+
+/// Validates that every named physical child of `upper_dir_path` is a
+/// whiteout, removing nothing.
+///
+/// The full-validation pass of the sweep: any non-whiteout child returns
+/// `ENOTEMPTY`, so the sweep refuses the removal before any entry is deleted.
+fn validate_whiteout_children(upper_dir_path: &Path, names: &[String]) -> Result<()> {
     for name in names {
-        let child_path = Path::new(
-            upper_dir_path.mount_node().clone(),
-            upper_dir_path
-                .dentry()
-                .as_dir_dentry_or_err()?
-                .lookup_child(&name)?,
-        );
-        if !is_whiteout_inode(child_path.inode())? {
+        if !is_whiteout_child(upper_dir_path, name)? {
             return Err(Error::with_message(
                 Errno::ENOTEMPTY,
                 "a hidden non-whiteout entry prevents the overlay directory removal",
             ));
         }
-        upper_dir_path.unlink(&name)?;
+    }
+    Ok(())
+}
+
+/// Re-observes and unlinks every named whiteout child of `upper_dir_path`.
+///
+/// The removal pass of the sweep: each child is re-classified immediately
+/// before its `unlink`, so an entry swapped in since the validation pass is
+/// refused (`ENOTEMPTY`) instead of deleted. The re-check narrows but cannot
+/// close the residual check-to-use window, so the upper directory must not be
+/// modified concurrently.
+fn unlink_rechecked_whiteouts(upper_dir_path: &Path, names: &[String]) -> Result<()> {
+    for name in names {
+        if !is_whiteout_child(upper_dir_path, name)? {
+            return Err(Error::with_message(
+                Errno::ENOTEMPTY,
+                "a hidden non-whiteout entry prevents the overlay directory removal",
+            ));
+        }
+        upper_dir_path.unlink(name)?;
     }
     Ok(())
 }
