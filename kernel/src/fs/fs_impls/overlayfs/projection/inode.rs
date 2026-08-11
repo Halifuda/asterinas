@@ -16,8 +16,12 @@
 //! `DIR` transaction lock (`Some` for directories only); `facts` is the
 //! per-object `INODE` domain, accessed only through brief snapshot locks
 //! (`facts_snapshot`: clone and release) and never held across an underlying
-//! call. The only nested order is `DIR -> INODE` plus the mount-wide cache
-//! locks used sequentially under `DIR` inside `OverlayFs::lookup_binding`.
+//! call — with one O_APPEND exception: [`OverlayInode::append_write`] holds
+//! the `facts` guard across the underlying real `size()` + `write_at` so
+//! concurrent appends serialize on the post-write size (leaf lock, bounded
+//! hold, no re-entry; see `copyup::mod`'s lock contract). The only nested
+//! order is `DIR -> INODE` plus the mount-wide cache locks used sequentially
+//! under `DIR` inside `OverlayFs::lookup_binding`.
 
 use core::time::Duration;
 
@@ -79,8 +83,14 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayInode {
     /// published `key()` never disagrees with `facts_snapshot()`. The field
     /// is touched only under the object's `DIR` transaction.
     pub(super) key: Mutex<RealObjectKey>,
-    /// The per-object payload: the real-object facts, fixed at creation
-    /// (brief snapshot locks only).
+    /// The per-object payload: the real-object facts, fixed at creation.
+    ///
+    /// Lock discipline: brief snapshot locks only (`facts_snapshot`: clone
+    /// and release), with one O_APPEND exception — [`OverlayInode::append_write`]
+    /// holds this `INODE` guard across the underlying real `size()` +
+    /// `write_at` so concurrent appends serialize on the post-write size
+    /// (leaf lock, bounded hold, no re-entry; see `copyup::mod`'s lock
+    /// contract).
     pub(super) facts: Mutex<OverlayObjectFacts>,
     /// The payload-less `DIR` transaction lock; `Some` iff this object is a
     /// directory.
@@ -352,6 +362,40 @@ impl OverlayInode {
     /// never held across an underlying call.
     pub(in crate::fs::fs_impls::overlayfs) fn facts_snapshot(&self) -> OverlayObjectFacts {
         self.facts.lock().clone()
+    }
+
+    /// Serializes an `O_APPEND` write as one atomic size-read + write under
+    /// the `INODE` facts guard.
+    ///
+    /// The two-step `size()` then `write_at()` sequence is the append
+    /// contract of the underlying fs (which does not process `O_APPEND`
+    /// itself); without serialization two concurrent appends could read the
+    /// same size and lose an update. This method reuses the existing
+    /// per-object `facts` lock — the per-logical-inode serialization domain —
+    /// and holds it across both steps: the sole documented O_APPEND exception
+    /// to the brief-snapshot rule (see the module and `copyup::mod` lock
+    /// contracts).
+    ///
+    /// The real inode is parsed from the held snapshot (`upper`, else
+    /// `lowers[0]`) rather than re-resolved via
+    /// [`OverlayInode::select_real_inode`], which would re-acquire this
+    /// non-reentrant `Mutex` and deadlock. The guard is released at scope
+    /// end; the underlying fs lock is a leaf that never re-enters Overlay, so
+    /// the hold adds no new lock-topology edge and is bounded by one write
+    /// call. `lowers[0]` is safe by the facts invariant
+    /// `upper.is_some() || !lowers.is_empty()`.
+    pub(in crate::fs::fs_impls::overlayfs) fn append_write(
+        &self,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        let guard = self.facts.lock();
+        let real = match guard.upper() {
+            Some(upper) => upper.real_inode().clone(),
+            None => guard.lowers()[0].real_inode().clone(),
+        };
+        let offset = real.size();
+        real.write_at(offset, reader, status_flags)
     }
 
     /// Returns the payload-less `DIR` transaction lock, if this object is a

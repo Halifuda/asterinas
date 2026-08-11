@@ -124,3 +124,21 @@
 - **关闭:** Creator B / Checker B / Reviewer B 均已关闭。
 - **提交:** 本 commit（Round B 单独 commit）。
 - **基线更新:** 下一轮 Creator C (C8+C9+C10) 从此 commit 起算。
+
+---
+
+## 3.9 Continuation 2026-08-11 — Creator Round C (C8+C9+C10) ACCEPTED
+
+- **Dispatch (V1 Direct Spawn Lane, no-fork):** Creator C `task_creator_wave8_C_C8C9C10_20260811` (agent Zeno) — packet `subagent-tasks/wave8-full-review/task_creator_wave8_C_C8C9C10_20260811_dispatch.md`; Checker C `task_checker_wave8_C_C8C9C10_20260811` (agent Sartre); Reviewer C `task_reviewer_wave8_C_C8C9C10_20260811` (agent Aristotle)。全部按 V1 架构启动。
+- **Creator C 交付:** C8 (D1, R1.2 复用 facts 锁、无新锁无新字段) + C9 (D6, R1.3 仅 MAX_COPYUP_DEPTH=1024 + ELOOP fail-closed、保留递归) + C10 (D33 readdir 首条目 Err 传播) 全部落地，无跳过。write-set 四文件：`copyup/{mod,trigger}.rs`、`projection/inode.rs`、`readdir_index.rs` (+135/−31)。容器内 `cargo check -p aster-kernel --target x86_64-unknown-none` exit 0、0 warnings（Creator 自测 + Checker 强制重编译双证据）。
+- **Checker C 编译门:** ACCEPTED。强制重编译证据 `components/wave8-full-review/run_evidence/20260811_checker_c8c9c10_compile/`（warm + fresh 双 log，exit 0，0 warnings）。
+- **Reviewer C 单独验收:** ACCEPT（零直接编辑）。复用纪律逐项通过（C8 复用 facts 锁与 snapshot 解析、无新锁/无重复解析；C9 仅加深度参数；C10 仅改错误传播边界）。实体 census 独立核对通过（3 新实体全部列出且 Rule A/B/D 成立）。非阻塞注：C9 最坏 1025 帧 ≈262.4 KiB 略超注释 256 KiB 一行，仍远在 512 KiB 栈内，与 Designer 悲观估算一致。
+- **关闭:** Creator C / Checker C / Reviewer C 均已关闭。
+- **提交:** 本 commit（Round C 单独 commit）。
+
+## 4.2 Continuation 2026-08-11 — 前三轮 Creator（A/B/C）全部 ACCEPTED，D+E 暂缓
+
+- Round A (C1+C2) = commit f1d33af53；Round B (C4+C5+C6) = commit 70fa24c17；Round C (C8+C9+C10) = 本 commit。工作树干净。
+- 已落地 D 项（共 21）：D1 D2 D3 D4 D5 D6 D7 D8 D10 D11 D16 D17 D18 D20 D21 D22 D23 D24 D26 D27 D33。C11 (D34 D35) 与机械批 34 项已随 5d115b4ad 落地。
+- **未执行（按 user 指示暂缓）：Creator D = C3（D9 D14 D15 D19 D25，含 VFS fs_apis/inode.rs，需授权标注）；Creator E = C7（D12 D13 D28 D29 D30 D31 D32）。**
+- **遗留事项（后续）：** ① `mount/mod.rs:12` 模块文档仍提及已删 `WriteAccessAccounting`（反引号散文，无警告）——建议并入统一 doc pass；② Wave8 运行时回归（Wave7 推迟的 20 例可调度矩阵，overlay/029 首例）待全部修复批次后调度；C7 的 D31/D30 需 overlay/030 类身份用例；③ 全 CI 门复验 `make check`（可选）；④ exFAT 格式化（可选，另开一轮）。

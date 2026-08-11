@@ -33,6 +33,18 @@
 //! Overlay lock is released; `Ok(())` is the sole success carrier and the
 //! caller re-observes authority via `facts_snapshot`.
 
+/// The maximum depth of the copy-up ancestor recursion.
+///
+/// `ensure_upper_authority_inner` recurses once per consecutive lower-backed
+/// publication parent; each frame keeps only two live `Arc`s (`_fs` and
+/// `publication_parent`) and releases every guard before the next recursion,
+/// so a single frame is ~96-128 B typically and at most ~256 B pessimistically.
+/// 1024 × 256 B = 256 KiB ≤ half of the default 512 KiB kernel task stack
+/// (128 pages × 4 KiB; `OSTD_TASK_STACK_SIZE_IN_PAGES` may override), so a
+/// chain deeper than this limit fails closed with `ELOOP` instead of ever
+/// risking a kernel-stack overflow.
+const MAX_COPYUP_DEPTH: usize = 1024;
+
 use crate::{fs::fs_impls::overlayfs::projection::OverlayInode, prelude::*};
 
 impl OverlayInode {
@@ -46,6 +58,11 @@ impl OverlayInode {
     /// recorded (defensive guard), and propagates any underlying recipe
     /// failure unchanged.
     ///
+    /// The top-down ancestor walk recurses at most [`MAX_COPYUP_DEPTH`] levels
+    /// (see the constant's stack-budget note); a deeper consecutive
+    /// lower-backed ancestor chain fails closed with `Errno::ELOOP` instead of
+    /// risking kernel-stack overflow, with no change to any success path.
+    ///
     /// Lock contract: the brief `CUL` read that captures `publication_parent`
     /// releases its guard before the recursive ancestor walk, so the parent
     /// `CUL` is always acquired strictly before the child `CUL`; the
@@ -55,6 +72,13 @@ impl OverlayInode {
     /// re-acquires the guard; `ostd::sync::Mutex` is non-reentrant). No
     /// Overlay lock crosses the return boundary.
     pub(in crate::fs::fs_impls::overlayfs) fn ensure_upper_authority(&self) -> Result<()> {
+        self.ensure_upper_authority_inner(0)
+    }
+
+    /// The recursive body of [`OverlayInode::ensure_upper_authority`]; `depth`
+    /// is the number of ancestor recursions already performed (0 at the entry,
+    /// incremented once per consecutive lower-backed publication parent).
+    fn ensure_upper_authority_inner(&self, depth: usize) -> Result<()> {
         // Step 1 — mount-lifetime pin: the `Weak<OverlayFs>` upgrade proves
         // the mount is alive and pins it for the trigger's duration (no
         // `.unwrap()`/`.expect()`).
@@ -84,8 +108,17 @@ impl OverlayInode {
         // Step 4 — top-down ancestor walk: the parent promotes its own
         // ancestors first, so the parent `CUL` is strictly acquired before
         // the child `CUL`; the recursion terminates at the upper-backed root
-        // and never re-enters the same instance (acyclic chain).
-        publication_parent.ensure_upper_authority()?;
+        // and never re-enters the same instance (acyclic chain). The depth
+        // counter bounds the chain: more than `MAX_COPYUP_DEPTH` consecutive
+        // lower-backed ancestors fails closed with `ELOOP` (never a stack
+        // overflow); the success-path behavior is unchanged.
+        if depth >= MAX_COPYUP_DEPTH {
+            return_errno_with_message!(
+                Errno::ELOOP,
+                "the copy-up ancestor chain exceeds the depth limit"
+            );
+        }
+        publication_parent.ensure_upper_authority_inner(depth + 1)?;
 
         // Step 5 — winner/waiter serialization: the sleep-capable `CUL` wait.
         // Waiters hold nothing while blocked on `lock()`; the guard is then

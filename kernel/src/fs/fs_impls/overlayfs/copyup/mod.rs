@@ -19,10 +19,16 @@
 //! brief `INODE` facts snapshot inside `select_real_inode`
 //! (snapshot-and-release, never held across an underlying call);
 //! `record_copyup_transition` takes a brief non-blocking `CUL` `try_lock`;
-//! the EROFS gate precedes every promotion side effect. No per-open
-//! real-inode view carrier exists: every call re-resolves the current
-//! authority per operation (Linux `ovl_real_file_path` follow-copy-up,
-//! file.c:128-171).
+//! the EROFS gate precedes every promotion side effect. One O_APPEND
+//! exception: `write_at_impl` routes the append path to
+//! [`OverlayInode::append_write`] (`projection/inode.rs`), which holds the
+//! `INODE` facts guard across the underlying real `size()` + `write_at` so
+//! concurrent appends serialize on the post-write size. That hold never
+//! re-enters an Overlay lock (the real is parsed from the held snapshot, not
+//! re-resolved), the underlying fs lock is a leaf that never re-enters
+//! Overlay, and the hold is bounded by one write call. No per-open real-inode
+//! view carrier exists: every call re-resolves the current authority per
+//! operation (Linux `ovl_real_file_path` follow-copy-up, file.c:128-171).
 
 use core::sync::atomic::Ordering;
 
@@ -164,22 +170,23 @@ impl OverlayInode {
         real.read_at(offset, writer, status_flags)
     }
 
-    // Write delegation: per-call authority re-resolution; `O_APPEND` is
-    // applied from the passed status flags (offset := real size) as the
-    // packet-ruled defense. Write-capable fds are upper by construction, so
-    // delegation never bypasses the trigger.
+    // Write delegation: per-call authority re-resolution; the `O_APPEND`
+    // branch serializes `offset := real size` + `write_at` under the `INODE`
+    // facts guard (`append_write`) — a bare two-step size-read-then-write
+    // would be a TOCTOU where two concurrent appends could read the same
+    // size and lose an update. The non-`O_APPEND` branch re-resolves the
+    // authority and writes at the passed offset. Write-capable fds are upper
+    // by construction, so delegation never bypasses the trigger.
     pub(in crate::fs::fs_impls::overlayfs) fn write_at_impl(
         &self,
         offset: usize,
         reader: &mut VmReader,
         status_flags: StatusFlags,
     ) -> Result<usize> {
+        if status_flags.contains(StatusFlags::O_APPEND) {
+            return self.append_write(reader, status_flags);
+        }
         let real = self.select_real_inode();
-        let offset = if status_flags.contains(StatusFlags::O_APPEND) {
-            real.size()
-        } else {
-            offset
-        };
         real.write_at(offset, reader, status_flags)
     }
 }

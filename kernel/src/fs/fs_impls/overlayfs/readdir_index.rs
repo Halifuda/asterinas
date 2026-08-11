@@ -131,9 +131,17 @@ impl OverlayInode {
     /// `Valid` index is served from the cache, a `NeedsRebuild` index is
     /// rebuilt under the same `DIR` transaction. The returned delta advances
     /// the per-FD offset to the next unvisited cookie (`Ok(0)` = end of
-    /// sequence); a visitor stop (e.g. user buffer full) is not propagated
-    /// (ext2 precedent) — the consumed delta is returned. Lock-order details
-    /// are documented inline at each step.
+    /// sequence). A visitor stop on the FIRST unvisited candidate of a call —
+    /// `.` at offset 0 or the first real entry after the head section — is
+    /// propagated unchanged: nothing was consumed, the per-FD offset stays
+    /// put, and libc either retries or surfaces the error (Linux readdir
+    /// semantics; the `legacy_fs.rs` precedent), so an undersized buffer is
+    /// never mistaken for end-of-directory. Once this call has consumed at
+    /// least one entry, a later visitor stop is not propagated (ext2
+    /// precedent) — the consumed delta is returned for continuation
+    /// (`..`'s stop after `.` and any real-entry stop after a consumed
+    /// head/real entry). Lock-order details are documented inline at each
+    /// step.
     pub(in crate::fs::fs_impls::overlayfs) fn readdir_at_impl(
         &self,
         offset: usize,
@@ -185,11 +193,13 @@ impl OverlayInode {
         // `lookup("..")`/xattr reads when `..` is never served, and removes
         // the spurious warning path.
         if input_cookie < ReaddirCookie(1) {
-            // `.` carries this directory's projected identity.
-            if visitor.visit(".", self.ino(), InodeType::Dir, 1).is_err() {
-                // The first candidate failed; nothing was consumed.
-                return Ok(delta_fn(None));
-            }
+            // `.` carries this directory's projected identity. A failure here
+            // is propagated unchanged: this call has consumed nothing, so the
+            // per-FD offset stays put and libc either retries or surfaces the
+            // error — an undersized buffer is never mistaken for
+            // end-of-directory (D33; Linux readdir and the `legacy_fs.rs`
+            // precedent).
+            visitor.visit(".", self.ino(), InodeType::Dir, 1)?;
             last_visited = Some(ReaddirCookie(1));
         }
         if input_cookie < ReaddirCookie(2) {
@@ -201,6 +211,9 @@ impl OverlayInode {
                 .visit("..", parent_object_id.ino, InodeType::Dir, 2)
                 .is_err()
             {
+                // `.` was already consumed by this call, so the consumed
+                // delta is returned and the caller continues from the next
+                // offset (D33 keeps the resume semantics here).
                 return Ok(delta_fn(last_visited));
             }
             last_visited = Some(ReaddirCookie(2));
@@ -236,10 +249,17 @@ impl OverlayInode {
             };
             // `d_ino` derives from the shared identity policy: the child
             // inode's precomputed `object_id` (`Inode::ino()`).
-            if visitor.visit(name, inode.ino(), *type_, d_off).is_err() {
-                // The visitor stopped (e.g. user buffer full); the error is
-                // not propagated (ext2 precedent); the consumed delta is
-                // returned.
+            if let Err(err) = visitor.visit(name, inode.ino(), *type_, d_off) {
+                if last_visited.is_none() {
+                    // This call has consumed nothing yet: propagate the
+                    // visitor error so a full-but-undersized buffer is not
+                    // mistaken for end-of-directory (D33; the per-FD offset
+                    // stays put and libc retries or surfaces the error).
+                    return Err(err);
+                }
+                // The visitor stopped after this call already consumed
+                // entries; the error is not propagated (ext2 precedent); the
+                // consumed delta is returned.
                 break;
             }
             last_visited = Some(*cookie);
