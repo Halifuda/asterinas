@@ -179,3 +179,13 @@
 - **D13 提取私有 helper（user 补充 3）**：两阶段检查**摘出辅助私有方法**防函数膨胀（如私有方法承载「全校验」与「复检+删除」两步，或等价拆分），`cleanup_upper_whiteouts` 保持薄入口。Creator 报告须给出新 helper 的白名单 Rule 依据（结构拆分/Designer 指定，参照 C1 的 clear_empty_exchange 先例）。
 - **D32 改动最小**：谓词自足式（选项①）——只改 `project_inode` 的 `get_or_create` 谓词（mod.rs:217-220），`facts.upper().is_none()` 时仅当载体可见源与 `source_inode` 指针相等才复用；不动签名、不改调用点。
 - **D29 命名**：弃用 `make_hit`，采用 `RealObject::for_lookup_child(layer_index, &child_path, layer_real)`（Designer 备选；语义明确、owner 边界正确）。
+
+## 4.7 Continuation 2026-08-11 — Creator E1 (C7 投影侧 D28 D30 D31 D32 D29) ACCEPTED
+
+- **Dispatch (V1 Direct Spawn Lane, no-fork):** Creator E1 `task_creator_wave8_E1_C7_projection_20260811` (agent Cicero) — packet `subagent-tasks/wave8-full-review/task_creator_wave8_E1_C7_projection_20260811_dispatch.md`; Checker E1 `task_checker_wave8_E1_C7_projection_20260811` (agent Nietzsche); Reviewer E1 `task_reviewer_wave8_E1_C7_projection_20260811` (agent Plato)。
+- **Creator E1 交付:** D28（is_whiteout_inode 只认 b'y'）/ D30（layer_index 继承 lower_real）/ D31（origin_real_ino_resolves 同层保留 lower ino 核对 + 保守回退 + TODO(origin-verify) 升级路径）/ D32（谓词自足式）/ D29（RealObject::for_lookup_child 提取）全部落地。write-set 三文件：`projection/{entry,lower_id,mod}.rs` (+126/−33)。容器 cargo check exit 0 / 0 warnings（Creator 自测 + Checker 强制重编译双证据）。
+- **Checker E1 编译门:** ACCEPTED。证据 `components/wave8-full-review/run_evidence/20260811_checker_c7_projection_compile/`（warm + fresh 双 log）。
+- **Reviewer E1 单独验收:** ACCEPT（零直接编辑）。术语/TODO 纪律通过：方法名 resolves（非 verify）、TODO(origin-verify) 写明「VFS ino→inode / file-handle 表面到位后升级为完整 origin verification」；三文件 grep `\bD[0-9]{2}\b` 零命中。复用纪律通过（for_lookup_child 复用 with_path；origin_real_ino_resolves 复用 resolve_layer_id_for_record/facts.lowers；D32 复用 visible_source/contains_real_inode）。实体 census 独立核对通过（2 新实体 Rule B/C）。非阻塞观察已记录（D31 同层映射以 fsid 近似，只会保守误拒）。
+- **关闭:** Creator E1 / Checker E1 / Reviewer E1 均已关闭。
+- **提交:** 本 commit（Round E1 单独 commit）。
+- **基线更新:** 下一轮 Creator E2 (C7 whiteout 侧 D12 D13) 从此 commit 起算；E2 write-set = `dir/whiteout.rs`（与 E1 不相交）。

@@ -193,7 +193,7 @@ impl OverlayFs {
         // comment's "no duplicated fallback expression" claim holds: the
         // expression `self.identity().project_object_id(source, is_directory)`
         // is written exactly once (in the closure) and the closure is invoked
-        // by all four uses below (flattened — no nested match). The `_fn`
+        // by all five uses below (flattened — no nested match). The `_fn`
         // suffix marks the binding as callable at every use site.
         let fallback_fn = || self.identity().project_object_id(source, is_directory);
         let object_id = if source.layer_index() == 0 {
@@ -201,10 +201,19 @@ impl OverlayFs {
                 // Defensive: the record was device-validated at the read boundary, so
                 // `None` here is the absent/ambiguous-device corner; the
                 // visible-source projection is the conservative fallback.
-                Ok(Some(record)) => self
-                    .identity()
-                    .project_object_id_from_lower_id(&record, is_directory)
-                    .unwrap_or_else(fallback_fn),
+                Ok(Some(record)) => {
+                    // The record is accepted only when its real inode is
+                    // consistent with the retained same-layer lower of the
+                    // fresh facts; otherwise the visible-source projection
+                    // is the conservative fallback.
+                    if self.origin_real_ino_resolves(&record, facts) {
+                        self.identity()
+                            .project_object_id_from_lower_id(&record, is_directory)
+                            .unwrap_or_else(fallback_fn)
+                    } else {
+                        fallback_fn()
+                    }
+                }
                 Ok(None) => fallback_fn(),
                 Err(err) => {
                     warn!(
@@ -220,13 +229,36 @@ impl OverlayFs {
         };
         // Clone the visible source before the closures move `facts`: the
         // get-or-create predicate validates a cached hit against this real
-        // inode, replacing an ino-reuse stale occupant.
+        // inode, replacing an ino-reuse stale occupant. The fresh-truth
+        // upper presence is captured here as well, because the predicate
+        // must distinguish a lower-only fresh truth (below) from an
+        // upper-backed one.
         let source_inode = visible_source(facts).real_inode().clone();
+        let fresh_is_lower_only = facts.upper().is_none();
         let fs = self.self_weak.clone();
         let facts = facts.clone();
         self.inodes().get_or_create(
             key,
-            move |carrier| carrier.facts_snapshot().contains_real_inode(&source_inode),
+            move |carrier| {
+                if fresh_is_lower_only {
+                    // The fresh truth is lower-only: reuse only a carrier
+                    // whose visible source is exactly this lower — the
+                    // in-flight lower-only projection. A stale-upper carrier
+                    // (visible source = the vanished upper, this lower merely
+                    // retained in its snapshot) must NOT be reused even
+                    // though `contains_real_inode` would match the retained
+                    // lower; serving its dead-upper metadata would be wrong.
+                    // An upper-still-alive in-flight projection is unaffected:
+                    // its fresh truth has an upper and takes the
+                    // `contains_real_inode` branch below.
+                    Arc::ptr_eq(
+                        visible_source(&carrier.facts_snapshot()).real_inode(),
+                        &source_inode,
+                    )
+                } else {
+                    carrier.facts_snapshot().contains_real_inode(&source_inode)
+                }
+            },
             move || {
                 Arc::new(OverlayInode {
                     fs,

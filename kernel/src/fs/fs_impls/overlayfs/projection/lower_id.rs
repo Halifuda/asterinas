@@ -23,7 +23,7 @@
 
 use device_id::DeviceId;
 
-use super::entry::RealObject;
+use super::{entry::RealObject, inode::OverlayObjectFacts};
 use crate::{
     fs::{
         fs_impls::overlayfs::mount::OverlayFs,
@@ -252,8 +252,11 @@ impl OverlayFs {
     /// foreign, and ambiguous evidence while preserving the visible-source
     /// fallback in `project_inode`; multiple matching configured roots with
     /// the same `fsid` remain usable. Genuine xattr-read errors propagate.
-    /// Consumed by `IdentityPolicy` via `project_inode` and by copy-up's
-    /// re-projection.
+    /// The caller (`project_inode`) additionally cross-checks an accepted
+    /// record's real inode against the retained same-layer lower of the fresh
+    /// facts ([`OverlayFs::origin_real_ino_resolves`]); a record failing that
+    /// cross-check falls back to the visible-source projection. Consumed by
+    /// `IdentityPolicy` via `project_inode` and by copy-up's re-projection.
     pub(in crate::fs::fs_impls::overlayfs) fn read_lower_id(
         &self,
         upper: &Arc<dyn Inode>,
@@ -284,6 +287,55 @@ impl OverlayFs {
             // record and reads as "no record".
             Err(err) if err.error() == Errno::ERANGE => Ok(None),
             Err(err) => Err(err),
+        }
+    }
+
+    /// Returns whether the persisted lower-source record is consistent with
+    /// the retained same-layer lower of `facts`.
+    ///
+    /// The name is deliberately `resolves` rather than "verify": this is a
+    /// resolvable-consistency cross-check — the record's real inode must
+    /// equal the real inode of the retained lower at the record's layer —
+    /// not the full origin verification Linux performs in `ovl_verify_origin`
+    /// through file-handle resolution. The current VFS surface has no
+    /// ino-to-inode / file-handle resolution surface, so a forged or stale
+    /// record whose `(container_dev_id, lower_layer_root_ino)` pair resolves
+    /// but whose `real_ino` matches no retained same-layer lower is rejected;
+    /// the caller falls back to the visible-source projection (identity
+    /// authenticity wins over authoritative continuity, mirroring Linux
+    /// dropping the origin when the lower changes). Residual risk remains for
+    /// userns / untrusted-upper deployments, as in Linux without the full
+    /// file-handle verification.
+    ///
+    /// TODO(origin-verify): once the VFS gains an ino-to-inode / file-handle
+    /// resolution surface, upgrade this cross-check to a full origin
+    /// verification (the `ovl_verify_origin` equivalent) and drop the
+    /// retained-lower approximation.
+    pub(super) fn origin_real_ino_resolves(
+        &self,
+        record: &LowerIdRecord,
+        facts: &OverlayObjectFacts,
+    ) -> bool {
+        // The record's layer is the unique current lower fsid matching its
+        // device/root pair; the retained lower at that layer is the
+        // same-layer evidence in the fresh facts.
+        let Some(layer_fsid) = self
+            .identity()
+            .resolve_layer_id_for_record(record.container_dev_id(), record.lower_layer_root_ino())
+        else {
+            return false;
+        };
+        match facts
+            .lowers()
+            .iter()
+            .find(|lower| lower.fsid() == layer_fsid)
+        {
+            // Accepted only when the record's real inode equals the retained
+            // same-layer lower; a mismatch (the lower was replaced since
+            // copy-up) or an absent retained lower (the lower no longer
+            // participates in the name) rejects the record.
+            Some(retained_lower) => record.real_ino() == retained_lower.real_inode().ino(),
+            None => false,
         }
     }
 

@@ -40,10 +40,11 @@ const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 /// The single whiteout predicate of the overlayfs tree (Linux
 /// `ovl_is_whiteout`): a whiteout is either a classic character device `0:0`
 /// or an object carrying the `trusted.overlay.whiteout` marker. The marker
-/// read is presence-based: an absent (`ENODATA`) or unsupported
-/// (`EOPNOTSUPP`) marker reads as "not a whiteout", while a value longer than
-/// the 1-byte probe (`ERANGE`) still proves presence. Genuine xattr errors
-/// propagate.
+/// read is value-based: a 1-byte value of exactly `b'y'` proves the whiteout
+/// marker; an absent (`ENODATA`) or unsupported (`EOPNOTSUPP`) marker, any
+/// non-canonical value, or a value longer than the 1-byte probe (`ERANGE`)
+/// reads as "not a whiteout" — matching the opaque-directory predicate and
+/// Linux `ovl_check_xwhiteout`. Genuine xattr errors propagate.
 pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
     real_inode: &Arc<dyn Inode>,
 ) -> Result<bool> {
@@ -63,8 +64,8 @@ pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
     let mut value = [0u8; 1];
     let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
     match real_inode.get_xattr(name, &mut writer) {
-        Ok(_) => Ok(true),
-        Err(err) if err.error() == Errno::ERANGE => Ok(true),
+        Ok(written) => Ok(written == 1 && value[0] == b'y'),
+        Err(err) if err.error() == Errno::ERANGE => Ok(false),
         Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => Ok(false),
         Err(err) => Err(err),
     }
@@ -154,6 +155,23 @@ impl RealObject {
             fsid,
             container_dev_id,
         }
+    }
+
+    /// Builds the dentry-anchored real object for one layer hit of a child
+    /// lookup inside the layer scan.
+    ///
+    /// The child hit inherits the parent layer's `fsid` and
+    /// `container_dev_id` evidence and pins the dentry-anchored `child_path`
+    /// carrier; the pinned real inode is derived from that carrier. Shared by
+    /// the upper and lower arms of `lookup_in_layers` so the two hit
+    /// constructions cannot drift.
+    fn for_lookup_child(layer_index: usize, child_path: &Path, layer_real: &RealObject) -> Self {
+        Self::with_path(
+            layer_index,
+            RealPath::from_path(child_path),
+            layer_real.fsid(),
+            layer_real.container_dev_id(),
+        )
     }
 
     /// Returns the position of this real object in the overlay layer stack.
@@ -285,13 +303,7 @@ impl OverlayFs {
             {
                 Ok(child_dentry) => {
                     let child_path = Path::new(upper_path.mount_node().clone(), child_dentry);
-                    let hit = RealObject {
-                        layer_index: 0,
-                        real_inode: child_path.inode().clone(),
-                        real_path: Some(RealPath::from_path(&child_path)),
-                        fsid: upper_real.fsid(),
-                        container_dev_id: upper_real.container_dev_id(),
-                    };
+                    let hit = RealObject::for_lookup_child(0, &child_path, upper_real);
                     if hit.is_whiteout()? {
                         return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
                             HiddenEvidence {
@@ -341,9 +353,12 @@ impl OverlayFs {
             }
         }
 
-        // Lower layers, topmost-first (layer indices `1..`).
-        for (offset, lower_real) in parent_facts.lowers.iter().enumerate() {
-            let layer_index = offset + 1;
+        // Lower layers, topmost-first (layer positions `1..`). Each child hit
+        // inherits the mount-layer position of the `lower_real` that produced
+        // it: a dense `offset + 1` would only coincide when the retained
+        // lowers start at layer 1 with no gaps.
+        for lower_real in &parent_facts.lowers {
+            let layer_index = lower_real.layer_index();
             let lower_path = lower_real.real_path()?;
             match lower_path
                 .dentry()
@@ -352,13 +367,7 @@ impl OverlayFs {
             {
                 Ok(child_dentry) => {
                     let child_path = Path::new(lower_path.mount_node().clone(), child_dentry);
-                    let hit = RealObject {
-                        layer_index,
-                        real_inode: child_path.inode().clone(),
-                        real_path: Some(RealPath::from_path(&child_path)),
-                        fsid: lower_real.fsid(),
-                        container_dev_id: lower_real.container_dev_id(),
-                    };
+                    let hit = RealObject::for_lookup_child(layer_index, &child_path, lower_real);
                     if hit.is_whiteout()? {
                         // A whiteout is the topmost occurrence of the name:
                         // the name is hidden. Below an already-visible
