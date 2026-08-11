@@ -153,3 +153,9 @@
 - **D25**：**降级为注释 TODO**。不改方法名、不改签名、不改行为；`with_creator_credentials_fn` 方法 doc 补显式 TODO（「currently a passthrough — callers must not rely on it for permission decisions；待 VFS scoped credential-swap API 落地后恢复作用域切换（P1-19）」）。`snapshot()`/`source()` 上的既有 TODO（policy.rs:184/191）与 `#[expect(dead_code)]` 保留。
 - **C3 最终形态（写集）**：逻辑代码改动集中在 `metadata_security/permission.rs`（D14）、`metadata_security/xattr.rs`（D19 两行 + 注释）、`dir/mod.rs`（D9 link 源侧准入补强）；`mount/policy.rs` 与 permission.rs DAC 块仅注释（D15/D25）。不再触碰 VFS `fs_apis/inode.rs`。
 - **流程提醒**：C3 为安全核心，spec 建议子步独立切片/独立 Checker；D9 需镜像 base `check_hardlink_source`（非 regular→EPERM；setuid/setgid+group-exec→FOWNER），注意复用既有 `current_task_has_capability`/`InodeMetadata` 判定，不得新增无谓 helper。
+
+## 4.4 Continuation 2026-08-11 — D15 属 VFS 缺口事件记录 + C3 单 Creator 派发决定
+
+- **D15 VFS 缺口事件（user 指示记录）**：D15 的根因是 **VFS 层缺口**——Asterinas 的 VFS 默认 `Inode::check_permission`（`kernel/src/fs/vfs/fs_apis/inode.rs:573-640`）未提供可复用的 mode-DAC 求值原语（无 `check_mode_dac` 类共享助手），导致 overlay 的 `check_local_permission` Projected-DAC 块（`permission.rs:193-260`）不得不整段内联镜像 VFS 算法，构成 dry 漂移隐患。经 user 决定：**本波不修改 VFS 接口**，overlay 侧仅以注释 TODO 标注镜像关系与未来提取计划；**该缺口仍在 VFS 侧**，待 VFS 提供共享 DAC 求值助手后消除镜像（TODO 触发条件）。同类 VFS 依赖：D25 的 scoped credential-switch API（P1-19）已在 `policy.rs:184/191` TODO 与 `#[expect(dead_code)]` 中记录。
+- **C3 派发决定（user 指示）**：客观代码行数少（约 20–40 行逻辑 + 注释），**不拆分多 Creator，单 Creator 承载 C3 全部 5 项**（D9 D14 D15 D19 D25）——拆多轮的目的本是控制上下文长度，行数少则无必要。仍走完整流程：单 Creator → Checker 容器编译门 → Reviewer 单独验收（Reviewer 须核对 D15/D25 的 TODO 注释是否确实写入）。
+- **执行范围（已确认决策）**：D14 按 spec 改；D19 get→MAY_READ、list→MAY_ACCESS + 显式 TODO；D15 纯注释 TODO（不碰 VFS）；D25 纯注释 TODO（不改名不改签名）。写集 = `metadata_security/{permission,xattr}.rs`、`dir/mod.rs`、`mount/policy.rs`（仅注释）。
