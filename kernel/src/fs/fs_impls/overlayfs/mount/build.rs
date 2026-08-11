@@ -22,10 +22,10 @@
 //! 3. validate the upper/workdir pair structurally and probe instance
 //!    stability (`UpperWorkdirClaim::validate_pair` +
 //!    `verify_inode_instance_stability`);
-//! 4. compute the policy draft — the creator-credential snapshot, the
-//!    effective read-only state, and the write-access accounting (writable
-//!    mounts only) — split across tags 4a-4d because the credential snapshot
-//!    must be declared before the layer stack so it drops last;
+//! 4. compute the policy draft — the creator-credential snapshot and the
+//!    effective read-only state — split across tags 4a-4d because the
+//!    credential snapshot must be declared before the layer stack so it drops
+//!    last;
 //! 5. determine the unified identity (fresh token for effective read-only
 //!    overlays; `UpperWorkdirClaim::determine_identity` reuse-or-generate for
 //!    writable overlays);
@@ -61,9 +61,7 @@ use super::{
     claims::{self, OverlayUuid, UpperWorkdirClaim},
     layers::{self, OverlayLayerStack},
     options::{OverlayMountOptions, UuidMode},
-    policy::{
-        CreatorCredentialPolicy, MountPolicy, UpperFilesystemCapabilities, WriteAccessAccounting,
-    },
+    policy::{CreatorCredentialPolicy, MountPolicy, UpperFilesystemCapabilities},
     superblock::{MountLifecycle, MountPhase, OverlayFs},
 };
 use crate::{
@@ -141,19 +139,11 @@ impl OverlayFs {
         // capability probe, UUID persistence) run only for genuinely
         // writable overlays: a read-only overlay never prepares a workdir
         // staging workspace, never probes, and never persists, so
-        // `write_access`/`upper_capabilities`/`uuid` all stay `None`.
-        let mut write_access = None;
+        // `upper_capabilities`/`uuid` all stay `None`.
         let mut claims = None;
         let mut upper_capabilities = None;
         let mut uuid = None;
         if let Some(upper) = &layer_stack.upper {
-            // Step 4c (policy draft) — write-access accounting for genuinely
-            // writable mounts (`write_access` is `Some` iff
-            // `is_effective_read_only` is false).
-            if !is_effective_read_only {
-                write_access = Some(WriteAccessAccounting::new(upper.fs.clone()));
-            }
-
             // The parse invariant guarantees both option strings are present
             // for an upper-backed overlay; the conversions below are defensive
             // (no `.unwrap()`/`.expect()` in production paths).
@@ -174,6 +164,38 @@ impl OverlayFs {
             let upper_path = layers::resolve_root_path(fs_creation_ctx, upper_dir)?;
             let workdir_path = layers::resolve_root_path(fs_creation_ctx, work_dir)?;
             UpperWorkdirClaim::validate_pair(&upper_path, &workdir_path)?;
+            // D24 — lower/workdir overlap validation (the workdir is not a
+            // layer, so `assemble`'s upper+lowers pairwise check cannot cover
+            // it; the same `layers::is_same_or_descendant` predicate and the
+            // same identity checks are reused here). A workdir that is
+            // identical to or an ancestor/descendant of a lower layer root
+            // would place the staging workspace inside the lower tree —
+            // `prepare_workdir` would then write into the lower layers — so
+            // it is rejected with `EINVAL` (Linux
+            // `ovl_check_overlapping_layers` parity).
+            let workdir_dentry = workdir_path.dentry();
+            let workdir_name = workdir_dentry.path_name();
+            for lower in &layer_stack.lowers {
+                let lower_path = lower.root_path.upgrade()?;
+                let lower_dentry = lower_path.dentry();
+                let lower_name = lower_dentry.path_name();
+                if Arc::ptr_eq(lower_dentry, workdir_dentry)
+                    || Arc::ptr_eq(&lower.root_inode, workdir_path.inode())
+                {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "workdir must be distinct from every lower layer root"
+                    );
+                }
+                if layers::is_same_or_descendant(&workdir_name, &lower_name)
+                    || layers::is_same_or_descendant(&lower_name, &workdir_name)
+                {
+                    return_errno_with_message!(
+                        Errno::EINVAL,
+                        "workdir must not be an ancestor or descendant of a lower layer root"
+                    );
+                }
+            }
             claims::verify_inode_instance_stability(fs_creation_ctx, upper_dir, &upper.root_inode)?;
             claims::verify_inode_instance_stability(
                 fs_creation_ctx,
@@ -264,7 +286,6 @@ impl OverlayFs {
             &options,
             uuid,
             upper_capabilities,
-            write_access,
         );
 
         // Step 10a — projection construction wiring: the extended

@@ -5,9 +5,25 @@
 //! This module resolves the real `upperdir`/`lowerdir` roots into pinned
 //! [`OverlayLayer`]s and freezes them into an immutable [`OverlayLayerStack`].
 //! It owns layer-root resolution, layer ordering, the per-unique-underlying-
-//! superblock `fsid` assignment. The stack is constructed once by
+//! superblock `fsid` assignment, and the layer-root overlap validation
+//! (D24). The stack is constructed once by
 //! [`OverlayLayerStack::assemble`] during `OverlayFs::new` and is immutable
 //! afterwards for the mount lifetime; sibling modules read it only.
+//!
+//! Lower-layer writability boundary (D23, downgraded wording): the overlay
+//! itself never writes the lower layers. The guarantee holds in two parts —
+//! for non-`default_permissions` mounts it holds before any C1-C11 batch
+//! lands (mutating paths promote to the upper first); for
+//! `default_permissions` mounts it is completed by the C3(D14)
+//! permission-boundary fix, until which that configuration carries the
+//! documented D14 defect. External concurrent modification of the lower
+//! layers is an unsupported operation (documented): the projection and
+//! identity logic rely on the layer stack being stable for the mount
+//! lifetime, and an external lower writer can corrupt the visible merge
+//! (e.g. the `refresh_impure_marker` check-use race). The mount boundary
+//! therefore rejects the one truly mountable corruption form — lower/
+//! upper/workdir/lower-root overlap (D24) — while read-write lower backends
+//! remain accepted (Linux overlayfs parity).
 
 use device_id::DeviceId;
 
@@ -25,12 +41,12 @@ use crate::{
 /// filesystem context.
 ///
 /// This is the single shared path-resolution helper of the mount module:
-/// [`OverlayLayer::resolve`], the sibling `build.rs` upper/workdir
-/// resolution, and the `claims.rs` instance-stability probe all go through
-/// this helper instead of each re-implementing the
-/// `FsPath::from_fd_at(AT_FDCWD, …)` +
+/// the [`OverlayLayerStack::assemble`] layer-root resolution, the sibling
+/// `build.rs` upper/workdir resolution, and the `claims.rs`
+/// instance-stability probe all go through this helper instead of each
+/// re-implementing the `FsPath::from_fd_at(AT_FDCWD, …)` +
 /// `resolver().read().lookup_no_follow(…)` sequence (the exact logic is
-/// required at three sites within this module). Intermediate symlink
+/// required at multiple sites within this module). Intermediate symlink
 /// components are followed; the final component is not (mount-time roots are
 /// the literal resolved directories).
 pub(super) fn resolve_root_path(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Path> {
@@ -150,36 +166,115 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayer {
     /// Underlying filesystem identity of the layer root.
     pub(in crate::fs::fs_impls::overlayfs) fs: Arc<dyn FileSystem>,
     /// Per-unique-underlying-superblock identifier assigned at assembly.
+    ///
+    /// Immutable after construction: [`OverlayLayerStack::assemble`] resolves
+    /// every layer root first, computes the final identifier from the unique
+    /// underlying filesystem instances, and only then constructs the layer
+    /// with its final value — no placeholder `fsid` state is ever published
+    /// and no post-construction `&mut` rewrite exists.
     pub(in crate::fs::fs_impls::overlayfs) fsid: u64,
     /// `st_dev` of the layer root, used for same-filesystem comparisons.
     pub(in crate::fs::fs_impls::overlayfs) container_dev_id: DeviceId,
 }
 
 impl OverlayLayer {
-    /// Resolves `raw_path` into a pinned overlay layer root.
+    /// Resolves `raw_path` into the pinned layer-root parts.
     ///
-    /// The path is resolved with `lookup_no_follow` in the mounting task's
-    /// filesystem context, so a missing path surfaces the resolver's `ENOENT`
-    /// and a non-directory root fails with `ENOTDIR`. The resolved inode and
-    /// its filesystem are pinned for the mount lifetime; the resolved `Path`
-    /// itself is downgraded into the layer-root anchor [`RealPath`]
-    /// (`root_path`) so sibling modules derive every real-object path from
-    /// the mount-time dentry layer. `fsid` is a placeholder here;
-    /// [`OverlayLayerStack::assemble`] assigns
-    /// the real per-unique-underlying-superblock identifier afterwards.
-    pub(super) fn resolve(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Self> {
+    /// The two-phase assembly contract (D22): [`OverlayLayerStack::assemble`]
+    /// resolves every raw path into its parts `(root_path, root_inode, fs,
+    /// container_dev_id)` first, computes the per-unique-underlying-superblock
+    /// `fsid` mapping from those parts, and only then constructs the final
+    /// [`OverlayLayer`]s with their final identifiers. This resolution phase
+    /// is the shared upper/lower construction step: it resolves with
+    /// `lookup_no_follow` in the mounting task's filesystem context (a
+    /// missing path surfaces the resolver's `ENOENT` and a non-directory root
+    /// fails with `ENOTDIR`), pins the resolved inode and filesystem for the
+    /// mount lifetime, and downgrades the resolved `Path` into the
+    /// layer-root anchor [`RealPath`] (`root_path`).
+    fn resolve_parts(
+        fs_creation_ctx: &FsCreationCtx,
+        raw_path: &str,
+    ) -> Result<(RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId)> {
         let path = resolve_root_path(fs_creation_ctx, raw_path)?;
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
-        Ok(Self {
-            root_path: RealPath::from_path(&path),
-            root_inode: path.inode().clone(),
-            fs: path.fs(),
-            fsid: 0,
-            container_dev_id: path.metadata()?.container_dev_id,
-        })
+        Ok((
+            RealPath::from_path(&path),
+            path.inode().clone(),
+            path.fs(),
+            path.metadata()?.container_dev_id,
+        ))
     }
+
+    /// Rejects an overlap between `new` and every already-assembled layer
+    /// root in `others` (D24, Linux `ovl_check_overlapping_layers` parity).
+    ///
+    /// Two roots overlap when they resolve to the same directory — either the
+    /// same dentry object or the same inode object (two spellings of the same
+    /// physical directory, e.g. a symlink or bind-mount alias; the inode
+    /// identity is instance-stable for pinned roots) — or when one is an
+    /// ancestor/descendant of the other in the resolved hierarchy (the
+    /// `path_name()` prefix discipline shared with
+    /// [`super::claims::UpperWorkdirClaim::validate_pair`] through
+    /// [`is_same_or_descendant`]). Violations return `EINVAL`. Only the layer
+    /// roots themselves are compared, so legal nested subdirectories (a lower
+    /// tree that merely contains the upper's parent directory, the normal
+    /// deployment shape) are never rejected. The workdir is not a layer and
+    /// is covered by the same predicate through the sibling `build.rs` hook.
+    fn validate_layer_overlap(new: &OverlayLayer, others: &[&OverlayLayer]) -> Result<()> {
+        let new_path = new.root_path.upgrade()?;
+        let new_dentry = new_path.dentry();
+        let new_name = new_dentry.path_name();
+        for other in others {
+            let other_path = other.root_path.upgrade()?;
+            let other_dentry = other_path.dentry();
+            let other_name = other_dentry.path_name();
+            if Arc::ptr_eq(new_dentry, other_dentry)
+                || Arc::ptr_eq(&new.root_inode, &other.root_inode)
+            {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "overlay layer roots must be distinct directories"
+                );
+            }
+            if is_same_or_descendant(&other_name, &new_name)
+                || is_same_or_descendant(&new_name, &other_name)
+            {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "overlay layer roots must not be each other's ancestor or descendant"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Returns whether `candidate` is the same directory as `ancestor` or a
+/// descendant of it in the resolved hierarchy.
+///
+/// The `path_name()` overlap discipline shared by the upper/workdir
+/// validation ([`super::claims::UpperWorkdirClaim::validate_pair`]) and the
+/// layer/workdir overlap validation ([`OverlayLayer::validate_layer_overlap`]
+/// plus the `build.rs` workdir hook). The absolute dentry `path_name()` is
+/// the only `pub(in crate::fs)` dentry surface usable from the mount tree;
+/// both paths are resolved with `lookup_no_follow` (which follows
+/// intermediate symlink components), so these names reflect the resolved
+/// hierarchy: symlink aliases of the same tree canonicalize to the same
+/// name, and exact aliases are additionally rejected by the inode-identity
+/// check at each call site. The remaining exotic case (ancestor/descendant
+/// directories reached only through distinct dentry/inode objects) is a
+/// known limitation — there is no VFS canonicalize API.
+pub(super) fn is_same_or_descendant(candidate: &str, ancestor: &str) -> bool {
+    if ancestor == "/" {
+        // The filesystem root is an ancestor of every dentry.
+        return true;
+    }
+    candidate == ancestor
+        || candidate
+            .strip_prefix(ancestor)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 impl OverlayLayerStack {
@@ -192,8 +287,18 @@ impl OverlayLayerStack {
     /// `FsFlags::RDONLY` and the overlay itself was not forced read-only;
     /// `is_forced_read_only` is the already-parsed option value fed from
     /// `OverlayMountOptions`. Every layer root is resolved through
-    /// [`OverlayLayer::resolve`] and one `fsid` is assigned per unique
+    /// [`OverlayLayer::resolve_parts`] and one `fsid` is assigned per unique
     /// underlying filesystem instance, deduplicated at assembly time.
+    ///
+    /// Two-phase construction (D22): all raw paths are resolved into their
+    /// pinned parts first, the unique-filesystem `fsid` mapping is computed
+    /// from those parts, and only then are the final [`OverlayLayer`]s
+    /// constructed with their final identifiers — no placeholder `fsid`
+    /// state is ever published, so the published fields are immutable after
+    /// construction. The overlap validation (D24) runs after construction
+    /// and before the stack is returned: the upper (when present) and every
+    /// lower pair must be distinct directories that are neither each
+    /// other's ancestor nor descendant.
     ///
     /// Non-empty lower layers are enforced at this checked constructor: an
     /// empty `lower_dirs` is rejected with `EINVAL` instead of being admitted
@@ -204,18 +309,17 @@ impl OverlayLayerStack {
         lower_dirs: Vec<String>,
         is_forced_read_only: bool,
     ) -> Result<Self> {
-        let mut upper = match upper_dir {
-            Some(raw_path) => {
-                let layer = OverlayLayer::resolve(fs_creation_ctx, &raw_path)?;
-                // A writable overlay cannot be served by a read-only upper
-                // backend unless the overlay itself was forced read-only.
-                if !is_forced_read_only && layer.fs.flags().contains(FsFlags::RDONLY) {
-                    return_errno_with_message!(Errno::EROFS, "the upper filesystem is read-only");
-                }
-                Some(layer)
+        let mut upper_parts = None;
+        if let Some(raw_path) = upper_dir {
+            let (root_path, root_inode, fs, container_dev_id) =
+                OverlayLayer::resolve_parts(fs_creation_ctx, &raw_path)?;
+            // A writable overlay cannot be served by a read-only upper
+            // backend unless the overlay itself was forced read-only.
+            if !is_forced_read_only && fs.flags().contains(FsFlags::RDONLY) {
+                return_errno_with_message!(Errno::EROFS, "the upper filesystem is read-only");
             }
-            None => None,
-        };
+            upper_parts = Some((root_path, root_inode, fs, container_dev_id));
+        }
 
         // Defensive structural rejection of the illegal empty state:
         // `OverlayMountOptions::parse` guarantees a non-empty `lowerdir`, but
@@ -227,10 +331,11 @@ impl OverlayLayerStack {
                 "at least one lower layer is required to assemble the layer stack"
             );
         }
-        let mut lowers = Vec::with_capacity(lower_dirs.len());
-        for raw_path in lower_dirs {
-            lowers.push(OverlayLayer::resolve(fs_creation_ctx, &raw_path)?);
-        }
+        let lower_parts: Vec<(RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId)> =
+            lower_dirs
+                .iter()
+                .map(|raw_path| OverlayLayer::resolve_parts(fs_creation_ctx, raw_path))
+                .collect::<Result<_>>()?;
 
         // Assign one `fsid` per unique underlying superblock: layers pinned
         // on the same underlying filesystem instance share a single
@@ -251,11 +356,40 @@ impl OverlayLayerStack {
                 (unique_fses.len() - 1) as u64
             }
         };
-        if let Some(upper_layer) = &mut upper {
-            upper_layer.fsid = fsid_of_fn(&upper_layer.fs);
-        }
-        for lower_layer in &mut lowers {
-            lower_layer.fsid = fsid_of_fn(&lower_layer.fs);
+
+        // Construct the final layers with their final `fsid` (upper first
+        // when present, then lowers topmost-first); the `fsid` field is
+        // immutable after this construction (no `&mut` rewrite exists).
+        let upper = upper_parts.map(|(root_path, root_inode, fs, container_dev_id)| {
+            let fsid = fsid_of_fn(&fs);
+            OverlayLayer {
+                root_path,
+                root_inode,
+                fs,
+                fsid,
+                container_dev_id,
+            }
+        });
+        let lowers = lower_parts
+            .into_iter()
+            .map(|(root_path, root_inode, fs, container_dev_id)| {
+                let fsid = fsid_of_fn(&fs);
+                OverlayLayer {
+                    root_path,
+                    root_inode,
+                    fs,
+                    fsid,
+                    container_dev_id,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // D24 — pairwise overlap validation of the upper (when present) and
+        // every lower root. The workdir is not a layer and is covered by the
+        // sibling `build.rs` hook using the same predicate.
+        let all_layers: Vec<&OverlayLayer> = upper.iter().chain(lowers.iter()).collect();
+        for (index, new_layer) in all_layers.iter().enumerate() {
+            OverlayLayer::validate_layer_overlap(new_layer, &all_layers[index + 1..])?;
         }
 
         Ok(Self { upper, lowers })

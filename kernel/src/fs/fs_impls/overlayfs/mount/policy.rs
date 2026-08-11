@@ -4,24 +4,20 @@
 //!
 //! This module owns the immutable [`MountPolicy`] snapshot published by
 //! [`OverlayFs`](super::superblock::OverlayFs), the creator-credential policy
-//! ([`CreatorCredentialPolicy`]), the post-claim upper-filesystem capability
-//! snapshot ([`UpperFilesystemCapabilities`]), and the minimal advisory
-//! write-access accounting ([`WriteAccessAccounting`]/[`WriteAccessGuard`]).
+//! ([`CreatorCredentialPolicy`]), and the post-claim upper-filesystem
+//! capability snapshot ([`UpperFilesystemCapabilities`]).
 //! Sibling modules read these published carriers only; they never re-create,
 //! copy ownership of, or mutate them.
 //!
 //! Construction happens once in `OverlayFs::new` (sibling `build.rs`): the
 //! immutable snapshot is assembled by [`MountPolicy::assemble`] after every
 //! fallible constituent exists (identity from step 5, capabilities from step
-//! 7), and the write-access accounting is created only for genuinely writable
-//! mounts (`write_access` is `Some` iff `is_effective_read_only` is false).
-//!
+//! 7).
 //! `MountPolicy` and `UpperFilesystemCapabilities` are the read-only snapshot
 //! the `projection` tree consumes (`is_effective_read_only`,
 //! `upper_capabilities`, `can_store_private_xattr`, `can_mknod_char`).
 
 use alloc::format;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use aster_rights::ReadDupOp;
 
@@ -34,7 +30,6 @@ use crate::{
         file::{InodeMode, InodeType},
         utils::DirentVisitor,
         vfs::{
-            file_system::{FileSystem, FsFlags},
             inode::{Inode, MknodType},
             path::is_dot_or_dotdot,
             xattr::XattrName,
@@ -83,8 +78,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct MountPolicy {
     uuid: Option<OverlayUuid>,
     /// The stashed creator-credential policy.
     credential_policy: CreatorCredentialPolicy,
-    /// The advisory write-access accounting; `Some` iff writable.
-    write_access: Option<WriteAccessAccounting>,
     /// The post-claim upper-filesystem capability snapshot.
     upper_capabilities: Option<UpperFilesystemCapabilities>,
     /// Whether the mount was created with the `default_permissions` option.
@@ -97,7 +90,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct MountPolicy {
 impl MountPolicy {
     /// Assembles the immutable policy snapshot.
     ///
-    /// The single assembly point; the eight parameters are exactly the
+    /// The single assembly point; the seven parameters are exactly the
     /// published snapshot's constituents. Called once from `OverlayFs::new`
     /// (sibling `build.rs`) after all fallible constituents exist.
     pub(super) fn assemble(
@@ -106,14 +99,12 @@ impl MountPolicy {
         options: &OverlayMountOptions,
         uuid: Option<OverlayUuid>,
         upper_capabilities: Option<UpperFilesystemCapabilities>,
-        write_access: Option<WriteAccessAccounting>,
     ) -> Self {
         Self {
             is_effective_read_only,
             uuid_mode: options.uuid_mode,
             uuid,
             credential_policy,
-            write_access,
             upper_capabilities,
             is_default_permissions: options.is_default_permissions,
             xino_mode: options.xino_mode,
@@ -151,18 +142,6 @@ impl MountPolicy {
     /// Returns the stashed creator-credential policy.
     pub(in crate::fs::fs_impls::overlayfs) fn credential_policy(&self) -> &CreatorCredentialPolicy {
         &self.credential_policy
-    }
-
-    /// Returns the advisory write-access accounting, if this is a writable
-    /// mount.
-    // TODO: Replace this local accounting with VFS writer/freeze protection
-    // around upper-mutating transactions.
-    #[expect(
-        dead_code,
-        reason = "the VFS has no writer/freeze interface for upper mutations"
-    )]
-    pub(super) fn write_access(&self) -> Option<&WriteAccessAccounting> {
-        self.write_access.as_ref()
     }
 
     /// Returns the post-claim upper-filesystem capability snapshot, if this
@@ -352,10 +331,15 @@ impl UpperFilesystemCapabilities {
     /// whiteout char device `0:0`.
     ///
     /// The workdir staging workspace hosts a uniquely-named temporary char
-    /// device `0:0`;
-    /// `EOPNOTSUPP` means no classic-whiteout form. The temp is removed inline
-    /// on success; only an `unlink` failure after a successful `mknod` can
-    /// leave residue, which fails the mount closed.
+    /// device `0:0`. `EOPNOTSUPP` (no classic-whiteout form) and the
+    /// permission-class denials `EPERM`/`EACCES` (e.g. a user namespace
+    /// without `CAP_MKNOD`, or a host FUSE policy refusing device nodes) all
+    /// mean "this backend offers no classic-whiteout form to this mount" and
+    /// map to `Ok(false)`, so the whiteout gate falls back to the private-
+    /// xattr whiteout form; genuine I/O errors still propagate and fail the
+    /// mount. The temp is removed inline on success; only an `unlink` failure
+    /// after a successful `mknod` can leave residue, which fails the mount
+    /// closed.
     fn probe_mknod_char(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
         let probe_name = unique_temp_name(CHAR_DEVICE_PROBE_PREFIX);
         match workspace_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
@@ -363,7 +347,14 @@ impl UpperFilesystemCapabilities {
                 workspace_inode.unlink(&probe_name)?;
                 Ok(true)
             }
-            Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(false),
+            Err(err)
+                if matches!(
+                    err.error(),
+                    Errno::EOPNOTSUPP | Errno::EPERM | Errno::EACCES
+                ) =>
+            {
+                Ok(false)
+            }
             Err(err) => Err(err),
         }
     }
@@ -413,98 +404,5 @@ impl DirentVisitor for DTypeProbeVisitor {
             self.saw_unknown_non_dot = true;
         }
         Ok(())
-    }
-}
-
-/// The minimal advisory write-access accounting of a writable overlay.
-///
-/// A saturating mount-local user counter with an RAII guard
-/// ([`WriteAccessGuard`]); the counter never gates underlying I/O and is not
-/// a second ownership source. Minimal because Asterinas has no VFS superblock
-/// freeze/`want_write` API.
-// TODO: Replace this provisional counter with VFS writer/freeze protection,
-// then acquire it at each upper-mutating transaction boundary.
-#[derive(Debug)]
-pub(super) struct WriteAccessAccounting {
-    /// The accounted upper filesystem (defensive `EROFS` gate).
-    upper_fs: Arc<dyn FileSystem>,
-    /// The saturating active-user count (never wraps).
-    active_write_users: AtomicU64,
-}
-
-impl WriteAccessAccounting {
-    /// Creates the accounting for a writable upper filesystem.
-    ///
-    /// Called once from `OverlayFs::new` for genuinely writable mounts only
-    /// (`write_access` is `Some` iff `is_effective_read_only` is false).
-    pub(super) fn new(upper_fs: Arc<dyn FileSystem>) -> Self {
-        Self {
-            upper_fs,
-            active_write_users: AtomicU64::new(0),
-        }
-    }
-
-    /// Takes one advisory write-access user slot.
-    ///
-    /// Defensively fails with `EROFS` when the accounted upper now reports
-    /// read-only; otherwise the saturating counter is incremented and the RAII
-    /// guard returned. The increment is a non-blocking single-word atomic
-    /// update that never wraps.
-    #[expect(
-        dead_code,
-        reason = "the VFS has no writer/freeze interface for upper mutations"
-    )]
-    pub(super) fn try_get_write_access(&self) -> Result<WriteAccessGuard<'_>> {
-        if self.upper_fs.flags().contains(FsFlags::RDONLY) {
-            return Err(Error::new(Errno::EROFS));
-        }
-        let _ = self
-            .active_write_users
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
-        Ok(WriteAccessGuard { accounting: self })
-    }
-
-    /// Reports whether any write-access user is currently counted.
-    #[expect(
-        dead_code,
-        reason = "the VFS has no writer/freeze interface for upper mutations"
-    )]
-    pub(super) fn has_active_write_users(&self) -> bool {
-        self.active_write_users.load(Ordering::Relaxed) > 0
-    }
-
-    /// Returns the current advisory active-user count.
-    #[expect(
-        dead_code,
-        reason = "the VFS has no writer/freeze interface for upper mutations"
-    )]
-    pub(super) fn active_write_user_count(&self) -> u64 {
-        self.active_write_users.load(Ordering::Relaxed)
-    }
-}
-
-/// A short-lived RAII borrow of one advisory write-access slot.
-///
-/// `Drop` decrements the saturating counter; the guard never gates underlying
-/// I/O.
-#[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "the VFS has no writer/freeze interface for upper mutations"
-)]
-pub(super) struct WriteAccessGuard<'a> {
-    /// The accounting this guard borrows; `Drop` decrements it.
-    accounting: &'a WriteAccessAccounting,
-}
-
-impl Drop for WriteAccessGuard<'_> {
-    fn drop(&mut self) {
-        let _ = self.accounting.active_write_users.try_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |count| Some(count.saturating_sub(1)),
-        );
     }
 }

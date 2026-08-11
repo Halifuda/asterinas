@@ -260,10 +260,15 @@ impl OverlayXattrPolicy {
     /// survivors to `list_writer`.
     ///
     /// Returns the number of bytes written (each survivor is written with its
-    /// trailing null byte). The intermediate raw list is bounded by
-    /// `XATTR_LIST_MAX_LEN`: the underlying list always fits, so an oversized
-    /// real list surfaces as the underlying `ERANGE` before any survivor is
-    /// written. Invariant-preserving filter: a private record
+    /// trailing null byte); with a zero-capacity `list_writer` (the
+    /// `listxattr(path, NULL, 0)` size probe) no byte is written and the
+    /// returned length is the total filtered size. A writer that cannot fit
+    /// the next survivor returns `ERANGE` (the caller's buffer is too small);
+    /// the probe contract requires the zero-capacity call to succeed with the
+    /// required length, never `EINVAL`. The intermediate raw list is bounded
+    /// by `XATTR_LIST_MAX_LEN`: the underlying list always fits, so an
+    /// oversized real list surfaces as the underlying `ERANGE` before any
+    /// survivor is written. Invariant-preserving filter: a private record
     /// (`Private`/`Escaped`/`Reserved`) never leaks through the listing. A
     /// non-UTF-8 name cannot be an overlay-private record (all private names
     /// are ASCII), so it is forwarded unchanged rather than failing or
@@ -284,9 +289,23 @@ impl OverlayXattrPolicy {
             if is_private {
                 continue;
             }
+            let entry_len = name_bytes.len() + 1;
+            if list_writer.avail() == 0 {
+                // Size probe: accumulate the required length without writing
+                // (the caller's `listxattr(path, NULL, 0)` probe must return
+                // the total filtered size, not fail).
+                bytes_written += entry_len;
+                continue;
+            }
+            if entry_len > list_writer.avail() {
+                return_errno_with_message!(
+                    Errno::ERANGE,
+                    "the xattr list buffer is too small for the filtered list"
+                );
+            }
             list_writer.write_fallible(&mut VmReader::from(name_bytes))?;
             list_writer.write_val(&0u8)?;
-            bytes_written += name_bytes.len() + 1;
+            bytes_written += entry_len;
         }
         Ok(bytes_written)
     }
@@ -298,7 +317,14 @@ impl OverlayXattrPolicy {
     /// Enumerates the `User`, `Trusted`, and `Security` namespaces — the
     /// `System` namespace (`system.posix_acl_*`) is the ACL insertion point
     /// and stays excluded on every copy path — and filters overlay-private
-    /// names through [`OverlayXattrPolicy::is_private`]. The clear-empty
+    /// names through [`OverlayXattrPolicy::is_private`]. Every listed name is
+    /// additionally namespace-filtered after parsing (a non-filtering backend
+    /// can list names of other namespaces under one probe, e.g. `user.*`
+    /// under a `Trusted` list or `system.posix_acl_*` under a `Security`
+    /// list; such cross-namespace names are skipped, so `System` stays
+    /// excluded and no duplicate is copied), and an unparseable name (an
+    /// unknown namespace such as `lustre.*`) is skipped with a warning
+    /// instead of hard-failing the copy. The clear-empty
     /// recipe writes the temp's own `trusted.overlay.opaque` marker
     /// explicitly, so copying the displaced upper dir's marker would
     /// double-mark and is excluded by the same rule.
@@ -341,8 +367,10 @@ impl OverlayXattrPolicy {
     /// preserves these xattrs. The strict copy-up policy refuses the silent
     /// loss by propagating the denial — Linux's successful non-owner copy
     /// requires the credential-swap VFS facility; its landing is the full
-    /// closure. Genuine xattr errors (an invalid name in the copied list)
-    /// still hard-fail and abort the exchange before the rename.
+    /// closure. Genuine xattr errors still hard-fail and abort the exchange
+    /// before the rename; an unparseable list entry (a non-UTF-8 or
+    /// unknown-namespace name) is skipped with a warning — it cannot be
+    /// represented as a VFS `XattrName` — never hard-failed.
     pub(in crate::fs::fs_impls::overlayfs) fn copy_eligible_xattrs(
         &self,
         source: &Arc<dyn Inode>,
@@ -390,10 +418,28 @@ impl OverlayXattrPolicy {
                 // The name is validated exactly once per copied xattr and the
                 // validated `XattrName` is threaded through the value read and
                 // the temp write — no re-validation of `full_name` and no
-                // duplicated EINVAL error literal.
-                let name = XattrName::try_from_full_name(full_name).ok_or_else(|| {
-                    Error::with_message(Errno::EINVAL, "invalid xattr name in the copied list")
-                })?;
+                // duplicated EINVAL error literal. An unparseable list entry
+                // (an unknown namespace such as `lustre.*`) cannot be
+                // represented as a VFS `XattrName`; it is skipped with a
+                // warning (the "System/lustre excluded" copy intent) instead
+                // of hard-failing the whole copy.
+                let Some(name) = XattrName::try_from_full_name(full_name) else {
+                    warn!(
+                        "overlay xattr copy: skipping unparseable xattr name: {}",
+                        full_name
+                    );
+                    continue;
+                };
+                // Explicit namespace filter: a non-filtering backend may list
+                // names of other namespaces under this namespace's probe (e.g.
+                // `user.*` under a `Trusted` list, or `system.posix_acl_*`
+                // under a `Security` list). Only names whose parsed namespace
+                // matches the probed one are copied — `System` stays excluded
+                // on every copy path and no cross-namespace duplicate is
+                // copied.
+                if name.namespace() != namespace {
+                    continue;
+                }
                 // Source value-read failures: the documented list/read race
                 // (`ENODATA`/`ERANGE` — value removed or resized between the
                 // probe and the materialized read) degrades to "skip this
@@ -466,8 +512,9 @@ impl OverlayXattrPolicy {
     /// `Copy` and carries no `Clone` (VFS surface), so each `get_xattr`
     /// call takes its own owned view; both views are re-borrowed from the
     /// caller's already-validated name (validated exactly once in the copy
-    /// loop), so the helper carries no validation and no error site of its own
-    /// — the single `ok_or_else` lives in the copy loop. Invoked once per
+    /// loop; an unparseable list entry was already skipped with a warning
+    /// there), so the helper carries no validation and no error site of its
+    /// own. Invoked once per
     /// listed name (multiple times per copy call) from
     /// [`OverlayXattrPolicy::copy_eligible_xattrs`].
     fn read_xattr_value(source: &Arc<dyn Inode>, name: &XattrName<'_>) -> Result<Vec<u8>> {
@@ -576,6 +623,21 @@ impl OverlayInode {
     /// whiteout residue is never counted). Callers invoke it best-effort
     /// (warn-and-continue) after the underlying mutation has already
     /// committed, matching Linux `ovl_cache_get_impure`.
+    ///
+    /// Immutable-lower premise (D23 boundary): the clear is valid only on a
+    /// lower stack the overlay itself never writes — the guarantee holds in
+    /// two parts: for non-`default_permissions` mounts it holds before any
+    /// C1-C11 batch lands; for `default_permissions` mounts it is completed
+    /// by the C3(D14) permission-boundary fix, until which that
+    /// configuration carries the documented D14 defect. External concurrent
+    /// modification of the lower layers is an unsupported operation
+    /// (documented). The residual check-use race — an external lower writer
+    /// adding content between the children scan and the clear — is a known
+    /// limitation recorded here: no overlay lock can close it (the writer is
+    /// outside the kernel), and the defensive re-check (clear then re-read
+    /// and re-scan) would only narrow, never close, the window while adding
+    /// a second scan and marker write on a cold path, so it is deliberately
+    /// not implemented.
     pub(in crate::fs::fs_impls::overlayfs) fn refresh_impure_marker(&self) -> Result<()> {
         // Upper-present gate: the marker lives only on real upper
         // directories; a lower-only directory cannot carry one (defensive

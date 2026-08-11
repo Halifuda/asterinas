@@ -281,21 +281,13 @@ impl UpperWorkdirClaim {
         // additionally rejected by the inode-identity check above. The
         // remaining exotic case (ancestor/descendant directories reached only
         // through distinct dentry/inode objects) is a known limitation — there
-        // is no VFS canonicalize API.
-        let is_same_or_descendant_fn = |candidate: &str, ancestor: &str| -> bool {
-            if ancestor == "/" {
-                // The filesystem root is an ancestor of every dentry.
-                return true;
-            }
-            candidate == ancestor
-                || candidate
-                    .strip_prefix(ancestor)
-                    .is_some_and(|rest| rest.starts_with('/'))
-        };
+        // is no VFS canonicalize API. The predicate itself is the shared
+        // `layers::is_same_or_descendant` helper, reused by the layer-root
+        // overlap validation (`layers.rs`) and the `build.rs` workdir hook.
         let upper_name = upper.dentry().path_name();
         let workdir_name = workdir.dentry().path_name();
-        if is_same_or_descendant_fn(&workdir_name, &upper_name)
-            || is_same_or_descendant_fn(&upper_name, &workdir_name)
+        if layers::is_same_or_descendant(&workdir_name, &upper_name)
+            || layers::is_same_or_descendant(&upper_name, &workdir_name)
         {
             return_errno_with_message!(
                 Errno::EINVAL,
@@ -430,8 +422,22 @@ impl UpperWorkdirClaim {
     /// recursion (Linux `ovl_workdir_cleanup`/`ovl_workdir_cleanup_recurse`
     /// three-level contract).
     fn remove_work_entries(&self, dir: &Arc<dyn Inode>, level: usize) -> Result<()> {
+        // `readdir_at` is a batched interface (the underlying backend returns
+        // one batch per call and a continuation cookie); a single call can
+        // therefore leave residue beyond the first batch, and a later
+        // `rmdir(WORKDIR_NAME)` would surface the underlying `ENOTEMPTY` and
+        // fail the mount. Loop with the returned offset until `Ok(0)` drains
+        // the directory (the same discipline as `probe_d_type` in
+        // `mount/policy.rs` and the standard `InodeHandle::readdir` caller);
+        // the `Vec<String>` visitor appends across batches.
         let mut names = Vec::new();
-        dir.readdir_at(0, &mut names)?;
+        let mut offset = 0;
+        loop {
+            match dir.readdir_at(offset, &mut names)? {
+                0 => break,
+                visited => offset += visited,
+            }
+        }
         names.retain(|name| !is_dot_or_dotdot(name));
         for name in names {
             let child = dir.lookup(&name)?;
@@ -455,20 +461,6 @@ impl UpperWorkdirClaim {
     /// not-effective.
     pub(super) fn persist_identity(&self) -> Result<()> {
         self.identity.persist_on_upper(&self.upper.inode)
-    }
-
-    /// Returns the pinned workdir root inode (the claimed root).
-    ///
-    /// The root is the `InodeClaimGuard` target and stays the claim-protocol
-    /// surface; staging consumers resolve through the workspace accessor
-    /// ([`Self::workdir_workspace`]) instead.
-    #[expect(
-        dead_code,
-        reason = "the workdir-root claim surface is preserved by the claim protocol; \
-                  staging consumers resolve through the workspace accessor"
-    )]
-    pub(in crate::fs::fs_impls::overlayfs) fn workdir_inode(&self) -> &Arc<dyn Inode> {
-        &self.workdir.inode
     }
 
     /// Returns the pinned staging workspace inode.

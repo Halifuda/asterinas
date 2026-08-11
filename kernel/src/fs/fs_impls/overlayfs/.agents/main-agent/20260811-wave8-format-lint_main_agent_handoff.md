@@ -111,3 +111,16 @@
 - **关闭:** Creator A / Checker A / Reviewer A 均已关闭。
 - **提交:** 本 commit（Round A 单独 commit）。
 - **基线更新:** 下一轮 Creator B (C4+C5+C6) 从此 commit 起算。
+
+---
+
+## 3.8 Continuation 2026-08-11 — Creator Round B (C4+C5+C6) ACCEPTED
+
+- **Dispatch (V1 Direct Spawn Lane, no-fork):** Creator B `task_creator_wave8_B_C4C5C6_20260811` (agent Bohr) — packet `subagent-tasks/wave8-full-review/task_creator_wave8_B_C4C5C6_20260811_dispatch.md`; Checker B `task_checker_wave8_B_C4C5C6_20260811` (agent Turing); Reviewer B `task_reviewer_wave8_B_C4C5C6_20260811` (agent Copernicus)。全部按 V1 架构启动。
+- **Creator B 交付:** C4 (D16 D17) + C5 (D18 D22 D23 D24) + C6 (D20 D21 D26 D27) 全部落地，无跳过。write-set 五文件：`metadata_security/xattr.rs`、`mount/{layers,claims,policy,build}.rs` (+334/−227)。容器内 `cargo check -p aster-kernel --target x86_64-unknown-none` exit 0、0 warnings（Creator 自测 + Checker 强制重编译双证据）。
+- **Checker B 编译门:** ACCEPTED。强制重编译证据 `components/wave8-full-review/run_evidence/20260811_checker_c4c5c6_compile/`（warm + fresh 双 log，exit 0，0 warnings）。
+- **Reviewer B 单独验收:** ACCEPT（零直接编辑）。复用纪律逐项通过（`is_same_or_descendant` 三处共用；`resolve_parts` 复用 `resolve_root_path`；D27 删除后无新 accounting 面；无变体复制）。实体 census 独立核对通过（3 新实体全部列出且 Rule 成立）。
+- **非阻塞遗留（已记录，留待统一 doc pass）：** `mount/mod.rs:12` 模块文档仍提及已删的 `WriteAccessAccounting`（反引号散文、无警告，文件不在 write-set）。
+- **关闭:** Creator B / Checker B / Reviewer B 均已关闭。
+- **提交:** 本 commit（Round B 单独 commit）。
+- **基线更新:** 下一轮 Creator C (C8+C9+C10) 从此 commit 起算。
