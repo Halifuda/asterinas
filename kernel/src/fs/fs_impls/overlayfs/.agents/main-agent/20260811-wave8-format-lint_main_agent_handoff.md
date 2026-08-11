@@ -164,5 +164,6 @@
 
 - **触发**：用户指示「家里要下雷雨，先 commit 再 push 一次，然后再工作，免得跳闸（曾跳闸过）」。
 - **checkpoint 内容**：Creator D（task_creator_wave8_D_C3_20260811，agent Boyle）4 文件改动（`metadata_security/{permission,xattr}.rs`、`dir/mod.rs`、`mount/policy.rs`，125+/66-）+ Checker D 编译门已 ACCEPTED（exit 0 / 0 warnings，强制重编译证据 `run_evidence/20260811_checker_c3_compile/`）+ handoff 决策记录。
-- **状态**：Reviewer D（task_reviewer_wave8_D_C3_20260811，agent Socrates）**验收进行中**，尚未 ACCEPT/REJECT。本 checkpoint commit 不代表 Round D 正式接受；Reviewer 结论出来后按结果继续（ACCEPT → 关闭 subagent + 收尾；REJECT → 原样发回 Creator D 修复后复验）。
+- **状态**：Reviewer D（task_reviewer_wave8_D_C3_20260811，agent Socrates）**已 ACCEPT**（2026-08-11；TODO 落点三项全部核对通过：D19 xattr.rs:764-768、D15 permission.rs:208-213、D25 policy.rs:207-209；复用纪律/census/line-level 全过；2 处 comment-only 文档同步已随 checkpoint commit 52e2a12f1 落地并 push）。Round D 正式接受。
+- **收尾**：Creator D / Checker D / Reviewer D 均已关闭；checkpoint commit 52e2a12f1 已含 Round D 全部代码 + Reviewer 注释同步（git add 时已在工作树），已 push 到 origin/codex/overlayfs-refactor；本小节为接受记录收尾。
 - **push**：分支 `codex/overlayfs-refactor` push 到 origin（防跳闸后可从远端恢复）。
