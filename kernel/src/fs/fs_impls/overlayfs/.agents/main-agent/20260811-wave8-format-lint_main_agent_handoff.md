@@ -142,3 +142,14 @@
 - 已落地 D 项（共 21）：D1 D2 D3 D4 D5 D6 D7 D8 D10 D11 D16 D17 D18 D20 D21 D22 D23 D24 D26 D27 D33。C11 (D34 D35) 与机械批 34 项已随 5d115b4ad 落地。
 - **未执行（按 user 指示暂缓）：Creator D = C3（D9 D14 D15 D19 D25，含 VFS fs_apis/inode.rs，需授权标注）；Creator E = C7（D12 D13 D28 D29 D30 D31 D32）。**
 - **遗留事项（后续）：** ① `mount/mod.rs:12` 模块文档仍提及已删 `WriteAccessAccounting`（反引号散文，无警告）——建议并入统一 doc pass；② Wave8 运行时回归（Wave7 推迟的 20 例可调度矩阵，overlay/029 首例）待全部修复批次后调度；C7 的 D31/D30 需 overlay/030 类身份用例；③ 全 CI 门复验 `make check`（可选）；④ exFAT 格式化（可选，另开一轮）。
+
+## 4.3 Continuation 2026-08-11 — Creator D (C3) 决策记录（已确认，暂不执行）
+
+> User 逐项确认（2026-08-11）：D14 按 Designer spec 原案修改；D19 的 list 门采用方案 B（MAY_ACCESS + 显式 TODO 标注，保持 spec 原方案）；D15 降级为注释 TODO（不碰 VFS，不提取 check_mode_dac）；D25 降级为注释 TODO（不改名不改签名）。**本决策仅记录，Creator D 暂不派发，待 user 指示。**
+
+- **D14**：按 spec 原案。`check_permission`（permission.rs:80-91）Mutating 分支无条件 `ensure_upper_authority()`（不再随 `default_permissions` 跳过）；`check_real_permission`（279-289）移除其内幂等冗余的 `ensure_upper_authority()`，只保留 creator-credential 下 real 复检；模块/方法文档同步（「提升独立于权限跳过」）。已确认：对已 upper-backed 对象是幂等快速路径（trigger.rs Step 2），Linux 对已 copy-up 文件保留 upper 副本、不回滚删除。
+- **D19**：`get_xattr_impl` 准入 → `MAY_READ`（实际生效，read 位被 DAC 求值）；`list_xattr_impl` 准入 → `MAY_ACCESS`（方案 B：保持 spec 原语义位，与底层 ext2/ramfs 自求值一致），并在调用点补显式 TODO 注明「当前 DAC 不求值 MAY_ACCESS，此门为空操作，待 DAC 支持 MAY_ACCESS 后生效；信息泄露由 get 的 MAY_READ 门 + 底层 list 自求值共同约束」。
+- **D15**：**降级为注释 TODO**。不修改 `kernel/src/fs/vfs/fs_apis/inode.rs`，不提取 `check_mode_dac`；仅在 permission.rs Projected-DAC 块（193-260）注释标注「本块是 VFS 默认 Inode::check_permission（inode.rs:573-640）的镜像；VFS 接口稳定后应提取共享 check_mode_dac 助手消除漂移（TODO）」。write-set 不再含 VFS 文件。
+- **D25**：**降级为注释 TODO**。不改方法名、不改签名、不改行为；`with_creator_credentials_fn` 方法 doc 补显式 TODO（「currently a passthrough — callers must not rely on it for permission decisions；待 VFS scoped credential-swap API 落地后恢复作用域切换（P1-19）」）。`snapshot()`/`source()` 上的既有 TODO（policy.rs:184/191）与 `#[expect(dead_code)]` 保留。
+- **C3 最终形态（写集）**：逻辑代码改动集中在 `metadata_security/permission.rs`（D14）、`metadata_security/xattr.rs`（D19 两行 + 注释）、`dir/mod.rs`（D9 link 源侧准入补强）；`mount/policy.rs` 与 permission.rs DAC 块仅注释（D15/D25）。不再触碰 VFS `fs_apis/inode.rs`。
+- **流程提醒**：C3 为安全核心，spec 建议子步独立切片/独立 Checker；D9 需镜像 base `check_hardlink_source`（非 regular→EPERM；setuid/setgid+group-exec→FOWNER），注意复用既有 `current_task_has_capability`/`InodeMetadata` 判定，不得新增无谓 helper。
