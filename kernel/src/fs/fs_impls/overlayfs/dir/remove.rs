@@ -306,7 +306,9 @@ impl OverlayInode {
         } else {
             None
         };
-        let staged_temp = clear_empty_temp.as_ref().map(|temp| (temp.name(), temp.kind()));
+        let staged_temp = clear_empty_temp
+            .as_ref()
+            .map(|temp| (temp.name(), temp.kind()));
         // The shared recipe scaffold: the commit marker is flipped at each
         // physical upper commit point and the reconcile / pre-publication
         // cleanup classification is owned by `run_recipe`.
@@ -457,9 +459,10 @@ impl OverlayInode {
                          required for the clear-empty directory exchange",
             ));
         }
-        let marker_name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
-        })?;
+        let marker_name =
+            XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
+                Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
+            })?;
         let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
         temp_inode.set_xattr(
             marker_name,
@@ -520,8 +523,7 @@ impl OverlayInode {
             .lookup_child(temp_name)
         {
             Ok(displaced_dentry) => {
-                let displaced_path =
-                    Path::new(workdir_path.mount_node().clone(), displaced_dentry);
+                let displaced_path = Path::new(workdir_path.mount_node().clone(), displaced_dentry);
                 if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&displaced_path) {
                     warn!(
                         "overlay clear-empty: the displaced-directory whiteout \
@@ -533,8 +535,7 @@ impl OverlayInode {
                     warn!(
                         "overlay clear-empty: workdir cleanup of the displaced \
                          directory {:?} failed (residue, never a visible source): {:?}",
-                        temp_name,
-                        cleanup_err
+                        temp_name, cleanup_err
                     );
                 }
             }
@@ -542,8 +543,7 @@ impl OverlayInode {
                 warn!(
                     "overlay clear-empty: re-observation of the displaced \
                      directory {:?} failed (residue, never a visible source): {:?}",
-                    temp_name,
-                    reobserve_err
+                    temp_name, reobserve_err
                 );
             }
         }

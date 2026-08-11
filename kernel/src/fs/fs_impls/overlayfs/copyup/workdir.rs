@@ -194,7 +194,13 @@ impl OverlayFs {
         for _ in 0..MAX_WORKDIR_TEMP_CREATE_ATTEMPTS {
             let name = self.generate_workdir_temp_name(target_name, upper_parent_path);
             match request.create_in(&workdir_path, &name) {
-                Ok(path) => return Ok(WorkdirTemp { name, path, kind: request.kind() }),
+                Ok(path) => {
+                    return Ok(WorkdirTemp {
+                        name,
+                        path,
+                        kind: request.kind(),
+                    });
+                }
                 Err(err) if err.error() == Errno::EEXIST => final_eexist = Some(err),
                 Err(err) => return Err(err),
             }

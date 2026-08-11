@@ -204,3 +204,12 @@
 - **C7 完成 = E1（投影侧 D28 D30 D31 D32 D29，commit 8928e05c1）+ E2（whiteout 侧 D12 D13，本 commit）**。E1 术语/TODO 纪律通过（resolves + TODO(origin-verify) 升级路径；无 D 编号）；E2 术语纪律通过。
 - **wave8 全部修复簇至此完成**：C1 C2 C3 C4 C5 C6 C7 C8 C9 C10 C11 全部落地（含用户决策：C3 的 D15/D25 降级注释 TODO、D19 list=MAY_ACCESS+TODO；C7 的 D31 resolves+TODO、D13 两阶段+helper、D32 最小化、D29 for_lookup_child）。累计 D 项：D1–D35 中 ACCEPT 项全部落地（除 IGNORE 的 D36–D40 死代码项按决策不处理）+ 机械批 34 项 + C11。
 - **遗留事项（后续，非本目标范围）**：① `mount/mod.rs:12` 模块文档提及已删 WriteAccessAccounting（统一 doc pass）；② Wave8 运行时回归（Wave7 推迟的 20 例可调度矩阵，overlay/029 首例；C7 的 D31/D30 需 overlay/030 类身份用例）——由 Checker 角色另行调度；③ 全 CI 门 `make check` 复验（可选）；④ exFAT 格式化（可选，另开一轮）。
+
+## 4.10 Continuation 2026-08-11 — wave8 静态门复跑（overlayfs 范围，rustfmt + clippy）
+
+- **user 指示**：先走 rustfmt 和 clippy；只管 overlayfs，exFAT 等其它部分不管。
+- **rustfmt**（容器内，32 个 overlayfs `.rs` 不含 `.agents`）：exit 0；改动 2 文件纯格式重排（`copyup/workdir.rs` WorkdirTemp 字面量折行、`dir/remove.rs` 三处折行/压缩）。`rustfmt --check` 全范围 exit 0。
+- **clippy**：`cargo clippy -p aster-kernel --target x86_64-unknown-none` 首跑 2 warnings——`mount/layers.rs` 两处 `clippy::type_complexity`（D22 的 4 元组 `(RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId)` 返回与 `Vec<...>` 标注）。
+- **修复**：新增模块私有 type alias `LayerParts`（保持 tuple 形状、不引入载体类型，符合 D22「返回 Designer 命名 4 元组」决策）；`resolve_parts` 返回 `Result<LayerParts>`、`lower_parts: Vec<LayerParts>`。行为零变化。
+- **复验**：plain clippy exit 0、0 warnings；`RUSTFLAGS="-Dwarnings" cargo clippy`（make check 门形式）exit 0；`git diff --check` clean。
+- **提交**：本 commit（3 文件 +29/−20：workdir.rs/remove.rs 格式重排、layers.rs type alias）。

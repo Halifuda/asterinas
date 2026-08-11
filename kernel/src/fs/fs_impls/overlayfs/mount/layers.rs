@@ -49,6 +49,13 @@ use crate::{
 /// required at multiple sites within this module). Intermediate symlink
 /// components are followed; the final component is not (mount-time roots are
 /// the literal resolved directories).
+/// The pinned layer-root parts resolved before the `fsid` assignment.
+///
+/// A 4-tuple keeps the two-phase assembly shape (resolve-then-assign) and
+/// avoids an intermediate carrier type; the tuple is consumed only inside
+/// [`OverlayLayerStack::assemble`] and never crosses a public boundary.
+type LayerParts = (RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId);
+
 pub(super) fn resolve_root_path(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Path> {
     let fs_path = FsPath::from_fd_at(AT_FDCWD, raw_path, EmptyPathStr::Reject)?;
     // Resolve inside a single statement so the `borrow_fs()` `Ref` and the
@@ -191,10 +198,7 @@ impl OverlayLayer {
     /// fails with `ENOTDIR`), pins the resolved inode and filesystem for the
     /// mount lifetime, and downgrades the resolved `Path` into the
     /// layer-root anchor [`RealPath`] (`root_path`).
-    fn resolve_parts(
-        fs_creation_ctx: &FsCreationCtx,
-        raw_path: &str,
-    ) -> Result<(RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId)> {
+    fn resolve_parts(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<LayerParts> {
         let path = resolve_root_path(fs_creation_ctx, raw_path)?;
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
@@ -331,11 +335,10 @@ impl OverlayLayerStack {
                 "at least one lower layer is required to assemble the layer stack"
             );
         }
-        let lower_parts: Vec<(RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId)> =
-            lower_dirs
-                .iter()
-                .map(|raw_path| OverlayLayer::resolve_parts(fs_creation_ctx, raw_path))
-                .collect::<Result<_>>()?;
+        let lower_parts: Vec<LayerParts> = lower_dirs
+            .iter()
+            .map(|raw_path| OverlayLayer::resolve_parts(fs_creation_ctx, raw_path))
+            .collect::<Result<_>>()?;
 
         // Assign one `fsid` per unique underlying superblock: layers pinned
         // on the same underlying filesystem instance share a single
