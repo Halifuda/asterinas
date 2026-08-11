@@ -167,3 +167,15 @@
 - **状态**：Reviewer D（task_reviewer_wave8_D_C3_20260811，agent Socrates）**已 ACCEPT**（2026-08-11；TODO 落点三项全部核对通过：D19 xattr.rs:764-768、D15 permission.rs:208-213、D25 policy.rs:207-209；复用纪律/census/line-level 全过；2 处 comment-only 文档同步已随 checkpoint commit 52e2a12f1 落地并 push）。Round D 正式接受。
 - **收尾**：Creator D / Checker D / Reviewer D 均已关闭；checkpoint commit 52e2a12f1 已含 Round D 全部代码 + Reviewer 注释同步（git add 时已在工作树），已 push 到 origin/codex/overlayfs-refactor；本小节为接受记录收尾。
 - **push**：分支 `codex/overlayfs-refactor` push 到 origin（防跳闸后可从远端恢复）。
+
+## 4.6 Continuation 2026-08-11 — Creator E (C7) 决策记录（user 确认，暂未派发）
+
+> User 确认 5 条判断 + 3 条补充纪律（2026-08-11）。以下为 C7 执行时的权威决策（覆盖 spec 原案相应处）。
+
+- **D31 命名 `resolves`**：确认是有意保守命名（可解析一致性检查，非 `ovl_verify_origin` 的完整验证——VFS 无 file-handle 表面）。实现注释须写明命名理由（`resolves` = 同层保留 lower 的 ino 一致性核对，非 verify）。
+- **D31 TODO（user 补充 1）**：显式 `TODO` 标注与 `ovl_verify_origin` 的差距，并**显式说明「后续 VFS ino→inode / file-handle 解析表面到位后，本检查将升级为 verify」**（写清未来升级路径）。
+- **注释术语纪律（user 补充 2）**：**本 scope（C7 write-set）内所有新增/修改注释不得使用开发阶段内部编号术语（如 D31/D13 这类编号）**，一律用自然语言描述问题与未来路径；其他位置既有 D 编号术语（如 C3 轮已提交的 TODO(D15)/TODO(D19)/TODO(D25)）本次不管。
+- **D13 锁原子性判断**：现有锁**无法**完全原子（① 被扫 upper 物理目录的并发变更可来自绕过 overlay 的直接 upper 修改，不在任何 overlay 锁域内；② overlay 锁契约仅 `DIR -> INODE` 单一嵌套，无 `DIR -> DIR` 父子嵌套先例，引入需 VFS 锁序审计；③ clear-empty 的 displaced 目录在 workdir、无稳定活跃 OverlayInode 可持）。维持 Designer 两阶段安全子集（第一遍全校验、任一非 whiteout→ENOTEMPTY 且未删任何条目；第二遍逐名复检后再 unlink；不新增锁；文档注明残余窗口与 upper 外部并发前提）。
+- **D13 提取私有 helper（user 补充 3）**：两阶段检查**摘出辅助私有方法**防函数膨胀（如私有方法承载「全校验」与「复检+删除」两步，或等价拆分），`cleanup_upper_whiteouts` 保持薄入口。Creator 报告须给出新 helper 的白名单 Rule 依据（结构拆分/Designer 指定，参照 C1 的 clear_empty_exchange 先例）。
+- **D32 改动最小**：谓词自足式（选项①）——只改 `project_inode` 的 `get_or_create` 谓词（mod.rs:217-220），`facts.upper().is_none()` 时仅当载体可见源与 `source_inode` 指针相等才复用；不动签名、不改调用点。
+- **D29 命名**：弃用 `make_hit`，采用 `RealObject::for_lookup_child(layer_index, &child_path, layer_real)`（Designer 备选；语义明确、owner 边界正确）。
