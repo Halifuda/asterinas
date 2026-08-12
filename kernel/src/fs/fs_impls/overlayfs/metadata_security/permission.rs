@@ -32,9 +32,9 @@
 //! algorithm (`kernel/src/fs/vfs/fs_apis/inode.rs:573-640`) against the
 //! projected `OverlayInode::metadata()` (mode/uid/gid), with the
 //! `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`. It is inlined here
-//! because no reusable kernel helper exists (VFS gap — see the `TODO(D15)`
-//! at the Projected-DAC block); the protected-state admission is an
-//! insertion point (no-op).
+//! because no reusable kernel helper exists (VFS gap); see the TODO
+//! at the Projected-DAC block. The protected-state admission is currently
+//! a no-op hook.
 //!
 //! Lock contract: this module acquires no Overlay lock. The local stage is
 //! lock-free (brief `INODE` facts snapshot inside `metadata()`, released
@@ -186,7 +186,7 @@ impl OverlayInode {
         in_group
     }
 
-    /// PRIVATE STAGE A — the lock-free local half of the two-stage check.
+    /// PRIVATE LOCAL STAGE — the lock-free local half of the two-stage check.
     ///
     /// For the `Mutating` class, the `EROFS` gate (`MountPolicy::
     /// is_effective_read_only`) runs first — before the DAC block — so a
@@ -197,7 +197,7 @@ impl OverlayInode {
     /// (mode/uid/gid) and the current task's credentials (`fsuid`/`fsgid`),
     /// with the `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`.
     /// `Permission::empty()` passes trivially. The protected-state admission
-    /// is an insertion point (no-op).
+    /// is currently a no-op hook.
     fn check_local_permission(&self, access: AccessType, mut perm: Permission) -> Result<()> {
         // EROFS gate: the mutating class on an effective read-only mount
         // fails before the DAC block and before any authority side effect.
@@ -205,7 +205,7 @@ impl OverlayInode {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
 
-        // TODO(D15): this block is a mirror of the VFS default
+        // TODO: this block is a mirror of the VFS default
         // `Inode::check_permission` (`kernel/src/fs/vfs/fs_apis/inode.rs:
         // 573-640`); the VFS exposes no shared mode-DAC evaluator (VFS gap),
         // so the algorithm is inlined here. Once the VFS interface
@@ -273,12 +273,12 @@ impl OverlayInode {
             return_errno_with_message!(Errno::EACCES, "other permission check failed");
         }
 
-        // Protected-state admission seam: insertion point (no-op; the
-        // `protattr` record is already in the xattr known-private table).
+        // Protected-state admission hook: currently a no-op; `protattr`
+        // is already classified as overlay-private in the xattr table.
         Ok(())
     }
 
-    /// PRIVATE STAGE B — the real-handle half of the two-stage check.
+    /// PRIVATE REAL STAGE — the real-handle half of the two-stage check.
     ///
     /// The copy-up promotion no longer lives here: the entry
     /// [`OverlayInode::check_permission`] already ran `ensure_upper_authority()`

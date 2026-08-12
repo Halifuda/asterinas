@@ -73,7 +73,7 @@ use crate::{
 /// The ownership/capability facts of the current caller against one projected
 /// owner.
 ///
-/// Named carrier replacing the earlier positional `(bool, bool)` return of
+/// Named result type replacing the earlier positional `(bool, bool)` return of
 /// the ownership probe: the `is_owner`/`has_cap` pair is the gate decision of the
 /// ownership-sensitive setters and is consumed by name at every call site
 /// (`set_mode`/`set_owner`/`set_group`). Module-private to `metadata.rs`.

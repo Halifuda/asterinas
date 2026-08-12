@@ -5,24 +5,24 @@
 //! This module resolves the real `upperdir`/`lowerdir` roots into pinned
 //! [`OverlayLayer`]s and freezes them into an immutable [`OverlayLayerStack`].
 //! It owns layer-root resolution, layer ordering, the per-unique-underlying-
-//! superblock `fsid` assignment, and the layer-root overlap validation
-//! (D24). The stack is constructed once by
+//! superblock `fsid` assignment, and the layer-root overlap validation.
+//! The stack is constructed once by
 //! [`OverlayLayerStack::assemble`] during `OverlayFs::new` and is immutable
 //! afterwards for the mount lifetime; sibling modules read it only.
 //!
-//! Lower-layer writability boundary (D23, downgraded wording): the overlay
-//! itself never writes the lower layers. The guarantee holds in two parts —
-//! for non-`default_permissions` mounts it holds before any C1-C11 batch
-//! lands (mutating paths promote to the upper first); for
-//! `default_permissions` mounts it is completed by the C3(D14)
-//! permission-boundary fix, until which that configuration carries the
-//! documented D14 defect. External concurrent modification of the lower
+//! Lower-layer writability: the overlay never writes the lower layers.
+//! The guarantee holds in two parts —
+//! for non-`default_permissions` mounts mutating paths promote to the
+//! upper first; for
+//! `default_permissions` mounts it is completed by a pending
+//! permission-boundary fix, until which that configuration carries a
+//! known defect. External concurrent modification of the lower
 //! layers is an unsupported operation (documented): the projection and
 //! identity logic rely on the layer stack being stable for the mount
 //! lifetime, and an external lower writer can corrupt the visible merge
 //! (e.g. the `refresh_impure_marker` check-use race). The mount boundary
 //! therefore rejects the one truly mountable corruption form — lower/
-//! upper/workdir/lower-root overlap (D24) — while read-write lower backends
+//! upper/workdir/lower-root overlap — while read-write lower backends
 //! remain accepted (Linux overlayfs parity).
 
 use device_id::DeviceId;
@@ -49,10 +49,9 @@ use crate::{
 /// required at multiple sites within this module). Intermediate symlink
 /// components are followed; the final component is not (mount-time roots are
 /// the literal resolved directories).
-/// The pinned layer-root parts resolved before the `fsid` assignment.
 ///
 /// A 4-tuple keeps the two-phase assembly shape (resolve-then-assign) and
-/// avoids an intermediate carrier type; the tuple is consumed only inside
+/// avoids defining a dedicated intermediate type; the tuple is consumed only inside
 /// [`OverlayLayerStack::assemble`] and never crosses a public boundary.
 type LayerParts = (RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId);
 
@@ -86,9 +85,9 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayerStack {
 
 /// A dentry-anchored real path whose anchor mount is held weakly.
 ///
-/// The stored path carriers of an overlay mount — `OverlayLayer.root_path`
+/// The stored paths of an overlay mount — `OverlayLayer.root_path`
 /// and `RealObject.real_path` — must never pin the parent overlay's
-/// `Mount`/`OverlayFs` lifetime (overlay/029 repair, P0-02/P0-16): a carrier
+/// `Mount`/`OverlayFs` lifetime (a fix for upstream xfstests overlay/029): a stored path
 /// surviving teardown would otherwise keep the parent's claim guards from
 /// releasing on the final `Drop`. `RealPath` therefore holds the anchor
 /// mount weakly (`Weak<Mount>`), alongside the dentry anchor (strong pin: a
@@ -99,11 +98,11 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayerStack {
 /// [`RealPath::upgrade`]; a dead anchor fails closed with `Errno::EIO`.
 #[derive(Clone, Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct RealPath {
-    /// The anchor mount; held weakly so a surviving carrier cannot pin it.
+    /// The anchor mount; held weakly so a surviving stored path cannot pin it.
     /// Upgraded per use by [`RealPath::upgrade`].
     mount: Weak<Mount>,
     /// The dentry anchor within the anchor mount (strong pin: the dentry
-    /// chain and its inodes stay alive while this carrier lives; a `Dentry`
+    /// chain and its inodes stay alive while this stored path lives; a `Dentry`
     /// holds no `Mount` reference, so this pin cannot keep the mount alive).
     dentry: Arc<Dentry>,
     /// The real inode of the dentry anchor (strong pin; derived once at
@@ -113,11 +112,11 @@ pub(in crate::fs::fs_impls::overlayfs) struct RealPath {
 }
 
 impl RealPath {
-    /// Builds the carrier from a live, dentry-anchored path, downgrading the
+    /// Builds the stored path from a live, dentry-anchored path, downgrading the
     /// anchor mount.
     ///
     /// The single construction path; enforces the "inode/path/dentry refer
-    /// to the same dentry-layer object" contract at one site. The carrier
+    /// to the same dentry-layer object" contract at one site. The stored path
     /// pins the dentry chain and the real inode but never the anchor mount.
     pub(in crate::fs::fs_impls::overlayfs) fn from_path(path: &Path) -> Self {
         Self {
@@ -130,7 +129,7 @@ impl RealPath {
     /// Upgrades the weak anchor mount into a live `Path`.
     ///
     /// Returns `Err(EIO)` when the anchor mount is no longer alive (the
-    /// parent overlay was unmounted while a carrier survived); no
+    /// parent overlay was unmounted while a stored path survived); no
     /// namespace-mutating or dentry-routed operation may proceed on a dead
     /// anchor. Lock-free atomic `Weak::upgrade`; adds no lock edge and never
     /// crosses a `Bio` boundary.
@@ -187,7 +186,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayLayer {
 impl OverlayLayer {
     /// Resolves `raw_path` into the pinned layer-root parts.
     ///
-    /// The two-phase assembly contract (D22): [`OverlayLayerStack::assemble`]
+    /// The two-phase assembly order: [`OverlayLayerStack::assemble`]
     /// resolves every raw path into its parts `(root_path, root_inode, fs,
     /// container_dev_id)` first, computes the per-unique-underlying-superblock
     /// `fsid` mapping from those parts, and only then constructs the final
@@ -212,7 +211,7 @@ impl OverlayLayer {
     }
 
     /// Rejects an overlap between `new` and every already-assembled layer
-    /// root in `others` (D24, Linux `ovl_check_overlapping_layers` parity).
+    /// root in `others` (Linux `ovl_check_overlapping_layers` parity).
     ///
     /// Two roots overlap when they resolve to the same directory — either the
     /// same dentry object or the same inode object (two spellings of the same
@@ -271,12 +270,12 @@ impl OverlayLayerStack {
     /// [`OverlayLayer::resolve_parts`] and one `fsid` is assigned per unique
     /// underlying filesystem instance, deduplicated at assembly time.
     ///
-    /// Two-phase construction (D22): all raw paths are resolved into their
+    /// Two-phase construction: all raw paths are resolved into their
     /// pinned parts first, the unique-filesystem `fsid` mapping is computed
     /// from those parts, and only then are the final [`OverlayLayer`]s
     /// constructed with their final identifiers — no placeholder `fsid`
     /// state is ever published, so the published fields are immutable after
-    /// construction. The overlap validation (D24) runs after construction
+    /// construction. The overlap validation runs after construction
     /// and before the stack is returned: the upper (when present) and every
     /// lower pair must be distinct directories that are neither each
     /// other's ancestor nor descendant.
@@ -364,7 +363,7 @@ impl OverlayLayerStack {
             })
             .collect::<Vec<_>>();
 
-        // D24 — pairwise overlap validation of the upper (when present) and
+        // Pairwise overlap validation of the upper (when present) and
         // every lower root. The workdir is not a layer and is covered by the
         // sibling `build.rs` hook using the same predicate.
         let all_layers: Vec<&OverlayLayer> = upper.iter().chain(lowers.iter()).collect();

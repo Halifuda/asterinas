@@ -12,6 +12,12 @@
 //! the sibling `dir/mod.rs`; the recipes compose the owner helpers inline —
 //! `project_new_upper` + `BindingCache::insert` + `readdir_index_insert`.
 //!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
+//!
 //! Lock contract: the caller (the `dir/mod.rs` entry) holds the parent `DIR`
 //! transaction lock and has pinned the mount. This module acquires no Overlay
 //! lock of its own beyond the brief `INODE` facts snapshots inside
@@ -104,8 +110,8 @@ impl OverlayInode {
     /// caller-held `DIR` — then performs the upper `create`/`mknod` directly
     /// through the base VFS `Path` layer (no workdir) and publishes the
     /// result inline. The returned dentry-anchored `Path` feeds
-    /// [`RealObject::with_path`], so the published object carries the
-    /// base-view coherence carrier. A plain-absent or opaque-hidden target
+    /// [`RealObject::with_path`], so the published object remains
+    /// base-view coherent. A plain-absent or opaque-hidden target
     /// never creates opaque. The publication steps are infallible, so no
     /// reconcile arm is structurally reachable in this recipe; the
     /// post-physical failure reconcile lives in
@@ -125,7 +131,7 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         let upper_parent_path = self.upper_parent_path()?;
         // The overlay-visible object kind of the request (used by the index
-        // seam below). Shared mechanical mapping (the `MknodType` ->
+        // below). Shared mechanical mapping (the `MknodType` ->
         // `InodeType` classification is the single `super::mknod_object_type`
         // helper in `dir/mod.rs`, consumed by all three sites); the `None`
         // leg keeps the plain `create` object type.
@@ -140,7 +146,7 @@ impl OverlayInode {
             Some(mknod) => upper_parent_path.mknod(name, mode, mknod)?,
             None => upper_parent_path.new_fs_child(name, type_, mode)?,
         };
-        // Semantic publication — inline seam composition: the new upper
+        // Semantic publication — inline composition: the new upper
         // object's facts, the projected OverlayInode, the positive binding,
         // and the index.
         let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {
@@ -206,7 +212,7 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         let upper_parent_path = self.upper_parent_path()?;
         // Shared mechanical kind mapping (consumed by the opaque branch and
-        // the index seam). Computed before `mknod_type` is consumed by the
+        // the index integration point). Computed before `mknod_type` is consumed by the
         // temp creation below.
         let object_type = mknod_type
             .as_ref()
@@ -291,7 +297,7 @@ impl OverlayInode {
                     )?;
                     marker.commit();
                 }
-                // Semantic publication — inline seam composition. The temp
+                // Semantic publication — inline composition. The temp
                 // handle is the object now published at `(upper_parent_path,
                 // name)` (inode identity is stable across the rename), so it
                 // is the new upper real object.
@@ -323,11 +329,11 @@ impl OverlayInode {
 
     /// Publishes a freshly created upper object as the positive binding of
     /// `(self, name)` and records it in the readdir index — the semantic
-    /// publication seam shared by the two create recipes (and by `link_impl`
-    /// in `dir/mod.rs`).
+    /// publication path shared by the two create recipes; `link_impl`
+    /// composes the same two steps inline in `dir/mod.rs`.
     ///
     /// The `BindingCache::insert` half reuses the shared
-    /// [`OverlayFs::publish_binding`] seam (projection/mod.rs) so the
+    /// [`OverlayFs::publish_binding`] integration point (projection/mod.rs) so the
     /// publication key is constructed in one place; the
     /// `readdir_index_insert` half keeps the `(name, inode)` index entry in
     /// sync with the binding.

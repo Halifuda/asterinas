@@ -2,8 +2,8 @@
 
 //! Upper/workdir exclusivity claims and the unified 64-bit overlay identity.
 //!
-//! This module implements the inode `Extension` runtime lease as the claim
-//! carrier: each claimed root inode hosts a VFS-owned `OverlayInuseSlot`, and
+//! This module implements the inode `Extension` runtime lease that carries the claim:
+//! each claimed root inode hosts a VFS-owned `OverlayInuseSlot`, and
 //! the non-zero unified [`OverlayUuid`] value is both the claim token
 //! (per-slot CAS) and, when effective, the overlay UUID persisted as
 //! `trusted.overlay.uuid` on the upper root. The upper slot is claimed first
@@ -356,13 +356,11 @@ impl UpperWorkdirClaim {
     /// rmdir'd, then a fresh empty workspace is created with [`WORKDIR_MODE`]
     /// and pinned on the claim.
     ///
-    /// TODO(workdir-cleanup-vfs-parity): the visible `work` name is removed
-    /// and recreated through the mount-time `Path` API (`workdir_path`), so
-    /// the base view's `DentryChildren` is updated: the previous raw-inode
-    /// cleanup bypassed the VFS dentry layer and left stale cached entries
-    /// (`work/foo`) visible after mount, whereas Linux `ovl_workdir_cleanup`
-    /// operates through the upper-fs VFS dentry layer and keeps the cached
-    /// directory view coherent. Zero VFS interface change.
+    /// The visible `work` name is removed and recreated through the mount-time
+    /// `Path` API (`workdir_path`), so the base view's `DentryChildren` is
+    /// updated and the cached directory view stays coherent with the on-disk
+    /// removal; Linux `ovl_workdir_cleanup` operates through the upper-fs VFS
+    /// dentry layer the same way.
     ///
     /// `workdir_path` is the resolved base-mount workdir root from the
     /// construction sequence (the same object validated and claimed by the
@@ -378,24 +376,16 @@ impl UpperWorkdirClaim {
         match self.workdir.inode.lookup(WORKDIR_NAME) {
             Ok(residue) if residue.type_().is_directory() => {
                 self.remove_work_entries(&residue, 0)?;
-                // TODO(workdir-cleanup-vfs-parity): the `work` name must be
-                // removed through the VFS dentry layer (`Path::rmdir`) so the
-                // base view's `DentryChildren` is updated; Linux
-                // `ovl_workdir_cleanup` keeps the upper-fs cached view
-                // coherent through the dentry layer (see the method doc).
                 workdir_path.rmdir(WORKDIR_NAME)?;
             }
             Ok(_) => {
-                // TODO(workdir-cleanup-vfs-parity): same as the rmdir arm —
-                // `Path::unlink` keeps the base view's `DentryChildren`
-                // coherent with the on-disk removal (see the method doc).
                 workdir_path.unlink(WORKDIR_NAME)?;
             }
             Err(err) if err.error() == Errno::ENOENT => {}
             Err(err) => return Err(err),
         }
-        // TODO(workdir-mode): the workspace mode diverges from Linux by
-        // design — Linux `ovl_workdir_create` uses mode 0 and relies on
+        // The workspace mode diverges from Linux by design:
+        // Linux `ovl_workdir_create` uses mode 0 and relies on
         // `generic_permission`'s CAP_DAC_OVERRIDE directory special-case,
         // while this kernel's `check_permission` requires an exec bit to
         // traverse directories even for root; 0o700 keeps the workspace
@@ -449,8 +439,8 @@ impl UpperWorkdirClaim {
 
     /// Persists the unified identity as `trusted.overlay.uuid`.
     ///
-    /// Called only when the identity is effective (post-claim, construction
-    /// step 9). The caller (`build.rs`) maps an `On` persist failure to
+    /// Called only when the identity is effective (after the capability gates
+    /// pass and persistence is decided). The caller (`build.rs`) maps an `On` persist failure to
     /// `EOPNOTSUPP` fail-closed and an `Auto` persist failure to degrade to
     /// not-effective.
     pub(super) fn persist_identity(&self) -> Result<()> {
@@ -499,7 +489,7 @@ impl UpperWorkdirClaim {
 /// Resolving the same root path twice must yield `Arc::ptr_eq`-equal inodes,
 /// proving the backend's inode cache is instance-stable for pinned roots. In
 /// addition, both resolutions must be the same instance as `pinned_inode` —
-/// the layer-pinned object that step 6 actually claims — so the checked
+/// the layer-pinned object that `UpperWorkdirClaim::claim` actually claims — so the checked
 /// object and the used object are the same. This is a heuristic; the durable
 /// guarantee is the backend identity contract. A failing backend fails closed
 /// with `EOPNOTSUPP`.

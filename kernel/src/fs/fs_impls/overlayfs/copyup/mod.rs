@@ -27,7 +27,7 @@
 //! re-enters an Overlay lock (the real is parsed from the held snapshot, not
 //! re-resolved), the underlying fs lock is a leaf that never re-enters
 //! Overlay, and the hold is bounded by one write call. No per-open real-inode
-//! view carrier exists: every call re-resolves the current authority per
+//! view object exists: every call re-resolves the current authority per
 //! operation (Linux `ovl_real_file_path` follow-copy-up, file.c:128-171).
 
 use core::sync::atomic::Ordering;
@@ -279,7 +279,7 @@ impl OverlayInode {
 
     // Pure forwarder to the current authority's real page cache (upper after
     // promotion; the lower source for lower-backed read views). Never
-    // promotes: the parameterless seam carries no write intent.
+    // promotes: the parameterless entry point carries no write intent.
     pub(in crate::fs::fs_impls::overlayfs) fn page_cache_impl(&self) -> Option<Arc<Vmo>> {
         self.select_real_inode().page_cache()
     }

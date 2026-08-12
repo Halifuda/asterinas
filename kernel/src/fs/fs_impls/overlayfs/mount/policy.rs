@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Published mount-policy carriers.
+//! Published mount-policy snapshots.
 //!
 //! This module owns the immutable [`MountPolicy`] snapshot published by
 //! [`OverlayFs`](super::superblock::OverlayFs), the creator-credential policy
 //! ([`CreatorCredentialPolicy`]), and the post-claim upper-filesystem
 //! capability snapshot ([`UpperFilesystemCapabilities`]).
-//! Sibling modules read these published carriers only; they never re-create,
+//! Sibling modules read these published snapshots only; they never re-create,
 //! copy ownership of, or mutate them.
 //!
 //! Construction happens once in `OverlayFs::new` (sibling `build.rs`): the
@@ -181,14 +181,13 @@ impl CreatorCredentialPolicy {
     }
 
     /// Returns the stashed creator credentials.
-    // TODO: Consume this through a VFS scoped credential-switch API.
+    // TODO: Consume this through a VFS API that runs a closure under the stashed credentials.
     #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
     pub(in crate::fs::fs_impls::overlayfs) fn snapshot(&self) -> &Credentials<ReadDupOp> {
         &self.snapshot
     }
 
     /// Returns the credential source (closed set: `Creator` today).
-    // TODO: Consume this through a VFS scoped credential-switch API.
     #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
     pub(in crate::fs::fs_impls::overlayfs) fn source(&self) -> CredentialSource {
         self.source
@@ -196,7 +195,7 @@ impl CreatorCredentialPolicy {
 
     /// Runs `operation_fn` under the stashed creator credentials.
     ///
-    /// The scoped credential-swap mechanism is a VFS dependency: Asterinas
+    /// Scoped execution under the stashed credentials is a VFS dependency: Asterinas
     /// `PosixThread` exposes `credentials()`/`credentials_dup()`/
     /// `credentials_mut()` but no scoped "run with stashed credentials" API,
     /// and `Inode::check_permission` uses `Task::current()` implicitly. Until
@@ -204,9 +203,9 @@ impl CreatorCredentialPolicy {
     /// credentials and the stashed snapshot is published for sibling modules
     /// but cannot be installed; no signature is changed.
     ///
-    /// TODO(D25): currently a passthrough — callers must not rely on it for
-    /// permission decisions; once the VFS scoped credential-swap API lands
-    /// (P1-19), restore the scope switch here.
+    /// TODO: currently a passthrough — callers must not rely on it for
+    /// permission decisions; once the VFS API for executing with the
+    /// caller's credentials lands, restore the scope switch here.
     pub(in crate::fs::fs_impls::overlayfs) fn with_creator_credentials_fn<T>(
         &self,
         operation_fn: impl FnOnce() -> Result<T>,

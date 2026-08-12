@@ -5,16 +5,16 @@
 //! This module declares the six `projection/*` submodules and hosts the
 //! `OverlayFs`-extension impl blocks: the `bindings()`/`inodes()`/`identity()`
 //! field accessors and the `lookup_binding`/`project_inode`/`publish_binding`
-//! lookup orchestration (caller-side projection). The shared carriers are
+//! lookup orchestration (caller-side projection). The shared types are
 //! re-exported so consumers in sibling module trees (`mount::build` step 10,
 //! `mount::superblock` field types, and the leaf modules
 //! `readdir_index.rs`/`copyup/`/`dir/`) can name them: [`OverlayInode`],
 //! [`OverlayObjectFacts`], [`BindingCache`], [`InodeCache`],
-//! [`IdentityPolicy`], and the wider carrier set — [`Binding`],
+//! [`IdentityPolicy`], and the wider type set — [`Binding`],
 //! [`BindingKey`], [`PositiveBinding`], [`NegativeBinding`],
 //! [`HiddenEvidence`], [`PositiveKind`], [`RealObject`], [`RealObjectKey`],
 //! and [`OverlayObjectId`]. Only the module-private intermediate
-//! (`LayerLookup`) and the `pub(super)` carrier fields stay reachable only
+//! (`LayerLookup`) and the `pub(super)` fields stay reachable only
 //! inside this module tree.
 //!
 //! The cross-module helpers `OverlayFs::project_new_upper` and the
@@ -96,7 +96,7 @@ impl OverlayFs {
     /// the stale `Arc<Binding>` on mismatch). Negative variants stay private
     /// evidence and surface as `ENOENT` at the caller.
     ///
-    /// The carrier's `is_stale_upper` signal is derived on the mismatch
+    /// The binding's `is_stale_upper` signal is derived on the mismatch
     /// branch only (`Binding::is_stale_upper`): a previously published
     /// upper-backed positive binding whose physical upper object vanished
     /// behind the overlay with no whiteout left. The binding is still rebuilt
@@ -146,14 +146,14 @@ impl OverlayFs {
         // when contended) lives in the method body (`copyup/mod.rs`), so
         // re-publications after a binding invalidation are no-ops.
         if let Binding::Positive(positive) = &binding {
-            // `publication_parent` resolves the live parent carrier by its
+            // `publication_parent` resolves the live parent inode by its
             // visible-source key (the fallible copy-up transition aliases the
             // registration first — the old-key mapping is retained until the
             // dead-pin sweep reclaims it — so the probe cannot miss for a
             // live parent). A miss is an invariant violation surfaced loudly
             // (debug-assert + log) and degrades recoverably: the coordinate
             // recording is skipped rather than fabricating a duplicate
-            // carrier.
+            // inode.
             if let Ok(parent) = self.publication_parent(parent_facts) {
                 positive.inode.record_copyup_transition(parent, name);
             }
@@ -181,7 +181,7 @@ impl OverlayFs {
     /// The canonical `Weak<OverlayFs>` stamped on every created inode comes
     /// from `OverlayFs::self_weak` — established by `Arc::new_cyclic` in
     /// `OverlayFs::new` (ramfs precedent) — NOT by downcasting the root
-    /// carrier. The weak upgrades exactly while the mount lives, so every
+    /// inode. The weak upgrades exactly while the mount lives, so every
     /// created inode's `fs()` upgrade succeeds while the mount lives.
     fn project_inode(&self, facts: &OverlayObjectFacts) -> Arc<OverlayInode> {
         let source = visible_source(facts);
@@ -189,10 +189,9 @@ impl OverlayFs {
         let is_directory =
             facts.kind == PositiveKind::Merged || source.real_inode().type_().is_directory();
         // The visible-source projection is the single conservative fallback
-        // of this block — bound once and reused by every arm, so the
-        // comment's "no duplicated fallback expression" claim holds: the
-        // expression `self.identity().project_object_id(source, is_directory)`
-        // is written exactly once (in the closure) and the closure is invoked
+        // of this block — bound once and reused by every arm: the expression
+        // `self.identity().project_object_id(source, is_directory)` is
+        // written exactly once (in the closure) and the closure is invoked
         // by all five uses below (flattened — no nested match). The `_fn`
         // suffix marks the binding as callable at every use site.
         let fallback_fn = || self.identity().project_object_id(source, is_directory);
@@ -241,9 +240,9 @@ impl OverlayFs {
             key,
             move |carrier| {
                 if fresh_is_lower_only {
-                    // The fresh truth is lower-only: reuse only a carrier
+                    // The fresh truth is lower-only: reuse only an inode
                     // whose visible source is exactly this lower — the
-                    // in-flight lower-only projection. A stale-upper carrier
+                    // in-flight lower-only projection. A stale-upper inode
                     // (visible source = the vanished upper, this lower merely
                     // retained in its snapshot) must NOT be reused even
                     // though `contains_real_inode` would match the retained
@@ -293,8 +292,7 @@ impl OverlayFs {
     /// object before `BindingCache::insert`. It reuses the exact
     /// `project_inode` semantics — inode-cache `get_or_create` by
     /// `RealObjectKey`, facts/object_id initialization — so a second
-    /// projection of the same upper real object reuses the same identity
-    /// carrier.
+    /// projection of the same upper real object reuses the same identity.
     pub(in crate::fs::fs_impls::overlayfs) fn project_new_upper(
         &self,
         facts: &OverlayObjectFacts,
@@ -305,7 +303,7 @@ impl OverlayFs {
     /// Publishes `binding` for `(parent_id, name)` into the binding cache.
     ///
     /// Called by `lookup_binding` under the parent `DIR` transaction — and by
-    /// the namespace-mutation recipes' shared publication seam
+    /// the namespace-mutation recipes' shared publication entry point
     /// (`dir/create.rs::publish_positive_binding`) — so the
     /// check-act-publish sequence stays atomic per directory; the entry is an
     /// immutable `Arc<Binding>` snapshot (replaced, never mutated in place).
@@ -326,22 +324,22 @@ impl OverlayFs {
     /// whose facts are `parent_facts` — the lookup receiver (copy-up hook
     /// support).
     ///
-    /// Every live carrier — the root (registered by `OverlayInode::new_root`
-    /// alongside the mount slot), every non-root carrier (`project_inode`),
+    /// Every live inode — the root (registered by `OverlayInode::new_root`
+    /// alongside the mount slot), every non-root inode (`project_inode`),
     /// and every copied-up parent ([`OverlayInode::replace_facts`], which
     /// aliases the registration so the old and new visible-source keys both
-    /// resolve to the one carrier) — is registered in `InodeCache` under its
+    /// resolve to the one inode) — is registered in `InodeCache` under its
     /// *current* visible-source key.
     /// The read-only probe therefore returns the actual lookup parent — the
-    /// one carrier registered for the visible-source key — with exactly one
-    /// carrier per key on every path; no key-equality root check exists and
+    /// one inode registered for the visible-source key — with exactly one
+    /// inode per key on every path; no key-equality root check exists and
     /// no duplicate is ever projected.
     ///
     /// A probe miss violates the registration invariant (a live parent is
     /// never missing from the cache): the miss is surfaced with a
     /// `debug_assert!` and an error log and returns `Err` so the hook caller
     /// degrades recoverably (skipping the coordinate recording) instead of
-    /// silently minting a second carrier. The probe holds no
+    /// silently minting a second inode. The probe holds no
     /// upgradeable-reader slot, so it never re-enters the inode cache's
     /// single upgradeable slot.
     fn publication_parent(&self, parent_facts: &OverlayObjectFacts) -> Result<Arc<OverlayInode>> {
@@ -354,13 +352,13 @@ impl OverlayFs {
                     "a live overlay parent is always registered under its current visible-source key"
                 );
                 error!(
-                    "overlay parent identity inconsistency: no inode-cache carrier for \
+                    "overlay parent identity inconsistency: no inode-cache entry for \
                      visible-source key {:?}",
                     key
                 );
                 Err(Error::with_message(
                     Errno::EIO,
-                    "the overlay parent carrier is not registered under its visible-source key",
+                    "the overlay parent inode is not registered under its visible-source key",
                 ))
             }
         }

@@ -11,6 +11,12 @@
 //! with the target publication sequence (`BindingCache::insert` +
 //! `readdir_index_insert`) under the target parent `DIR`.
 //!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
+//!
 //! Lock contract: neither helper acquires or holds any Overlay lock. They run
 //! inside the caller's target-parent `DIR` domain established by
 //! `lock_dir_transaction` in `dir/mod.rs`; the source promotion
@@ -25,8 +31,8 @@
 //! Degradation note: without a persistent origin index, two lower aliases of
 //! one lower inode that copy up separately may become two distinct upper
 //! inodes; upper-authoritative sources always share one upper inode (the real
-//! hard link published here). The no-index degradation is accepted
-//! explicitly, never papered over.
+//! hard link published here). The no-index degradation is an acknowledged
+//! limitation, never papered over.
 
 use crate::{
     fs::{

@@ -51,7 +51,7 @@ use crate::{
 ///
 /// The lower file is streamed through one reused kernel buffer; the chunk
 /// bounds each `read_at`/`write_at` pair so a short read still makes bounded
-/// progress. A pure numeric local, not a named entity in the census.
+/// progress. A pure numeric local, not a named production type.
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
 impl OverlayInode {
@@ -112,7 +112,7 @@ impl OverlayInode {
         let upper_dir = publication_parent.select_real_inode();
         let upper_dir_path = publication_parent.upper_parent_path()?;
         let fs = self.fs_arc()?;
-        // T1 (Objective 1): every promoted object makes its publication
+        // Impurity marker: every promoted object makes its publication
         // parent impure — persist the marker before the object-kind dispatch
         // and the physical upper commit (strict, pre-commit; read-first
         // idempotence makes an already-marked parent a no-op).
@@ -185,10 +185,10 @@ impl OverlayInode {
                         // the xattr copy: the upper filesystem refreshed
                         // mtime/ctime on each write/resize, so the replay
                         // restores the lower timestamps before durability and
-                        // publication (D3).
+                        // publication.
                         self.transfer_timestamps(temp.inode())?;
                         // Durability (fsync=auto default; strict/volatile are
-                        // future insertion points): the data file is synced
+                        // future policy choices): the data file is synced
                         // before publication.
                         temp.inode().sync_all()?;
                         // Atomic publication: rename the private workdir temp
@@ -229,7 +229,7 @@ impl OverlayInode {
                     || Self::mark_reconcile_pending(coordinate),
                     |marker| {
                         self.promote_symlink(temp.inode())?;
-                        // Symlink metadata transfer (D4): owner/group are
+                        // Symlink metadata transfer: owner/group are
                         // applied; the mode is skipped for symlinks (Linux
                         // `ovl_set_attr` never sets a symlink mode) and the
                         // timestamps are replayed after the xattr copy so no
@@ -257,7 +257,7 @@ impl OverlayInode {
                 // plus metadata/xattrs and the atomic rename. A socket node
                 // cannot be recreated through the stable `Inode::mknod`
                 // surface (`MknodType` has no socket variant); it is rejected
-                // before any side effect (recorded VFS gap, never silently
+                // before any side effect (a known VFS-surface limitation, never silently
                 // wrong).
                 let mknod_type = match lower.real_inode().type_() {
                     InodeType::NamedPipe => MknodType::NamedPipe,
@@ -316,7 +316,7 @@ impl OverlayInode {
                         self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
                         self.transfer_timestamps(temp.inode())?;
                         // The workdir staging workspace resolves inside the
-                        // recipe closure (D5): a resolution failure is a
+                        // recipe closure: a resolution failure is a
                         // pre-commit failure, so `run_recipe` best-effort
                         // cleans the staged temp instead of leaking it.
                         let workdir_path = self.workdir_root_path()?;
@@ -357,7 +357,7 @@ impl OverlayInode {
     /// publication. The caller holds the `CUL` guard, so the publication
     /// coordinate and the workdir staging workspace are passed in (no `CUL`
     /// re-read); the workdir resolution itself happens inside the recipe
-    /// closure (D5), so a resolution failure is classified as a pre-commit
+    /// closure, so a resolution failure is classified as a pre-commit
     /// failure and `run_recipe` best-effort cleans the staged temp.
     fn publish_via_rename(
         &self,
@@ -486,11 +486,11 @@ impl OverlayInode {
     /// size. The mode transfer skips symlinks — Linux `ovl_set_attr` never
     /// sets a symlink mode, and the backing filesystems treat a symlink
     /// `set_mode` as a no-op or reject it, so the copy-up skips it rather
-    /// than depending on that per-fs behavior (D4). Timestamps are NOT
+    /// than depending on that per-fs behavior. Timestamps are NOT
     /// applied here: the regular-file data stream (`promote_regular_file`)
     /// and the resize refresh mtime/ctime on the upper filesystem, so the
     /// timestamps are replayed by [`OverlayInode::transfer_timestamps`]
-    /// after every data/xattr step that could refresh them (D3).
+    /// after every data/xattr step that could refresh them.
     fn transfer_metadata(&self, temp: &Arc<dyn Inode>) -> Result<()> {
         let lower = self.lower_source()?;
         let lower_inode = lower.real_inode();
@@ -508,7 +508,7 @@ impl OverlayInode {
     /// Replays the lower timestamps (atime/mtime/ctime) onto the upper
     /// object.
     ///
-    /// Split out of [`OverlayInode::transfer_metadata`] (D3) so the copy-up
+    /// Split out of [`OverlayInode::transfer_metadata`] so the copy-up
     /// preserves the lower timestamps instead of publishing the copy-up
     /// instant: the File arm replays after the data stream (and the xattr
     /// copy) and before `sync_all`/publication; the data-less arms
@@ -559,12 +559,12 @@ impl OverlayInode {
     /// 2) The facts are replaced (`upper = upper_real`) under the brief
     ///    `INODE` guard via the [`replace_facts`](OverlayInode::replace_facts)
     ///    transition; the lower-derived `object_id` is kept (constant
-    ///    `st_ino`, no re-project-from-upper). The registered carrier for the
+    ///    `st_ino`, no re-project-from-upper). The registered inode for the
     ///    current visible-source key is recovered through the
-    ///    `OverlayFs::project_new_upper` get-or-create step (one carrier per
-    ///    key — the recovered carrier is this inode, never a duplicate).
+    ///    `OverlayFs::project_new_upper` get-or-create step (one inode per
+    ///    key — the recovered inode is this inode, never a duplicate).
     /// 3) The lower page-cache invalidation hook on authority change is a
-    ///    future insertion point; no field is pre-baked.
+    ///    future extension point; no field is pre-baked.
     fn publish_upper_authority(
         &self,
         upper_real: RealObject,

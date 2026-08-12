@@ -3,14 +3,17 @@
 # Main-Agent Handoff: 2026-08-11 Wave8 Format + Clippy
 
 **Date / Time:** 2026-08-11 09:50 CST
-**Status:** `ACTIVE — Wave8 静态门（899ac24ef）+ 全量 review（74 条）+ Designer 研判完成（ACCEPT 27 / AWS 8 / IGNORE 5，簇 C1–C11，spec 含用户反馈修订 R1）；Creator 机械批已随 WIP commit 3fb122613 落地并经主代理编译修复（check/fmt/clippy 全绿）。下一动作：按 6-Creator 切片执行（见 §3.6/§4/§5）。`
+**Status:** `CLOSED — 2026-08-12：Wave8 全部完成并关闭（静态门 + 全量 review + C1–C11 全部落地 + 20 例可调度矩阵全量复测 PASS）。PR 流程另开新 handoff：20260812-pr-draft-prep_main_agent_handoff.md。`
 
 ## 1. Global State Pointer
 
-- **Current Active Wave / Pass:** Wave8 — 静态格式 + lint 门（`wave8_format_lint_20260811`）。Wave7 已关闭（pass_40–pass_45 全部 gate 已接受；20 例全量回归显式推迟到 wave8 之后）。
+- **Current Active Wave / Pass:** **CLOSED (2026-08-12)** — Wave8（`wave8_format_lint_20260811`）已关闭。Wave7 已关闭（pass_40–pass_45 全部 gate 已接受）；Wave8 全部修复簇（C1–C11）与静态门已接受，20 例可调度矩阵全量复测 **PASS（20/20，2026-08-11，user-confirmed）**。下一个工作单元 = **PR 流程**（新 handoff：`20260812-pr-draft-prep_main_agent_handoff.md`）。
 - **Blueprint Updates Made:** No。`SYSTEM_BLUEPRINT.md` / `PASS_SLICING.md` 未改；本轮为执行记录，状态保持 Wave7 关闭后的 accept 态。
 - **基线:** 工作树在本轮开始时干净，`codex/overlayfs-refactor` @ `430b5ce4c`（pass_45）；container `codex-asterinas-dev` `/root/asterinas` 与 host `/home/ayd/asterinas` 同一 bind-mount。
 - **本轮结束后工作树状态:** 干净（wave8 提交已落地）。clippy 证据归档在 gitignored `components/wave8-format-lint/`。
+
+
+> **2026-08-12 更正（user-confirmed，覆盖 §4.11 待办 / §4.13「不跑」表述）：** §4.11「待办：20 例矩阵全量复跑（029 修复后，确认无次生回归）」与 §4.13「不跑 20 例矩阵复跑」均已过时。**2026-08-11 在 029 修复（`6befa4f79`）之后已完整复测 20 例可调度矩阵并通过（20/20 PASS，0 FAIL / 0 NOTRUN / 0 HANG）**，确认无次生回归；Wave8 于 2026-08-12 正式关闭。完整记录见 §4.14。
 
 ## 2. Pass Slicing Decisions
 
@@ -90,6 +93,8 @@
   - 实施顺序：M（已落地）→ A → B → C → D(C3) → E(C7)。每个 Creator 配同步 Checker（可合并批次验证）。切片依据 = 写集相干 + 依赖顺序 + 简单合并；6 个为最小合理数（B/C 若拆分各 +2，均不必要）。
 
 ## 5. Next Actions for the Next Thread (CRITICAL)
+
+> **2026-08-12 关闭更新：** 本段为历史交接内容，其列出的 6-Creator 切片已全部执行并 ACCEPTED（§3.7–§3.9/§4.5/§4.8）；Wave8 运行时回归（20 例矩阵）已完成并通过（§4.14）。**Wave8 无后续动作。** 当前活跃 handoff = `20260812-pr-draft-prep_main_agent_handoff.md`（PR 流程）。
 
 > **交接说明（2026-08-11）：** 本任期结束，用户将开空上下文 main-agent 继续。以下为续任者第一动作。
 
@@ -220,7 +225,7 @@
 - **修复（Creator `task_creator_wave8_fix029_overlap_20260811`，agent Fermat）**：按 Linux `ovl_check_layer`（对象级父链 + inuse/trap，非字符串）对齐——`Dentry::is_equal_or_descendant_of` 可见性 `pub(super)`→`pub(in crate::fs)`（dentry.rs 唯一一行）；`mount/{layers,build,claims}.rs` 三处重叠判定从 path_name 字符串切换为双向对象祖先链；删除 `is_same_or_descendant` 字符串谓词；`Arc::ptr_eq` 同一性检查保留。无新实体；编译 exit 0 / 0 warnings。报告 `pass_53_wave8_fix029_creator.md`。
 - **复验（Checker `task_checker_wave8_fix029_rerun_20260811`，agent Kuhn）**：overlay/029 单例 **PASS**（Ran: overlay/029 / Passed all 1 tests / exit 0；0 FAIL / 0 NOTRUN / 0 HANG；无 panic/oops/mount EINVAL）。证据 `run_evidence/20260811_fix029_rerun/`；receipt `pass_53_wave8_fix029_checker.md`。
 - **提交**：本 commit（4 文件 +37/−65）。
-- **待办**：20 例矩阵全量复跑（029 修复后，确认无次生回归）；overlay/030（C7 D31/D30 身份类）仍为 deferral。
+- **待办**：20 例矩阵全量复跑（029 修复后，确认无次生回归）；overlay/030（C7 D31/D30 身份类）仍为 deferral。 **（已完成：2026-08-11 全量复测 PASS，见 §4.14；030 实际为 fileattr 缺口类，见 §4.12。）**
 
 ## 4.12 Continuation 2026-08-11 — 更正：overlay/030 不是身份类用例
 
@@ -231,7 +236,16 @@
 
 ## 4.13 Continuation 2026-08-11 — overlay 内部 rustfmt + clippy 维护（029 修复后）
 
-- **user 指示**：不跑 20 例矩阵复跑；维护 overlay 内部 rustfmt 与 clippy 即可。
+- **user 指示**：不跑 20 例矩阵复跑；维护 overlay 内部 rustfmt 与 clippy 即可。 **（该指示随后被 2026-08-11 全量复测执行并通过所覆盖，见 §4.14。）**
 - **rustfmt**（容器内，32 个 overlayfs .rs + 受影响的 `kernel/src/fs/vfs/path/dentry.rs`）：exit 0，**零改动**（029 修复提交 6befa4f79 后全部已格式良好）；`rustfmt --check` exit 0。
 - **clippy**（`cargo clippy -p aster-kernel --target x86_64-unknown-none`）：plain exit 0、**0 warnings**；`RUSTFLAGS="-Dwarnings"` 门 exit 0。`git diff --check` clean。
 - **结论**：029 修复（dentry 对象祖先链）无新 lint/格式问题；工作树干净，无生产改动需提交（本 commit 仅 handoff 记录）。
+
+## 4.14 Continuation 2026-08-12 — 20 例矩阵全量复测 PASS + Wave8 关闭
+
+- **user-confirmed（2026-08-12）**：2026-08-11 已在 029 修复（`6befa4f79`，dentry 对象祖先链重叠判定）之后，**完整复测 20 例可调度矩阵并通过（20/20 PASS）**——覆盖 §4.11「待办」与 §4.13「不跑」的历史表述，确认 029 修复无次生回归。
+- **矩阵内容**：`overlay/029 002 003 006 007 009 010 011 012 014 016 019 022 024 026 031 038 039 063 077`（与 `pass_52_wave8_regression_checker.md` 的 20 例 runlist 一致；pass_52 在 029 修复前为 19/20，唯一 FAIL 已由 pass_53 修复并单例复验 PASS）。
+- **证据**：库内归档为 `components/wave8-full-review/run_evidence/20260811_regression/`（修复前 19/20 + 029 复现）与 `20260811_fix029_rerun/`（修复后单例 PASS）；**全量复测（20/20 PASS）为 user-confirmed**，其运行日志尚未归档到 `run_evidence/`（如需 PR 前留档可后续补录，非阻塞）。
+- **仍为 deferral（能力缺口类，与 Wave8 关闭无关）**：`overlay/059`、`overlay/062`（身份类，需 redirect_dir / exportfs file-handle 能力）；`overlay/030/075/076`（fileattr 能力缺口，P2-06）。030 与 C7 无关（§4.12 更正）。
+- **Wave8 关闭结论**：静态门（rustfmt/clippy `-Dwarnings` 全绿）+ 全量 review（74 条，C1–C11 全部落地）+ 20 例运行时矩阵全量 PASS。**Wave8 CLOSED。** 后续工作 = PR 流程，见新 handoff `20260812-pr-draft-prep_main_agent_handoff.md`。
+- **Board 同步（2026-08-12）**：`SYSTEM_BLUEPRINT.md` Phase 4 已追加「Wave7 + Wave8 closure」与「PR delivery phase」指针（§1 的『Blueprint Updates Made: No』为 wave8 执行期间的历史表述，不覆盖本次关闭同步）。

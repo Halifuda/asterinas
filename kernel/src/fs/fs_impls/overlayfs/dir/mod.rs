@@ -6,7 +6,7 @@
 //! This module declares the five `dir/*` submodules and hosts the thin
 //! `Inode`-trait mutation entries — `create` / `mknod` / `write_link` /
 //! `link` / `unlink` / `rmdir` / `rename` — plus the four orchestration
-//! helpers of the `dir/mod.rs` slice: the one-parent `DIR` lock helper
+//! helpers in this module: the one-parent `DIR` lock helper
 //! ([`OverlayInode::lock_dir_transaction`]), the two-parent `DIR` lock helper
 //! ([`OverlayInode::lock_parent_dir_transactions`], stable object-identity
 //! order, each parent exactly once), the post-promotion upper real parent
@@ -18,6 +18,12 @@
 //!   target-over-whiteout fragments), `rename.rs` (EXDEV gate + upper rename +
 //!   dual-parent publication), and `whiteout.rs` (whiteout cache +
 //!   representation).
+//!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
 //!
 //! Lock contract: every mutation entry establishes the affected parent `DIR`
 //! domain(s) first (via the two lock helpers below), then runs the mutating
@@ -59,7 +65,8 @@ mod rename;
 /// The `MknodType` -> `InodeType` classification was inlined at three sites
 /// (`dir/mod.rs::mknod`, `dir/create.rs::create_upper_only`, and
 /// `dir/create.rs::create_over_whiteout`); this helper is the single
-/// mechanical mapping — the tree's DRY threshold is three occurrences.
+/// mechanical mapping — the classification appears at three call sites, so
+/// it is factored into this single helper.
 /// `MknodType` has no `InodeType` conversion, so the match is the owned
 /// mapping.
 pub(super) fn mknod_object_type(mknod: &MknodType) -> InodeType {
@@ -138,7 +145,7 @@ impl OverlayInode {
     // promotion to the shared upper real `Path`) and `link_over_whiteout`
     // (workdir hard link + rename-over) — are composed here with the fresh
     // target projection and the inline target publication (the publication
-    // seams are infallible, so the reconcile path is unreachable here).
+    // steps are infallible, so the reconcile path is unreachable here).
     pub(in crate::fs::fs_impls::overlayfs) fn link_impl(
         &self,
         old: &Arc<dyn Inode>,
@@ -222,14 +229,14 @@ impl OverlayInode {
         // Source promotion (link.rs): `ensure_upper_authority` then the
         // shared upper real object's dentry-anchored `Path`. Without an
         // origin/index, two lower aliases of one lower inode may copy up
-        // separately to distinct upper inodes (known degradation, a future
-        // insertion point); upper-authoritative sources always share one
+        // separately to distinct upper inodes (an acknowledged limitation;
+        // future origin/index tracking would remove it); upper-authoritative
+        // sources always share one
         // upper inode (real hard link).
         let source_path = self.link_source(&old_overlay)?;
-        // T4 (Objective 1): linking an origin-bearing source into this parent
-        // makes the parent impure — persist the marker before either
-        // physical-link branch (Linux `ovl_create_or_link` origin arm;
-        // strict, pre-commit).
+        // Linking an origin-bearing source into this parent makes the parent
+        // impure — persist the marker before either physical-link branch
+        // (Linux `ovl_create_or_link` origin arm; strict, pre-commit).
         if !old_overlay.facts_snapshot().lowers().is_empty() {
             fs.xattr_policy()
                 .set_impure_marker(self.upper_parent_path()?.inode())?;
@@ -246,8 +253,8 @@ impl OverlayInode {
         // Inline target publication: the positive binding shares the source
         // `OverlayInode` — inode-cache reuse by `RealObjectKey`, so
         // `project_new_upper` is not needed — and the readdir-index decision
-        // seam maintains the target parent index (Valid + upper-only rule).
-        // Both seams are infallible; they run under the held `DIR` before
+        // integration point maintains the target parent index (Valid + upper-only rule).
+        // Both steps are infallible; they run under the held `DIR` before
         // release.
         let key = BindingKey::new(self.key(), String::from(name));
         let binding = Arc::new(Binding::Positive(PositiveBinding::new(old_overlay.clone())));
@@ -317,8 +324,8 @@ impl OverlayInode {
         };
         // EXDEV gate before any upper side effect: only a cross-directory
         // move of a lower-backed/merged directory hits the EXDEV default
-        // (redirect is a future insertion point). The same-parent comparison
-        // is the carrier address identity of the two `DIR` lock helpers.
+        // (redirect is not implemented). The same-parent comparison
+        // is the `Arc::as_ptr` identity of the two `DIR` lock helpers.
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
             self.cross_device_gate(&source_binding)?;
         }
@@ -335,7 +342,7 @@ impl OverlayInode {
     /// directory.
     ///
     /// The one-parent `DIR` lock helper. `self.dir()` is `Some` exactly for
-    /// directory carriers, and every mutation entry of this module is a
+    /// directory inodes, and every mutation entry of this module is a
     /// child-name operation that the VFS routes on directory inodes (the same
     /// `Some`-invariant `lookup` relies on), so the `None` arm is a hard
     /// invariant failure — never a silent guard-less mutation, and never a
@@ -357,15 +364,15 @@ impl OverlayInode {
     /// `RealObjectKey`
     /// lexicographic `(fsid, real_ino)` is not currently publishable — the
     /// landed `RealObjectKey` derives no `Ord` and its fields are
-    /// `projection`-private — so this helper applies the accepted alternative
-    /// (`Arc::as_ptr` ordering): the two parents are ordered by their carrier
+    /// `projection`-private — so this helper applies the chosen alternative
+    /// (`Arc::as_ptr` ordering): the two parents are ordered by their `Arc` pointer
     /// address, `core::ptr::from_ref(self)` being exactly the address
-    /// `Arc::as_ptr` returns for the same carrier. The inode cache
-    /// (`get_or_create` by `RealObjectKey`) guarantees one carrier per logical
+    /// `Arc::as_ptr` returns for the same inode. The inode cache
+    /// (`get_or_create` by `RealObjectKey`) guarantees one inode per logical
     /// directory, so the address is a stable per-directory identity and the
-    /// same-carrier case (a same-directory rename) acquires the single `DIR`
+    /// same-inode case (a same-directory rename) acquires the single `DIR`
     /// once. The guards are returned as the anonymous tuple `(self_guard,
-    /// other_guard)` — a local return shape, not a named coordination carrier;
+    /// other_guard)` — a local return shape, not a named coordination type;
     /// the elided `'_` lifetimes are written as explicit `'a`/`'b` because the
     /// two guards borrow from two distinct inputs.
     pub(super) fn lock_parent_dir_transactions<'a, 'b>(
@@ -394,7 +401,7 @@ impl OverlayInode {
                 ));
             }
         };
-        // Stable object-identity order by carrier address; the same-carrier
+        // Stable object-identity order by `Arc` pointer address; the same-inode
         // case acquires the single `DIR` once (each parent exactly once).
         let self_addr = core::ptr::from_ref(self);
         let other_addr = Arc::as_ptr(other);
@@ -417,7 +424,7 @@ impl OverlayInode {
     ///
     /// The physical-operation target of every `Path`-routed recipe: after the
     /// mutating admission's promotion stage the facts carry an upper real
-    /// object, and that object is always dentry-anchored by the carrier
+    /// object, and that object is always dentry-anchored by the inode
     /// invariant, so the checked `real_path()` accessor succeeds.
     /// `EROFS` surfaces when the facts carry no upper (a non-writable
     /// overlay); `EIO` propagates when the upper real object is not

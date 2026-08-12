@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Mount resource and policy: the VFS entry point, the filesystem carrier,
-//! and the read-only carriers published to the rest of the overlayfs
+//! Mount resource and policy: the VFS entry point, the filesystem object,
+//! and the read-only snapshots published to the rest of the overlayfs
 //! implementation.
 //!
 //! This module provides the VFS entry point ([`OverlayFsType`] implementing
-//! `crate::fs::vfs::registry::FsType`), the macro-level carrier
-//! ([`OverlayFs`]), and the read-only carriers consumed by sibling modules
+//! `crate::fs::vfs::registry::FsType`), the top-level overlay filesystem object
+//! ([`OverlayFs`]), and the read-only snapshots consumed by sibling modules
 //! (`OverlayLayerStack`/`OverlayLayer`/`RealPath`, `MountPolicy`,
 //! `CreatorCredentialPolicy`, `UpperFilesystemCapabilities`,
 //! `WriteAccessAccounting`, `UpperWorkdirClaim`). All fallible mount work

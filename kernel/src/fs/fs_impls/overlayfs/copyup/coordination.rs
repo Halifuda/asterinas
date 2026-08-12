@@ -11,7 +11,7 @@
 //!
 //! Stored under
 //! `OverlayInode::copyup_transition: Mutex<Option<CopyUpTransition>>`, the
-//! `CUL` domain (carrier field in `projection/inode.rs`). `None` only before
+//! `CUL` domain (field in `projection/inode.rs`). `None` only before
 //! the first positive-binding publication; the guard is a sleep-capable
 //! `ostd::sync::Mutex` (promotion can BIO under it), and waiters hold nothing
 //! while blocked on `lock()`. The coordinate is recorded once at the first

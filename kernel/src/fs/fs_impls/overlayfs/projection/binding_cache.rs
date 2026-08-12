@@ -58,7 +58,7 @@ impl PositiveBinding {
         Self { inode }
     }
 
-    /// Returns the inode carrier bound to this positive name.
+    /// Returns the inode bound to this positive name.
     pub(in crate::fs::fs_impls::overlayfs) fn inode(&self) -> Arc<OverlayInode> {
         self.inode.clone()
     }
@@ -145,13 +145,13 @@ impl HiddenEvidence {
     }
 }
 
-/// The publication carrier of one per-name binding: the parent directory
+/// The publication key of one per-name binding: the parent directory
 /// identity plus the exact name in the parent.
 ///
 /// Keys are per-parent: same-name lookups of one parent serialize under that
 /// parent's `DIR` transaction lock. The name is stored as a `Box<str>` so the
 /// cache's per-parent inner maps probe it without an allocation; this type is
-/// the `insert` carrier — the cache itself is keyed by `(parent_id, name)`
+/// the `insert` key — the cache itself is keyed by `(parent_id, name)`
 /// through the nested per-parent maps.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) struct BindingKey {
@@ -247,10 +247,10 @@ impl BindingCache {
 
     /// Removes the whole per-parent binding table for `parent_id`.
     ///
-    /// F3 cleanup: after a parent directory's copy-up key transition
-    /// (`old_key → new_key`), the bindings published under the old parent
+    /// Cleanup after a parent directory's copy-up key transition
+    /// (`old_key → new_key`): the bindings published under the old parent
     /// identity are unreachable from new-key lookups but still strongly pin
-    /// their carriers. Removing the outer map entry releases them. Absent
+    /// their inodes. Removing the outer map entry releases them. Absent
     /// keys are a no-op.
     pub(in crate::fs::fs_impls::overlayfs) fn invalidate_parent(&self, parent_id: &RealObjectKey) {
         self.entries.write().remove(parent_id);
@@ -272,7 +272,7 @@ impl Binding {
     /// Returns whether this cached binding still matches the layer truth.
     ///
     /// The memo verification gate: a positive binding matches when the bound
-    /// carrier's facts share the visible identity of the fresh positive
+    /// inode's facts share the visible identity of the fresh positive
     /// truth; a negative binding matches when the negative variant and its
     /// barrier identity agree. Any other combination is a mismatch.
     pub(super) fn matches_truth(&self, truth: &LayerLookup) -> bool {
@@ -290,7 +290,7 @@ impl Binding {
     /// Returns whether this cached binding is a "stale upper" for `truth`.
     ///
     /// Separates the stale-upper class from the true lower fall-back in the
-    /// fresh-truth derivation (Change 1 repair): a cached positive binding
+    /// fresh-truth derivation: a cached positive binding
     /// that was published upper-backed (`facts_snapshot().upper()` is `Some`)
     /// is stale when the fresh layer truth no longer contains that upper
     /// entry and no whiteout now covers the name — the physical upper object

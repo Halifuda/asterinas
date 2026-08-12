@@ -72,6 +72,8 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     with long-lived repair loops; the 57-micro `需要实现` set is fully
     implemented across 30 new `.rs` files (~10k lines). Stable commits:
     `e1613f12c` (W1), `77b0d4a49` (W2), `b9b9d6caf` (W3), `43a0747bc` (W4).
+  - **Wave7 + Wave8 closure (2026-08-12):** Wave7 pass_40–pass_45 全部 gate 已接受；Wave8 静态门（rustfmt + clippy `-Dwarnings` 全绿）、全量 review（74 条 → C1–C11 全部落地）、以及 **20 例可调度矩阵全量复测 PASS（2026-08-11，user-confirmed；029 修复后无次生回归）** 全部完成。**Wave8 CLOSED**（handoff: `main-agent/20260811-wave8-format-lint_main_agent_handoff.md` §4.14）。
+  - **PR delivery phase (2026-08-12, open):** 从 pure upstream main（`94a8f624d`）切干净分支，交付「新 overlayfs + 配套 VFS 修改 + legacy 删除」，按 11-commit（1k~2k 行/commit）切分（story-first：C2–C10 惰性文件、C11 合龙）。活跃 handoff: `main-agent/20260812-pr-draft-prep_main_agent_handoff.md`。此为交付形态切分，不改变本 board 的 meso/micro pass 账目。
   - **Workflow amendment (user-directed 2026-08-03)**: no Creator-synced
     per-pass Checker passes; Reviewer is the only pre-code-completion static
     gate; the single runtime gate is the meso-integration xfstests Checker

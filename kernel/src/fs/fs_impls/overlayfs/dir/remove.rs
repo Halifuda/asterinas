@@ -18,6 +18,12 @@
 //! `dir/mod.rs` and delegate into this file; `visible_child_count` is consumed
 //! from the merged-directory module, never re-implemented.
 //!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
+//!
 //! Lock contract: the caller (the `dir/mod.rs` entry) holds the parent `DIR`
 //! transaction lock and has pinned the mount. This module acquires no Overlay
 //! lock of its own beyond the brief `INODE` facts snapshots inside
@@ -95,10 +101,10 @@ impl OverlayInode {
     ///    `NeedsRebuild`-unresolvable index → conservative `ENOTEMPTY` (never
     ///    an upper-only emptiness guess). Whiteout-hidden children do not
     ///    count. `unlink` skips this gate.
-    /// 3. **Stage B admission:** `check_permission(AccessType::Mutating,
+    /// 3. **Permission admission:** `check_permission(AccessType::Mutating,
     ///    MAY_WRITE)` promotes this parent to upper authority under the
-    ///    caller-held `DIR` (stage A, the EROFS gate, is the entry's
-    ///    admission), then `upper_parent_path()` resolves the promoted upper
+    ///    caller-held `DIR` (the entry's EROFS gate is the other admission
+    ///    point), then `upper_parent_path()` resolves the promoted upper
     ///    real parent `Path`.
     /// 4. **Pure-upper target** (upper-backed with no lower fallback and no
     ///    opaque barrier): direct `upper_parent_path.rmdir(name)`/
@@ -172,7 +178,7 @@ impl OverlayInode {
 
         if kind == RemoveKind::Rmdir {
             // Step 2 — the visible-emptiness gate (runs before any upper
-            // removal). The index seam ensures the target index is `Valid`
+            // removal). The index integration point ensures the target index is `Valid`
             // (rebuild under the same `DIR` transaction) and counts the
             // `Visible` entries; `.`/`..` are never entries and
             // whiteout-hidden children do not count.
@@ -222,18 +228,19 @@ impl OverlayInode {
             None => false,
         };
 
-        // Step 3/4 — stage B admission (promotes the parent under the held
-        // `DIR`; stage A is the entry's admission) and the promoted upper
-        // real parent `Path` (the physical-operation target).
+        // Step 3/4 — the recipe's own permission admission (promotes the
+        // parent under the held `DIR`; the entry's EROFS gate is the other
+        // admission point) and the promoted upper real parent `Path` (the
+        // physical-operation target).
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let upper_parent_path = self.upper_parent_path()?;
 
         if is_pure_upper {
-            // Branch A (Objective 2): a pure-upper rmdir may still face
-            // physical whiteout residue inside the upper dir (the
-            // visible-emptiness gate does not count whiteouts) — sweep it
-            // before the physical rmdir. The `EIO` arm is defensive:
-            // `is_pure_upper` already implies an upper object.
+            // A pure-upper rmdir may still face physical whiteout residue
+            // inside the upper dir (the visible-emptiness gate does not
+            // count whiteouts) — sweep it before the physical rmdir. The
+            // `EIO` arm is defensive: `is_pure_upper` already implies an
+            // upper object.
             if kind == RemoveKind::Rmdir {
                 let target_upper_dir = target_facts.upper().ok_or_else(|| {
                     Error::with_message(
@@ -248,7 +255,7 @@ impl OverlayInode {
             // base VFS `Path` layer. A physical-upper `ENOENT` means the
             // asserted upper object became stale behind the overlay and maps
             // to `ESTALE`; every other upper error propagates as-is. Both
-            // publication seams are infallible, so no reconcile arm is
+            // publication steps are infallible, so no reconcile arm is
             // structurally reachable here.
             let result = if kind == RemoveKind::Rmdir {
                 upper_parent_path.rmdir(name)
@@ -258,9 +265,9 @@ impl OverlayInode {
             result.map_err(translate_stale_upper_enoent)?;
             fs.bindings().invalidate(&self.key(), name);
             self.readdir_index_remove(name);
-            // C1 (Objective 1): the removal may have restored purity —
-            // refresh the marker best-effort (the mutation already committed;
-            // a refresh failure never fails the removal).
+            // The removal may have restored purity — refresh the marker
+            // best-effort (the mutation already committed; a refresh failure
+            // never fails the removal).
             if let Err(err) = self.refresh_impure_marker() {
                 warn!(
                     "overlay remove: the impure-marker refresh failed after the \
@@ -357,11 +364,11 @@ impl OverlayInode {
                         }
                     })?;
                 marker.commit();
-                // Semantic publication — inline seam composition: the whiteout
+                // Semantic publication — inline composition: the whiteout
                 // is re-observed from the upper (layer 0) so the published
                 // `HiddenByWhiteout` binding pins its strong `HiddenEvidence`
                 // barrier, then the parent index tombstones the now-hidden
-                // name (the `readdir_index_remove` decision seam). The
+                // name (the `readdir_index_remove` decision point). The
                 // re-observation is fallible: on failure the whiteout is
                 // already published — reconcile.
                 let whiteout_path = Path::new(
@@ -383,7 +390,7 @@ impl OverlayInode {
                 Ok(())
             },
         )?;
-        // C1 (Objective 1): the removal may have restored purity — refresh
+        // The whiteout-publish removal may have restored purity — refresh
         // the marker best-effort (the mutation already committed; a refresh
         // failure never fails the removal).
         if let Err(err) = self.refresh_impure_marker() {
@@ -397,11 +404,11 @@ impl OverlayInode {
     }
 
     /// Executes the clear-empty directory exchange of the lower-backed rmdir
-    /// recipe (D10/D11).
+    /// recipe.
     ///
-    /// Extracted from `remove_target`'s recipe closure to drop one nesting
-    /// level (the `minimize-nesting` guideline) without changing the recipe
-    /// semantics. When the upper directory of a lower-backed directory holds
+    /// This helper factors the clear-empty exchange out of the recipe closure
+    /// so the closure stays shallow, without changing the recipe semantics.
+    /// When the upper directory of a lower-backed directory holds
     /// entries the merged view hides (necessarily whiteouts — the emptiness
     /// gate has already refused visible children), those entries must not
     /// leak and would defeat `publish_whiteout`'s displaced-dir workdir
@@ -421,9 +428,8 @@ impl OverlayInode {
     /// fallible re-observation (`as_dir_dentry_or_err`) is the defensive
     /// guard that the workdir staging workspace is a directory (it is, by
     /// `UpperWorkdirClaim::prepare_workdir` construction), and on that
-    /// unreachable path the error propagates as a pre-commit failure — a
-    /// documented residual divergence from the pre-extraction code, where the
-    /// marker already committed classified the same error as reconcile.
+    /// unreachable path the error propagates as a pre-commit failure; the
+    /// commit marker has not yet flipped.
     fn clear_empty_exchange(
         &self,
         fs: &Arc<OverlayFs>,
@@ -478,7 +484,7 @@ impl OverlayInode {
         // BEST-EFFORT `XattrCopyPolicy::BestEffort` variant (the `ClearEmpty`
         // path): because the displaced upper dir is being deleted, they
         // degrade to warn-and-skip and the non-owner rmdir succeeds. See
-        // `OverlayXattrPolicy::copy_eligible_xattrs` for the credential-seam
+        // `OverlayXattrPolicy::copy_eligible_xattrs` for the credential mechanism
         // and failure-policy discussion. The copy is filtered through the
         // `OverlayXattrPolicy` (private / escaped / reserved names never
         // copy; the temp's own markers are written explicitly by the recipe).
@@ -510,7 +516,7 @@ impl OverlayInode {
             .map_err(translate_stale_upper_enoent)?;
         // Clean the displaced old upper dir in the workdir: every remaining
         // entry is a whiteout (the emptiness gate refused visible children),
-        // so sweep them through the shared seam and rmdir the dir.
+        // so sweep them through the shared path and rmdir the dir.
         // Best-effort: a cleanup failure is a known workdir-cleanup debt and
         // never becomes a visible namespace entry — the whiteout publish
         // below proceeds with the opaque temp at `name`. The displaced
@@ -564,8 +570,8 @@ impl OverlayInode {
 /// compare the overlay's cached upper dentry against a fresh upper lookup by
 /// name and return `ESTALE` on mismatch without touching the upper (Linux
 /// `ovl_matches_upper`). That requires a breaking VFS interface/behavior
-/// change, which this wave intentionally avoids; revisit once a non-breaking
-/// VFS seam exists.
+/// change, which this change intentionally avoids; revisit once a non-breaking
+/// VFS integration point exists.
 fn translate_stale_upper_enoent(err: Error) -> Error {
     if err.error() == Errno::ENOENT {
         Error::with_message(

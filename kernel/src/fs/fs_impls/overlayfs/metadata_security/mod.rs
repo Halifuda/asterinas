@@ -5,8 +5,8 @@
 //! This module declares the three `metadata_security/*` submodules and hosts
 //! the thin cross-file helpers: the single private delegation helper
 //! `OverlayInode::delegate_to_real` (shared by the three sibling files) and
-//! the cross-module `OverlayFs::xattr_policy` accessor (the field is the
-//! carrier in `mount/superblock.rs`, the payload type lives in the sibling
+//! the cross-module `OverlayFs::xattr_policy` accessor (the field lives in
+//! `mount/superblock.rs` and stores the policy type defined in the sibling
 //! `xattr.rs`). The real control flow lives in the sibling files:
 //! `permission.rs` (two-stage permission pipeline), `metadata.rs` (metadata
 //! setters), and `xattr.rs` (`OverlayXattrPolicy`/`XattrClass` + the xattr

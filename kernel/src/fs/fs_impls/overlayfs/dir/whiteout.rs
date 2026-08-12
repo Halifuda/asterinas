@@ -16,17 +16,23 @@
 //! the opaque/whiteout replacement semantics without touching this module's
 //! payload.
 //!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
+//!
 //! # The `WL` lock domain
 //!
 //! The single `WL` payload is `OverlayFs::whiteout_cache: Mutex<WhiteoutCache>`
-//! (the carrier field in `mount/superblock.rs`). `WL` critical sections are
+//! (the field in `mount/superblock.rs`). `WL` critical sections are
 //! the **short slot operations only** — `take`/`store`/`disable_sharing`
 //! (pop / push / flag) — and never contain BIO, sleeping allocation,
 //! underlying VFS calls, callbacks, or waits. All fallible and sleep-capable
 //! work — temp creation (`mknod`/`create` + the whiteout-marker xattr write),
 //! the underlying `link`, and the workdir `rename` — runs **outside** `WL` in
-//! the caller's sleep-capable `DIR` domain. The Mutex-vs-RwMutex question for
-//! this field is a deferred decision: the lock type is unchanged.
+//! the caller's sleep-capable `DIR` domain. This field deliberately uses a
+//! `Mutex` rather than an `RwMutex`; the choice may be revisited.
 //!
 //! # Representation derivation
 //!
@@ -108,10 +114,10 @@ const WHITEOUT_TEMP_NAME_COMPONENT: &str = "whiteout";
 /// Stored at `OverlayFs::whiteout_cache: Mutex<WhiteoutCache>` — the `WL`
 /// domain, a sleep-capable `ostd::sync::Mutex` whose critical sections never
 /// contain BIO/sleep/underlying calls/callbacks/waits (the cache-slot
-/// protocol). The Mutex-vs-RwMutex question is a deferred decision — the
-/// lock type is unchanged. The cache-slot fields stay private; the only
-/// external surface is the constructor and the slot methods used by this
-/// file's `publish_whiteout`.
+/// protocol). The cache field deliberately uses a `Mutex` rather than an
+/// `RwMutex`; the choice may be revisited. The cache-slot fields stay
+/// private; the only external surface is the constructor and the slot
+/// methods used by this file's `publish_whiteout`.
 #[derive(Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct WhiteoutCache {
     /// The single reusable workdir whiteout (private staging); `None` when
@@ -191,7 +197,7 @@ pub(super) struct WhiteoutHandle {
     /// xattr); a strong pin keeps the workdir object alive.
     #[expect(
         dead_code,
-        reason = "retained frozen pin: the strong inode pin keeps the workdir object alive \
+        reason = "retained strong pin: the strong inode pin keeps the workdir object alive \
                   while the dentry-anchored `path` routes the publish arms"
     )]
     inode: Arc<dyn Inode>,

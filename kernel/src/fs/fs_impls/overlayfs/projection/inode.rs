@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The Overlay inode carrier and its canonical VFS trait surface.
+//! The Overlay inode and its canonical VFS trait surface.
 //!
-//! This module owns the [`OverlayInode`] struct (the published logical inode
-//! carrier), its per-object payload [`OverlayObjectFacts`], the root-carrier
+//! This module owns the [`OverlayInode`] struct (the published logical inode),
+//! its per-object payload [`OverlayObjectFacts`], the root-inode
 //! constructor ([`OverlayInode::new_root`], consumed by `OverlayFs::new` step
 //! 10),
 //! and the sole `Inode` and `FileOps` implementations. Those canonical trait
@@ -51,10 +51,10 @@ use crate::{
     vm::page_cache::Vmo,
 };
 
-/// The logical Overlay inode carrier exposed to the VFS.
+/// The logical Overlay inode exposed to the VFS.
 ///
 /// One [`OverlayInode`] represents one logical overlay object and is shared by
-/// every name bound to it: hard links reuse a single carrier through the
+/// every name bound to it: hard links reuse a single inode through the
 /// inode cache, and a `PositiveBinding` references the shared inode with zero
 /// per-name fact duplication. The real-object facts live exactly once in
 /// [`OverlayObjectFacts`], and the precomputed `object_id` publishes the
@@ -76,7 +76,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayInode {
     /// The inode-cache key of the visible-metadata source.
     ///
     /// Interior-mutable so the copy-up transition
-    /// ([`OverlayInode::replace_facts`]) can commit the carrier's new
+    /// ([`OverlayInode::replace_facts`]) can commit the inode's new
     /// visible-source key atomically with its inode-cache alias: the
     /// fallible `alias_key` runs first (the old-key mapping is retained until
     /// the dead-pin sweep reclaims it), then this field is updated — the
@@ -186,7 +186,7 @@ impl OverlayObjectFacts {
     /// Kind-aware positive-identity comparison for the memo verification:
     /// the kinds must match; the upper identities must match (`Arc::ptr_eq`,
     /// or both absent); `Single` objects compare only the visible source
-    /// (post-copy-up carriers legitimately retain bookkeeping lowers that the
+    /// (post-copy-up inodes legitimately retain bookkeeping lowers that the
     /// layer scan no longer reports), while `Merged` objects compare the full
     /// lower composition strictly so a silent lower-layer add/remove is
     /// detected.
@@ -238,7 +238,7 @@ impl OverlayObjectFacts {
 }
 
 impl OverlayInode {
-    /// Constructs the root overlay carrier (the construction step-10
+    /// Constructs the root overlay inode (the construction step-10
     /// constructor).
     ///
     /// Infallible and eager: every fallible preparation completed inside
@@ -250,20 +250,20 @@ impl OverlayInode {
     /// guaranteed. The root facts merge the upper root (writable mounts) with
     /// all lower roots (topmost first); each root `RealObject` is built from
     /// its layer's dentry-anchored `RealPath` anchor
-    /// ([`RealObject::with_path`]), so the root carriers pin the base-mount
+    /// ([`RealObject::with_path`]), so the root inodes pin the base-mount
     /// dentry layer for the mount lifetime. The root is always a directory,
     /// so `dir_transaction_lock` is `Some`; `object_id` is projected by
     /// `fs.identity()` from the visible-metadata source.
     pub(in crate::fs::fs_impls::overlayfs) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
         // Construction order: `OverlayFs::new` publishes the `Arc` first (via
-        // `Arc::new_cyclic`) and calls this seam immediately afterwards, so
+        // `Arc::new_cyclic`) and calls this constructor immediately afterwards, so
         // the upgrade always succeeds; the failure arm is genuinely
         // unreachable and panics rather than fabricating a mount-less root
-        // carrier (never silently wrong, no `.unwrap()`/`.expect()`).
+        // inode (never silently wrong, no `.unwrap()`/`.expect()`).
         let fs = match fs.upgrade() {
             Some(fs) => fs,
             None => unreachable!(
-                "OverlayFs::new materializes the root carrier right after publishing \
+                "OverlayFs::new materializes the root inode right after publishing \
                  the Arc; the mount reference is always alive at this call site"
             ),
         };
@@ -323,15 +323,15 @@ impl OverlayInode {
             readdir_index: Some(Mutex::new(ReaddirIndex::new())),
             copyup_transition: Mutex::new(None),
         });
-        // Register the root carrier in the inode cache alongside the mount
-        // slot, so every live carrier — root included — resolves by its
+        // Register the root inode in the inode cache alongside the mount
+        // slot, so every live inode — root included — resolves by its
         // visible-source key. `publication_parent` then needs no key-equality
         // root special case (a non-root directory aliasing the root's real
-        // object resolves to the same carrier on every path), and
-        // `project_inode` can never mint a duplicate root carrier. The
+        // object resolves to the same inode on every path), and
+        // `project_inode` can never mint a duplicate root inode. The
         // registration is a brief internal-data cache lock at single-threaded
-        // mount construction.
-        // no-op identity check: the root carrier is registered at mount construction
+        // mount construction; the identity predicate is a no-op because any
+        // cached hit at the root key is this same inode.
         fs.inodes().get_or_create(key, |_| true, || inode.clone());
         inode
     }
@@ -413,21 +413,21 @@ impl OverlayInode {
     /// The transition is self-consistent and fallible: the inode-cache
     /// registration is aliased under the new visible-source key while the
     /// old-key mapping is retained (`InodeCache::alias_key`, both keys → the
-    /// one carrier), then the payload is swapped and the published
+    /// one inode), then the payload is swapped and the published
     /// [`OverlayInode::key`] is re-derived from the new visible source. The
     /// fallible alias runs FIRST and its `Err` propagates with `facts`/`key`
-    /// untouched, so a displacement (a different live carrier already
+    /// untouched, so a displacement (a different live inode already
     /// registered at the new key) fails the transition and the copy-up caller
     /// can fail or retry instead of proceeding with a split. The caller
     /// passes the post-transition visible source (`new_visible_source`) so
     /// `alias_key` can tell the two live-occupant cases apart: a same-object
     /// concurrent displacement keeps the error, while an ino-reuse stale
     /// occupant at the new key is replaced and self-healed. After the
-    /// commit, a directory carrier also drops the per-parent binding table
+    /// commit, a directory inode also drops the per-parent binding table
     /// published under the old parent identity (`invalidate_parent`),
     /// releasing the stale bindings' strong pins; no inode-cache guard is
     /// held when that leaf write lock is taken. A live parent
-    /// resolves to exactly one carrier on every path and
+    /// resolves to exactly one inode on every path and
     /// `OverlayFs::publication_parent`'s probe cannot miss for a live parent.
     /// Validity (`upper.is_some() || !lowers.is_empty()`) is guaranteed
     /// because the only construction path outside `projection` is the checked
@@ -436,11 +436,11 @@ impl OverlayInode {
     /// must serialize the transition against concurrent projections of the
     /// same real object (hold the object's and the parents' `DIR`s across
     /// `replace_facts`): the old-key alias closes the stale-facts race,
-    /// `alias_key` surfaces — never silently orphans — a live carrier already
+    /// `alias_key` surfaces — never silently orphans — a live inode already
     /// projected at the new key, and the retained old-key alias carries a
     /// strong keep-alive pin of the pre-transition real inode so it cannot be
     /// recycled while the alias exists. The post-condition is verified with
-    /// `Arc::ptr_eq` against this carrier.
+    /// `Arc::ptr_eq` against this inode.
     pub(in crate::fs::fs_impls::overlayfs) fn replace_facts(
         self: &Arc<Self>,
         facts: OverlayObjectFacts,
@@ -458,18 +458,18 @@ impl OverlayInode {
                 visible_source(&old_facts).real_inode().clone(),
             )
         };
-        // A live carrier cannot outlive its mount; the teardown arm swaps the
+        // A live inode cannot outlive its mount; the teardown arm swaps the
         // payload locally and skips the cache alias (no live lookup can
-        // observe this carrier then).
+        // observe this inode then).
         let Some(fs) = self.fs.upgrade() else {
             *self.facts.lock() = facts;
             *self.key.lock() = new_key;
             return Ok(());
         };
         // The fallible alias runs first: both key views (old and new) still
-        // resolve to this one carrier, so a displacement at `new_key` fails
+        // resolve to this one inode, so a displacement at `new_key` fails
         // the transition with `facts`/`key` untouched and the copy-up caller
-        // can fail or retry. Only then is the carrier's own state committed
+        // can fail or retry. Only then is the inode's own state committed
         // (the old-key alias stays for stale-facts in-flight projections and
         // is retired by the dead-pin sweep).
         fs.inodes()
@@ -480,10 +480,10 @@ impl OverlayInode {
             fs.inodes()
                 .get(new_key)
                 .is_some_and(|probe| Arc::ptr_eq(&probe, self)),
-            "after replace_facts the inode cache maps the new visible-source key to THIS carrier"
+            "after replace_facts the inode cache maps the new visible-source key to THIS inode"
         );
         // Clean the stale per-parent binding table of the old parent identity
-        // after the semantic commit; directory-only (a non-directory carrier
+        // after the semantic commit; directory-only (a non-directory inode
         // never owns bindings, so the write would be a no-op). No inode-cache
         // guard is held at this point, so the binding-cache write stays a
         // leaf acquisition (the two cache locks are never held together).
@@ -848,7 +848,7 @@ impl OverlayInode {
             }
         };
         // Overlay-root special case: `..` is the root itself (Unix
-        // self-parent); the root carrier's stored `object_id` is served and
+        // self-parent); the root inode's stored `object_id` is served and
         // the underlying `lookup("..")` is skipped entirely.
         if self.is_mount_root(&fs) {
             return self.parent_fallback();
@@ -917,8 +917,9 @@ impl OverlayInode {
     /// enforce `MAY_READ` in `get_xattr`), so on `EACCES`/`EPERM` an
     /// unprivileged reader falls back to the visible-source projection while
     /// a privileged reader gets the record-derived identity: `d_ino("..")`
-    /// may differ between privileged and unprivileged readers until the
-    /// credential-swap VFS support lands (same class of known gap). The
+    /// may differ between privileged and unprivileged readers until the VFS
+    /// can execute xattr reads with the caller's credentials (a limitation
+    /// shared with other caller-credential-gated operations). The
     /// `Err` arm logs at `debug!` — the divergence is never
     /// silent, and a caller looping `getdents` on such a directory cannot
     /// flood the kernel log with per-call warnings.
@@ -958,16 +959,17 @@ impl OverlayInode {
             Ok(None) => None,
             // Explicit `EACCES`/`EPERM` arm: the origin-record read is
             // caller-credential-gated, so the served `d_ino("..")` may differ
-            // between privileged and unprivileged readers until the
-            // credential-swap seam lands. Logged at `debug!` so the
-            // divergence is never silent without letting an unprivileged
-            // caller flood the kernel log via repeated `getdents`.
+            // between privileged and unprivileged readers until the VFS can
+            // read xattrs with the caller's credentials. Logged at `debug!`
+            // so the divergence is never silent without letting an
+            // unprivileged caller flood the kernel log via repeated
+            // `getdents`.
             Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
                 debug!(
                     "overlay readdir: the parent's origin record is \
                      credential-gated ({:?}); d_ino(\"..\") may differ between \
-                     privileged and unprivileged readers until the \
-                     credential-swap seam lands; falling back to the \
+                     privileged and unprivileged readers until the VFS can \
+                     read xattrs with the caller's credentials; falling back to the \
                      visible-source projection",
                     err
                 );
@@ -987,11 +989,11 @@ impl OverlayInode {
     /// Returns whether this inode is the overlay mount root (the self-parent
     /// special case of the `..` route).
     ///
-    /// The root carrier is the `OverlayInode` created by
+    /// The root inode is the `OverlayInode` created by
     /// `OverlayInode::new_root` in every configuration; the check
-    /// compares the root carrier's inode-cache key against `self.key()` (the
-    /// same-carrier test: the cache is keyed by `RealObjectKey`). A root
-    /// carrier of any other concrete type is an unexpected configuration and
+    /// compares the root inode's inode-cache key against `self.key()` (the
+    /// same-inode test: the cache is keyed by `RealObjectKey`). A root
+    /// inode of any other concrete type is an unexpected configuration and
     /// is surfaced loudly here AND FAILS CLOSED: `true` is returned so the
     /// caller serves the self-parent fallback — never a fall-through to the
     /// backing-store `lookup("..")` on a misclassified root, which could
@@ -1001,7 +1003,7 @@ impl OverlayInode {
             Ok(root_carrier) => root_carrier.key() == self.key(),
             Err(_) => {
                 warn!(
-                    "overlay readdir: the mount root carrier is not an OverlayInode; \
+                    "overlay readdir: the mount root inode is not an OverlayInode; \
                      serving the self-parent fallback"
                 );
                 // Fail closed: never fall through to the backing-store `..`

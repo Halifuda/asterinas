@@ -65,7 +65,7 @@ pub(super) enum ReaddirIndexValidity {
     /// `Valid` guarantees completeness/consistency of the visible sequence only
     /// against overlay-owned mutations; base-fs modifications performed outside
     /// the overlay (silent modifications) are not observed until a rebuild is
-    /// triggered, by design (option A).
+    /// triggered, by design (silent base-fs changes are tolerated until the next rebuild).
     Valid,
     /// Serving is refused; the next readdir rebuilds (the conservative
     /// invalidation outcome and the never-publish-partial fallback).
@@ -171,7 +171,7 @@ impl OverlayInode {
         // The returned delta is `last_visited_cookie - input`; a visited
         // cookie is always `> input`, so the subtraction cannot underflow.
         // `u64 -> usize` uses `try_from` (all supported arches are 64-bit —
-        // recorded platform assumption).
+        // an explicit platform assumption).
         let delta_fn = |last_visited: Option<ReaddirCookie>| -> usize {
             let delta = match last_visited {
                 Some(last) => last.0 - input_cookie.0,
@@ -197,7 +197,7 @@ impl OverlayInode {
             // is propagated unchanged: this call has consumed nothing, so the
             // per-FD offset stays put and libc either retries or surfaces the
             // error — an undersized buffer is never mistaken for
-            // end-of-directory (D33; Linux readdir and the `legacy_fs.rs`
+            // end-of-directory (Linux readdir and the `legacy_fs.rs`
             // precedent).
             visitor.visit(".", self.ino(), InodeType::Dir, 1)?;
             last_visited = Some(ReaddirCookie(1));
@@ -213,7 +213,7 @@ impl OverlayInode {
             {
                 // `.` was already consumed by this call, so the consumed
                 // delta is returned and the caller continues from the next
-                // offset (D33 keeps the resume semantics here).
+                // offset (the resume semantics are preserved here).
                 return Ok(delta_fn(last_visited));
             }
             last_visited = Some(ReaddirCookie(2));
@@ -243,7 +243,7 @@ impl OverlayInode {
             };
             let d_off = match usize::try_from(cookie.0) {
                 Ok(d_off) => d_off,
-                // Unreachable on supported 64-bit targets (recorded platform
+                // Unreachable on supported 64-bit targets (explicit platform
                 // assumption); a cookie beyond `usize` cannot be served.
                 Err(_) => break,
             };
@@ -253,7 +253,7 @@ impl OverlayInode {
                 if last_visited.is_none() {
                     // This call has consumed nothing yet: propagate the
                     // visitor error so a full-but-undersized buffer is not
-                    // mistaken for end-of-directory (D33; the per-FD offset
+                    // mistaken for end-of-directory (the per-FD offset
                     // stays put and libc retries or surfaces the error).
                     return Err(err);
                 }
@@ -314,10 +314,10 @@ impl OverlayInode {
             && facts.upper().is_some()
             && facts.lowers().is_empty()
         {
-            // The revive-vs-create result is consumed at the seam boundary. A
+            // The revive-vs-create result is consumed at this call boundary. A
             // same-object revive keeps the index `Valid` (same cookie slot,
             // provably same position); a fresh CREATE append cannot be proven
-            // end-of-order here (the seam has no position evidence), so it
+            // end-of-order here (this helper has no position evidence), so it
             // falls back to the conservative `NeedsRebuild` floor instead of
             // trusting the append position.
             if !index.insert_visible(name, inode, type_) {
@@ -563,7 +563,7 @@ impl ReaddirIndex {
     ///
     /// `entries` empty, `validity == NeedsRebuild`, `next_cookie ==
     /// ReaddirCookie(3)` (cookies `1`/`2` are reserved for `.`/`..`),
-    /// `tombstone_count == 0`. The `OverlayInode::readdir_index` carrier
+    /// `tombstone_count == 0`. The `OverlayInode::readdir_index` field
     /// initializes every directory with this constructor.
     pub(super) fn new() -> Self {
         Self {

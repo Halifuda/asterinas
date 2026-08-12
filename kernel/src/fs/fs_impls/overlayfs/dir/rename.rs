@@ -16,6 +16,12 @@
 //! upper rename, the source-whiteout compose, the inline dual-parent
 //! publication, and the reconcile to this file.
 //!
+//! Lock domains: `DIR` = per-parent directory transaction lock; `CUL` =
+//! per-object copy-up lock; `INODE` = per-object facts lock; `WL` =
+//! whiteout-cache lock; `MOUNT` = mount-lifecycle lock; `UPPER` =
+//! underlying upper-filesystem lock; `IU` = mount-time upper/workdir
+//! in-use claim.
+//!
 //! Lock contract: the caller (the `dir/mod.rs` entry) holds both parent `DIR`
 //! transaction locks in stable object-identity order and has pinned the
 //! mount; this module acquires no Overlay lock of its own beyond the brief
@@ -54,7 +60,7 @@
 //!   recipe publishes is the source-name compose. The `Replace`-mode overlay
 //!   emptiness gate below is the merged-target check Linux runs instead
 //!   (`ovl_check_empty_dir` in `ovl_rename_start`).
-//! - **Redirect insertion point:** no redirect option exists on the mount and
+//! - **Redirect is not implemented:** no redirect option exists on the mount and
 //!   no redirect xattr is written; the EXDEV default applies to every
 //!   cross-directory lower-backed/merged directory source. Linux also sets an
 //!   opaque marker on a pure-upper directory moved into a merged parent
@@ -66,7 +72,7 @@
 //! - **nlink bookkeeping:** Linux's `ovl_nlink_start`/`ovl_drop_nlink`
 //!   accounting for replaced targets is not tracked in Asterinas (no overlay
 //!   nlink model); the replaced target's upper inode simply loses its
-//!   namespace name, matching the origin/index deferral.
+//!   namespace name, matching the currently unsupported origin/index tracking.
 //!
 //! No `.unwrap()`/`.expect()` appears in any production path.
 
@@ -106,7 +112,7 @@ impl OverlayInode {
     /// facts invariant `upper.is_some() || !lowers.is_empty()` guarantees the
     /// empty-lowers case is genuinely upper-only).
     ///
-    /// The `redirect_dir` policy is a future insertion point: no redirect
+    /// The `redirect_dir` policy is not implemented: no redirect
     /// mount option is published and no redirect xattr is ever written, so
     /// the EXDEV default applies; when redirect lands, the rejection below
     /// becomes the redirect-policy probe bounded by the `redirect_max`-style
@@ -133,15 +139,14 @@ impl OverlayInode {
         if source_inode.facts_snapshot().lowers().is_empty() {
             return Ok(());
         }
-        // The redirect policy is an insertion point only: it is never
-        // enabled, so the EXDEV default fires for every cross-directory
-        // lower-backed/merged directory source (the entry composes the
-        // cross-directory condition). When redirect lands, the policy probe
-        // replaces this rejection at this point.
+        // The redirect policy is never enabled, so the EXDEV default fires
+        // for every cross-directory lower-backed/merged directory source
+        // (the entry composes the cross-directory condition). When redirect
+        // lands, the policy probe replaces this rejection at this point.
         Err(Error::with_message(
             Errno::EXDEV,
             "the overlay cross-directory rename of a lower-backed or merged directory \
-             requires the deferred redirect_dir policy",
+             requires the not-yet-implemented redirect_dir policy",
         ))
     }
 
@@ -248,12 +253,12 @@ impl OverlayInode {
         // `Replace` over a visible lower-backed directory target requires the
         // merged target directory to be overlay-visible-empty before the move
         // (Linux `ovl_check_empty_dir` in `ovl_rename_start`; the upper
-        // rename only sees the upper dir). The `visible_child_count` seam
+        // rename only sees the upper dir). The `visible_child_count` integration point
         // counts visible children (whiteout-hidden children do not count); a
         // pure-upper target defers to the upper rename's own emptiness
         // enforcement. The gate records the fresh target facts so the
-        // branch-E whiteout sweep (Objective 2) can run on the target's
-        // physical upper copy after the per-branch promotions.
+        // target's physical whiteout-residue sweep can run on its physical
+        // upper copy after the per-branch promotions.
         let gate_target_facts = if mode == RenameMode::Replace
             && target_is_positive
             && let Some(target_object) = target_binding.clone().into_inode()
@@ -290,12 +295,12 @@ impl OverlayInode {
         let upper_parent_path = self.upper_parent_path()?;
         let target_upper_parent_path = target.upper_parent_path()?;
 
-        // Branch E (Objective 2): when the Replace gate passed for a
-        // directory target with a physical upper copy, sweep the target's
-        // physical whiteout residue before the physical rename (Linux
-        // `ovl_clear_empty` for the same case, dir.c:1215-1227). Strict and
-        // pre-commit: a failure aborts before `run_recipe`, whose pre-commit
-        // cleanup is a no-op because no workdir temp is staged.
+        // When the Replace gate passed for a directory target with a
+        // physical upper copy, sweep the target's physical whiteout residue
+        // before the physical rename (Linux `ovl_clear_empty` for the same
+        // case, dir.c:1215-1227). Strict and pre-commit: a failure aborts
+        // before `run_recipe`, whose pre-commit cleanup is a no-op because
+        // no workdir temp is staged.
         if let Some(target_upper_dir) = gate_target_facts
             .as_ref()
             .and_then(|target_facts| target_facts.upper())
@@ -303,10 +308,10 @@ impl OverlayInode {
             whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
         }
 
-        // T3 (Objective 1): a cross-directory move of an origin-bearing
-        // source makes the target parent impure — persist the marker before
-        // the physical rename (Linux `ovl_rename_upper` cross-dir origin
-        // arm; strict, pre-commit).
+        // A cross-directory move of an origin-bearing source makes the
+        // target parent impure — persist the marker before the physical
+        // rename (Linux `ovl_rename_upper` cross-dir origin arm; strict,
+        // pre-commit).
         let same_parent = self.key() == target.key();
         if !same_parent && source_has_lower {
             fs.xattr_policy()
@@ -412,11 +417,11 @@ impl OverlayInode {
                 Ok(())
             },
         )?;
-        // C2 (Objective 1): a cross-directory rename may have restored purity
-        // in the source or target parent (the overwrite-of-origin-target case
-        // can clear the target's last origin-bearing entry) — refresh both
-        // markers best-effort (the mutation already committed; a refresh
-        // failure never fails the rename).
+        // A cross-directory rename may have restored purity in the source or
+        // target parent (the overwrite-of-origin-target case can clear the
+        // target's last origin-bearing entry) — refresh both markers
+        // best-effort (the mutation already committed; a refresh failure
+        // never fails the rename).
         if !same_parent {
             if let Err(err) = self.refresh_impure_marker() {
                 warn!(

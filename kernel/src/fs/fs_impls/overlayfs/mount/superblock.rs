@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The overlay filesystem carrier and its VFS-facing superblock surface.
+//! The overlay filesystem object and its VFS-facing superblock surface.
 //!
 //! This module owns the `OverlayFs` struct (the published mount/layer/policy
 //! state plus the projection state — `bindings`/`inodes`/`identity`), the
 //! `FileSystem` trait implementation, and the `MOUNT` lifecycle domain
-//! (`MountLifecycle`/`MountPhase`). All fallible mount work happens in
+//! (`MountLifecycle`/`MountPhase`) — `MOUNT` is the mount-lifecycle lock. All fallible mount work happens in
 //! `build.rs` (`OverlayFs::new`); the hooks here enter through a pinned
 //! `Arc<OverlayFs>` and hold no overlay lock except the short `MOUNT`
 //! transition inside [`OverlayFs::begin_shutdown`].
@@ -31,7 +31,7 @@ use crate::{
     prelude::*,
 };
 
-/// The macro-level carrier of the overlay filesystem (mirrors Linux `ovl_fs`).
+/// The top-level overlay filesystem object (mirrors Linux `ovl_fs`).
 ///
 /// `OverlayFs` is the only object that publishes mount/layer/policy state to
 /// sibling modules. It is created by [`OverlayFs::new`] (in `build.rs`)
@@ -41,7 +41,7 @@ use crate::{
 /// ([`IdentityPolicy`]) — is initialized in the same constructor and consumed
 /// by the `projection` module.
 ///
-/// Invariants: `root_inode()` returns the prepared root carrier and performs
+/// Invariants: `root_inode()` returns the prepared root inode and performs
 /// no fallible work; `claims` is `Some` only for writable mounts and is
 /// released exactly once on the final `Drop` (guard `Drop`, atomic
 /// non-blocking, no mutex); the `MOUNT` lifecycle is used only for lifecycle
@@ -50,7 +50,7 @@ use crate::{
 /// (not topology levels) and the `identity` policy is immutable after
 /// construction.
 ///
-/// The cross-module carriers for copy-up, metadata security, and namespace
+/// The cross-module shared state for copy-up, metadata security, and namespace
 /// mutation — `workdir_temp_serial`, `xattr_policy`, `whiteout_cache` — are
 /// also owned here and consumed by their owning modules.
 pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
@@ -67,7 +67,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     pub(super) policy: MountPolicy,
     /// The reported mount source.
     pub(super) mount_source: String,
-    /// The prepared root carrier.
+    /// The prepared root inode.
     ///
     /// The root inode needs the published mount (`fs.layer_stack()` /
     /// `fs.identity()`), but `Weak::upgrade()` is documented-`None` inside
@@ -77,7 +77,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// clones the prepared root; a `None` value for a published mount is a
     /// hard construction invariant failure, never a silent mount-less root.
     pub(super) root_inode: Mutex<Option<Arc<dyn Inode>>>,
-    /// The `MOUNT` level-1 lifecycle domain; phase only, sleep-capable.
+    /// The mount lifecycle state; phase only, sleep-capable.
     pub(super) lifecycle: Mutex<MountLifecycle>,
     /// Mount-wide filesystem event subscriber statistics.
     pub(super) fs_event_stats: FsEventSubscriberStats,
@@ -86,7 +86,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// Established by `Arc::new_cyclic` in `OverlayFs::new` (ramfs
     /// `Arc::new_cyclic` + `Weak<RamFs>` precedent) and consumed by
     /// `projection::project_inode` to stamp created `OverlayInode`s with the
-    /// mount's live `Weak` — replacing the root-carrier downcast. The weak
+    /// mount's live `Weak` — replacing a downcast from the root inode. The weak
     /// never pins the mount.
     pub(in crate::fs::fs_impls::overlayfs) self_weak: Weak<OverlayFs>,
     /// The mount-wide binding cache — the first source for `(parent, name)`
@@ -94,7 +94,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     ///
     /// Entries are immutable `Arc<Binding>` snapshots (a positive pins its
     /// inode, a negative pins its barrier); insert/update happen under the
-    /// caller's parent `DIR` transaction lock. Not a second layer registry or
+    /// caller's parent `DIR` (per-parent directory transaction) lock. Not a second layer registry or
     /// identity table.
     pub(in crate::fs::fs_impls::overlayfs) bindings: BindingCache,
     /// The mount-wide inode identity-reuse cache.
@@ -157,7 +157,6 @@ pub(super) enum MountPhase {
     /// The mount is live and accepts operations.
     Ready,
     /// The mount is draining; no new operations may start.
-    // TODO: Wire a VFS unmount/shutdown callback to this transition before detach.
     #[expect(dead_code, reason = "the VFS exposes no filesystem shutdown callback")]
     ShuttingDown,
 }
@@ -237,7 +236,7 @@ impl FileSystem for OverlayFs {
             // slot is a construction-order violation, never a runtime
             // condition (hard invariant, no `.unwrap()`/`.expect()`).
             None => unreachable!(
-                "OverlayFs::new materializes the root carrier before publication; \
+                "OverlayFs::new materializes the root inode before publication; \
                  a published overlay mount always has its root slot set"
             ),
         }

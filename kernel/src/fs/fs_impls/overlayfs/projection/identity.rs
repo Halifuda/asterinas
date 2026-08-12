@@ -3,7 +3,7 @@
 //! Dev/ino identity projection of the overlay namespace.
 //!
 //! This module owns the immutable per-mount [`IdentityPolicy`] (mounted as
-//! `OverlayFs::identity`) and the published [`OverlayObjectId`] carrier. It
+//! `OverlayFs::identity`) and the published [`OverlayObjectId`] value. It
 //! implements the dev/ino projection matrix:
 //!
 //! - **same-fs passthrough** — when every layer shares one underlying
@@ -58,7 +58,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectId {
     pub(in crate::fs::fs_impls::overlayfs) ino: u64,
 }
 
-/// One published layer's identity triplet — the named carrier of the
+/// One published layer's identity triplet — the named record of the
 /// construction-local `layer_devs` input of [`IdentityPolicy::new`].
 ///
 /// `fsid` is the per-mount layer ordinal, `container_dev_id` the backend

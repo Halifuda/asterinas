@@ -30,7 +30,7 @@
 //! holding `CUL`/`INODE`/`UPPER` while sleeping. The ReconcilePending marker
 //! (recovery) is derived from the coordinate phase inside `promote` under the
 //! held guard — no redundant bool crosses this boundary. On return every
-//! Overlay lock is released; `Ok(())` is the sole success carrier and the
+//! Overlay lock is released; `Ok(())` is the sole success return value and the
 //! caller re-observes authority via `facts_snapshot`.
 
 /// The maximum depth of the copy-up ancestor recursion.
@@ -129,7 +129,7 @@ impl OverlayInode {
 
         // Step 6 — re-snapshot under the guard: another task won and promoted
         // while this task waited; re-observe upper authority and return the
-        // same `Ok(())` success carrier (waiter leg).
+        // same `Ok(())` success value (waiter path).
         if self.facts_snapshot().upper().is_some() {
             return Ok(());
         }

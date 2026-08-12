@@ -81,8 +81,8 @@ pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
 /// place.
 ///
 /// Invariants: the pin is strong; the fields are fixed for the lifetime of the
-/// value. The dentry-anchored [`RealPath`] carrier (`real_path`) is the
-/// base-view coherence carrier: it is `Some` for every real object that
+/// value. The dentry-anchored [`RealPath`] (`real_path`) is the
+/// base-view coherence anchor: it is `Some` for every real object that
 /// participates in a namespace mutation or dentry-routed lookup (upper
 /// objects always, lower objects produced by the layer scan, root objects
 /// via the layer anchor) and `None` only for the readdir `..` identity
@@ -97,12 +97,12 @@ pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
 /// projection tree.
 ///
 /// The leaf modules (`readdir_index.rs`, `copyup/`, `dir/`) name the layer
-/// carriers.
+/// real objects.
 #[derive(Clone, Debug)]
 pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
     pub(super) layer_index: usize,
     pub(super) real_inode: Arc<dyn Inode>,
-    /// Dentry-anchored real-object [`RealPath`] carrier; `None` only for the
+    /// Dentry-anchored real-object [`RealPath`] value; `None` only for the
     /// readdir `..` identity projection (see the struct doc).
     pub(super) real_path: Option<RealPath>,
     pub(super) fsid: u64,
@@ -134,12 +134,12 @@ impl RealObject {
     }
 
     /// Builds a dentry-anchored real object from its layer position and the
-    /// real object's [`RealPath`] carrier.
+    /// real object's dentry-anchored [`RealPath`].
     ///
-    /// Derives the pinned `real_inode` from the carrier
-    /// (`real_path.inode()`), so the carrier's inode and path always refer to
-    /// the same dentry-layer object. The carrier is the base-view coherence
-    /// carrier for every namespace-mutating or dentry-routed consumer; its
+    /// Derives the pinned `real_inode` from the path
+    /// (`real_path.inode()`), so the path's inode and dentry always refer to
+    /// the same dentry-layer object. The path keeps the base-view dentry
+    /// layer coherent for every namespace-mutating or dentry-routed consumer; its
     /// anchor mount is held weakly, so the published object never pins the
     /// parent overlay's `Mount`/`OverlayFs` lifetime.
     pub(in crate::fs::fs_impls::overlayfs) fn with_path(
@@ -161,8 +161,8 @@ impl RealObject {
     /// lookup inside the layer scan.
     ///
     /// The child hit inherits the parent layer's `fsid` and
-    /// `container_dev_id` evidence and pins the dentry-anchored `child_path`
-    /// carrier; the pinned real inode is derived from that carrier. Shared by
+    /// `container_dev_id` evidence and pins the dentry-anchored `child_path`;
+    /// the pinned real inode is derived from that path. Shared by
     /// the upper and lower arms of `lookup_in_layers` so the two hit
     /// constructions cannot drift.
     fn for_lookup_child(layer_index: usize, child_path: &Path, layer_real: &RealObject) -> Self {
@@ -185,13 +185,13 @@ impl RealObject {
     }
 
     /// Returns the dentry-anchored real-object `Path`, upgraded from the
-    /// stored weak-anchor carrier.
+    /// stored weak-anchor path.
     ///
     /// `Err(EIO)` when this real object carries no path — the readdir `..`
     /// identity projection is the only path-less producer, and no
     /// namespace-mutating or dentry-routed caller may operate on it — or
     /// when the anchor mount is no longer alive (the parent overlay was
-    /// unmounted while this carrier survived; fail-closed, matching the
+    /// unmounted while this path survived; fail-closed, matching the
     /// existing "mount no longer alive" convention).
     pub(in crate::fs::fs_impls::overlayfs) fn real_path(&self) -> Result<Path> {
         self.real_path
@@ -281,8 +281,8 @@ impl OverlayFs {
     /// lower scan. Every layer hit is resolved through the parent's
     /// dentry-anchored path (`Dentry::lookup_child` on the base VFS dentry
     /// layer, which revalidates cached entries and updates the base view's
-    /// `DentryChildren`), and the hit carrier keeps that dentry-anchored
-    /// [`RealPath`] carrier. The caller holds the parent `DIR` transaction lock;
+    /// `DentryChildren`), and the hit keeps that dentry-anchored
+    /// [`RealPath`]. The caller holds the parent `DIR` transaction lock;
     /// this function takes no Overlay lock itself.
     pub(super) fn lookup_in_layers(
         &self,

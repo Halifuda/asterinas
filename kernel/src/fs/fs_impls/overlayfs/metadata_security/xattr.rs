@@ -3,7 +3,7 @@
 //! The xattr classification policy and delegation entries.
 //!
 //! This module hosts the `metadata_security/xattr.rs` surface: the payload-less
-//! [`OverlayXattrPolicy`] carrier (stateless; owned once by the
+//! [`OverlayXattrPolicy`] policy value (stateless; owned once by the
 //! `OverlayFs::xattr_policy` field, initialized in `mount/build.rs`), its
 //! [`XattrClass`] classification result, the module-private known private-name
 //! table and prefix constants, the `classify`/`is_private`/
@@ -79,18 +79,18 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayXattrPolicy;
 /// The payload-less four-way classification result of an xattr full name.
 ///
 /// Payload-less: the four-way classification is the semantic and every entry
-/// branches only `Public`-vs-rest; the per-record owner dispatch of the
+/// branches only `Public`-vs-rest; the per-record classification of the
 /// removed `OverlayPrivateXattr` payload enum is preserved as the
-/// module-private `OVERLAY_PRIVATE_SUFFIXES` table plus the owner-dispatch
-/// comment below, because no consumer reads the payload (all dispatch targets
-/// are insertion points or other modules' features).
+/// module-private `OVERLAY_PRIVATE_SUFFIXES` table and the comment below,
+/// because no consumer reads the payload — each suffix only needs its
+/// classification here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::fs::fs_impls::overlayfs) enum XattrClass {
     /// A user.*/system.*/security.*/trusted.* (non-overlay) name: delegate to
     /// the real authority.
     Public,
     /// A known Overlay-private record (suffix in `OVERLAY_PRIVATE_SUFFIXES`);
-    /// owner-dispatched; filtered from listing; refused through the generic
+    /// classified by suffix; filtered from listing; refused through the generic
     /// path.
     Private,
     /// A `overlay.overlay.` nesting-prefixed name (refused and filtered).
@@ -100,17 +100,15 @@ pub(in crate::fs::fs_impls::overlayfs) enum XattrClass {
     Reserved,
 }
 
-/// Known overlay-private record suffixes. Owner dispatch (comment/
-/// insertion-point table — never a pre-baked
-/// enum payload):
-///   whiteout, opaque -> namespace-mutation owner [insertion point]
-///   redirect         -> deferred
-///   origin, upper    -> association/identity work [insertion point]
-///   impure           -> metadata/xattr owner (this module)
-///   nlink            -> copy-up hardlink bookkeeping
-///   uuid             -> mount UUID persist
-///   metacopy         -> deferred
-///   protattr         -> fileattr (deferred)
+/// Known overlay-private record suffixes and where each is handled:
+///   whiteout, opaque -> directory mutation
+///   redirect         -> not yet handled here
+///   origin, upper    -> inode association tracking
+///   impure           -> metadata/xattr handling (this module)
+///   nlink            -> copy-up link counting
+///   uuid             -> mount UUID persistence
+///   metacopy         -> not yet handled here
+///   protattr         -> file attributes (not yet handled here)
 const OVERLAY_PRIVATE_SUFFIXES: &[&str] = &[
     "opaque", "whiteout", "redirect", "origin", "impure", "nlink", "upper", "uuid", "metacopy",
     "protattr",
@@ -152,7 +150,7 @@ pub(in crate::fs::fs_impls::overlayfs) const WHITEOUT_XATTR_FULL_NAME: &str =
 /// The `impure` suffix is already a known overlay-private record
 /// (`OVERLAY_PRIVATE_SUFFIXES`), so the name/value pair lives here as the
 /// single declaration; the marker is only ever read/written/cleared through
-/// the internal [`OverlayXattrPolicy`] seam — never through the user-facing
+/// the internal [`OverlayXattrPolicy`] interface — never through the user-facing
 /// xattr entries.
 pub(in crate::fs::fs_impls::overlayfs) const IMPURE_XATTR_FULL_NAME: &str =
     "trusted.overlay.impure";
@@ -320,8 +318,8 @@ impl OverlayXattrPolicy {
     /// the overlayfs tree.
     ///
     /// Enumerates the `User`, `Trusted`, and `Security` namespaces — the
-    /// `System` namespace (`system.posix_acl_*`) is the ACL insertion point
-    /// and stays excluded on every copy path — and filters overlay-private
+    /// `System` namespace (`system.posix_acl_*`) is reserved for ACLs and
+    /// stays excluded on every copy path — and filters overlay-private
     /// names through [`OverlayXattrPolicy::is_private`]. Every listed name is
     /// additionally namespace-filtered after parsing (a non-filtering backend
     /// can list names of other namespaces under one probe, e.g. `user.*`
@@ -371,8 +369,10 @@ impl OverlayXattrPolicy {
     /// no-op mechanism; Linux copies under the creator's credentials and
     /// preserves these xattrs. The strict copy-up policy refuses the silent
     /// loss by propagating the denial — Linux's successful non-owner copy
-    /// requires the credential-swap VFS facility; its landing is the full
-    /// closure. Genuine xattr errors still hard-fail and abort the exchange
+    /// requires executing the source reads under the creator's credentials,
+    /// which the VFS cannot do yet; until that is possible, the strict
+    /// policy propagates the denial instead of silently dropping xattrs.
+    /// Genuine xattr errors still hard-fail and abort the exchange
     /// before the rename; an unparseable list entry (a non-UTF-8 or
     /// unknown-namespace name) is skipped with a warning — it cannot be
     /// represented as a VFS `XattrName` — never hard-failed.
@@ -451,7 +451,7 @@ impl OverlayXattrPolicy {
                 // xattr" under BOTH policies; under best-effort
                 // ([`XattrCopyPolicy::BestEffort`], `ClearEmpty` path) EVERY
                 // source value-read error — a denied read (`EACCES`/`EPERM`,
-                // the no-op creator-credential seam, `mount/policy.rs`) as
+                // the no-op creator-credential mechanism in `mount/policy.rs`) as
                 // well as resource/I-O failures (`ENOSPC`/`EIO`, ...) —
                 // skips with a `warn!` (the clear-empty source being
                 // deleted); strict propagates every error but the race (no
@@ -624,17 +624,18 @@ impl OverlayInode {
     /// the caller's `DIR` transaction, the `Visible` child `Arc`s are cloned
     /// under a brief index `INODE` lock (released before any per-child facts
     /// snapshot or xattr call), and the marker is cleared when NO visible
-    /// child keeps a non-empty lower stack (the frozen purity predicate;
-    /// whiteout residue is never counted). Callers invoke it best-effort
+    /// child keeps a non-empty lower stack (the purity predicate: a child
+    /// keeps the marker iff its lower stack is non-empty; whiteout residue is
+    /// never counted). Callers invoke it best-effort
     /// (warn-and-continue) after the underlying mutation has already
     /// committed, matching Linux `ovl_cache_get_impure`.
     ///
-    /// Immutable-lower premise (D23 boundary): the clear is valid only on a
-    /// lower stack the overlay itself never writes — the guarantee holds in
-    /// two parts: for non-`default_permissions` mounts it holds before any
-    /// C1-C11 batch lands; for `default_permissions` mounts it is completed
-    /// by the C3(D14) permission-boundary fix, until which that
-    /// configuration carries the documented D14 defect. External concurrent
+    /// Immutable-lower premise: the clear is valid only on a lower stack the
+    /// overlay itself never writes. On mounts without `default_permissions`
+    /// that guarantee already holds; on `default_permissions` mounts it is
+    /// not yet implemented, so the marker clear is only safe once the
+    /// permission path never writes to lower layers — until then that
+    /// configuration keeps a documented limitation. External concurrent
     /// modification of the lower layers is an unsupported operation
     /// (documented). The residual check-use race — an external lower writer
     /// adding content between the children scan and the clear — is a known
@@ -757,14 +758,14 @@ impl OverlayInode {
     }
 
     // Xattr list: the read-class admission demand `Permission::MAY_ACCESS`
-    // (the spec semantic bit, matching the underlying ext2/ramfs list
-    // self-evaluation), then the real listing into the bounded
-    // `XATTR_LIST_MAX_LEN` intermediate, then the private-name filter
+    // (the access bit required by the list semantics, matching the underlying
+    // ext2/ramfs list self-evaluation), then the real listing into the
+    // bounded `XATTR_LIST_MAX_LEN` intermediate, then the private-name filter
     // streaming pass so `Private`/`Escaped`/`Reserved` records never reach
     // the caller. The filtered length returned by `filter_private_names` is
     // the number of bytes written to `list_writer`.
     //
-    // TODO(D19): the current DAC block (VFS `inode.rs:573-640` / overlay
+    // TODO: the current DAC block (VFS `inode.rs:573-640` / overlay
     // Projected-DAC) does not evaluate `MAY_ACCESS`, so this gate is a no-op
     // for now; it becomes effective only after DAC support for `MAY_ACCESS`
     // lands. The actual read-side constraint is carried by the `get`'s

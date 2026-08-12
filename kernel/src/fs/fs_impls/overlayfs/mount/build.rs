@@ -2,9 +2,9 @@
 
 //! Construction orchestration for the overlay filesystem ([`OverlayFs::new`]).
 //!
-//! This module implements the construction sequence of the
-//! `mount_resource_policy` component inside the single constructor
-//! [`OverlayFs::new`]. The list below follows the contract order, not the
+//! This module implements the mount resource/policy construction logic
+//! inside the single constructor
+//! [`OverlayFs::new`]. The list below follows the canonical construction order, not the
 //! textual statement order: the actual execution order is 1 → 4a → 2 → 4b →
 //! 4c → 3 → 5 → 6 → 7 → 8 → 9 → 4d → 10 → 11, because tags 4a-4d execute
 //! around steps 2-3 for drop-order reasons (the credential snapshot is
@@ -13,8 +13,8 @@
 //! the overlay `AnonDeviceId` and constructs `IdentityPolicy` plus the
 //! `bindings`/`inodes` caches, all required before the root constructor runs
 //! because `OverlayInode::new_root` reads `fs.identity()`, then constructs the
-//! root
-//! carrier, which accepts the `Weak<OverlayFs>` and fills the late-bound root
+//! root inode,
+//! which accepts the `Weak<OverlayFs>` and fills the late-bound root
 //! publication slot right after the `Arc` is published via `Arc::new_cyclic`.
 //!
 //! 1. parse the mount options (`OverlayMountOptions::parse`);
@@ -38,13 +38,13 @@
 //!    writable mounts only);
 //! 10. perform the projection wiring: (a) acquire the overlay `AnonDeviceId`
 //!     (fallible) and construct `IdentityPolicy` (with `overlay_dev_id`) plus
-//!     the empty `bindings`/`inodes` caches, then (b) construct the root
-//!     carrier via the projection constructor `OverlayInode::new_root` (see
+//!     the empty `bindings`/`inodes` caches, then (b) construct the root inode
+//!     via the projection constructor `OverlayInode::new_root` (see
 //!     the construction note at the call site);
 //! 11. publish the `Arc<OverlayFs>` (the single publication point).
 //!
 //! On failure the locals drop in reverse declaration order, so the runtime
-//! resources release in a fixed order: root carrier / workdir state / workdir
+//! resources release in a fixed order: root inode / workdir state / workdir
 //! claim / upper claim / layer pins / credential snapshot. The step-10 locals
 //! (overlay `AnonDeviceId`, the `IdentityPolicy`, and the `bindings`/`inodes`
 //! caches) are declared after the policy snapshot, so on rollback they
@@ -89,8 +89,8 @@ impl OverlayFs {
     /// The 11 ordered steps are local statements. The construction resources
     /// are declared in creation order (creator credential policy first, then
     /// the layer stack, then the claims, then the policy snapshot and the
-    /// root carrier), so a failure at any point rolls back in reverse
-    /// declaration order: root carrier / workdir state / workdir claim /
+    /// root inode), so a failure at any point rolls back in reverse
+    /// declaration order: root inode / workdir state / workdir claim /
     /// upper claim / layer pins / credential snapshot.
     pub(super) fn new(fs_creation_ctx: &FsCreationCtx) -> Result<Arc<Self>> {
         // Step 1 — parse the mount options. The parsed fields are consumed
@@ -164,7 +164,7 @@ impl OverlayFs {
             let upper_path = layers::resolve_root_path(fs_creation_ctx, upper_dir)?;
             let workdir_path = layers::resolve_root_path(fs_creation_ctx, work_dir)?;
             UpperWorkdirClaim::validate_pair(&upper_path, &workdir_path)?;
-            // D24 — lower/workdir overlap validation (the workdir is not a
+            // Lower/workdir overlap validation (the workdir is not a
             // layer, so `assemble`'s upper+lowers pairwise check cannot cover
             // it; the same dentry object ancestor-chain predicate
             // (`Dentry::is_equal_or_descendant_of`) and the same identity
@@ -294,7 +294,7 @@ impl OverlayFs {
         // constructs the `IdentityPolicy` (`overlay_dev_id` set here;
         // construction-local layer identity tuples from the published layer
         // snapshot). The `bindings`/`inodes` caches are initialized empty here
-        // too — they are the per-mount state fields on the carrier, and the
+        // too — they are the per-mount state fields on the filesystem object, and the
         // `projection` module publishes them through
         // `OverlayFs::bindings()`/`inodes()`/`identity()`.
         //
@@ -317,8 +317,8 @@ impl OverlayFs {
         // remains stored after `new`.
         let (layer_devs, upper_layer_dev_index) = Self::collect_layer_devs(&layer_stack);
 
-        // The xino mask width ("e.g. 64 - 16 = 48-bit payload"); the policy
-        // value is owned by the build packet. `new` is fallible only to
+        // The xino mask width (e.g. 64 - 16 = 48-bit payload); the xino shift
+        // value is a construction constant chosen here. `new` is fallible only to
         // enforce the `xino_shift <= 63` invariant.
         const XINO_SHIFT: u32 = 16;
         let identity = IdentityPolicy::new(
@@ -330,17 +330,17 @@ impl OverlayFs {
         )?;
 
         // The cache fields start empty; entries are inserted/updated under the
-        // caller's parent `DIR` transaction by the `projection` module lookup
+        // caller's parent `DIR` (per-parent directory transaction) lock by the `projection` module lookup
         // flow.
         let bindings = BindingCache::new();
         let inodes = InodeCache::new();
 
-        // Step 10b (root carrier) + Step 11 (publication) — the root is
-        // materialized through the projection seam
+        // Step 10b (root inode) + Step 11 (publication) — the root is
+        // materialized through the projection integration point
         // `OverlayInode::new_root(Weak<OverlayFs>)`, and the `Arc<OverlayFs>`
         // is published once.
         //
-        // Self-referential construction: the root carrier consumes the
+        // Self-referential construction: the root inode consumes the
         // published mount (`fs.layer_stack()` / `fs.identity()`), so it
         // cannot be built inside the `Arc::new_cyclic` closure —
         // `Weak::upgrade()` is documented-`None` during construction (the
@@ -350,7 +350,7 @@ impl OverlayFs {
         // reference (ramfs `Arc::new_cyclic` + `Weak<RamFs>` precedent), the
         // struct is built with an empty root publication slot, and the slot
         // is filled immediately after the strong reference exists via
-        // `OverlayInode::new_root(Arc::downgrade(&overlay_fs))`. The seam
+        // `OverlayInode::new_root(Arc::downgrade(&overlay_fs))`. The constructor
         // accepts the `Weak<OverlayFs>` (the upgrade is guaranteed at this
         // call site). The inode stores the weak (`Arc::downgrade` inside
         // `new_root`), so there is no `fs -> inode -> fs` strong cycle.
@@ -375,8 +375,8 @@ impl OverlayFs {
             // and the legacy overlayfs hold `AnonDeviceId` on the fs struct)
             // is this `_anon_device_id: AnonDeviceId` field on `OverlayFs`.
             _anon_device_id: anon_device_id,
-            // Cross-module carriers for copy-up, metadata security, and
-            // namespace mutation. The three fields were added to
+            // Cross-module shared state for copy-up, metadata security, and
+            // namespace mutation. The three fields are declared in
             // `mount/superblock.rs` and are initialized here in declaration
             // order; all three have trivial drops, so the RAII release order
             // above is undisturbed.
