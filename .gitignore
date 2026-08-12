@@ -41,6 +41,6 @@ cachix.list
 distro/etc_nixos/_config_for_test.nix
 
 # Local overlayfs agent receipts and test evidence
-kernel/src/fs/fs_impls/overlayfs/.agents/components/
-kernel/src/fs/fs_impls/overlayfs/.agents/tmp/
-kernel/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/
+kernel/core/src/fs/fs_impls/overlayfs/.agents/components/
+kernel/core/src/fs/fs_impls/overlayfs/.agents/tmp/
+kernel/core/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/
