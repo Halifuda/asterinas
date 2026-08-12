@@ -914,7 +914,7 @@ MUST account for in the Global Lock Topology. They are not optional.
 1. **VFS does NOT hold a parent-directory lock across inode ops.** Linux
    overlayfs relies on VFS holding `i_rwsem` on the parent directory across
    `lookup`/`create`/`unlink`/`rename`/`rmdir`. Asterinas VFS invokes inode
-   ops with NO such lock held (verified: `kernel/src/fs/vfs/fs_apis/inode.rs`
+   ops with NO such lock held (verified: `kernel/core/src/fs/vfs/fs_apis/inode.rs`
    op signatures take no parent-lock parameter; legacy `overlayfs/fs.rs`
    carries `// TODO: Hold the upper lock from here to avoid race condition`
    comments at `create`/`unlink`). Consequence: the overlay MUST introduce its

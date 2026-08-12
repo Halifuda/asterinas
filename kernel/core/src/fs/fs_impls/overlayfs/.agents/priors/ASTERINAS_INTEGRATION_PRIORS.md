@@ -5,7 +5,7 @@
 This document is the "Asterinas OS Reality Dictionary" strictly intended for the **Designer**. It translates the generic OS requirements into the exact constraints the file system module must appease when orchestrated.
 
 **CRITICAL RULE FOR REFACTORING:**
-Do **NOT** use the flawed legacy Asterinas filesystem implementation as a reference. Everything written in this dictionary is derived from the generic VFS (`kernel/src/fs/vfs`), the OSTD locks (`ostd::sync`), and stable block device layers.
+Do **NOT** use the flawed legacy Asterinas filesystem implementation as a reference. Everything written in this dictionary is derived from the generic VFS (`kernel/core/src/fs/vfs`), the OSTD locks (`ostd::sync`), and stable block device layers.
 
 ## 1. Asterinas Lock Primitives & Concurrency Substrate
 The Designer must orchestrate locks without violating these hard operational limits:
@@ -44,7 +44,7 @@ The disk also implements `ostd::mm::VmIo`, offering `VmReader` and `VmWriter` bo
 ## 3. Exhaustive PageCacheBackend Interface (`vfs::page_cache`)
 For file data caching, Asterinas VFS uses a generic `PageCache`. The Designer must provide a `PageCacheBackend` implementation for inodes that support cached data I/O. This translates generic page offsets into specific physical block manipulations.
 
-**`PageCacheBackend` Trait (in `kernel/src/fs/vfs/page_cache.rs`)**:
+**`PageCacheBackend` Trait (in `kernel/core/src/fs/vfs/page_cache.rs`)**:
 - `fn read_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter>;`
   - Maps virtual page index `idx` to absolute on-disk sectors, constructs a BIO (using `BioBuilder`), and returns the asynchronous `BioWaiter`.
 - `fn write_page_async(&self, idx: usize, frame: &CachePage) -> Result<BioWaiter>;`
@@ -64,7 +64,7 @@ For file data caching, Asterinas VFS uses a generic `PageCache`. The Designer mu
 ## 4. Exhaustive FileSystem Trait (VFS Mount & Superblock)
 At the top level of the VFS hierarchy, the Designer must orchestrate the overall file system instance by implementing the `FileSystem` trait. This defines the macro-boundaries of the module.
 
-**`FileSystem` Trait (in `kernel/src/fs/vfs/fs_apis/file_system.rs`)**:
+**`FileSystem` Trait (in `kernel/core/src/fs/vfs/fs_apis/file_system.rs`)**:
 - `fn name(&self) -> &'static str;`
   - Required. Identifies the file system type.
 - `fn source(&self) -> Option<&str>;`
@@ -138,7 +138,7 @@ The `Inode` trait bridges VFS path resolution and file actions to the specific f
   - VFS hook returning an optional memory map structure. Most FS implementations return `None` initially to let VFS generate a default `PageCache`.
 
 ## 6. Expected Error Variants (`Errno`)
-Designers must map errors to standard POSIX-shaped Asterinas OS `Errno` variants (found in `kernel/src/error.rs`):
+Designers must map errors to standard POSIX-shaped Asterinas OS `Errno` variants (found in `kernel/core/src/error.rs`):
 - `ENOENT`: File or directory not found.
 - `ENOTEMPTY`: Expected when `rmdir` is called on a directory containing valid dentries (excluding `.` and `..`).
 - `EEXIST`: Expected when creating something that already exists.

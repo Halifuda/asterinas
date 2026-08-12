@@ -47,7 +47,7 @@ Lightweight triage agents must not:
   allocation policy, error mapping, or validation semantics;
 - widen the target case list or owner scope;
 - edit `SYSTEM_BLUEPRINT.md`, `PASS_SLICING.md`, or main-agent handoffs;
-- introduce filesystem-local tests under `kernel/src/fs/fs_impls/`;
+- introduce filesystem-local tests under `kernel/core/src/fs/fs_impls/`;
 - claim an above-`overlayfs` owner unless the logs show the smallest
   observed boundary outside the filesystem implementation/refactor implementation.
 
@@ -84,7 +84,7 @@ Choose exactly one bucket:
 - `PASSABLE_PERF_REGRESSION`: the intended case passed but is slower than the
   packeted baseline or exceeds the packeted threshold.
 - `ABOVE_EXFAT_CONFIRMED`: the failure reproduces and the smallest observed
-  failing boundary is outside `kernel/src/fs/fs_impls/overlayfs/`.
+  failing boundary is outside `kernel/core/src/fs/fs_impls/overlayfs/`.
 - `EXFAT_CANDIDATE`: the failure reproduces and the smallest observed failing
   boundary is inside or immediately entered from `overlayfs`.
 - `HARNESS_OR_ENV`: the intended case did not execute, devices / filesystem

@@ -3,7 +3,7 @@
 # Lightweight xfstests Triage Prompt: `{phase}`
 
 Use the temporary xfstests lightweight triage protocol and `$ovfs-checker`:
-`kernel/src/fs/fs_impls/overlayfs/.agents/protocol/XFSTESTS_LIGHTWEIGHT_TRIAGE.md`.
+`kernel/core/src/fs/fs_impls/overlayfs/.agents/protocol/XFSTESTS_LIGHTWEIGHT_TRIAGE.md`.
 
 ## Scope
 

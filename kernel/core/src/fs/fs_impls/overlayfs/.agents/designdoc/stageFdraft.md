@@ -60,12 +60,12 @@ Stage F 不重新设计 B/C 的锁序和 publication law，也不重新选择 P2
 
 对应源码入口是：
 
-- `kernel/src/fs/vfs/fs_apis/file_system.rs`：root publication boundary；
-- `kernel/src/fs/vfs/fs_apis/inode.rs`：inode operations、revalidation、xattr
+- `kernel/core/src/fs/vfs/fs_apis/file_system.rs`：root publication boundary；
+- `kernel/core/src/fs/vfs/fs_apis/inode.rs`：inode operations、revalidation、xattr
   和 permission；
-- `kernel/src/fs/vfs/path/dentry.rs`：dentry tree、children cache 和 lookup
+- `kernel/core/src/fs/vfs/path/dentry.rs`：dentry tree、children cache 和 lookup
   publication；
-- `kernel/src/fs/vfs/fs_apis/xattr.rs`：xattr namespace 和 set flags。
+- `kernel/core/src/fs/vfs/fs_apis/xattr.rs`：xattr namespace 和 set flags。
 
 ## 3. 跨 Meso 的责任分工
 

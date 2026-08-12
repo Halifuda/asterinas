@@ -66,9 +66,9 @@ runs. Do not put those large images in Git; record their size and SHA-256 in
 the Checker receipt instead.
 
 For the old implementation baseline, use
-`kernel/src/fs/fs_impls/overlayfs/.agents/components/old-ovfs-baseline-test/`.
+`kernel/core/src/fs/fs_impls/overlayfs/.agents/components/old-ovfs-baseline-test/`.
 For later runs, use a new timestamped directory under the packet-authorized
-`kernel/src/fs/fs_impls/overlayfs/.agents/components/<component-id>/` path.
+`kernel/core/src/fs/fs_impls/overlayfs/.agents/components/<component-id>/` path.
 The overlayfs `components/` tree is intentionally Git-ignored: keep local
 evidence there, but do not stage receipts, raw logs, or large image metadata
 from it unless the main agent explicitly changes that policy.
@@ -142,7 +142,7 @@ evidence about the hang location, not evidence that the suite never started.
 ## Reporting
 
 Write the required Checker receipt/report under the packet's authorized
-`kernel/src/fs/fs_impls/overlayfs/.agents/components/<component-id>/` path. Keep the
+`kernel/core/src/fs/fs_impls/overlayfs/.agents/components/<component-id>/` path. Keep the
 Creator-synchronized scope exact. Separate infrastructure/startup failures
 from filesystem behavior mismatches, and send the main agent the original
 diagnostics without reinterpretation. Never add filesystem-local ktests or

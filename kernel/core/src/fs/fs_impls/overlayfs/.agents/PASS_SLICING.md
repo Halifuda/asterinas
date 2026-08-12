@@ -343,7 +343,7 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     `Extension` group whose `overlay_inuse_slot()` accessor lazily initializes
     one token-only atomic slot; and the `ReadOnly` source link admission.
   - **VFS boundary**: exact expected write-set is
-    `kernel/src/fs/vfs/fs_apis/{registry.rs,inode.rs,inode_ext.rs}`. It adds no
+    `kernel/core/src/fs/vfs/fs_apis/{registry.rs,inode.rs,inode_ext.rs}`. It adds no
     VFS module, global map, other extension-group use, context carrier, or
     lock domain. The slot's `Acquire`/`Release`/`Relaxed` protocol protects
     only token ownership; existing `InodeClaimGuard` keeps the inode pin and
@@ -469,7 +469,7 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     separate passes.
   - **Scope**: every active overlayfs source file (all 31 non-`legacy_fs.rs`
     `.rs` files) is comment-rewritten so a developer reading only
-    `kernel/src/fs/fs_impls/overlayfs/` understands the code without the
+    `kernel/core/src/fs/fs_impls/overlayfs/` understands the code without the
     `.agents/` workspace. All micro-feature IDs (`P0-xx`/`P1-xx`/`P2-xx`/
     `P3-xx`) and internal workspace vocabulary (Meso/Wave/pass IDs/spec §/
     review-repair-round history/RECONCILIATION/frozen etc.) are removed from
@@ -1059,7 +1059,7 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     evidence `run_evidence/overlay021_retry_20260810/`. **Root cause pinned
     (2026-08-10 guest fsstress smoke, user-directed):** fsstress exits at
     `io_setup` (aio, syscall 206) → ENOSYS (no Asterinas aio handler;
-    `kernel/src/syscall/mod.rs` default branch) BEFORE any file op → 0 files
+    `kernel/core/src/syscall/mod.rs` default branch) BEFORE any file op → 0 files
     seeded → 021 globs empty. Attribution refined to `前置/内核 syscall 缺口`,
     non-overlayfs; routing options (a) implement io_setup/io_destroy
     (out-of-scope, separate authorization), (b) repackage AIO-less fsstress,

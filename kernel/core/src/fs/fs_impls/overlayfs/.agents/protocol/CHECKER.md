@@ -14,7 +14,7 @@ This refactor uses xfstests as its only validation method. Checker work MUST
 NOT propose, create, modify, or grow any `#[ktest]`, `#[cfg(ktest)]`,
 kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest
 harness anywhere in the repository. Any explicitly authorized harness or
-configuration change must be outside `kernel/src/fs/fs_impls/` and belong to
+configuration change must be outside `kernel/core/src/fs/fs_impls/` and belong to
 the xfstests lane.
 
 There are two legal Checker pass kinds:
@@ -86,9 +86,9 @@ Required execution rules for this lane:
    guest writes do not pollute the base image.
 3. **filesystem Refactor `.agents` Directory Only**: The wrapper must place reusable
    images under
-   `kernel/src/fs/fs_impls/overlayfs/.agents/xfstests/images/` and mutable
+   `kernel/core/src/fs/fs_impls/overlayfs/.agents/xfstests/images/` and mutable
    receipts under
-   `kernel/src/fs/fs_impls/overlayfs/.agents/xfstests/logs/<timestamp>/`.
+   `kernel/core/src/fs/fs_impls/overlayfs/.agents/xfstests/logs/<timestamp>/`.
    Do not use a repository-root `.agents` directory for this lane.
 4. **Run Directory Contents**: Preserve at least a manifest, reproduce command,
    QEMU command line, `qemu.log`, `qemu-serial.log`, test stdout/stderr, xfstests
@@ -109,12 +109,12 @@ Required execution rules for this lane:
 ## Allowed Edits
 
 - Creation or modification of your assigned `pass_XX_<component_name>_checker.md` artifact.
-- Validation harness/config files only when the packet explicitly names an upstream-approved harness location outside `kernel/src/fs/fs_impls/`.
+- Validation harness/config files only when the packet explicitly names an upstream-approved harness location outside `kernel/core/src/fs/fs_impls/`.
 
 ## Forbidden Edits
 
 - **NO PRODUCTION LOGIC EDITS**: You may not edit the non-test production `.rs` implementation written by the Creator. If it's broken, your job is to output a Repair Batch, not fix it yourself.
-- **NO KTEST EDITS**: Do not add, modify, or grow any ktest-based validation surface anywhere in the repository, including `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, or `test_support/`. Only explicitly packeted xfstests harness/configuration changes outside `kernel/src/fs/fs_impls/` are allowed.
+- **NO KTEST EDITS**: Do not add, modify, or grow any ktest-based validation surface anywhere in the repository, including `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, or `test_support/`. Only explicitly packeted xfstests harness/configuration changes outside `kernel/core/src/fs/fs_impls/` are allowed.
 - Modifying Architect/Designer specs.
 - Modifying `SYSTEM_BLUEPRINT.md`.
 

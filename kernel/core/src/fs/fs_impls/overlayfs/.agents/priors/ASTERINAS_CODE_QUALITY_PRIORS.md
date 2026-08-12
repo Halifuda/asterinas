@@ -15,7 +15,7 @@ not authorize `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules,
 ## CORE CODING STANDARDS & RUST HYGIENE
 
 ### 1. Unsafe Code
-- `kernel/` is entirely Safe Rust. **Never** introduce `unsafe` blocks, `unsafe fn`, or `unsafe trait` inside `kernel/src/fs/`.
+- `kernel/` is entirely Safe Rust. **Never** introduce `unsafe` blocks, `unsafe fn`, or `unsafe trait` inside `kernel/core/src/fs/`.
 - Every crate under `kernel/` must maintain `#![deny(unsafe_code)]`.
 - `ostd/` is the only crate permitted to use `unsafe`.
 

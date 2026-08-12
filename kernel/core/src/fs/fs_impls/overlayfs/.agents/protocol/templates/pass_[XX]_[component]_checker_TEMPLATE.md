@@ -27,11 +27,11 @@
 
 ## 2.1 Validation Harness Surface Record
 
-*Required whenever Checker created or edited explicitly packeted upstream xfstests harness/config files outside `kernel/src/fs/fs_impls/`. Any creation, modification, or growth of `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, `test_support/`, memory-disk fixtures, or other ktest-based validation anywhere in the repository is forbidden for this refactor.*
+*Required whenever Checker created or edited explicitly packeted upstream xfstests harness/config files outside `kernel/core/src/fs/fs_impls/`. Any creation, modification, or growth of `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test modules, `test_support/`, memory-disk fixtures, or other ktest-based validation anywhere in the repository is forbidden for this refactor.*
 
-- **Touched Validation Harness Surface:** [List touched upstream-approved harness/config files outside `kernel/src/fs/fs_impls/`, or say `None` if Checker reused existing harness only.]
+- **Touched Validation Harness Surface:** [List touched upstream-approved harness/config files outside `kernel/core/src/fs/fs_impls/`, or say `None` if Checker reused existing harness only.]
 - **Existing Legacy Filesystem-Local Test Surface In Scope:** [Only list packeted pre-existing legacy surfaces if the task explicitly named them for cleanup/audit; otherwise say `None`.]
-- **Harness Boundary Justification:** [Explain why any touched harness/config path is outside `kernel/src/fs/fs_impls/` and belongs to the approved validation lane.]
+- **Harness Boundary Justification:** [Explain why any touched harness/config path is outside `kernel/core/src/fs/fs_impls/` and belongs to the approved validation lane.]
 - **Checker Surface Note:** [e.g., `No harness edits`, `Updated xfstests config`, `Possible harness placement concern for Reviewer`]
 - **Reviewer Follow-Up Needed:** [Choose `No validation harness surface touched`, `Ordinary post-checker Reviewer gate`, or `Validation harness boundary review required`.]
 

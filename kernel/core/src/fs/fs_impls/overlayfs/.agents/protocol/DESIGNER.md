@@ -167,7 +167,7 @@ do not add an internal test lane.
   helper shape open creates unmanageable surface area.
 - **NO ARCHITECTURAL REVISIONS**: Do not alter the static lock boundaries, macro-owners, or topology provided by the Architect. Do not skip any assigned micro-features.
 - **NO PASS SLICING**: Do not decide Creator Pass boundaries or say "Pass 1 should implement X and Y." That is owned by the main agent.
-- **XFSTESTS-ONLY VALIDATION**: Do not request, design, create, modify, or imply any internal unit-test lane, `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest harness anywhere in the repository. Validation must be expressible through the upstream xfstests lane. Any xfstests harness/configuration change must be outside `kernel/src/fs/fs_impls/` and explicitly authorized by the packet.
+- **XFSTESTS-ONLY VALIDATION**: Do not request, design, create, modify, or imply any internal unit-test lane, `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest harness anywhere in the repository. Validation must be expressible through the upstream xfstests lane. Any xfstests harness/configuration change must be outside `kernel/core/src/fs/fs_impls/` and explicitly authorized by the packet.
 - **NO RAII/DROP MICROMANAGEMENT**: Define the locking rules and hazards, but do not dictate exact line-by-line `drop(guard)` statements or attempt to write the Rust syntax for scope blocks. Trust Rust's RAII and the Creator to implement the specified constraints.
 - **NO PRODUCTION CODE**: Do not write `.rs` files.
 

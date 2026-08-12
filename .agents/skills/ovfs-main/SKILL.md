@@ -6,7 +6,7 @@ description: Use when coordinating, scheduling, or accepting work in the overlay
 # Overlayfs Main Agent
 
 Act as the scheduler and final protocol gate for
-`kernel/src/fs/fs_impls/overlayfs/`. The repository-local protocol is
+`kernel/core/src/fs/fs_impls/overlayfs/`. The repository-local protocol is
 authoritative; this skill is the compact entry point into it.
 
 ## Plugin boundary
@@ -20,11 +20,11 @@ requires superpowers as a protocol conflict to the user.
 
 Read these files before making a scheduling or acceptance decision:
 
-1. `kernel/src/fs/fs_impls/overlayfs/.agents/README.md`
-2. `kernel/src/fs/fs_impls/overlayfs/.agents/PROTOCOL.md`
-3. `kernel/src/fs/fs_impls/overlayfs/.agents/SYSTEM_BLUEPRINT.md`
-4. `kernel/src/fs/fs_impls/overlayfs/.agents/PASS_SLICING.md`
-5. The single latest handoff under `kernel/src/fs/fs_impls/overlayfs/.agents/main-agent/`
+1. `kernel/core/src/fs/fs_impls/overlayfs/.agents/README.md`
+2. `kernel/core/src/fs/fs_impls/overlayfs/.agents/PROTOCOL.md`
+3. `kernel/core/src/fs/fs_impls/overlayfs/.agents/SYSTEM_BLUEPRINT.md`
+4. `kernel/core/src/fs/fs_impls/overlayfs/.agents/PASS_SLICING.md`
+5. The single latest handoff under `kernel/core/src/fs/fs_impls/overlayfs/.agents/main-agent/`
 
 Load only the priors and role protocol files needed for the current decision.
 Use the repository-root `ra-code-nav` skill for scoped Rust symbol navigation
@@ -66,7 +66,7 @@ them pointer-oriented, and require artifacts under the matching
 `.agents/components/<component-id>/` directory.
 
 For an Architect packet, use `$ovfs-subagent` with role `Architect` and the
-protocol in `kernel/src/fs/fs_impls/overlayfs/.agents/protocol/ARCHITECT.md`.
+protocol in `kernel/core/src/fs/fs_impls/overlayfs/.agents/protocol/ARCHITECT.md`.
 
 ### V2 dispatch lane (platform-verified 2026-08-08)
 

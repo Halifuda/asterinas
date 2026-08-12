@@ -150,7 +150,7 @@ docker exec codex-asterinas-dev bash -c '
 
 ```bash
 docker exec codex-asterinas-dev bash -c '
-  FILE="file:///root/asterinas/kernel/src/fs/fs_impls/overlayfs/fs.rs"
+  FILE="file:///root/asterinas/kernel/core/src/fs/fs_impls/overlayfs/fs.rs"
   # find document vertex
   DOC=$(grep "\"label\":\"document\"" /tmp/asterinas.lsif \
     | jq -r "select(.uri==\"$FILE\") | .id")
@@ -172,7 +172,7 @@ fall back to `rust-analyzer symbols` on the specific file via stdin:
 
 ```bash
 docker exec codex-asterinas-dev bash -c '
-  cat /root/asterinas/kernel/src/fs/fs_impls/overlayfs/fs.rs \
+  cat /root/asterinas/kernel/core/src/fs/fs_impls/overlayfs/fs.rs \
   | rust-analyzer symbols \
   | jq -c "select(.kind==\"SymbolKind(Impl)\")" '
 ```

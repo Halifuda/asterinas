@@ -2,7 +2,7 @@
 
 # Meso-Component Designer Validation Contract: `{component_name}`
 
-*This artifact is not a test-design document. It is the sole external-evidence contract for the `Checker`, expressed through the xfstests lane. The mapping is many-to-many; missing upstream coverage is recorded as a gap rather than filled with another test lane. This refactor must not create, modify, or grow any ktest or other internal test surface. Any xfstests harness/configuration change must be outside `kernel/src/fs/fs_impls/` and explicitly authorized by the packet.*
+*This artifact is not a test-design document. It is the sole external-evidence contract for the `Checker`, expressed through the xfstests lane. The mapping is many-to-many; missing upstream coverage is recorded as a gap rather than filled with another test lane. This refactor must not create, modify, or grow any ktest or other internal test surface. Any xfstests harness/configuration change must be outside `kernel/core/src/fs/fs_impls/` and explicitly authorized by the packet.*
 
 ## 1. External Validation Mapping
 

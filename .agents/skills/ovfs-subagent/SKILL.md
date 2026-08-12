@@ -37,11 +37,11 @@ superpowers as a protocol conflict to the main agent.
 Read, in this order:
 
 1. The archived packet named by your dispatch turn:
-   `kernel/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/<component-id>/<task_id>_dispatch.md`.
+   `kernel/core/src/fs/fs_impls/overlayfs/.agents/subagent-tasks/<component-id>/<task_id>_dispatch.md`.
 2. `.agents/protocol/<ROLE>.md` for the assigned role. The available role
    entries are `ARCHITECT.md`, `DESIGNER.md`, `CREATOR.md`, `CHECKER.md`, and
    `REVIEWER.md`.
-3. `kernel/src/fs/fs_impls/overlayfs/.agents/PROTOCOL.md` for scheduler-wide
+3. `kernel/core/src/fs/fs_impls/overlayfs/.agents/PROTOCOL.md` for scheduler-wide
    invariants and artifact boundaries.
 4. The matching role protocol is the detailed role rule. Use the top-level
    `ra-code-nav` skill for packet-scoped Rust navigation.
@@ -55,7 +55,7 @@ The main-agent protocol overrides this compact entry point. Use
 
 Internalize the staged priors and produce the static topology and traceability
 artifacts required by the Architect packet, following
-`kernel/src/fs/fs_impls/overlayfs/.agents/protocol/ARCHITECT.md`.
+`kernel/core/src/fs/fs_impls/overlayfs/.agents/protocol/ARCHITECT.md`.
 
 ### Designer
 
@@ -72,7 +72,7 @@ Implement only the main-agent-assigned Creator Pass. Name the parent
 meso-component and exact covered micro-features in the report. Follow the
 Designer contract, preserve the lock topology, census all production entities
 in the write-set, and do not add test code under
-`kernel/src/fs/fs_impls/overlayfs/`.
+`kernel/core/src/fs/fs_impls/overlayfs/`.
 
 ### Checker
 
@@ -96,7 +96,7 @@ validation-harness boundary.
 - Do not spawn agents or send followup/send messages; you hold the tools but
   the protocol forbids their use by subagents (PROTOCOL.md §1.3).
 - Do not add `#[ktest]`, `#[cfg(ktest)]`, `test_support/`, memory-disk fixtures,
-  or other filesystem-local validation under `kernel/src/fs/fs_impls/overlayfs/`.
+  or other filesystem-local validation under `kernel/core/src/fs/fs_impls/overlayfs/`.
 - Do not redesign lock topology, macro/meso ownership, or pass boundaries.
 - Do not silently broaden a Creator or Checker result to the whole component.
 - Do not treat a partial test count as proof that the intended suite ran.

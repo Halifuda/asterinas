@@ -33,7 +33,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/vm/vmar/vmar_impls/protect.rs }
+    - target: { kind: file, path: kernel/core/src/vm/vmar/vmar_impls/protect.rs }
       persona: development
       grounding: "Reachable panic"
       severity: critical
@@ -69,7 +69,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/sched/sched_class/fair.rs }
+    - target: { kind: file, path: kernel/core/src/sched/sched_class/fair.rs }
       persona: development
       grounding: careful-atomics
       severity: major
@@ -95,9 +95,9 @@
     patch.
   review_mode:
     files:
-      - kernel/src/ipc/semaphore/system_v/sem.rs
+      - kernel/core/src/ipc/semaphore/system_v/sem.rs
   defects:
-    - target: { kind: file, path: kernel/src/ipc/semaphore/system_v/sem.rs }
+    - target: { kind: file, path: kernel/core/src/ipc/semaphore/system_v/sem.rs }
       persona: development
       grounding: atomic-critical-sections
       severity: major
@@ -124,7 +124,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/ipc/semaphore/system_v/sem.rs }
+    - target: { kind: file, path: kernel/core/src/ipc/semaphore/system_v/sem.rs }
       persona: development
       grounding: raii
       severity: critical
@@ -138,7 +138,7 @@
       expectation: >
         A reviewer should flag the timer/guard that is constructed but never kept
         alive.
-    - target: { kind: file, path: kernel/src/ipc/semaphore/system_v/sem.rs }
+    - target: { kind: file, path: kernel/core/src/ipc/semaphore/system_v/sem.rs }
       persona: development
       grounding: "Over-broad removal"
       severity: major
@@ -224,7 +224,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/syscall/getcwd.rs }
+    - target: { kind: file, path: kernel/core/src/syscall/getcwd.rs }
       persona: security
       grounding: validate-at-boundaries
       severity: major
@@ -284,7 +284,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/fs/fs_impls/tmpfs/fs.rs }
+    - target: { kind: file, path: kernel/core/src/fs/fs_impls/tmpfs/fs.rs }
       persona: maintainability
       grounding: no-magic-number
       severity: minor
@@ -300,7 +300,7 @@
         A reviewer should flag the duplicated literal `2` in the tmpfs default
         block and inode limit helpers as an unnamed capacity policy and ask for a
         named constant.
-    - target: { kind: file, path: kernel/src/fs/fs_impls/tmpfs/fs.rs }
+    - target: { kind: file, path: kernel/core/src/fs/fs_impls/tmpfs/fs.rs }
       persona: maintainability
       grounding: backtick-identifiers
       severity: minor
@@ -317,7 +317,7 @@
         A reviewer should flag that the new tmpfs workaround comment leaves
         code identifiers such as `RamFs` unformatted and ask for backticks around
         them.
-    - target: { kind: file, path: kernel/src/fs/vfs/path/mod.rs }
+    - target: { kind: file, path: kernel/core/src/fs/vfs/path/mod.rs }
       persona: maintainability
       grounding: consistency
       severity: minor
@@ -511,7 +511,7 @@
     diff:
       base: HEAD^
   defects:
-    - target: { kind: file, path: kernel/src/process/credentials/credentials_.rs }
+    - target: { kind: file, path: kernel/core/src/process/credentials/credentials_.rs }
       persona: security
       grounding: "Privilege escalation"
       severity: critical
@@ -537,7 +537,7 @@
         effective capability set when file capabilities are present for a
         non-root caller; only the file effective flag should make the
         permitted set effective.
-    - target: { kind: file, path: kernel/src/process/credentials/file_capabilities.rs }
+    - target: { kind: file, path: kernel/core/src/process/credentials/file_capabilities.rs }
       persona: security
       grounding: "Incorrect permission check"
       severity: major
@@ -562,7 +562,7 @@
         `execve` must not require the executable to be readable; execute-only
         files without file capabilities must reach the xattr absence case and
         execute successfully.
-    - target: { kind: file, path: kernel/src/process/execve.rs }
+    - target: { kind: file, path: kernel/core/src/process/execve.rs }
       persona: security
       grounding: "TOCTOU race"
       severity: major
@@ -603,9 +603,9 @@
     `MaskOp` decode enum unnecessarily.
   review_mode:
     files:
-      - kernel/src/syscall/rt_sigprocmask.rs
+      - kernel/core/src/syscall/rt_sigprocmask.rs
   defects:
-    - target: { kind: file, path: kernel/src/syscall/rt_sigprocmask.rs }
+    - target: { kind: file, path: kernel/core/src/syscall/rt_sigprocmask.rs }
       persona: development
       grounding: "Incorrect signal semantics"
       severity: critical
@@ -627,7 +627,7 @@
         A reviewer should flag that every path installing a blocked signal
         mask, including `SIG_SETMASK`, must preserve the invariant that
         `SIGKILL` and `SIGSTOP` cannot be blocked.
-    - target: { kind: file, path: kernel/src/syscall/rt_sigprocmask.rs }
+    - target: { kind: file, path: kernel/core/src/syscall/rt_sigprocmask.rs }
       persona: development
       grounding: "Incorrect argument validation"
       severity: major
@@ -647,13 +647,13 @@
         A reviewer should flag that `rt_sigprocmask` must ignore invalid
         `how` values when `set` is `NULL`; only calls that install or change a
         signal mask should validate the operation.
-    - target: { kind: file, path: kernel/src/syscall/rt_sigprocmask.rs }
+    - target: { kind: file, path: kernel/core/src/syscall/rt_sigprocmask.rs }
       persona: maintainability
       grounding: narrow-visibility
       severity: minor
       desc: >
         `MaskOp` is declared `pub`, but it is only used inside
-        `kernel/src/syscall/rt_sigprocmask.rs` to decode the syscall's `how`
+        `kernel/core/src/syscall/rt_sigprocmask.rs` to decode the syscall's `how`
         argument. Exposing this syscall-local enum creates an unnecessary
         module interface for an implementation detail that no other module
         needs to name.

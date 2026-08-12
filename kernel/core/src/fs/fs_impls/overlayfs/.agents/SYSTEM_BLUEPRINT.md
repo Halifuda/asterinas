@@ -83,7 +83,7 @@ Managers and subagents update artifacts elsewhere; only the main agent updates t
     `creator_pass_slicing_20260803` decision (met).
   - **Expected Artifacts**: Creator receipts
     `components/<component-id>/pass_XX_<component>_creator.md` + production
-    `.rs` files under `kernel/src/fs/fs_impls/overlayfs/`; later per-meso
+    `.rs` files under `kernel/core/src/fs/fs_impls/overlayfs/`; later per-meso
     Reviewer reports; final meso-integration Checker evidence per the six
     Designer validation contracts.
   - **Legacy file (2026-08-03, user-directed):** `fs.rs` renamed to

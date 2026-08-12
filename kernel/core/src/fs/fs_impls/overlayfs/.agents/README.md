@@ -2,9 +2,16 @@
 
 # Overlayfs Refactor Multi-Agent Workspace
 
-This directory stores the operating protocol for the `overlayfs` refactor workspace at `kernel/src/fs/fs_impls/overlayfs/`.
+This directory stores the operating protocol for the `overlayfs` refactor workspace at `kernel/core/src/fs/fs_impls/overlayfs/`.
 
-The legacy single-file implementation lives at `kernel/src/fs/fs_impls/overlayfs/fs.rs` and remains the active registered filesystem until the refactor explicitly schedules a takeover. Per `PROTOCOL.md`, the legacy implementation MUST NOT be used as a reference for the new design; the Architect internalizes the staged priors instead.
+The legacy single-file implementation lives at `kernel/core/src/fs/fs_impls/overlayfs/fs.rs` and remains the active registered filesystem until the refactor explicitly schedules a takeover. Per `PROTOCOL.md`, the legacy implementation MUST NOT be used as a reference for the new design; the Architect internalizes the staged priors instead.
+
+> **Path convention (2026-08-12):** Upstream restructured the kernel tree
+> (`kernel/src/` → `kernel/core/src/`), so all live paths in this protocol
+> workspace and the `ovfs-*` skills use the
+> `kernel/core/src/fs/fs_impls/overlayfs/` form. Historical records (handoffs,
+> component specs, subagent packets) may still show the old `kernel/src/...`
+> prefix; those refer to the same files.
 
 This directory was bootstrapped from the generic filesystem protocol bundle; the bundle's generic adoption notes have been superseded by the overlayfs-specific protocol text below.
 

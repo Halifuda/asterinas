@@ -80,7 +80,7 @@ Output **only** a JSON array of comment objects (no prose around it):
   — every comment proposes a remedy.
   They are posted as GitHub-flavored Markdown,
   so wrap every code identifier, path, type, function or variable name, and literal value in backticks
-  (`self.len`, `Ordering::Acquire`, `kernel/src/foo.rs`),
+  (`self.len`, `Ordering::Acquire`, `kernel/core/src/foo.rs`),
   and put any multi-line snippet in `fix` in a fenced ```` ``` ```` block.
   (The `grounding` of a bug stays plain prose, as described above
   — only `problem` and `fix` take inline code.)
