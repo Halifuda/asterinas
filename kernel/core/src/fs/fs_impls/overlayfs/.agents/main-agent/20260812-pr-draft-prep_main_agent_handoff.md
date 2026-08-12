@@ -125,3 +125,30 @@
      - B. cleanup 先 `rmdir(WORK_DIR "/work")` 再 `rmdir(WORK_DIR)`（Linux 同款残留，staging 平时为空）。
   3. 基础设施 `run_test.sh` / `fs/Makefile` — 不需要修改。
 - 其余：regression 树无其他 overlay 引用；conformance 仅 gvisor blocklist 提到（与 overlayfs 无关）；xfstests overlay 套件是独立 lane。
+
+### 8.6 Step 1 完成：rustdoc 修复 + API docs CI 本地验证（2026-08-12）
+- 5 处 rustdoc 错误已修（6 文件改动，最终 5 文件有 diff）：
+  1. `copyup/promote.rs:539` — `OverlayXattrPolicy::copy_eligible_xattrs` 改全路径链接。
+  2. `copyup/mod.rs` — `mod promote;` → `pub(in crate::fs::fs_impls::overlayfs) mod promote;`（使 `dir/remove.rs:422` 的 `copyup::promote::CommitMarker` 路径可解析；remove.rs 文本未改）。
+  3. `projection/mod.rs:16` — `[`OverlayObjectId`]` → `[`OverlayObjectId`](identity::OverlayObjectId)`。
+  4. `copyup/workdir.rs:117` — 去掉冗余显式链接（`mknod_object_type`）。
+  5. `mount/mod.rs:41` — 去掉冗余显式链接（`FileSystem::name`）。
+- 过程修正：先试 `pub(in …) use` re-export 方案，rustc 判 `unused import`（-D warnings 会挂），改走可见性放宽 + 相对/全路径链接，**零未用导入**。
+- 容器门（codex-asterinas-dev，CI 同款命令）：`cargo doc -Zbuild-std … -p aster-core --no-deps`（RUSTDOCFLAGS=`-Dwarnings --document-private-items -Arustdoc::private_intra_doc_links --check-cfg cfg(ktest)`）**EXIT 0**；`cargo fmt --check` PASS；`cargo check -p aster-core` 0 warnings；`cargo clippy -p aster-core -- -Dwarnings` PASS。
+- 待办：把本批改动同步到 PR 分支 `~/asterinas-pr codex/pr-overlayfs-refactor` 并 push 后，GitHub check_api_docs 应转绿。
+
+### 8.7 Step 1 迁移到 PR 区 + PR 容器双绿（2026-08-12，未提交）
+- 5 文件 doc 修复已迁移到 `/home/ayd/asterinas-pr`（`codex/pr-overlayfs-refactor`，HEAD a0ac8bafe）：`projection/mod.rs`、`copyup/mod.rs`、`copyup/promote.rs`、`copyup/workdir.rs`、`mount/mod.rs`。迁移前逐文件 diff 确认 PR 树与 dev 仅差这 5 处 doc 修改；迁移后 `git diff` 恰为 5 文件 5 行（**未 commit/push**，按 user 要求）。
+- PR 专用容器 `codex-asterinas-pr`（挂载 `/home/ayd/asterinas-pr` → `/root/asterinas-pr`）验证：
+  - `make docs` **EXIT 0**（aster-core 段 flags 与 CI 一致：`-Dwarnings --document-private-items -Arustdoc::private_intra_doc_links`）。
+  - `make check` **EXIT 0**（trailing whitespace / workspace lints / format_all / clippy workspace（含 aster-core+asterinas）/ nixfmt / test C format / typos 全过）。
+- 待办：push 后 GitHub `check_api_docs` 应转绿；随后处理 regression-test（改测试）。
+
+### 8.8 Step 2（进行中）：修改 `readdir_small_buffer.c`（dev 工作区，2026-08-12）
+- **设计结论（user 确认方向）**：测试目的 = 验证合并 readdir 对"已存在 whiteout"的处理（隐藏自身 + 隐藏 lower 同名 + 小缓冲完整），不是验证 whiteout 创建；因此 fixture 应**手动在底层 fs 上放真实 Linux 格式 whiteout**，不用 unlink 让内核创建（避免 readdir 测试与 unlink 路径耦合）。
+- 改动（`test/initramfs/src/regression/fs/overlayfs/readdir_small_buffer.c`）：
+  1. fixture：`write_file(UPPER "/.wh.deleted")` → `mknod(UPPER "/deleted", S_IFCHR|0644, makedev(0,0))`（Linux 格式 chardev 0:0、目标同名；ramfs metadata `type_=CharDevice, self_dev_id=None` 已核实能过 `is_whiteout_inode`）。断言不变（deleted==0 / whiteout==0 / total==12）。
+  2. cleanup：`unlink(UPPER "/.wh.deleted")` → `unlink(UPPER "/deleted")`；`rmdir(WORK_DIR)` 前先 `rmdir(WORK_DIR "/work")`（overlay mount 建的 staging，Linux `ovl_workdir_create` 同款，umount 后残留）。
+  3. 注释同步更新；加 `_GNU_SOURCE` + `<sys/sysmacros.h>`（先例 ext2/mknod.c）。
+- 验证：`clang-format --dry-run --Werror` PASS；`make`（gcc -Wall -Werror）编译 ovl_test + readdir_small_buffer PASS。
+- 待办：QEMU 跑 regression 验证 → 迁移到 PR 区（该测试不在 7 commit 内，将作为新 commit 追加）→ push。

@@ -45,7 +45,7 @@ use crate::{
 
 pub(super) mod coordination;
 
-mod promote;
+pub(in crate::fs::fs_impls::overlayfs) mod promote;
 mod trigger;
 mod workdir;
 

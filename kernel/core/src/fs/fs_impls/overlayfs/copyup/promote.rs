@@ -536,7 +536,7 @@ impl OverlayInode {
     /// silently dropping `security.*`/`trusted.*` metadata. The copy travels
     /// through the mount's creator-credential scope
     /// (`with_creator_credentials_fn`); see
-    /// [`OverlayXattrPolicy::copy_eligible_xattrs`] for the credential
+    /// [`OverlayXattrPolicy::copy_eligible_xattrs`](crate::fs::fs_impls::overlayfs::metadata_security::xattr::OverlayXattrPolicy::copy_eligible_xattrs) for the credential
     /// and source-read-policy discussion.
     fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>, policy: XattrCopyPolicy) -> Result<()> {
         let lower = self.lower_source()?;

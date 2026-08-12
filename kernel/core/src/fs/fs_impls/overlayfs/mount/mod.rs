@@ -38,7 +38,7 @@ use crate::{
 ///
 /// Single representation of the `"overlay"` name used by the VFS entry point
 /// ([`FsType::name`]), the reported mount-source default (`build.rs`), and
-/// [`FileSystem::name`](crate::fs::vfs::file_system::FileSystem::name)
+/// [`FileSystem::name`]
 /// (`superblock.rs`).
 pub(super) const OVERLAY_FS_NAME: &str = "overlay";
 

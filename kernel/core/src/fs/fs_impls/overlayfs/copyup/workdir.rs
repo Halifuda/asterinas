@@ -114,7 +114,7 @@ impl WorkdirTempRequest<'_> {
     ///
     /// A known fact of the request, never a re-derivation: `Create` carries
     /// the kind directly, `Mknod` maps the node kind through the shared
-    /// [`mknod_object_type`](crate::fs::fs_impls::overlayfs::dir::mknod_object_type)
+    /// [`mknod_object_type`]
     /// mapping (the single `MknodType` -> `InodeType` classification), and
     /// `Link` inherits the hard-linked source's type. The kind feeds the
     /// [`WorkdirTemp`] handle and the kind-aware cleanup dispatcher.

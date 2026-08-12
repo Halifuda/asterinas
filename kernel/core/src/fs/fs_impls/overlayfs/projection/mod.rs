@@ -13,7 +13,7 @@
 //! [`IdentityPolicy`], and the wider type set — [`Binding`],
 //! [`BindingKey`], [`PositiveBinding`], [`NegativeBinding`],
 //! [`HiddenEvidence`], [`PositiveKind`], [`RealObject`], [`RealObjectKey`],
-//! and [`OverlayObjectId`]. Only the module-private intermediate
+//! and [`OverlayObjectId`](identity::OverlayObjectId). Only the module-private intermediate
 //! (`LayerLookup`) and the `pub(super)` fields stay reachable only
 //! inside this module tree.
 //!
