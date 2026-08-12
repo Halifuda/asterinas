@@ -529,7 +529,7 @@ impl OverlayFs {
 /// runs strictly before the physical rmdir/rename (pre-commit), so a failure
 /// aborts the removal and a retry converges.
 pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
-    let mut names = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     upper_dir_path.inode().readdir_at(0, &mut names)?;
     names.retain(|name| !path::is_dot_or_dotdot(name));
     // First pass — full validation: refuse the sweep before removing

@@ -551,7 +551,7 @@ impl OverlayInode {
     /// errors propagate. `.`/`..` are never scanned. No Overlay lock is held
     /// across the underlying call; the caller's `DIR` transaction covers it.
     fn collect_layer_names(&self, layer: &RealObject) -> Result<Vec<String>> {
-        let mut names = Vec::new();
+        let mut names: Vec<String> = Vec::new();
         layer.real_inode().readdir_at(0, &mut names)?;
         names.retain(|name| !is_dot_or_dotdot(name));
         Ok(names)

@@ -325,7 +325,7 @@ impl OverlayXattrPolicy {
     /// can list names of other namespaces under one probe, e.g. `user.*`
     /// under a `Trusted` list or `system.posix_acl_*` under a `Security`
     /// list; such cross-namespace names are skipped, so `System` stays
-    /// excluded and no duplicate is copied), and an unparseable name (an
+    /// excluded and no duplicate is copied), and an unparsable name (an
     /// unknown namespace such as `lustre.*`) is skipped with a warning
     /// instead of hard-failing the copy. The clear-empty
     /// recipe writes the temp's own `trusted.overlay.opaque` marker
@@ -373,7 +373,7 @@ impl OverlayXattrPolicy {
     /// which the VFS cannot do yet; until that is possible, the strict
     /// policy propagates the denial instead of silently dropping xattrs.
     /// Genuine xattr errors still hard-fail and abort the exchange
-    /// before the rename; an unparseable list entry (a non-UTF-8 or
+    /// before the rename; an unparsable list entry (a non-UTF-8 or
     /// unknown-namespace name) is skipped with a warning — it cannot be
     /// represented as a VFS `XattrName` — never hard-failed.
     pub(in crate::fs::fs_impls::overlayfs) fn copy_eligible_xattrs(
@@ -423,14 +423,14 @@ impl OverlayXattrPolicy {
                 // The name is validated exactly once per copied xattr and the
                 // validated `XattrName` is threaded through the value read and
                 // the temp write — no re-validation of `full_name` and no
-                // duplicated EINVAL error literal. An unparseable list entry
+                // duplicated EINVAL error literal. An unparsable list entry
                 // (an unknown namespace such as `lustre.*`) cannot be
                 // represented as a VFS `XattrName`; it is skipped with a
                 // warning (the "System/lustre excluded" copy intent) instead
                 // of hard-failing the whole copy.
                 let Some(name) = XattrName::try_from_full_name(full_name) else {
                     warn!(
-                        "overlay xattr copy: skipping unparseable xattr name: {}",
+                        "overlay xattr copy: skipping unparsable xattr name: {}",
                         full_name
                     );
                     continue;
@@ -517,7 +517,7 @@ impl OverlayXattrPolicy {
     /// `Copy` and carries no `Clone` (VFS surface), so each `get_xattr`
     /// call takes its own owned view; both views are re-borrowed from the
     /// caller's already-validated name (validated exactly once in the copy
-    /// loop; an unparseable list entry was already skipped with a warning
+    /// loop; an unparsable list entry was already skipped with a warning
     /// there), so the helper carries no validation and no error site of its
     /// own. Invoked once per
     /// listed name (multiple times per copy call) from

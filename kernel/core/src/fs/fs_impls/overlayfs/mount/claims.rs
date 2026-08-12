@@ -414,7 +414,7 @@ impl UpperWorkdirClaim {
         // the directory (the same discipline as `probe_d_type` in
         // `mount/policy.rs` and the standard `InodeHandle::readdir` caller);
         // the `Vec<String>` visitor appends across batches.
-        let mut names = Vec::new();
+        let mut names: Vec<String> = Vec::new();
         let mut offset = 0;
         loop {
             match dir.readdir_at(offset, &mut names)? {

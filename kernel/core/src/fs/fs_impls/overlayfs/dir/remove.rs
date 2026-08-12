@@ -291,7 +291,7 @@ impl OverlayInode {
         let clear_empty_temp = if kind == RemoveKind::Rmdir {
             match target_facts.upper() {
                 Some(upper_obj) => {
-                    let mut upper_names = Vec::new();
+                    let mut upper_names: Vec<String> = Vec::new();
                     upper_obj.real_inode().readdir_at(0, &mut upper_names)?;
                     upper_names.retain(|entry| !path::is_dot_or_dotdot(entry));
                     if upper_names.is_empty() {
