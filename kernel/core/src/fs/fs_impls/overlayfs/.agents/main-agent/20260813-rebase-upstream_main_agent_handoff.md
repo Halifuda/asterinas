@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-13 rebase upstream/main（76dac6f55）与冲突总结
 
 **Date / Time:** 2026-08-13 11:40 CST
-**Status:** `RECORD — rebase 已完成（52/52 重放），1 个文本冲突已解析；静默冲突（`registry.rs` `task_ctx()`）已由 Designer 调研 + Creator 修复（方案 1），main agent 在 container 亲自验证 `cargo check -p asterinas --target x86_64-unknown-none` PASSED（0 errors）。HEAD `aa3dd455e`（修复 commit）。**运行时验证（2026-08-13）：21 例 xfstests 全 PASS + regression 全 PASS**（详见 §3.6）。本文件记录 rebase、冲突总结、修复闭环与验证结果。`
+**Status:** `RECORD — rebase 已完成（52/52 重放），1 个文本冲突已解析；静默冲突（`registry.rs` `task_ctx()`）已由 Designer 调研 + Creator 修复（方案 1），main agent 在 container 亲自验证 `cargo check -p asterinas --target x86_64-unknown-none` PASSED（0 errors）。HEAD `aa3dd455e`（修复 commit）。**运行时验证（2026-08-13）：21 例 xfstests 全 PASS + regression 全 PASS**（§3.6）**；静态门 `make check` 与 `make docs`（rustdoc -Dwarnings）全 PASS**（§3.7）。本文件记录 rebase、冲突总结、修复闭环与验证结果。`
 
 ## 1. Global State Pointer
 
@@ -88,6 +88,15 @@
 - **证据**：`components/post-rebase-validation-20260813/MANIFEST.md` +
   `run_evidence/20260813_21case/`（qemu.log/qemu-serial.log/runlist/images.sha256）+
   `run_evidence/20260813_regression/`（qemu.log/qemu-serial.log）。临时 runlist 已移出 tracked 目录，repo 干净。
+
+### 3.7 静态门验证（2026-08-13，container `codex-asterinas-dev`，HEAD `eb6735da2`）
+
+- **`make check` → exit 0**：尾随空白检查、workspace lints 启用检查、`format_all.sh --check`（rustfmt）、
+  `clippy_check.sh workspace`（默认 + 非默认成员 + linux-bzimage-setup）、`test/initramfs check`（C/Nix 格式）、
+  `test/nixos check`、`typos` 全部通过，无任何输出错误。
+- **`make docs` → exit 0**：`RUSTDOCFLAGS="-Dwarnings"` 全包 rustdoc（默认包 + 非默认包 + linux-bzimage-setup），
+  含 aster-core `--document-private-items -Arustdoc::private_intra_doc_links`，全部生成成功、无 doc warning 转 error。
+- 说明：这两项是纯静态门，未改任何文件；上一 commit `eb6735da2` 之前已跑的 21 例 xfstests + regression 不受影响。
 
 ## 4. Explicit Agent-Level Decisions
 
