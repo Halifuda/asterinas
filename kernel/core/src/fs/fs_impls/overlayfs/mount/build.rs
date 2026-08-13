@@ -110,14 +110,14 @@ impl OverlayFs {
         // once, at construction, and is declared first so it is dropped last
         // (release-order invariant: the credential snapshot is the final
         // release).
-        let credential_policy =
-            CreatorCredentialPolicy::new(fs_creation_ctx.task_ctx().posix_thread.credentials_dup());
+        let credential_policy = super::with_current_posix_thread(|posix_thread| {
+            Ok(CreatorCredentialPolicy::new(posix_thread.credentials_dup()))
+        })?;
 
         // Step 2 — assemble the layer stack. The parsed `is_forced_read_only`
         // flag is passed in instead of being re-derived from
         // `fs_creation_ctx.flags()` inside `assemble`.
         let layer_stack = OverlayLayerStack::assemble(
-            fs_creation_ctx,
             options.upper_dir.clone(),
             options.lower_dirs.clone(),
             options.is_forced_read_only,
@@ -161,8 +161,8 @@ impl OverlayFs {
             // the checked objects are exactly the objects claimed in step 6
             // (check/use alignment). Both paths go through the shared
             // `layers::resolve_root_path` helper.
-            let upper_path = layers::resolve_root_path(fs_creation_ctx, upper_dir)?;
-            let workdir_path = layers::resolve_root_path(fs_creation_ctx, work_dir)?;
+            let upper_path = layers::resolve_root_path(upper_dir)?;
+            let workdir_path = layers::resolve_root_path(work_dir)?;
             UpperWorkdirClaim::validate_pair(&upper_path, &workdir_path)?;
             // Lower/workdir overlap validation (the workdir is not a
             // layer, so `assemble`'s upper+lowers pairwise check cannot cover
@@ -197,12 +197,8 @@ impl OverlayFs {
                     );
                 }
             }
-            claims::verify_inode_instance_stability(fs_creation_ctx, upper_dir, &upper.root_inode)?;
-            claims::verify_inode_instance_stability(
-                fs_creation_ctx,
-                work_dir,
-                workdir_path.inode(),
-            )?;
+            claims::verify_inode_instance_stability(upper_dir, &upper.root_inode)?;
+            claims::verify_inode_instance_stability(work_dir, workdir_path.inode())?;
 
             // Step 5 — determine the unified identity before the claim step
             // (the token must be known at claim time). Effective read-only

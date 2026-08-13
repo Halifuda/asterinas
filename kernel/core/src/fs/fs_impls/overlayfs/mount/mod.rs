@@ -23,6 +23,7 @@ mod superblock;
 
 pub(in crate::fs::fs_impls::overlayfs) use layers::RealPath;
 pub(in crate::fs::fs_impls::overlayfs) use options::XinoMode;
+use ostd::task::Task;
 pub(super) use superblock::OverlayFs;
 
 use crate::{
@@ -31,6 +32,7 @@ use crate::{
         registry::{FsCreationCtx, FsProperties, FsType},
     },
     prelude::*,
+    process::posix_thread::{AsPosixThread, PosixThread},
 };
 
 /// The external-facing filesystem name of overlayfs (mirrors Linux
@@ -66,4 +68,29 @@ impl FsType for OverlayFsType {
     fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {
         None
     }
+}
+
+/// Runs `operation_fn` with the current task's POSIX thread.
+///
+/// Overlay mount construction (`OverlayFs::new`) executes synchronously
+/// inside the mounting task's syscall (`mount(2)`/`fsconfig(2)`); both
+/// `FsCreationCtx::new` callers are syscall handlers, so the current POSIX
+/// thread is exactly the mounting thread whose context upstream previously
+/// carried in `FsCreationCtx::task_ctx`. The rootfs direct-boot path
+/// (`FsCreationCtx::from_block_device`) never constructs an overlay (overlay
+/// is not a rootfs candidate, `rootfs.rs::SUPPORTED_ROOTFS_TYPES`), so the
+/// `None` branches below are defensive and fail the mount closed.
+pub(super) fn with_current_posix_thread<T>(
+    operation_fn: impl FnOnce(&PosixThread) -> Result<T>,
+) -> Result<T> {
+    let current_task = Task::current().ok_or_else(|| {
+        Error::with_message(Errno::EINVAL, "the overlay mount has no current task")
+    })?;
+    let posix_thread = current_task.as_posix_thread().ok_or_else(|| {
+        Error::with_message(
+            Errno::EINVAL,
+            "the overlay mount task is not a POSIX thread",
+        )
+    })?;
+    operation_fn(posix_thread)
 }

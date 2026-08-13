@@ -21,7 +21,6 @@ use crate::{
             inode::Inode,
             inode_ext::InodeExt,
             path::{Path, is_dot_or_dotdot},
-            registry::FsCreationCtx,
             xattr::{XattrName, XattrSetFlags},
         },
     },
@@ -494,19 +493,14 @@ impl UpperWorkdirClaim {
 /// guarantee is the backend identity contract. A failing backend fails closed
 /// with `EOPNOTSUPP`.
 pub(super) fn verify_inode_instance_stability(
-    fs_creation_ctx: &FsCreationCtx,
     raw_path: &str,
     pinned_inode: &Arc<dyn Inode>,
 ) -> Result<()> {
     // Both resolutions go through the shared `layers::resolve_root_path` helper; each
     // resolution is compared both to the other and to the layer-pinned inode
     // that is claimed downstream.
-    let first = layers::resolve_root_path(fs_creation_ctx, raw_path)?
-        .inode()
-        .clone();
-    let second = layers::resolve_root_path(fs_creation_ctx, raw_path)?
-        .inode()
-        .clone();
+    let first = layers::resolve_root_path(raw_path)?.inode().clone();
+    let second = layers::resolve_root_path(raw_path)?.inode().clone();
     if !Arc::ptr_eq(&first, &second) || !Arc::ptr_eq(&first, pinned_inode) {
         return_errno_with_message!(
             Errno::EOPNOTSUPP,

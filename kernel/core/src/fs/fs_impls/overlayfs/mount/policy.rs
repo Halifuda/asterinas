@@ -160,8 +160,8 @@ impl MountPolicy {
 /// that sibling modules use for underlying VFS calls. The credential snapshot
 /// is immutable after construction.
 pub(in crate::fs::fs_impls::overlayfs) struct CreatorCredentialPolicy {
-    /// The stashed creator credentials, taken once at construction via
-    /// `fs_creation_ctx.task_ctx().posix_thread.credentials_dup()`.
+    /// The stashed creator credentials, taken once at construction from the
+    /// current mounting thread's snapshot (`super::with_current_posix_thread`).
     snapshot: Credentials<ReadDupOp>,
     /// The credential source; [`CredentialSource::Creator`] is the only
     /// variant today.
@@ -171,8 +171,8 @@ pub(in crate::fs::fs_impls::overlayfs) struct CreatorCredentialPolicy {
 impl CreatorCredentialPolicy {
     /// Creates the policy from the mounting thread's credential snapshot.
     ///
-    /// `build.rs` takes the snapshot once at construction
-    /// (`ctx.task_ctx().posix_thread.credentials_dup()`).
+    /// `build.rs` takes the snapshot once at construction from the current
+    /// mounting thread (`super::with_current_posix_thread`).
     pub(super) fn new(snapshot: Credentials<ReadDupOp>) -> Self {
         Self {
             snapshot,

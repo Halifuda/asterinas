@@ -32,7 +32,6 @@ use crate::{
         file_system::{FileSystem, FsFlags},
         inode::Inode,
         path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
-        registry::FsCreationCtx,
     },
     prelude::*,
 };
@@ -55,18 +54,16 @@ use crate::{
 /// [`OverlayLayerStack::assemble`] and never crosses a public boundary.
 type LayerParts = (RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId);
 
-pub(super) fn resolve_root_path(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<Path> {
+pub(super) fn resolve_root_path(raw_path: &str) -> Result<Path> {
     let fs_path = FsPath::from_fd_at(AT_FDCWD, raw_path, EmptyPathStr::Reject)?;
-    // Resolve inside a single statement so the `borrow_fs()` `Ref` and the
-    // resolver read guard live exactly as long as the lookup (same shape as
-    // `registry.rs::resolve_block_device`); neither escapes this scope.
-    fs_creation_ctx
-        .task_ctx()
-        .thread_local
-        .borrow_fs()
-        .resolver()
-        .read()
-        .lookup_no_follow(&fs_path)
+    // Resolve inside a single statement so the `read_fs()` read guard and
+    // the resolver read guard live exactly as long as the lookup (same
+    // shape as `resolver.rs::lookup` current-thread pattern); neither
+    // escapes this scope.
+    super::with_current_posix_thread(|posix_thread| {
+        let fs = posix_thread.read_fs();
+        fs.resolver().read().lookup_no_follow(&fs_path)
+    })
 }
 
 /// The ordered, immutable layer stack of an overlay mount.
@@ -197,8 +194,8 @@ impl OverlayLayer {
     /// fails with `ENOTDIR`), pins the resolved inode and filesystem for the
     /// mount lifetime, and downgrades the resolved `Path` into the
     /// layer-root anchor [`RealPath`] (`root_path`).
-    fn resolve_parts(fs_creation_ctx: &FsCreationCtx, raw_path: &str) -> Result<LayerParts> {
-        let path = resolve_root_path(fs_creation_ctx, raw_path)?;
+    fn resolve_parts(raw_path: &str) -> Result<LayerParts> {
+        let path = resolve_root_path(raw_path)?;
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
@@ -284,7 +281,6 @@ impl OverlayLayerStack {
     /// empty `lower_dirs` is rejected with `EINVAL` instead of being admitted
     /// by a `Vec` that documents the invariant in a comment only.
     pub(super) fn assemble(
-        fs_creation_ctx: &FsCreationCtx,
         upper_dir: Option<String>,
         lower_dirs: Vec<String>,
         is_forced_read_only: bool,
@@ -292,7 +288,7 @@ impl OverlayLayerStack {
         let mut upper_parts = None;
         if let Some(raw_path) = upper_dir {
             let (root_path, root_inode, fs, container_dev_id) =
-                OverlayLayer::resolve_parts(fs_creation_ctx, &raw_path)?;
+                OverlayLayer::resolve_parts(&raw_path)?;
             // A writable overlay cannot be served by a read-only upper
             // backend unless the overlay itself was forced read-only.
             if !is_forced_read_only && fs.flags().contains(FsFlags::RDONLY) {
@@ -313,7 +309,7 @@ impl OverlayLayerStack {
         }
         let lower_parts: Vec<LayerParts> = lower_dirs
             .iter()
-            .map(|raw_path| OverlayLayer::resolve_parts(fs_creation_ctx, raw_path))
+            .map(|raw_path| OverlayLayer::resolve_parts(raw_path))
             .collect::<Result<_>>()?;
 
         // Assign one `fsid` per unique underlying superblock: layers pinned

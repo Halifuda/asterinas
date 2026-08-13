@@ -1133,3 +1133,30 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
   - **Boundaries**: no VFS interface change; no static lock-topology change;
     no ktest; no `legacy_fs.rs`; no `.agents` status edits by the Creator;
     no build/test commands in the Creator phase.
+
+- **`pass_01_fs_creation_ctx_repair`**
+  - **Kind**: Creator Pass (bounded cross-meso API-repair；upstream `FsCreationCtx` 移除
+    `task_ctx` 字段后的编译修复；task `task_creator_fs_creation_ctx_repair_20260813`；
+    ACCEPTED Designer 调研 `components/fs_creation_ctx_research_20260813/fs_creation_ctx_designer_research_20260813.md` §4
+    + `_validation_note.md`）。
+  - **Parent**: `N/A` — bounded cross-meso repair（precedent: pass_45）：meso 01 mount 树
+    （`build.rs`/`layers.rs`/`claims.rs`/`policy.rs`/`mod.rs`）+ VFS `registry.rs` 删除残留访问器。
+  - **Continuation / Parent Task**: ACCEPTED `task_designer_fs_creation_ctx_research_20260813`
+    （方案 1：overlayfs 内部用 `Task::current().as_posix_thread()` 拿挂载线程；VFS 零改动，
+    `registry.rs` 回 upstream `76dac6f55` 原状；方案 2 Linux fs_context 回放原理可行但被方案 1 支配）。
+  - **Covered Micro-Features**: 无新 micro（纯 API-repair；语义不变：同一挂载线程凭证快照 +
+    同一 resolver 路径解析，与 Linux `fc->cred`/`kern_path(AT_FDCWD)` 语义同型）。
+  - **Frozen surface (ACCEPTED Designer 调研)**: `with_current_posix_thread<T>(operation_fn:
+    impl FnOnce(&PosixThread) -> Result<T>) -> Result<T>`（`mount/mod.rs`，`pub(super)`，
+    两个 `EINVAL` fail-closed 分支，无 unwrap/expect）；`resolve_root_path(raw_path)` /
+    `resolve_parts(raw_path)` / `assemble(upper_dir, lower_dirs, is_forced_read_only)` /
+    `verify_inode_instance_stability(raw_path, pinned_inode)` 去 ctx 参数；`build.rs` 凭证快照
+    走 `with_current_posix_thread` + `credentials_dup()`（4a 位置与 drop 顺序不变）；`policy.rs`
+    仅注释；`registry.rs` 删 `task_ctx()` 访问器（−5 行，回 upstream 原状）。零 ktest，零 unsafe，
+    `legacy_fs.rs` 未动。
+  - **Execution shape**: Designer 调研（V1 架构）→ 1 个 Creator dispatch（V1 架构，command-free）
+    → main-agent 结构 diff 验收 → container `cargo check -p asterinas --target x86_64-unknown-none`
+    **PASSED**（main agent 亲自执行，9.91s，0 errors）→ 验收点 1-7 全过（registry diff 为空；
+    无 `.task_ctx()` 调用；签名一致；无 unwrap/expect/unsafe/ktest/legacy 改动）→ 提交。
+  - **Boundaries**: 无新锁/锁序变更；无 VFS 增量（`registry.rs` 与 upstream 逐字节一致）；
+    Creator 无构建命令；不改 `.agents` 状态文件；运行时行为不变，xfstests 回归为可选（未调度）。
