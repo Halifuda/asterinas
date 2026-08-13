@@ -2,33 +2,15 @@
 
 //! The workdir temporary lifecycle.
 //!
-//! This module owns the workdir-temp retry contract.
+//! [`WorkdirTemp`] preserves the successful name/inode pair, and
+//! [`OverlayFs::create_workdir_temp`] retries only `EEXIST`, regenerating the
+//! name for each attempt and leaving publication or cleanup to its caller.
+//! Naming is uniqueness-based.
 //!
-//! [`WorkdirTempRequest`] describes the closed set of staging operations and
-//! [`WorkdirTemp`] preserves the successful name/inode pair. The
-//! [`OverlayFs::create_workdir_temp`] entry retries only `EEXIST`, regenerates
-//! the name for every attempt, and leaves publication or cleanup to its caller.
+//! ## References
 //!
-//! The workdir staging workspace (`<workdir>/work`) is a private staging area
-//! on the upper filesystem, never a layer: temporaries never enter
-//! lookup/readdir, unique naming keeps them out of the overlay namespace, and
-//! a failure leaves a cleanup obligation, never a visible entry. A temp
-//! handle belongs only to the winner's copy-up transaction: it is never
-//! returned to the VFS, never stored on the inode, and never a page-cache
-//! forwarding target. The claim protocol guarantees no cross-mount collision
-//! (a workdir cannot be claimed by two live mounts), so the composite name
-//! needs only per-mount uniqueness.
-//!
-//! Lock contract: workdir temp naming is uniqueness-based, not lock-based —
-//! no Overlay lock is acquired or held by any method here, and the underlying
-//! upper-filesystem calls run against that filesystem's own locking (proven
-//! non-re-entrant into Overlay). The EROFS gate precedes every workdir/upper
-//! side effect: the private [`OverlayFs::workdir_root_path`] resolver
-//! returns `Err(Errno::EROFS)` when no writable claim exists or the staging
-//! workspace was never prepared.
-//!
-//! [`OverlayFs::workdir_root_path`] is the dentry-anchored workdir
-//! staging-workspace resolver of the overlayfs tree.
+//! - Linux `ofs->workdir` dentry-ref parity:
+//!   <https://elixir.bootlin.com/linux/latest/source/fs/overlayfs/super.c#L663-L803>
 
 use alloc::format;
 
@@ -60,13 +42,8 @@ pub(in crate::fs::fs_impls::overlayfs) enum WorkdirTempRequest<'a> {
     },
 }
 
-/// A successful private workdir-temp creation.
-///
-/// The handle carries the staged object's [`InodeType`], derived from the
-/// request at creation time: the kind-aware cleanup dispatcher
-/// ([`OverlayFs::cleanup_workdir_temp`]) needs to know whether the staged
-/// object is a directory (`rmdir`) or not (`unlink`), and the kind is a
-/// known fact of the request — never a later re-derivation.
+/// A successful private workdir-temp creation; the handle carries the
+/// request-derived [`InodeType`] needed by the kind-aware cleanup dispatcher.
 pub(in crate::fs::fs_impls::overlayfs) struct WorkdirTemp {
     name: String,
     path: Path,
@@ -80,13 +57,6 @@ impl WorkdirTemp {
         &self.name
     }
 
-    /// Returns the object kind of the staged workdir temp.
-    ///
-    /// The kind is the request-derived [`InodeType`] written at creation;
-    /// consumers that perform their own best-effort cleanup
-    /// ([`OverlayFs::cleanup_workdir_temp`]) pass it through so the cleanup
-    /// dispatches on `InodeType::Dir` (`rmdir`) vs everything else
-    /// (`unlink`).
     pub(in crate::fs::fs_impls::overlayfs) fn kind(&self) -> InodeType {
         self.kind
     }
@@ -99,25 +69,15 @@ impl WorkdirTemp {
         self.path.inode()
     }
 
-    /// Consumes the handle into its `(name, path)` parts.
-    ///
-    /// The dentry-anchored path remains valid after the workdir-to-upper
-    /// rename (the same dentry is renamed), so it doubles as the published
-    /// upper object's path.
+    /// Consumes the handle into its `(name, path)` parts; the dentry-anchored
+    /// path stays valid after the workdir-to-upper rename and doubles as the
+    /// published upper object's path.
     pub(in crate::fs::fs_impls::overlayfs) fn into_parts(self) -> (String, Path) {
         (self.name, self.path)
     }
 }
 
 impl WorkdirTempRequest<'_> {
-    /// Returns the object kind of the staged workdir temp.
-    ///
-    /// A known fact of the request, never a re-derivation: `Create` carries
-    /// the kind directly, `Mknod` maps the node kind through the shared
-    /// [`mknod_object_type`]
-    /// mapping (the single `MknodType` -> `InodeType` classification), and
-    /// `Link` inherits the hard-linked source's type. The kind feeds the
-    /// [`WorkdirTemp`] handle and the kind-aware cleanup dispatcher.
     fn kind(&self) -> InodeType {
         match self {
             Self::Create { kind, .. } => *kind,
@@ -154,13 +114,8 @@ impl WorkdirTempRequest<'_> {
 impl OverlayFs {
     /// Generates a uniquely-named workdir temp name for a copy-up target.
     ///
-    /// The composite is `#{target_name}#{parent_ino}#{serial}`: the target's
-    /// publication name, the upper-parent real inode number ([`Inode::ino`]),
-    /// and one per-mount saturating workdir serial
-    /// ([`OverlayFs::workdir_temp_serial`]). The target-name component is
-    /// capped so the composite stays within [`crate::fs::utils::NAME_MAX`]
-    /// for any legal target name. The retry entry regenerates the name before
-    /// each attempt as the collision backstop.
+    /// The target-name component is capped so the composite stays within
+    /// [`crate::fs::utils::NAME_MAX`] for any legal target name.
     pub(in crate::fs::fs_impls::overlayfs) fn generate_workdir_temp_name(
         &self,
         target_name: &str,
@@ -177,11 +132,8 @@ impl OverlayFs {
         format!("#{target_component}#{parent_ino}#{serial}")
     }
 
-    /// Creates a private workdir temp object for copy-up staging.
-    ///
-    /// Each attempt generates a fresh name and dispatches the same typed
-    /// request. Only `EEXIST` retries; on exhaustion the final underlying
-    /// `EEXIST` is returned, while all other errors propagate unchanged.
+    /// Creates a private workdir temp object for copy-up staging, retrying
+    /// only `EEXIST` with a fresh name and propagating all other errors.
     pub(in crate::fs::fs_impls::overlayfs) fn create_workdir_temp(
         &self,
         target_name: &str,
@@ -214,16 +166,9 @@ impl OverlayFs {
 
     /// Removes a workdir temp object, dispatching on its known kind.
     ///
-    /// A directory temp (a staged directory copy-up or the clear-empty
-    /// staging directory) is removed with `rmdir`; every other object kind
-    /// is removed with `unlink` — the underlying filesystem refuses to
-    /// `unlink` a directory (`EISDIR`), so without the kind dispatch a
-    /// pre-commit failure of a directory temp would leak residue in the
-    /// workdir. The kind is supplied by the caller from the request-derived
-    /// [`WorkdirTemp::kind`] (a known fact, never a re-derivation). The
-    /// recipe calls this best-effort on any pre-publication failure; a
-    /// cleanup failure propagates as a known workdir-cleanup debt and never
-    /// becomes a visible namespace entry.
+    /// Directories are removed with `rmdir` and every other kind with
+    /// `unlink`, because the underlying filesystem refuses to `unlink` a
+    /// directory (`EISDIR`) and would otherwise leak directory-temp residue.
     pub(in crate::fs::fs_impls::overlayfs) fn cleanup_workdir_temp(
         &self,
         temp_name: &str,
@@ -240,18 +185,9 @@ impl OverlayFs {
     /// Resolves the pinned workdir staging workspace path of this writable
     /// mount.
     ///
-    /// The dentry-anchored workdir staging-workspace resolver of the
-    /// overlayfs tree: every dentry-routed workdir consumer — the temp
-    /// lifecycle helpers in this file and `OverlayInode::workdir_root_path`
-    /// (`copyup/promote.rs`) — funnels through this one entry, so the
-    /// claim-resolution shape and the EROFS error text exist exactly once.
-    /// The workspace path is pinned on the claim by
-    /// `UpperWorkdirClaim::prepare_workdir` during mount construction (Linux
-    /// `ofs->workdir` dentry-ref parity: staging never re-resolves the `work`
-    /// name); the claim is reachable via `claims()`. A missing claim or an
-    /// unprepared workspace means the mount is effectively read-only (or the
-    /// claims were released), so the EROFS gate fires here — before any
-    /// workdir/upper side effect.
+    /// The path is fixed at mount time and never re-resolves the `work` name;
+    /// a missing claim or unprepared workspace means the mount is effectively
+    /// read-only, so this entry returns `EROFS` before any workdir side effect.
     pub(in crate::fs::fs_impls::overlayfs) fn workdir_root_path(&self) -> Result<Path> {
         let claim = self.claims().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")

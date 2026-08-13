@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-12 PR Draft Prep
 
 **Date / Time:** 2026-08-12 10:29 CST（更新 2026-08-12：commit 切分改用 tokei 代码行数，忽略注释）
-**Status:** `ACTIVE — PR 流程（wave-pr）：从 pure upstream main（b96bbe3a1）切干净分支，交付「新 overlayfs + 配套 VFS 修改 + legacy 删除」，按 7-commit（tokei Code 1k~2k/commit）切分；VFS 修改按「首次使用点」均摊进对应生产 commit，无独立 VFS groundwork commit（2026-08-12 user 决策）。上一份活跃 handoff（wave8）已 CLOSED。`
+**Status:** `CLOSED — 2026-08-12：PR 7-commit + regression commit 已全部 push（~/asterinas-pr codex/pr-overlayfs-refactor @ 4c713d165）；061 重新打开工作流另开新 handoff：20260812-overlay061-reopen_main_agent_handoff.md。原状态摘要保留如下：PR 流程（wave-pr）：从 pure upstream main（b96bbe3a1）切干净分支，交付「新 overlayfs + 配套 VFS 修改 + legacy 删除」，按 7-commit（tokei Code 1k~2k/commit）切分；VFS 修改按「首次使用点」均摊进对应生产 commit，无独立 VFS groundwork commit（2026-08-12 user 决策）。上一份活跃 handoff（wave8）已 CLOSED。`
 
 ## 1. Global State Pointer
 

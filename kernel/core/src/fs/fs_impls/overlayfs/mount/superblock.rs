@@ -2,13 +2,9 @@
 
 //! The overlay filesystem object and its VFS-facing superblock surface.
 //!
-//! This module owns the `OverlayFs` struct (the published mount/layer/policy
-//! state plus the projection state — `bindings`/`inodes`/`identity`), the
-//! `FileSystem` trait implementation, and the `MOUNT` lifecycle domain
-//! (`MountLifecycle`/`MountPhase`) — `MOUNT` is the mount-lifecycle lock. All fallible mount work happens in
-//! `build.rs` (`OverlayFs::new`); the hooks here enter through a pinned
-//! `Arc<OverlayFs>` and hold no overlay lock except the short `MOUNT`
-//! transition inside [`OverlayFs::begin_shutdown`].
+//! `OverlayFs` is the per-mount overlay filesystem object that owns the
+//! layer stack, claims, policy, and projection state; the `FileSystem`
+//! impl forwards the superblock surface to the underlying real filesystem.
 
 use core::sync::atomic::AtomicU64;
 
@@ -31,84 +27,44 @@ use crate::{
     prelude::*,
 };
 
-/// The top-level overlay filesystem object (mirrors Linux `ovl_fs`).
+/// The top-level overlay filesystem object.
 ///
-/// `OverlayFs` is the only object that publishes mount/layer/policy state to
-/// sibling modules. It is created by [`OverlayFs::new`] (in `build.rs`)
-/// through the construction sequence; after publication the layer stack,
-/// claims, and policy snapshot are immutable. The projection state —
-/// `bindings` ([`BindingCache`]), `inodes` ([`InodeCache`]), and `identity`
-/// ([`IdentityPolicy`]) — is initialized in the same constructor and consumed
-/// by the `projection` module.
-///
-/// Invariants: `root_inode()` returns the prepared root inode and performs
-/// no fallible work; `claims` is `Some` only for writable mounts and is
-/// released exactly once on the final `Drop` (guard `Drop`, atomic
-/// non-blocking, no mutex); the `MOUNT` lifecycle is used only for lifecycle
-/// transitions and is never held across underlying callbacks. The
-/// `bindings`/`inodes` caches use sleep-capable `RwMutex` internal data locks
-/// (not topology levels) and the `identity` policy is immutable after
-/// construction.
-///
-/// The cross-module shared state for copy-up, metadata security, and namespace
-/// mutation — `workdir_temp_serial`, `xattr_policy`, `whiteout_cache` — are
-/// also owned here and consumed by their owning modules.
-pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
-    /// The immutable resolved layer stack (upper + lowers).
+/// Created by [`OverlayFs::new`]; owns the layer stack, claims, policy,
+/// projection state.
+pub(in overlayfs) struct OverlayFs {
     pub(super) layer_stack: OverlayLayerStack,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
     /// Established single-threaded before publication and released by the
-    /// final `Drop` (guard `Drop`, no mutex). The claim additionally pins the
-    /// prepared workdir staging workspace inode (`<workdir>/work`) once
-    /// `prepare_workdir` completes — a plain `Arc` pin with no lock domain.
+    /// final `Drop` (guard `Drop`). The claim additionally pins the prepared
+    /// workdir staging workspace inode (`<workdir>/work`) once
+    /// `prepare_workdir` completes.
     pub(super) claims: Option<UpperWorkdirClaim>,
-    /// The immutable published mount policy snapshot.
     pub(super) policy: MountPolicy,
-    /// The reported mount source.
     pub(super) mount_source: String,
     /// The prepared root inode.
     ///
-    /// The root inode needs the published mount (`fs.layer_stack()` /
-    /// `fs.identity()`), but `Weak::upgrade()` is documented-`None` inside
-    /// the `Arc::new_cyclic` closure (the strong count stays 0 until the
-    /// closure returns). `OverlayFs::new` fills this construction/publication
-    /// slot immediately after the `Arc` is published. `root_inode()` only
-    /// clones the prepared root; a `None` value for a published mount is a
-    /// hard construction invariant failure, never a silent mount-less root.
+    /// `root_inode()` only clones the prepared root; a `None` value for a
+    /// published mount is a hard construction invariant failure, never a
+    /// silent mount-less root.
     pub(super) root_inode: Mutex<Option<Arc<dyn Inode>>>,
-    /// The mount lifecycle state; phase only, sleep-capable.
     pub(super) lifecycle: Mutex<MountLifecycle>,
-    /// Mount-wide filesystem event subscriber statistics.
     pub(super) fs_event_stats: FsEventSubscriberStats,
     /// The canonical weak mount reference.
-    ///
-    /// Established by `Arc::new_cyclic` in `OverlayFs::new` (ramfs
-    /// `Arc::new_cyclic` + `Weak<RamFs>` precedent) and consumed by
-    /// `projection::project_inode` to stamp created `OverlayInode`s with the
-    /// mount's live `Weak` — replacing a downcast from the root inode. The weak
-    /// never pins the mount.
-    pub(in crate::fs::fs_impls::overlayfs) self_weak: Weak<OverlayFs>,
+    pub(in overlayfs) self_weak: Weak<OverlayFs>,
     /// The mount-wide binding cache — the first source for `(parent, name)`
     /// lookup results.
     ///
-    /// Entries are immutable `Arc<Binding>` snapshots (a positive pins its
-    /// inode, a negative pins its barrier); insert/update happen under the
-    /// caller's parent `DIR` (per-parent directory transaction) lock. Not a second layer registry or
-    /// identity table.
-    pub(in crate::fs::fs_impls::overlayfs) bindings: BindingCache,
+    /// A positive binding pins its inode, a negative one pins its barrier;
+    /// insert/update happen under the caller's parent directory transaction
+    /// lock.
+    pub(in overlayfs) bindings: BindingCache,
     /// The mount-wide inode identity-reuse cache.
     ///
-    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`; weak values so
-    /// the cache never forms an `OverlayFs → OverlayInode → OverlayFs` strong
-    /// cycle.
-    pub(in crate::fs::fs_impls::overlayfs) inodes: InodeCache,
-    /// The immutable dev/ino projection policy.
-    ///
-    /// Built once in `OverlayFs::new` (overlay `st_dev` plus the
-    /// construction-local identity tuples); the fallback ino allocator is a
-    /// saturating `AtomicU64` inside the policy.
-    pub(in crate::fs::fs_impls::overlayfs) identity: IdentityPolicy,
+    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
+    pub(in overlayfs) inodes: InodeCache,
+    /// The dev/ino projection policy.
+    pub(in overlayfs) identity: IdentityPolicy,
     /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
     ///
     /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
@@ -117,41 +73,29 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayFs {
     /// on the fs struct) or the minor number could be recycled under a live
     /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
     /// and suppresses the unused-field lint.
-    pub(in crate::fs::fs_impls::overlayfs) _anon_device_id: AnonDeviceId,
+    pub(in overlayfs) _anon_device_id: AnonDeviceId,
     /// The saturating workdir temp-name serial.
+    pub(in overlayfs) workdir_temp_serial: AtomicU64,
+    /// The xattr classification policy.
     ///
-    /// Unique-naming context for the copy-up module's
-    /// `OverlayFs::generate_workdir_temp_name`: the value is
-    /// saturating-fetched and never gates I/O.
-    pub(in crate::fs::fs_impls::overlayfs) workdir_temp_serial: AtomicU64,
-    /// The immutable xattr classification policy.
-    ///
-    /// Owned once here; stateless, no lock. Consumed by the
-    /// `metadata_security` module.
-    pub(in crate::fs::fs_impls::overlayfs) xattr_policy: OverlayXattrPolicy,
+    /// Owned once here; stateless.
+    pub(in overlayfs) xattr_policy: OverlayXattrPolicy,
     /// The mount-scoped reusable whiteout cache.
     ///
-    /// Bounded to one workdir staging slot; whiteout-lock critical sections
-    /// never cover BIO/sleep/underlying calls. Consumed by the `dir` module's
-    /// short-slot protocol.
-    pub(in crate::fs::fs_impls::overlayfs) whiteout_cache: Mutex<WhiteoutCache>,
+    /// Bounded to one workdir staging slot.
+    pub(in overlayfs) whiteout_cache: Mutex<WhiteoutCache>,
 }
 
-/// The `MOUNT` lifecycle state of an [`OverlayFs`].
-///
-/// Carries only the phase; the claims are intentionally not mutex-guarded
-/// (they are released by guard `Drop` on the final `Drop`, never by a
-/// lifecycle transition).
+/// The mount lifecycle state of an [`OverlayFs`].
 #[derive(Debug)]
 pub(super) struct MountLifecycle {
     pub(super) phase: MountPhase,
 }
 
-/// The `MOUNT` lifecycle phase of an overlay mount.
+/// The mount lifecycle phase of an overlay mount.
 ///
 /// `Ready` is the construction-time phase; [`OverlayFs::begin_shutdown`]
-/// performs the only transition, `Ready` → `ShuttingDown`. The final release
-/// is the last-`Drop` RAII boundary.
+/// performs the only transition, `Ready` → `ShuttingDown`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MountPhase {
     /// The mount is live and accepts operations.
@@ -162,11 +106,9 @@ pub(super) enum MountPhase {
 }
 
 impl OverlayFs {
-    /// Transitions the `MOUNT` lifecycle from `Ready` to `ShuttingDown`.
+    /// Transitions the mount lifecycle from `Ready` to `ShuttingDown`.
     ///
-    /// Returns `EBUSY` if the mount is already shutting down. Claim release
-    /// happens only on the final `Drop` (after pinned consumers drain), so no
-    /// consumer can observe a half-released claim.
+    /// Returns `EBUSY` if the mount is already shutting down.
     // TODO: Invoke this from the VFS unmount/shutdown callback before detach.
     #[expect(dead_code, reason = "the VFS exposes no filesystem shutdown callback")]
     pub(super) fn begin_shutdown(&self) -> Result<()> {
@@ -178,34 +120,24 @@ impl OverlayFs {
         Ok(())
     }
 
-    /// Returns the immutable layer stack.
-    ///
-    /// Consumed by the `projection` module from `OverlayInode::new_root`.
-    pub(in crate::fs::fs_impls::overlayfs) fn layer_stack(&self) -> &OverlayLayerStack {
+    /// Returns the layer stack of this mount.
+    pub(in overlayfs) fn layer_stack(&self) -> &OverlayLayerStack {
         &self.layer_stack
     }
 
-    /// Returns the immutable mount policy snapshot.
-    ///
-    /// Consumed by `OverlayInode::read_only_gate` and
-    /// `OverlayFs::store_lower_id`.
-    pub(in crate::fs::fs_impls::overlayfs) fn policy(&self) -> &MountPolicy {
+    /// Returns the mount policy.
+    pub(in overlayfs) fn policy(&self) -> &MountPolicy {
         &self.policy
     }
 
-    /// Returns the claimed upper/workdir pair, if this is a writable mount.
-    ///
-    /// No `projection` caller today.
-    pub(in crate::fs::fs_impls::overlayfs) fn claims(&self) -> Option<&UpperWorkdirClaim> {
+    pub(in overlayfs) fn claims(&self) -> Option<&UpperWorkdirClaim> {
         self.claims.as_ref()
     }
 
     /// Returns the real filesystem that superblock hooks forward to: the upper
     /// filesystem for writable mounts, otherwise the topmost lower layer.
     ///
-    /// `sync`/`statfs` semantics are forwarded to this filesystem. The
-    /// topmost lower is `lowers[0]`, which is guaranteed non-empty by the
-    /// checked `OverlayLayerStack::assemble` constructor.
+    /// `sync`/`statfs` semantics are forwarded to this filesystem.
     fn selected_real_fs(&self) -> &Arc<dyn FileSystem> {
         self.layer_stack
             .upper
@@ -231,10 +163,6 @@ impl FileSystem for OverlayFs {
         let root_inode = self.root_inode.lock();
         match root_inode.as_ref() {
             Some(root) => root.clone(),
-            // `OverlayFs::new` fills the slot right after publishing the
-            // `Arc`, so a published mount always carries its root; a missing
-            // slot is a construction-order violation, never a runtime
-            // condition (hard invariant, no `.unwrap()`/`.expect()`).
             None => unreachable!(
                 "OverlayFs::new materializes the root inode before publication; \
                  a published overlay mount always has its root slot set"
@@ -259,9 +187,6 @@ impl FileSystem for OverlayFs {
     }
 
     fn set_fs_flags(&self, flags: FsFlags, _data: Option<&str>, _ctx: &Context) -> Result<()> {
-        // The effective read-only state is fixed at mount time and only
-        // reported by `flags()`; full remount semantics are not implemented,
-        // so any delta is rejected instead of being silently accepted.
         let current_flags = self.flags();
         if current_flags.contains(FsFlags::RDONLY) && !flags.contains(FsFlags::RDONLY) {
             return Err(Error::new(Errno::EROFS));

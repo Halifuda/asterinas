@@ -2,47 +2,18 @@
 
 //! The two-stage permission admission pipeline.
 //!
-//! This module hosts the admission surface: the single entry
-//! [`OverlayInode::check_permission`] (the two stages split into two private
-//! helpers — the copy-up sits between the stages, so a fused pipeline is
-//! wrong), the lock-free local stage
+//! This module hosts the single admission entry
+//! [`OverlayInode::check_permission`] plus the two stage helpers it splits
+//! into — the copy-up sits between the stages, so a fused pipeline is wrong:
 //! [`OverlayInode::check_local_permission`] (EROFS gate for the `Mutating`
-//! class + the projected-DAC block), the real-handle stage
-//! [`OverlayInode::check_real_permission`] (the explicit real re-check under
-//! the creator-credential scope; the copy-up promotion lives in the entry,
-//! not here). The canonical read-only `Inode::check_permission` forwarder
-//! lives in `projection/inode.rs`; it calls this two-parameter inherent
-//! admission entry with `AccessType::ReadOnly` and never promotes.
+//! class + the projected-DAC block) and [`OverlayInode::check_real_permission`]
+//! (the explicit real re-check under the creator-credential scope). The
+//! read-only `Inode::check_permission` forwarder calls this two-parameter
+//! entry with `AccessType::ReadOnly`, never promoting.
 //!
-//! Pipeline: the local stage always runs first and is entirely lock-free.
-//! For the `Mutating` class the entry then promotes unconditionally via
-//! `ensure_upper_authority()` — the copy-up lives between the stages, and the
-//! elevation is independent of the permission skip
-//! (`MountPolicy::is_default_permissions`); the real stage
-//! [`OverlayInode::check_real_permission`] then evaluates the current real
-//! authority (`select_real_inode()`) under the mount's creator-credential
-//! scope. `default_permissions` skips only the real/creator-credential
-//! re-check, never the local stage and never the promotion. The explicit real
-//! check is authoritative for entries whose underlying real ops do not
-//! self-evaluate (ext2/ramfs metadata setters) and is a benign double
-//! evaluation for xattr ops that self-evaluate under the same scope (kept for
-//! gate independence).
+//! # References
 //!
-//! The local DAC block mirrors the VFS default `Inode::check_permission`
-//! algorithm (`kernel/src/fs/vfs/fs_apis/inode.rs:573-640`) against the
-//! projected `OverlayInode::metadata()` (mode/uid/gid), with the
-//! `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`. It is inlined here
-//! because no reusable kernel helper exists (VFS gap); see the TODO
-//! at the Projected-DAC block. The protected-state admission is currently
-//! a no-op hook.
-//!
-//! Lock contract: this module acquires no Overlay lock. The local stage is
-//! lock-free (brief `INODE` facts snapshot inside `metadata()`, released
-//! before any use); the real stage enters the authority promotion
-//! (`DIR -> CUL -> INODE -> WL -> UPPER` order) without holding anything; the
-//! creator-credential scope is a task-credential swap, not a lock. No Overlay
-//! lock crosses the entry boundary, and no `.unwrap()`/`.expect()` is used
-//! anywhere in this security gate.
+//! - <https://elixir.bootlin.com/linux/v6.16.9/source/kernel/groups.c#L227-L237>
 
 use ostd::task::{CurrentTask, Task};
 
@@ -62,29 +33,22 @@ use crate::{
 };
 
 impl OverlayInode {
-    /// The single admission method: the two-stage permission pipeline every
-    /// projected-object request funnels through.
+    /// Runs the single admission gate for every projected-object request.
     ///
-    /// The local stage (lock-free) always runs first and may reject with
-    /// `EROFS` (mutating class on an effective read-only mount) or `EACCES`
-    /// (projected-DAC demand denied) with no real handle and no copy-up/
-    /// workdir/temp/upper side effect. For the `Mutating` class the entry
-    /// then promotes unconditionally via `ensure_upper_authority()` (the
-    /// copy-up lives between the stages) — the elevation is independent of
-    /// the `default_permissions` skip. Unless the mount was created with
-    /// `default_permissions`, the real stage then re-evaluates the current
-    /// real authority under the creator-credential scope. The
-    /// `default_permissions` skip omits only the real/creator-credential
-    /// re-check, never the promotion and never the local stage. A real-stage
-    /// failure propagates as-is with no invented rollback (the authority
-    /// promotion owns any already-started transition cleanup). Verdicts are
-    /// never cached.
+    /// The gate has three steps:
+    /// 1. **Lock-free local stage** — runs the EROFS check and the
+    ///    projected DAC check.
+    /// 2. **Copy-up promotion** — runs only for the `Mutating` class, so
+    ///    writes get an upper authority to forward to.
+    /// 3. **Real-handle re-check** — runs unless `default_permissions` is
+    ///    enabled.
     ///
-    /// This two-parameter inherent method coexists with the one-parameter
-    /// `Inode::check_permission` forwarder in `projection/inode.rs`; Rust
-    /// method resolution prefers the inherent method when the arity matches,
-    /// so trait callers reach the read-only forwarder and module entries call
-    /// this one.
+    /// Verdicts are never cached: every call re-runs the admission.
+    ///
+    /// This is the inherent two-parameter form (`access`, `perm`). It
+    /// shadows the one-parameter `Inode::check_permission` forwarder that
+    /// read-only entry points inherit; those read-only entries never
+    /// promote, so the forwarder supplies only `AccessType::ReadOnly`.
     pub(in crate::fs::fs_impls::overlayfs) fn check_permission(
         &self,
         access: AccessType,
@@ -100,17 +64,11 @@ impl OverlayInode {
         Ok(())
     }
 
-    /// Runs `operation_fn` with the current task's posix thread.
-    ///
-    /// The two-step lookup shared by every kernel-context gate of this
-    /// module: `Task::current()` then `as_posix_thread()`. The [`CurrentTask`]
-    /// guard is passed to `operation_fn` alongside the borrowed
-    /// [`PosixThread`] so the guard outlives the borrow. `None` means no
-    /// current task or no posix thread (a kernel-internal operation, not a
-    /// user process); each caller maps `None` to its own kernel-context
-    /// default (fail-open `true` for the capability probe, `None` for the
-    /// fsuid probe, fail-closed `false` for the group probe, and the
-    /// no-DAC-demand `Ok(())` for the local DAC block).
+    /// Runs `operation_fn` with the current task's posix thread, passing the
+    /// [`CurrentTask`] guard alongside the borrowed [`PosixThread`] so the
+    /// guard outlives the borrow. `None` means a kernel-internal operation
+    /// (no task / no posix thread); each caller maps `None` to its own
+    /// kernel-context default.
     fn with_current_posix_thread<T>(
         operation_fn: impl FnOnce(&CurrentTask, &PosixThread) -> T,
     ) -> Option<T> {
@@ -120,20 +78,10 @@ impl OverlayInode {
     }
 
     /// Returns whether the current task holds `cap` in its user namespace
-    /// (the single shared capability probe of this module).
-    ///
-    /// A process-global probe, so it is an associated function (no `&self`
-    /// receiver). Probes through `lsm_hooks::on_capable` with the current
-    /// task's posix thread and user namespace (the
-    /// `check_local_permission` machinery). Kernel contexts fail open: with
-    /// no current task, or no posix thread (a kernel-internal operation,
-    /// not a user process), the probe reports `true` — there is no user to
-    /// gate (the `check_local_permission` no-task/no-posix-thread
-    /// precedent). A user context whose thread-local (and thus user
-    /// namespace) is absent reports `false` — fail-closed, since there is
-    /// no namespace against which the capability can be scoped. Consumed by
-    /// the permission stage (`check_local_permission`, DAC_OVERRIDE) and by
-    /// the metadata ownership gates (`metadata.rs`).
+    /// (the single shared capability probe of this module). Kernel contexts
+    /// fail open (`true` — no user to gate); a user context whose
+    /// thread-local (and thus user namespace) is absent fails closed
+    /// (`false` — no namespace to scope against).
     pub(in crate::fs::fs_impls::overlayfs) fn current_task_has_capability(cap: CapSet) -> bool {
         let Some(has_cap) = Self::with_current_posix_thread(|task, posix_thread| {
             task.as_thread_local().is_some_and(|thread_local| {
@@ -156,26 +104,20 @@ impl OverlayInode {
     /// — no task / no posix thread).
     ///
     /// Callers treat `None` as "not the owner" (the shared kernel-context
-    /// default applied via `is_some_and`). Consumed by
-    /// `metadata.rs::caller_owner_facts` and `dir/mod.rs::link`'s source-side
-    /// admission.
+    /// default applied via `is_some_and`). Consumed by the ownership-sensitive
+    /// metadata logic and the source-side link admission.
     pub(in crate::fs::fs_impls::overlayfs) fn current_fsuid() -> Option<Uid> {
         let fsuid =
             Self::with_current_posix_thread(|_, posix_thread| posix_thread.credentials().fsuid())?;
         Some(fsuid)
     }
 
-    /// Returns whether the current task's filesystem group ID or
-    /// supplementary group set contains `gid` — Linux `in_group_p` semantics
-    /// (`kernel/groups.c` `in_group_p`: `!gid_eq(grp, cred->fsgid)` then
-    /// `groups_search(cred->group_info, grp)`).
+    /// Returns whether `gid` equals the current task's filesystem group ID or
+    /// is in its supplementary group set (kernel contexts report `false`).
     ///
-    /// Kernel contexts (no task / no posix thread) report `false` — the
-    /// shared kernel-context default, applied in one place. The fsgid
-    /// disjunct completes the Linux shape: without it, an owner whose
-    /// filesystem group ID (`fsgid`) is the target gid but whose
-    /// supplementary set omits it would be denied the owner-chgrp exemption.
-    /// Consumed by `metadata.rs::set_group`'s owner-chgrp exemption.
+    /// The fsgid disjunct closes the owner-chgrp exemption gap: without it, an owner
+    /// whose filesystem group ID is the target gid but whose supplementary
+    /// set omits it would be denied the owner-chgrp exemption.
     pub(in crate::fs::fs_impls::overlayfs) fn current_in_group(gid: Gid) -> bool {
         let Some(in_group) = Self::with_current_posix_thread(|_, posix_thread| {
             let credentials = posix_thread.credentials();
@@ -186,37 +128,22 @@ impl OverlayInode {
         in_group
     }
 
-    /// PRIVATE LOCAL STAGE — the lock-free local half of the two-stage check.
+    /// Runs the lock-free local half of the two-stage admission.
     ///
-    /// For the `Mutating` class, the `EROFS` gate (`MountPolicy::
-    /// is_effective_read_only`) runs first — before the DAC block — so a
-    /// read-only mount fails with no real handle, no copy-up, and no
-    /// workdir/temp/upper side effect. The projected-DAC block then mirrors
-    /// the VFS default `Inode::check_permission` algorithm
-    /// (`inode.rs:573-640`, inlined) against the projected `metadata()`
-    /// (mode/uid/gid) and the current task's credentials (`fsuid`/`fsgid`),
-    /// with the `DAC_OVERRIDE` reduction via `lsm_hooks::on_capable`.
-    /// `Permission::empty()` passes trivially. The protected-state admission
-    /// is currently a no-op hook.
+    /// First, the `EROFS` gate runs for the `Mutating` class. It performs no
+    /// real-handle lookup, copy-up, or side effect. Then, for both classes,
+    /// the projected-DAC block mirrors the VFS default
+    /// `Inode::check_permission`, comparing the projected `metadata()` and
+    /// the current credentials.
     fn check_local_permission(&self, access: AccessType, mut perm: Permission) -> Result<()> {
-        // EROFS gate: the mutating class on an effective read-only mount
-        // fails before the DAC block and before any authority side effect.
         if access == AccessType::Mutating && self.fs_arc()?.policy().is_effective_read_only() {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
 
-        // TODO: this block is a mirror of the VFS default
-        // `Inode::check_permission` (`kernel/src/fs/vfs/fs_apis/inode.rs:
-        // 573-640`); the VFS exposes no shared mode-DAC evaluator (VFS gap),
-        // so the algorithm is inlined here. Once the VFS interface
-        // stabilizes, extract a shared `check_mode_dac` and consume it here
-        // to eliminate the drift.
-        // Projected-DAC block (the `inode.rs:573-640` mirror, inlined). No
-        // task / no posix thread / no thread-local: the kernel
-        // context is not a user process, so there is no DAC demand to check
-        // (mirror's `Option`-based guards, fail-open for non-user contexts;
-        // the DAC_OVERRIDE probe is fail-closed when the thread-local is
-        // absent — no `.unwrap()`/`.expect()` anywhere in this gate).
+        // TODO: this block inlines the VFS default `Inode::check_permission`
+        // because the VFS exposes no shared mode-DAC evaluator (VFS gap);
+        // extract a shared `check_mode_dac` once the VFS interface
+        // stabilizes.
         let Some(creds) =
             Self::with_current_posix_thread(|_, posix_thread| posix_thread.credentials())
         else {
@@ -225,13 +152,9 @@ impl OverlayInode {
         let metadata = self.metadata()?;
         let mode = metadata.mode;
 
-        // With DAC_OVERRIDE, read/write DACs are always overridable; the
+        // With `DAC_OVERRIDE`, read/write DACs are always overridable; the
         // executable DAC is overridable only when at least one exec bit is
-        // set (the VFS reduction, `inode.rs:585-604`). The probe runs through
-        // the shared user-namespace capability helper: at this point the task
-        // and posix thread are known to exist, so the helper's kernel-context
-        // fail-open arm is unreachable here and the thread-local-absent case
-        // stays fail-closed.
+        // set.
         let has_dac_override = Self::current_task_has_capability(CapSet::DAC_OVERRIDE);
         if has_dac_override {
             perm -= Permission::MAY_READ | Permission::MAY_WRITE;
@@ -250,8 +173,6 @@ impl OverlayInode {
             }
         }
 
-        // Owner / group / other mode-DAC checks against the projected
-        // metadata (the `inode.rs:606-625` mirror).
         if metadata.uid == creds.fsuid() {
             if (perm.may_read() && !mode.is_owner_readable())
                 || (perm.may_write() && !mode.is_owner_writable())
@@ -273,25 +194,17 @@ impl OverlayInode {
             return_errno_with_message!(Errno::EACCES, "other permission check failed");
         }
 
-        // Protected-state admission hook: currently a no-op; `protattr`
-        // is already classified as overlay-private in the xattr table.
+        // Protected-state names (e.g. `protattr`) are already excluded by
+        // classification in the xattr table; this hook is an intentional
+        // no-op.
         Ok(())
     }
 
-    /// PRIVATE REAL STAGE — the real-handle half of the two-stage check.
-    ///
-    /// The copy-up promotion no longer lives here: the entry
-    /// [`OverlayInode::check_permission`] already ran `ensure_upper_authority()`
-    /// for the `Mutating` class, unconditionally (elevation is independent of
-    /// the `default_permissions` skip). This stage only re-resolves the
-    /// current real authority per call (`select_real_inode()`) and evaluates
-    /// it under the mount's creator-credential scope
-    /// (`with_creator_credentials_fn`). The explicit real stage is
-    /// authoritative for entries whose underlying ops do not self-evaluate
-    /// (metadata setters) and a benign double evaluation for xattr ops that
-    /// self-evaluate under the same scope. A failure propagates as-is with no
-    /// invented rollback (the authority promotion owns any already-started
-    /// transition cleanup/reconcile).
+    /// Runs the real-handle half of the two-stage permission check:
+    /// re-resolves the current real authority per call and evaluates it
+    /// under the mount's creator-credential scope. The explicit re-check is
+    /// a benign double evaluation for xattr ops that self-evaluate under the
+    /// same scope; failures propagate as-is with no invented rollback.
     fn check_real_permission(&self, _access: AccessType, perm: Permission) -> Result<()> {
         let fs = self.fs_arc()?;
         let real = self.select_real_inode();

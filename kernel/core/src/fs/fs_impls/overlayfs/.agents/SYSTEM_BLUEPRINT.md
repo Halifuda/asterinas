@@ -220,6 +220,188 @@ Record only active or recently changed passes here. Durable slicing rationale be
     Runtime xfstests, final Reviewer acceptance, and Wave7 `legacy_fs.rs`
     deletion remain later gates.
 
+- **`wave9_comments_abflex_audit_20260815`** — **Active / dispatched 2026-08-15**
+  - **Kind**: bounded Reviewer wave（comments A/B-flexibility full-tree
+    audit）；6 个并行只读 Reviewer（mount / projection / dir / copyup /
+    security / top_readdir）；无 `.rs` 写权限；不执行清理。
+  - **Basis**: user 指示按 A/B 两档灵活性原则
+    （N1/N2/C2/C3/P2/N10/N11 + N9/N5/C4/C1/P10/P5/P9′）对全树现存 comments
+    再全面 Review；PR3708 A/B 档 finding（N9/N5/P5/P2）复核后按
+    `REMAINING` 再报；C/D 档不正式报。
+  - **Artifacts**: 6 份审计报告 →
+    `components/wave9-comments-abflex-audit-20260815/`；criteria/packets →
+    `subagent-tasks/wave9-comments-abflex-audit-20260815/`。
+  - **Result**: **ACCEPTED 2026-08-15** — 6/6 报告验收通过；13 findings
+    （HIGH 1/MED 2/LOW 10；N9×6/N5×4/P5×1/P2×1/C1×1；REMAINING 10 /
+    NEW 3 / REGRESSION 0）；无 `.rs` 改动；cleanup 待 user 指令。
+
+- **`wave9_comments_abflex_exec_20260815`** — **ACCEPTED 2026-08-15**
+  - **Kind**: two-lane execution wave（user-directed）。
+  - **Lane 1**: deepseek-v4-flash Creator 机械档 3/3 精确执行（M-AB-3 /
+    CP-AB-1 / D-AB-1）；diff 与 packet 一致，0 代码行改动。
+  - **Lane 2**: 两个 deepseek-v4-pro 对灵活档 10 条 A 提案 → B 批驳
+    （6 修正/4 同意）→ A 终稿；`flexible_plan_final.md` 10/10 覆盖并附
+    main-agent 验收注记。**user 已批准终稿，4 个 deepseek-v4-flash 按
+    `flexible_plan_exec_SPEC.md` 执行 10/10 并验收**；9 个 `.rs` diff
+    仅注释行、0 代码改动；未编译未提交。
+  - **Artifacts**: `components/wave9-comments-abflex-exec-20260815/`；
+    packets `subagent-tasks/wave9-comments-abflex-exec-20260815/`。
+
+- **`wave9_topdocs_fix_20260815`** — **ACCEPTED 2026-08-15**
+  - **Kind**: bounded Creator pass（comment-only）。
+  - **Result**: F1 顶层 `overlayfs/mod.rs` `//!` doc 已按 ext2/exfat 风格补齐；
+    P3 7 条（F3–F9）已执行；8/8 与 SPEC 逐字一致、diff 仅注释行。
+    F2/F10/F11 待 user 指令；未编译未提交。
+
+- **`wave9_lock_vocab_fix_20260815`** — **ACCEPTED 2026-08-15**
+  - **Kind**: bounded Creator pass（comment-only）。
+  - **Result**: 36/36 exact old/new 完成；全树注释锁缩写残留 grep=0；新文本无
+    snapshot；13 个 `.rs` diff 仅注释行；未编译未提交。
+
+- **`wave9_lock_vocab_review_20260815`** — **ACCEPTED 2026-08-15**
+  - **Kind**: bounded Reviewer wave（1 个 Reviewer、只读）。
+  - **Result**: 24 findings（HIGH 3：UPPER/MOUNT 无对应代码锁、copyup Lock contract
+    缺 CUL；MED 21 含 dir/whiteout WL/DIR、WL 全局定义缺失、BIO）；main agent 核实；
+    修复待 user 指令。
+  - **Artifacts**: `components/wave9-lock-vocab-review-20260815/`；
+    packets `subagent-tasks/wave9-lock-vocab-review-20260815/`。
+
+- **`wave9_topdocs_review_20260815`** — **ACCEPTED 2026-08-15**
+  - **Kind**: bounded Reviewer wave（1 个 Reviewer、只读）。
+  - **Basis**: book guides（maintainability comments、rust-specific
+    comments/crates-and-modules、documentation general-style）。
+  - **Result**: 11 findings（module-docs 2 NEW；P3 7 REMAINING；
+    no-impl-in-docs 1；explain-why 冗余 1）；main agent 逐条锚定核实；
+    修复未授权，待 user 指令。
+  - **Artifacts**: `components/wave9-topdocs-review-20260815/`；
+    packets `subagent-tasks/wave9-topdocs-review-20260815/`。
+
+- **`wave9_projection_user_annotations_triage_20260816`** — **ACCEPTED 2026-08-16**
+  - **Kind**: bounded Reviewer triage（1 个 deepseek-v4-flash、只读；workflow 直派，
+    provider `opencode-go` + model `deepseek-v4-flash`）。
+  - **Scope**: projection 7 文件工作树 user 标注 53 条（31 `USER_COMMENTS` +
+    22 `USER_CODES`）。
+  - **Result**: 两份报告验收通过——
+    `components/wave9-projection-user-annotations-20260816/
+    user_codes_summary_20260816.md`（UC-01…22，全部「留待后续处理」）与
+    `user_comments_principle_analysis_20260816.md`（CM-01…31，逐条原则判定 +
+    以前未发现根因）。projection 7 文件已 `git restore` 到 HEAD；
+    **copyup/mod.rs 的 user 进行中标注未动**。清理执行与 UC 处置待 user 指令。
+  - **Artifacts**: `components/wave9-projection-user-annotations-20260816/`；
+    packet `subagent-tasks/wave9-projection-user-annotations-20260816/`。
+
+- **`wave9_principles_fullaudit_20260816`** — **Dispatched 2026-08-16（6 个 Reviewer 并行，只读）**
+  - **Kind**: bounded Reviewer wave；按 §4.26 projection triage 的 31 条 CM 判定提炼为本轮判据
+    （P2/C2/C3 复述自解释、N4/N1/C4 叙述质量、N5 文档边界、N9/P10/P3/N8 模块 doc/术语、
+    N2/P4 rationale、C1 锁注释、C6 阈值），对 overlayfs 全树 31 个 active `.rs` 的 **git HEAD**
+    版本再审查。
+  - **Scopes**: mount（`mod.rs` + `mount/*`）、projection、dir、copyup、security、top_readdir；
+    projection 的 CM-01…31 为已知项不重复报。不审计工作树中 user 进行中的标注。
+  - **Criteria/packets**: `subagent-tasks/wave9-principles-fullaudit-20260816/`；
+    报告目标 `components/wave9-principles-fullaudit-20260816/`。无 `.rs` 写权限、不执行清理。
+  - **Result**: **ACCEPTED 2026-08-16（结构验收）** — 6/6 报告收齐、计数闭合、无 `.rs` 改动。
+    **109 findings**（NEW 96 / REMAINING 13 / REGRESSION 0；HIGH 1 / MED 15 / LOW 93）：
+    mount 29（22/7/0；0/8/21）、projection 33（32/1/0；0/3/30，CM-01…31 已排除）、
+    dir 8（7/1/0；1/0/7）、copyup 16（16/0/0；0/1/15）、
+    security 16（12/4/0；0/3/13）、top_readdir 7（7/0/0；0/0/7）。
+    处置 delete 23 / simplify 53 / rewrite 32 / adjudicate 1；执行待 user 指令。
+
+- **`wave9_copyup_user_annotations_triage_20260816`** — **ACCEPTED 2026-08-16**
+  - **Kind**: bounded Reviewer triage（1 个 deepseek-v4-flash、只读；workflow 直派，
+    provider `opencode-go` + model `deepseek-v4-flash`）。
+  - **Scope**: copyup 工作树 user 标注 10 条（3 `USER_COMMENTS` + 7 `USER_CODES`）。
+  - **Result**: 两份报告验收通过——
+    `components/wave9-copyup-user-annotations-20260816/
+    user_codes_summary_copyup_20260816.md`（UC-01…07，全部「留待后续处理」）与
+    `user_comments_vs_fullaudit_copyup_20260816.md`（COMMENTS 3 条 → retained 2 /
+    covered 1：COM-1/COM-3 新增待办，COM-2 = COPYUP-FULL-01 不重复保留）。
+    工作树标注未删除（复原待 user 指令）；处置执行待 user 指令。
+  - **Artifacts**: `components/wave9-copyup-user-annotations-20260816/`；
+    packet `subagent-tasks/wave9-copyup-user-annotations-20260816/`。
+
+- **`wave9_principles_cleanup_20260816`** — **ACCEPTED 2026-08-16（R1+R2 两轮执行）**
+  - **Kind**: user-directed comment-only cleanup（two lanes：R1 delete+simplify，
+    R2 rewrite 先提案后执行）。Slicing 见 `PASS_SLICING.md`
+    `wave9_principles_cleanup_20260816`。
+  - **R1**: 6 个 deepseek-v4-flash Creator 并行，执行 95 项 delete+simplify
+    （fullaudit 76 + CM 18 + COM-1 1）——6/6 收据、95/95 done、0 skipped。
+  - **R2**: 6 个 deepseek-v4-pro Creator 先产 46 条 rewrite 提案（fullaudit 32 +
+    CM 13 + COM-3 1），main agent 核准（5 处修订），再并行执行——6/6 收据、
+    46/46 done、0 skipped。
+  - **验收**: 28 个 `.rs` diff 仅注释行（lower_id.rs 仅删代码行尾注释）；
+    所有 old-phrase grep 0 残留；`/// TODO` 0 残留；`git diff --check` clean；
+    未编译；已 amend 入最新 wave-9 WIP。adjudicate 1（mount `RealPath` struct doc）仍挂起；
+    USER_CODES/UC 代码疑问仍留待后续。
+  - **Artifacts**: packets/Spec/approval
+    `subagent-tasks/wave9-principles-cleanup-r1-20260816/`、
+    `...-r2-20260816/`；提案/收据
+    `components/wave9-principles-cleanup-r1-20260816/`、
+    `...-r2-20260816/`。
+
+- **`wave9_metadata_user_annotations_triage_20260816`** — **ACCEPTED 2026-08-17**
+  - **Kind**: bounded Reviewer triage（1 个 deepseek-v4-flash、只读；workflow 直派）。
+  - **Scope**: metadata_security 4 文件工作树 user 标注 16 条
+    （12 `USER_COMMENTS` + 4 `USER_CODES`）。
+  - **Result**: 两份报告验收通过——
+    `components/wave9-metadata-user-annotations-20260816/
+    user_comments_summary_metadata_security_20260816.md`（12/12 归纳，初步原则
+    关联但注明不裁决）与 `user_codes_summary_metadata_security_20260816.md`
+    （4/4 代码疑问，留待后续）。工作树标注未删除；对比/裁决/清理待 user 指令。
+  - **Artifacts**: `components/wave9-metadata-user-annotations-20260816/`；
+    packet `subagent-tasks/wave9-metadata-user-annotations-20260816/`。
+
+- **`wave9_allmodules_principles_audit_20260817`** — **ACCEPTED 2026-08-17**
+  - **Kind**: bounded Reviewer wave（6 个 deepseek-v4-pro、只读；metadata_security 先单独
+    审，mount/projection/dir/copyup/top_readdir 并行补派）。
+  - **Basis**: user 在 metadata_security 新发现的 12 条 comment 问题归纳为 M1–M9
+    并映射到 N9/P10/N2/N4/N10/P2/C2/C5/N12/C6 等原则；共享判据
+    `subagent-tasks/wave9-allmodules-principles-audit-20260817/`。
+  - **Result**: 六 scope 合计 **70 findings**（NEW 58 / REMAINING 12 / REGRESSION 0；
+    HIGH 1 / MED 14 / LOW 55）：metadata_security 18（6/12/0；1/9/8）、mount 12、
+    projection 12、dir 12、copyup 5、top_readdir 11。0 `.rs` 改动；
+    清理执行待 user 指令。
+  - **Artifacts**: `components/wave9-metadata-principles-audit-20260817/` +
+    `components/wave9-allmodules-principles-audit-20260817/`；packets 同对应
+    `subagent-tasks/` 目录。
+
+- **`wave9_flash_cleanup_20260817`** — **ACCEPTED 2026-08-17**
+  - **Kind**: user-directed two-phase comment-only cleanup，**全部 deepseek-v4-flash**
+    （不用 pro）：R1 delete+simplify 36 项；R2 rewrite/add 提案 34 条 → main agent
+    核准（4 处修订）→ Flash 执行 34 项。
+  - **Result**: 70/70 actionable findings 闭合（36+34；0 skipped）；`git diff
+    --unified=0` 非注释 `.rs` 行 = 0；关键 old-phrase grep 0 残留；方法名
+    `apply_capability_gates` 未改名；未编译、未 amend（待 user 指令）。
+  - **Artifacts**: packets/Spec/approval
+    `subagent-tasks/wave9-flash-cleanup-20260817/{r1,r2}/`；提案/收据
+    `components/wave9-flash-cleanup-20260817/{r1,r2}/`。
+
+- **`wave9_day2_flash_audit_20260817`** — **ACCEPTED 2026-08-17**
+  - **Kind**: bounded Reviewer wave（6 个 deepseek-v4-flash、只读、**只审注释/文档**）。
+  - **Basis**: 昨日（2026-08-16）P2/C2/C3/N4/N5/N9/P10/P3/N8/N12/C1/C6 模式 +
+    今日 M1–M9 模式；审计 git HEAD `bfeedeb69`；已闭合项不重复报。
+  - **Result**: 六 scope 合计 **54 findings**（NEW 54 / REMAINING 0 / REGRESSION 0；
+    HIGH 0 / MED 11 / LOW 43）：metadata 8、mount 3、projection 25、dir 12、
+    copyup 4、top_readdir 2。0 `.rs` 改动。
+  - **Artifacts**: `components/wave9-day2-flash-audit-20260817/`；
+    packets/criteria `subagent-tasks/wave9-day2-flash-audit-20260817/`。
+
+- **`wave9_day2_flash_cleanup_20260817`** — **ACCEPTED 2026-08-17（恢复执行并闭合）**
+  - **Kind**: user-directed comment-only cleanup of day-2 audit findings；
+    **全部 deepseek-v4-flash**（`provider: opencode-go` +
+    `model: deepseek-v4-flash`，workflow 直派）。R1 delete+simplify 34 项
+    （5 个 Creator 并行；mount 0 条；top_readdir 2 条为中断前 partial 改动，
+    本轮 verify 后记 done(pre-applied)）；R2 rewrite 20 条 → Flash 提案
+    （5/5 proposed、0 blocked）→ main agent 核准（dir/projection 各 1 处修订）
+    → Flash 执行。
+  - **Result**: **54/54 findings 闭合**（R1 34 + R2 20；done 54 / skipped 0）；
+    `git diff --unified=0` 全部 `.rs` 非注释行 = 0；`git diff --check` clean；
+    关键 old-phrase grep 0 残留（剩余 permission.rs 模块 doc 的 “admission”
+    与代码日志中的 “impure-marker” 均不在本 wave 清单）；C6 目标块均压至
+    ≤8 行；未编译；已 amend 入最新 wave-9 WIP。
+  - **Artifacts**: packets/Spec/approval
+    `subagent-tasks/wave9-day2-flash-cleanup-20260817/{r1,r2}/`；提案/收据
+    `components/wave9-day2-flash-cleanup-20260817/{r1,r2}/`。
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

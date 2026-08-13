@@ -2,37 +2,31 @@
 
 //! Mount option parsing for overlayfs.
 //!
-//! This module validates the mount option string into an immutable
-//! [`OverlayMountOptions`] construction input. The recognized key set is
-//! closed ([`MountOptionKey`]); unknown keys fail with `EINVAL` before any
+//! This module validates the mount option string into an
+//! [`OverlayMountOptions`] construction input. The recognized keys are the
+//! [`MountOptionKey`] variants; unknown keys fail with `EINVAL` before any
 //! layer state is created.
+//!
+//! ## References
+//!
+//! - <https://elixir.bootlin.com/linux/v7.0/source/Documentation/filesystems/overlayfs.rst#L350-L364>
+//!   (Linux stacks colon-separated lowerdirs with the first entry topmost)
 
 use crate::{fs::vfs::file_system::FsFlags, prelude::*};
 
-/// A recognized overlayfs mount option key.
-///
-/// The set is closed: any other key is rejected with `EINVAL`. Future option
-/// keys must extend this enum instead of parsing ad-hoc strings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MountOptionKey {
-    /// The `lowerdir` option, a colon-separated list of lower layer paths.
     LowerDir,
-    /// The `upperdir` option; absent on read-only overlays.
     UpperDir,
-    /// The `workdir` option; required iff `upperdir` is present.
     WorkDir,
-    /// The `uuid` option with values `off|null|on|auto`.
     Uuid,
-    /// The `default_permissions` boolean option.
     DefaultPermissions,
-    /// The `xino` option with values `off|auto|on`.
     Xino,
 }
 
 /// The UUID/`fsid` policy of an overlay mount.
 ///
-/// The closed value set is `off|null|on|auto`; the default is
-/// [`UuidMode::Auto`].
+/// The default is [`UuidMode::Auto`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UuidMode {
     /// The overlay UUID is null and the fsid comes from the topmost underlying fs.
@@ -45,9 +39,11 @@ pub(super) enum UuidMode {
     Auto,
 }
 
-/// The `xino=` mode.
+/// The `xino` mode.
+///
+/// The default is [`XinoMode::Auto`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) enum XinoMode {
+pub(in overlayfs) enum XinoMode {
     /// xino encoding disabled; non-directories report the underlying dev/ino.
     Off,
     /// xino enabled when feasible (the default).
@@ -58,24 +54,17 @@ pub(in crate::fs::fs_impls::overlayfs) enum XinoMode {
 
 /// Validated construction input for an overlay mount.
 ///
-/// Fields are immutable after parsing. The struct is constructed once by
-/// [`OverlayMountOptions::parse`], consumed once by `OverlayFs::new`, and
-/// needs no lock because parsing happens in the single-threaded mount phase.
-/// Invariants: `lower_dirs` is non-empty and
-/// `upper_dir.is_some() == work_dir.is_some()`. The sibling `build.rs` reads
-/// the fields directly as immutable construction inputs.
+/// The struct is constructed once by [`OverlayMountOptions::parse`],
+/// consumed once by `OverlayFs::new`.
 #[derive(Debug)]
 pub(super) struct OverlayMountOptions {
-    /// Lower layer paths in option order; the first option is the topmost
-    /// lower layer (Linux `lowerdir=/l1:/l2:/l3` stacks `l1` topmost).
+    /// Lower layer paths in option order; the first option is the topmost.
     pub(super) lower_dirs: Vec<String>,
     /// Upper layer path; `None` means a read-only overlay.
     pub(super) upper_dir: Option<String>,
     /// Work directory path; `Some` iff `upper_dir` is `Some`.
     pub(super) work_dir: Option<String>,
-    /// Whether the mount was requested with `FsFlags::RDONLY`.
     pub(super) is_forced_read_only: bool,
-    /// Whether the `default_permissions` option was set.
     pub(super) is_default_permissions: bool,
     /// The UUID persistence mode; defaults to [`UuidMode::Auto`].
     pub(super) uuid_mode: UuidMode,
@@ -84,24 +73,32 @@ pub(super) struct OverlayMountOptions {
 }
 
 impl OverlayMountOptions {
-    /// Parses the mount option string and mirror flags into validated options.
+    /// Parses the comma-separated mount option string plus the mount flags
+    /// into a validated [`OverlayMountOptions`].
     ///
-    /// Recognized keys are `lowerdir`, `upperdir`, `workdir`, `uuid`, `xino`,
-    /// and `default_permissions`. Unknown keys, malformed `key=value` tokens,
-    /// duplicate keys, missing `lowerdir`, empty values, and invalid `uuid`/
-    /// `xino` values all fail with `EINVAL` before any layer state is created.
+    /// Parsing contract (all violations fail with `EINVAL`):
+    ///
+    /// * Key/value and splitting: the string is split on `,`, empty entries are
+    ///   skipped, and `key=value` sets the key's value; a bare `key` is a
+    ///   valueless option accepted only for `default_permissions`.
+    /// * Key domains and repetition: `lowerdir` is required and is a
+    ///   non-empty, colon-separated layer list (first path topmost) with no
+    ///   empty layer; `upperdir`/`workdir` each take a single non-empty path
+    ///   and must both be present or both be absent; `uuid` accepts only
+    ///   `off`/`null`/`on`/`auto`, `xino` accepts only `off`/`auto`/`on`,
+    ///   and `default_permissions` takes no value; every key may appear at
+    ///   most once.
+    /// * Required-value constraint: `None` (no option string) fails like a
+    ///   missing `lowerdir`.
     pub(super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
         let mut lower_dirs = Vec::new();
         let mut upper_dir = None;
         let mut work_dir = None;
         let mut is_default_permissions = false;
         let mut uuid_mode = UuidMode::Auto;
-        // Each key may appear at most once; the tracked fields double as
-        // seen-markers because they are assigned at most once. `uuid` needs a
-        // dedicated marker because `UuidMode::Auto` is also the default value.
+        // Boolean markers record which keys were seen, because some options
+        // have default values.
         let mut saw_uuid = false;
-        // `xino` needs a dedicated marker because `XinoMode::Auto` is also
-        // the default value (same discipline as `uuid`).
         let mut xino_mode = XinoMode::Auto;
         let mut saw_xino = false;
 
@@ -150,9 +147,6 @@ impl OverlayMountOptions {
                             "the `lowerdir` mount option requires a non-empty value"
                         );
                     }
-                    // A single colon-joined `lowerdir` value is stacked
-                    // left-to-right: the first path is the topmost layer
-                    // (Linux multi-layer semantics).
                     lower_dirs = value.split(':').map(str::to_string).collect();
                     if lower_dirs.iter().any(|lower_dir| lower_dir.is_empty()) {
                         return_errno_with_message!(
@@ -283,7 +277,7 @@ impl OverlayMountOptions {
         if upper_dir.is_some() != work_dir.is_some() {
             return_errno_with_message!(
                 Errno::EINVAL,
-                "the `workdir` mount option is required iff `upperdir` is specified"
+                "the `workdir` mount option is required if and only if `upperdir` is specified"
             );
         }
 

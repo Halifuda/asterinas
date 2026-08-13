@@ -1160,3 +1160,173 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     无 `.task_ctx()` 调用；签名一致；无 unwrap/expect/unsafe/ktest/legacy 改动）→ 提交。
   - **Boundaries**: 无新锁/锁序变更；无 VFS 增量（`registry.rs` 与 upstream 逐字节一致）；
     Creator 无构建命令；不改 `.agents` 状态文件；运行时行为不变，xfstests 回归为可选（未调度）。
+
+- **`wave9_comments_abflex_audit_20260815`**
+  - **Kind**: bounded Reviewer wave（comments A/B-flexibility full-tree audit；
+    read-only；6 个并行 Reviewer；task group
+    `wave9-comments-abflex-audit-20260815`）。
+  - **Parent**: `N/A` — cross-meso full-tree comment review（不改变任何
+    meso/micro 归属；无 covered micro）。
+  - **User directive (2026-08-15)**: 担忧此前执行审查的模型难以处理灵活性
+    判据，指示对 overlayfs 全树现存所有 comments 按 A/B 两档灵活性原则
+    （A：N1/N2/C2/C3/P2/N10/N11；B：N9/N5/C4/C1/P10/P5/P9′）再做一次全面
+    诚实只读 Review。最多 6 个 subagent（mount / projection / dir / copyup /
+    security / top_readdir），不执行清理。
+  - **Scope write-set**: 每个 Reviewer 仅可写其自身报告
+    `components/wave9-comments-abflex-audit-20260815/<task_id>_audit.md`；
+    无任何 `.rs` 编辑。
+  - **Criteria**: `subagent-tasks/wave9-comments-abflex-audit-20260815/
+    wave9_comments_abflex_audit_CRITERIA.md`（仅 A/B 14 项为正式判据；
+    C/D 档不报；PR3708 A/B 档 finding 复核后按 `REMAINING` 再报；
+    user 裁决 M-AUDIT-1/2/3、§4.2 延迟、fullaudit cleanup7 回潮复核）。
+  - **Boundaries**: read-only；不运行 cargo/rustfmt/clippy/git 写命令；
+    不 spawn/message；`legacy_fs.rs`/`.agents/` 不审；不审查代码逻辑；
+    P9′/P5 代码级项仅标 `adjudicate`。
+  - **Result (2026-08-15, ACCEPTED)**: 6/6 报告收齐并由 main agent 逐条验收；
+    13 findings（N9×6/N5×4/P5×1/P2×1/C1×1；REMAINING 10=PR3708 A/B 档、
+    NEW 3；0 REGRESSION）；无 `.rs` 改动；cleanup 不授权，执行待 user 指令。
+
+- **`wave9_comments_abflex_exec_20260815`**
+  - **Kind**: bounded two-lane execution wave（user-directed 2026-08-15）。
+  - **Lane 1（mechanical）**: 1 个 **deepseek-v4-flash Creator** 按 packet 精确 old/new
+    执行 ABFLEX 机械档 3 条（M-AB-3 删 layers.rs 锁注释块；CP-AB-1 删 coordination.rs
+    自指路径；D-AB-1 重写 dir/link.rs 模块 doc 补 DIR lock contract）。
+    write-set: 3 个 `.rs` 指定注释 + 1 收据。
+  - **Lane 2（flexible debate）**: 2 个 **deepseek-v4-pro** 按
+    `flexible_plan_debate_BRIEF.md` 对 ABFLEX 灵活档 10 条做 A 提案 → B 批驳 → A 终稿
+    三轮辩论；产出 `flexible_plan_final.md`。**不修改 `.rs`**。
+  - **Parent**: `N/A` — comment-only continuation of wave9 ABFLEX audit.
+  - **Boundaries**: 机械档只允许 packet §2 三处注释改动，禁代码改动/编译；
+    灵活档只允许三个 plan 文件；不执行 flexible 修改（待 user 批准）。
+  - **Result (2026-08-15, ACCEPTED)**: Flash 机械档 3/3 精确执行（0 代码改动）；
+    双 Pro 辩论完成，终稿 10/10 覆盖并经 main agent 验收注记（含 4 处自检计数校正）；
+    灵活档未实施，执行待 user 指令（M-AB-1 口径差异待批准）。
+
+- **`wave9_comments_abflex_flexexec_20260815`**
+  - **Kind**: bounded Creator wave（user-approved 2026-08-15 flexible plan execution；
+    comment-only）。
+  - **Parent**: `N/A` — continuation of `wave9_comments_abflex_exec_20260815` Lane 2.
+  - **Scope slicing**: 4 个 deepseek-v4-flash Creator 并行、按文件 write-disjoint：
+    mount（M-AB-1/M-AB-2，options.rs）、projection（PRJ-AB-1/2/3，mod.rs+entry.rs）、
+    security（S-AB-1/2，metadata.rs+xattr.rs）、top_readdir（TR-AB-1/2/3，readdir_index.rs）。
+  - **Execution basis**: `flexible_plan_exec_SPEC.md`（main-agent 核准 exact old/new，
+    来自双 Pro 终稿 `flexible_plan_final.md`）；各 packet 只授权对应 SPEC 节的注释替换。
+  - **Boundaries**: 只改 SPEC 列出的注释；禁代码改动/格式化/编译；不碰其它文件。
+  - **Result (2026-08-15, ACCEPTED)**: 4/4 Flash Creator 收据在册；10/10 替换与
+    `flexible_plan_exec_SPEC.md` 逐字一致；9 个 `.rs` diff 仅注释行、0 代码行改动；
+    未编译、未提交。
+
+- **`wave9_topdocs_review_20260815`**
+  - **Kind**: bounded Reviewer wave（user-directed 2026-08-15；1 个 Reviewer、只读）。
+  - **Parent**: `N/A` — full-tree `//!` module-doc quality review（不含 `///`/行内 `//`）。
+  - **Basis**: book guides：maintainability `comments.md`、rust-specific
+    `comments.md` + `crates-and-modules.md`（module-docs）、documentation
+    `general-style.md`；handoff §4.1 为背景。
+  - **Scope**: overlayfs 全部 32 个 `.rs` 的 `//!` doc（legacy_fs.rs/.agents 除外）。
+  - **Boundaries**: read-only；唯一写产物 = 1 份审计报告
+    `components/wave9-topdocs-review-20260815/`；不执行修复。
+  - **Result (2026-08-15, ACCEPTED)**: 报告 11 findings（module-docs 2 NEW；P3 7
+    REMAINING；no-impl-in-docs 1；explain-why 冗余 1）；main agent 逐条锚定核实；
+    修复未授权，执行待 user 指令。
+
+- **`wave9_topdocs_fix_20260815`**
+  - **Kind**: bounded Creator pass（user-directed 2026-08-15；comment-only）。
+  - **Parent**: `N/A` — continuation of `wave9_topdocs_review_20260815`.
+  - **Scope**: 8 处 exact old→new——T1 顶层 `overlayfs/mod.rs` 补 `//!` doc
+    （参考 ext2/exfat 写法）；P3-1..7 执行 TOPDOCS F3–F9（去跨文件路径引用）。
+  - **Basis**: `subagent-tasks/wave9-topdocs-fix-20260815/topdocs_p3_fix_SPEC.md`
+    （main-agent 核准）。
+  - **Boundaries**: 只改 SPEC 列出的注释；禁代码改动/格式化/编译。
+  - **Result (2026-08-15, ACCEPTED)**: 8/8 替换与 SPEC 逐字一致；8 个 `.rs` diff
+    仅注释行；F1 顶层 doc 已按 ext2/exfat 风格补齐、P3 7 条已清；F2/F10/F11 未执行。
+
+- **`wave9_lock_vocab_review_20260815`**
+  - **Kind**: bounded Reviewer wave（user-directed 2026-08-15；1 个 Reviewer、只读）。
+  - **Parent**: `N/A` — lock-domain vocabulary clarity audit（DIR/CUL/INODE/WL/UPPER/
+    MOUNT/IU/BIO；全树注释）。
+  - **Basis**: handoff §4.1 C1/N9/P3/P10 + book module-docs/design-decisions。
+  - **Boundaries**: read-only；唯一写产物 = 1 份审计报告
+    `components/wave9-lock-vocab-review-20260815/`；不执行修复。
+  - **Result (2026-08-15, ACCEPTED)**: 24 findings（HIGH 3 / MED 21；define 6 /
+    rewrite 16 / delete 2；no_op 6）；main agent 核实 HIGH 3 与 user 点名项；
+    修复未授权，待 user 指令。
+
+- **`wave9_lock_vocab_fix_20260815`**
+  - **Kind**: bounded Creator pass（user-approved 2026-08-15；comment-only）。
+  - **Parent**: `N/A` — continuation of `wave9_lock_vocab_review_20260815`.
+  - **Scope**: 36 处 exact old→new，全树注释去锁缩写（DIR/CUL/INODE/WL/UPPER/
+    MOUNT/BIO → 锁角色+代码字段）；新文本禁用 snapshot。
+  - **Basis**: `subagent-tasks/wave9-lock-vocab-fix-20260815/lock_vocab_rewrite_SPEC.md`。
+  - **Boundaries**: 只改 SPEC 列出的注释；禁代码改动/格式化/编译。
+  - **Result (2026-08-15, ACCEPTED)**: 36/36 替换与 SPEC 一致；全树注释锁缩写残留
+    grep=0；新增文本无 snapshot；13 个 `.rs` diff 仅注释行。
+
+- **`wave9_principles_cleanup_20260816`**
+  - **Kind**: user-directed comment-only cleanup of the wave-9 principles fullaudit
+    findings（2026-08-16）。Two lanes：
+    **R1 delete+simplify**：6 个 deepseek-v4-flash Creator 并行执行；
+    **R2 rewrite**：6 个 deepseek-v4-pro Creator 先产提案（只写提案报告，不改 `.rs`），
+    main agent 逐条核准后二次派发执行。
+  - **Parent / covered micros（每 scope 一包，与 wave6 pass 22-27 同 surface，无新 feature claim）**:
+    mount=`mount_resource_policy`（P0-01/02/03/05/18, P1-19/20/35, P2-11）；
+    projection=`visibility_projection_identity`（P0-04/06/07/08/09/10/11/12/16/17, P1-07, P2-01）；
+    dir=`namespace_mutation_whiteout`（P1-21..P1-30, P1-36）；
+    copyup=`copyup_authority_file_views`（P1-01..06/08..15/32/34/37）；
+    security=`metadata_security_xattr_policy`（P1-16/17/18/33）；
+    top_readdir=`merged_directory_index`（P0-13/14/15, P1-31）。
+  - **Finding 来源（全部 actionable 注释项）**:
+    CM-01…31（projection triage；18 delete/simplify + 13 rewrite）；
+    fullaudit 109（mount 29 / projection 33 / dir 8 / copyup 16 / security 16 / top_readdir 7；
+    其中 delete+simplify 76、rewrite 32、adjudicate 1 挂起）；
+    copyup triage retained 2（COM-1 simplify、COM-3 rewrite）。
+    USER_CODES/UC 代码疑问全部不在本轮。
+  - **R1 执行口径**: 每条 finding 按报告原文定位后只做 delete/simplify；行号漂移以原文为准；
+    只改注释/文档行；跳过项写收据；无编译。
+  - **R2 执行口径**: Pro 只出提案（目标原文 → 拟改写文本 + 原则依据），main agent 核准后才派
+    `.rs` 执行；提案报告在 `components/wave9-principles-cleanup-r2-20260816/proposals/`。
+  - **Explicit boundary**: 无代码行为/签名/可见性/锁改动；不改 legacy_fs.rs；无 ktest；
+    编译验证仍在代码清理彻底后统一进行。
+  - **R1 result (2026-08-16, ACCEPTED)**: 6/6 Flash Creator 收据在册；95/95 项
+    done=0 skipped（fullaudit delete+simplify 76 + CM delete/simplify 18 + COM-1 1）；
+    28 个 `.rs` diff 仅注释行（`git diff --unified=0` 非注释行 = 0；lower_id.rs
+    一处代码行仅删除行尾注释）；未编译；已 amend 入最新 wave-9 WIP。
+  - **R2 proposal (2026-08-16, main-agent 核准)**: 6/6 Pro 提案覆盖 46 条 rewrite
+    （fullaudit 32 + CM 13 + COM-3 1），proposed=46 blocked=0；main agent 修订 5 处：
+    RIDX-FULL-02 `Serve`→`Serves`；PROJECTION-FULL-04 首行回归 “Creates or reuses”；
+    CM-19 去 “immutable”；CM-31 简化 guard 措辞；MOUNT-FULL-29 保留 lower 并发修改
+    bullet（N2）仅去跨模块符号；MOUNT-FULL-19 bullet 保持 `-`。
+  - **R2 result (2026-08-16, ACCEPTED)**: 6/6 Pro Creator 收据在册；46/46 done=0
+    skipped；所有 old-phrase grep 0 残留、`/// TODO` 0 残留；`git diff --check` clean；
+    diff 仅注释行；未编译；已 amend 入最新 wave-9 WIP。adjudicate 1（mount `RealPath` struct doc）仍挂起。
+
+- **`wave9_day2_flash_cleanup_20260817`**
+  - **Kind**: user-directed comment-only cleanup of the wave-9 day-2 Flash audit
+    findings（2026-08-17；恢复执行）。Two lanes：
+    **R1 delete+simplify**：5 个 deepseek-v4-flash Creator 并行执行
+    （mount 0 条不派）；**R2 rewrite**：deepseek-v4-flash Creator 先产提案
+    （只写提案报告，不改 `.rs`），main agent 逐条核准后二次派发执行。
+  - **Parent / covered micros（每 scope 一包，与 `wave9_principles_cleanup_20260816`
+    同 surface，无新 feature claim）**:
+    mount=`mount_resource_policy`；projection=`visibility_projection_identity`；
+    dir=`namespace_mutation_whiteout`；copyup=`copyup_authority_file_views`；
+    security=`metadata_security_xattr_policy`；top_readdir=`merged_directory_index`。
+  - **Finding 来源**: day-2 audit 54 findings 的 actionable 注释项——
+    R1 delete+simplify 34（copyup 2 / dir 4 / metadata 4 / projection 22 /
+    top_readdir 2；mount 0）；R2 rewrite 20（mount 3 / projection 3 / dir 8 /
+    copyup 2 / metadata 4；top_readdir 0）。
+  - **R1 执行口径**: 每条 finding 按 SPEC 原文定位后只做 delete/simplify；行号漂移以
+    原文为准；只改注释/文档行；跳过项写收据；无编译。top_readdir 2 条为上次中断前
+    已写入的 partial 改动，本轮只 verify 并记 done(pre-applied)。
+  - **R2 执行口径**: Flash 只出提案（目标原文 → 拟改写 verbatim 文本 + 原则依据，
+    允许 delete/simplify 降档），main agent 核准后才派 `.rs` 执行；提案在
+    `components/wave9-day2-flash-cleanup-20260817/r2/proposals/`。
+  - **Explicit boundary**: 无代码行为/签名/可见性/锁改动；不改 legacy_fs.rs；无 ktest；
+    不 cargo fmt、不编译；编译验证仍在代码清理彻底后统一进行。
+  - **Status (2026-08-17, ACCEPTED)**: R1 5/5 Creator 收据在册，34/34 闭合
+    （copyup 2 / dir 4 / metadata 4 / projection 22 / top_readdir 2
+    done(pre-applied)；mount 0 不派）；main agent 直接修正 copyup trigger.rs
+    “is release”→“is released”一处语法。R2 提案 5/5 覆盖 20/20（proposed=20
+    blocked=0）；main agent 核准并修订 2 处（DIR-D2-07 改 “the type and
+    rmdir-emptiness gates”；PROJ-D2-16 改 “this caller skips the layer
+    resolution”）；R2 执行 20/20 闭合（done=20 skipped=0）。全部 `.rs` diff
+    非注释行 = 0；`git diff --check` clean；未编译；已 amend 入最新 wave-9 WIP。
