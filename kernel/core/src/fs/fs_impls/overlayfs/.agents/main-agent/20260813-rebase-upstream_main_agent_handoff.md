@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-13 rebase upstream/main（76dac6f55）与冲突总结
 
 **Date / Time:** 2026-08-13 11:40 CST
-**Status:** `RECORD — rebase 已完成（52/52 重放），1 个文本冲突已解析；静默冲突（`registry.rs` `task_ctx()`）已由 Designer 调研 + Creator 修复（方案 1），main agent 在 container 亲自验证 `cargo check -p asterinas --target x86_64-unknown-none` PASSED（0 errors）。HEAD `bc2957f89` + 修复 commit。本文件记录 rebase、冲突总结与修复闭环。`
+**Status:** `RECORD — rebase 已完成（52/52 重放），1 个文本冲突已解析；静默冲突（`registry.rs` `task_ctx()`）已由 Designer 调研 + Creator 修复（方案 1），main agent 在 container 亲自验证 `cargo check -p asterinas --target x86_64-unknown-none` PASSED（0 errors）。HEAD `aa3dd455e`（修复 commit）。**运行时验证（2026-08-13）：21 例 xfstests 全 PASS + regression 全 PASS**（详见 §3.6）。本文件记录 rebase、冲突总结、修复闭环与验证结果。`
 
 ## 1. Global State Pointer
 
@@ -74,6 +74,21 @@
 - **Pass 记录**：`PASS_SLICING.md` 新增 `pass_01_fs_creation_ctx_repair`；Creator receipt
   `components/fs_creation_ctx_research_20260813/pass_01_fs_creation_ctx_repair_creator.md`。
 
+### 3.6 Post-rebase 运行时验证（2026-08-13，main-agent 亲自执行，HEAD `aa3dd455e`）
+
+- **21 例 xfstests 全 PASS**：runlist = 20 例矩阵（029/002/003/006/007/009/010/011/012/014/016/019/
+  022/024/026/031/038/039/063/077）+ `overlay/028`（用户记为第 21 例；028 曾在 2026-08-12
+  `hangs_028_20260812` 补充跑 PASS）。guest `Passed all 21 tests` / `All conformance tests passed.`，
+  exit 0；无 FAIL/NOTRUN/HANG。
+- **regression test 全 PASS**：`AUTO_TEST=regression` 整套（含 overlayfs `readdir_small_buffer`）
+  → `All regression tests passed.`，exit 0。
+- **upstream harness 变更兼容**：新 `test/initramfs/Makefile`（`initramfs-boot-images`/`data-disk-images` 拆分、
+  per-fs `XFSTESTS_NEEDS_BLOCK_DEVICES`、`INITRAMFS`/`CMDLINE` 变量）无需任何修改即可跑通 overlay xfstests 与
+  regression；overlay config = `XFSTESTS_NEEDS_BLOCK_DEVICES := true` + `XFSTESTS_MKFS := mkfs.ext2`。
+- **证据**：`components/post-rebase-validation-20260813/MANIFEST.md` +
+  `run_evidence/20260813_21case/`（qemu.log/qemu-serial.log/runlist/images.sha256）+
+  `run_evidence/20260813_regression/`（qemu.log/qemu-serial.log）。临时 runlist 已移出 tracked 目录，repo 干净。
+
 ## 4. Explicit Agent-Level Decisions
 
 1. **保留 rebase 结果**：rebase 成功结束，分支停在 `bc2957f89`；未 abort。旧历史在安全分支 `codex/overlayfs-refactor-pre-rebase-20260813` 与 `origin` 中均可恢复。
@@ -83,7 +98,7 @@
 
 ## 5. Next Actions for the Next Thread (CRITICAL)
 
-1. **API-repair 已完成（本 tenure）**：`pass_01_fs_creation_ctx_repair` 编译验证 PASSED；无需再 dispatch。若后续 xfstests 回归需要，可安排 overlay 基础挂载用例组（overlay/001 等）确认运行时行为不变（可选，未调度）。
+1. **API-repair 已完成（本 tenure）**：`pass_01_fs_creation_ctx_repair` 编译验证 PASSED；**21 例 xfstests + regression 运行时验证 PASSED（2026-08-13，§3.6）**；无需再 dispatch。
 2. **验证 infra 合并**：`test/initramfs/Makefile` 的 per-fs 块设备开关（ext2=true / tmpfs=false / template=false）在新 `data-disk-images` 结构下行为正确；rootfs 直启路径（`INITRAMFS=off`）与 xfstests 双路径并存（建议后续顺带验证，非阻塞）。
 3. **push 决策**：修复已提交（本分支）；与用户确认是否 force-push rebase 后的 `codex/overlayfs-refactor`（当前与 origin diverged）；PR 分支（~/asterinas-pr `codex/pr-overlayfs-refactor`）不受影响，但若最终要合并上游新基线，PR 分支也可能需要同款 rebase。
 4. **清理**：确认分支可编译、证据落档后，再考虑删除安全分支 `codex/overlayfs-refactor-pre-rebase-20260813` 与 `/tmp` 备份；`20260812-overlay061-reopen` 的「暂不修复」决策保持不变（与本次 rebase 无关）。
