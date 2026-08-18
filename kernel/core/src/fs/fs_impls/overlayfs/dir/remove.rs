@@ -6,11 +6,9 @@
 //! [`RemoveKind::{Unlink, Rmdir}`] names the operation; `remove_target` is
 //! the shared recipe, with `clear_empty_exchange` and `translate_stale_upper_enoent` as helpers.
 //!
-//! Lock contract: the caller holds the parent directory transaction lock;
-//! this module enters the per-object copy-up coordination lock only through
-//! the copy-up step of `check_permission`, and never touches the whiteout
-//! cache lock.
-
+//! Lock contract: this module enters the per-object copy-up coordination
+//! lock only through the copy-up step of `check_permission`, and never
+//! touches the whiteout cache lock.
 //!
 //! ## References
 //!
@@ -26,23 +24,16 @@
 use super::whiteout;
 use crate::{
     fs::{
-        file::{InodeType, Permission},
+        file::InodeType,
         fs_impls::overlayfs::{
-            AccessType,
-            copyup::WorkdirTempRequest,
-            metadata_security::xattr::{
-                OPAQUE_MARKER_VALUE, OPAQUE_XATTR_FULL_NAME, XattrCopyPolicy,
-            },
-            mount::OverlayFs,
-            projection::{
-                Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode,
-                OverlayObjectFacts,
-            },
+            inode::{ObjectFacts, OverlayInode},
+            metadata_security::xattr::XattrCopyPolicy,
+            superblock::OverlayFs,
+            workdir::WorkdirTempRequest,
         },
         vfs::{
             inode::{Inode, RenameMode},
-            path::{self, Path},
-            xattr::{XattrName, XattrSetFlags},
+            path::Path,
         },
     },
     prelude::*,
@@ -58,11 +49,10 @@ pub(super) enum RemoveKind {
 impl OverlayInode {
     /// Removes one visible name via the shared unlink/rmdir recipe.
     ///
-    /// Fresh projection, the type and rmdir-emptiness gates, then direct upper
-    /// removal or whiteout publication (clear-empty exchange for lower-backed
-    /// directories). `unlink` refuses directories (`EISDIR`) to avoid
-    /// whiteout-hiding a lower-backed directory; opaque upper directories are
-    /// lower-backed, so `rmdir` publishes a whiteout instead.
+    /// Fresh projection, then the type and rmdir-emptiness gates, then direct
+    /// upper removal or whiteout publication (clear-empty exchange for
+    /// lower-backed directories). `unlink` refuses directories (`EISDIR`);
+    /// `rmdir` publishes a whiteout for opaque upper directories instead.
     pub(super) fn remove_target(&self, name: &str, kind: RemoveKind) -> Result<()> {
         let fs = self.fs_arc()?;
         let parent_facts = self.facts_snapshot();
@@ -77,7 +67,7 @@ impl OverlayInode {
                 "the overlay target became stale behind the overlay",
             )));
         }
-        let target_inode = lookup.binding.into_inode().ok_or_else(|| {
+        let target_inode = lookup.binding.inode().ok_or_else(|| {
             Error::with_message(Errno::ENOENT, "the overlay target does not exist")
         })?;
         let target_facts = target_inode.facts_snapshot();
@@ -110,16 +100,13 @@ impl OverlayInode {
             ));
         }
 
-        let is_pure_upper = match target_facts.upper() {
+        let is_pure_upper = match target_facts.upper.as_ref() {
             Some(upper_obj) => {
-                target_facts.lowers().is_empty() && !upper_obj.is_opaque_directory()?
+                target_facts.lowers.is_empty() && !upper_obj.is_opaque_directory()?
             }
             None => false,
         };
 
-        // The VFS entry already ran the EROFS and permission checks; this
-        // call repeats the recipe's write-permission check before mutating.
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let upper_parent_path = self.upper_parent_path()?;
 
         if is_pure_upper {
@@ -129,7 +116,7 @@ impl OverlayInode {
             // `EIO` arm is defensive: `is_pure_upper` already implies an
             // upper object.
             if kind == RemoveKind::Rmdir {
-                let target_upper_dir = target_facts.upper().ok_or_else(|| {
+                let target_upper_dir = target_facts.upper.as_ref().ok_or_else(|| {
                     Error::with_message(
                         Errno::EIO,
                         "the pure-upper rmdir target has no upper real directory",
@@ -147,7 +134,7 @@ impl OverlayInode {
                 upper_parent_path.unlink(name)
             };
             result.map_err(translate_stale_upper_enoent)?;
-            fs.bindings().invalidate(&self.key(), name);
+            fs.bindings.invalidate(&self.key(), name);
             self.readdir_index_remove(name);
             // The removal may have restored purity — refresh the marker
             // best-effort (the mutation already committed; a refresh failure
@@ -167,20 +154,18 @@ impl OverlayInode {
         // above refused rmdir-on-file with `ENOTDIR` and unlink-on-dir with
         // `EISDIR`).
         let target_type = target_inode.type_();
-        let replace_target = target_facts.upper().map(|_| target_type);
+        let replace_target = target_facts.upper.as_ref().map(|_| target_type);
         let clear_empty_temp = if kind == RemoveKind::Rmdir {
-            match target_facts.upper() {
+            match target_facts.upper.as_ref() {
                 Some(upper_obj) => {
-                    let mut upper_names: Vec<String> = Vec::new();
-                    upper_obj.real_inode().readdir_at(0, &mut upper_names)?;
-                    upper_names.retain(|entry| !path::is_dot_or_dotdot(entry));
+                    let upper_names =
+                        crate::fs::fs_impls::overlayfs::read_child_names(upper_obj.real_inode())?;
                     if upper_names.is_empty() {
                         None
                     } else {
                         let mode = upper_obj.real_inode().mode()?;
                         Some(fs.create_workdir_temp(
                             name,
-                            &upper_parent_path,
                             WorkdirTempRequest::Create {
                                 kind: InodeType::Dir,
                                 mode,
@@ -196,56 +181,52 @@ impl OverlayInode {
         let staged_temp = clear_empty_temp
             .as_ref()
             .map(|temp| (temp.name(), temp.kind()));
-        self.run_recipe(
-            &fs,
-            staged_temp,
-            || self.invalidate_stale_cache(&[(self, name)]),
-            |marker| {
-                if let Some(temp) = clear_empty_temp.as_ref() {
-                    self.clear_empty_exchange(
-                        &fs,
-                        &target_facts,
-                        name,
-                        &upper_parent_path,
-                        temp.name(),
-                        temp.inode(),
-                    )?;
-                    marker.commit();
+        let mut committed = false;
+        let result: Result<()> = (|| {
+            if let Some(temp) = clear_empty_temp.as_ref() {
+                self.clear_empty_exchange(
+                    &fs,
+                    &target_facts,
+                    name,
+                    &upper_parent_path,
+                    temp.name(),
+                    temp.inode(),
+                )?;
+                committed = true;
+            }
+            fs.publish_whiteout(&upper_parent_path, name, replace_target)
+                .map_err(|err| {
+                    if replace_target.is_some() {
+                        translate_stale_upper_enoent(err)
+                    } else {
+                        err
+                    }
+                })?;
+            committed = true;
+            // Semantic publication — shared helper: the whiteout is
+            // re-observed from the upper (layer 0) so the published
+            // `HiddenByWhiteout` binding pins its strong `HiddenEvidence`
+            // barrier, then the parent index tombstones the now-hidden
+            // name. The re-observation is fallible: on failure the
+            // whiteout is already published — reconcile.
+            self.publish_whiteout_binding(&fs, &upper_parent_path, name)?;
+            self.readdir_index_remove(name);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {}
+            Err(err) => {
+                if committed {
+                    self.invalidate_stale_cache(&[(self, name)]);
+                } else if let Some((temp_name, kind)) = staged_temp {
+                    // Pre-commit failure (pre-publication arm): best-effort
+                    // kind-aware temp cleanup; residue is a known cleanup
+                    // debt, never a visible source.
+                    let _ = fs.cleanup_workdir_temp(temp_name, kind);
                 }
-                fs.publish_whiteout(&upper_parent_path, name, replace_target)
-                    .map_err(|err| {
-                        if replace_target.is_some() {
-                            translate_stale_upper_enoent(err)
-                        } else {
-                            err
-                        }
-                    })?;
-                marker.commit();
-                // Semantic publication — inline composition: the whiteout
-                // is re-observed from the upper (layer 0) so the published
-                // `HiddenByWhiteout` binding pins its strong `HiddenEvidence`
-                // barrier, then the parent index tombstones the now-hidden
-                // name. The re-observation is fallible: on failure the
-                // whiteout is already published — reconcile.
-                let whiteout_path = Path::new(
-                    upper_parent_path.mount_node().clone(),
-                    upper_parent_path
-                        .dentry()
-                        .as_dir_dentry_or_err()?
-                        .lookup_child(name)?,
-                );
-                let whiteout_inode = whiteout_path.inode().clone();
-                let evidence = HiddenEvidence::new(0, whiteout_inode);
-                fs.bindings().insert(
-                    BindingKey::new(self.key(), String::from(name)),
-                    Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(
-                        evidence,
-                    ))),
-                );
-                self.readdir_index_remove(name);
-                Ok(())
-            },
-        )?;
+                return Err(err);
+            }
+        }
         if let Err(err) = self.refresh_impure_marker() {
             warn!(
                 "overlay remove: the impure-marker refresh failed after the \
@@ -260,20 +241,19 @@ impl OverlayInode {
     /// recipe.
     ///
     /// Needed when the upper directory holds whiteout-hidden entries that
-    /// would make `publish_whiteout` fail with `ENOTEMPTY`. The caller commits
-    /// the [`CommitMarker`](crate::fs::fs_impls::overlayfs::copyup::promote::CommitMarker)
-    /// after this returns; displaced-dir cleanup is best-effort and pre-commit
-    /// failures propagate.
+    /// would make `publish_whiteout` fail with `ENOTEMPTY`. The caller sets
+    /// its `committed` flag after this returns; displaced-dir cleanup is
+    /// best-effort and pre-commit failures propagate.
     fn clear_empty_exchange(
         &self,
         fs: &Arc<OverlayFs>,
-        target_facts: &OverlayObjectFacts,
+        target_facts: &ObjectFacts,
         name: &str,
         upper_parent_path: &Path,
         temp_name: &str,
         temp_inode: &Arc<dyn Inode>,
     ) -> Result<()> {
-        let Some(upper_obj) = target_facts.upper() else {
+        let Some(upper_obj) = target_facts.upper.as_ref() else {
             return Err(Error::with_message(
                 Errno::EIO,
                 "the clear-empty workdir temp has no upper directory",
@@ -284,40 +264,20 @@ impl OverlayInode {
         // preparation: it keeps the name a lower-search barrier at every
         // instant of the swap (crash window included), gated by the
         // private-xattr capability.
-        let can_store_private_xattr = fs
-            .policy()
-            .upper_capabilities()
-            .is_some_and(|caps| caps.can_store_private_xattr());
-        if !can_store_private_xattr {
-            return Err(Error::with_message(
-                Errno::EOPNOTSUPP,
-                "the upper filesystem cannot store the opaque marker \
-                         required for the clear-empty directory exchange",
-            ));
-        }
-        let marker_name =
-            XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
-                Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
-            })?;
-        let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
-        temp_inode.set_xattr(
-            marker_name,
-            &mut marker_reader,
-            XattrSetFlags::CREATE_OR_REPLACE,
+        fs.set_opaque_marker(
+            temp_inode,
+            "the upper filesystem cannot store the opaque marker \
+             required for the clear-empty directory exchange",
         )?;
         // The xattr buffer copy runs before the owner/group/mode are applied,
         // while the temp is still owned by the caller (the creating task), so
         // a non-owner rmdir of a directory carrying xattrs does not fail
         // `EACCES` on the temp `set_xattr`.
-        fs.policy()
-            .credential_policy()
-            .with_creator_credentials_fn(|| {
-                fs.xattr_policy().copy_eligible_xattrs(
-                    &old_upper_dir,
-                    temp_inode,
-                    XattrCopyPolicy::BestEffort,
-                )
-            })?;
+        fs.xattr_policy.copy_eligible_xattrs(
+            &old_upper_dir,
+            temp_inode,
+            XattrCopyPolicy::BestEffort,
+        )?;
         temp_inode.set_owner(old_upper_dir.owner()?)?;
         temp_inode.set_group(old_upper_dir.group()?)?;
         temp_inode.set_mode(old_upper_dir.mode()?)?;
@@ -328,13 +288,8 @@ impl OverlayInode {
         workdir_path
             .rename(temp_name, upper_parent_path, name, RenameMode::Exchange)
             .map_err(translate_stale_upper_enoent)?;
-        match workdir_path
-            .dentry()
-            .as_dir_dentry_or_err()?
-            .lookup_child(temp_name)
-        {
-            Ok(displaced_dentry) => {
-                let displaced_path = Path::new(workdir_path.mount_node().clone(), displaced_dentry);
+        match super::super::lookup_child_path(&workdir_path, temp_name) {
+            Ok(displaced_path) => {
                 if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&displaced_path) {
                     warn!(
                         "overlay clear-empty: the displaced-directory whiteout \

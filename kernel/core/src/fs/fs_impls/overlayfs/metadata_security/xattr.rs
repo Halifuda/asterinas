@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The xattr classification policy and delegation entries.
 //!
 //! This module classifies xattr names into public, private, reserved, and
@@ -19,7 +20,7 @@
 //! every entry runs its classification or admission gate before any side
 //! effect and forwards under the creator-credential scope through
 //! `delegate_to_real`; `list_xattr` streams the underlying names through
-//! [`OverlayXattrPolicy::filter_private_names`] so no private record reaches
+//! [`XattrPolicy::filter_private_names`] so no private record reaches
 //! the caller.
 //!
 //! # References
@@ -32,9 +33,7 @@
 use crate::{
     fs::{
         file::Permission,
-        fs_impls::overlayfs::{
-            AccessType, projection::OverlayInode, readdir_index::ReaddirIndexEntry,
-        },
+        fs_impls::overlayfs::{AccessType, inode::OverlayInode, superblock::OverlayFs},
         vfs::{
             inode::Inode,
             xattr::{XATTR_LIST_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags},
@@ -47,11 +46,11 @@ use crate::{
 ///
 /// Carries no state — classification is a pure function of the name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) struct OverlayXattrPolicy;
+pub(in overlayfs) struct XattrPolicy;
 
 /// The four-way classification result of an xattr full name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) enum XattrClass {
+pub(super) enum XattrClass {
     /// A user.*/system.*/security.*/trusted.* (non-overlay) name: delegate to
     /// the real authority.
     Public,
@@ -66,8 +65,10 @@ pub(in crate::fs::fs_impls::overlayfs) enum XattrClass {
     Reserved,
 }
 
-/// Known overlay-private record suffixes; consumers are documented at their
-/// handling sites.
+/// Known overlay-private record suffixes.
+///
+/// Suffix presence makes a name `Private`;
+/// any other `trusted.overlay.`/`user.overlay.` suffix is `Reserved`.
 const OVERLAY_PRIVATE_SUFFIXES: &[&str] = &[
     "opaque", "whiteout", "redirect", "origin", "impure", "nlink", "upper", "uuid", "metacopy",
     "protattr",
@@ -77,36 +78,52 @@ const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
 
 const USER_OVERLAY_PREFIX: &str = "user.overlay.";
 
+/// The persisted overlay UUID record name.
+pub(in overlayfs) const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
+
+/// Returns the parsed [`XattrName`] for the overlay UUID record.
+pub(in overlayfs) fn uuid_xattr_name() -> Result<XattrName<'static>> {
+    XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))
+}
+
+/// The durable lower-source origin record name.
+pub(in overlayfs) const ORIGIN_XATTR_FULL_NAME: &str = "trusted.overlay.origin";
+
+/// Returns the parsed [`XattrName`] for the overlay origin record.
+pub(in overlayfs) fn origin_xattr_name() -> Result<XattrName<'static>> {
+    XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name"))
+}
+
 /// The one-level nesting-escape prefix of a lower-overlay name.
 const ESCAPED_OVERLAY_PREFIX: &str = "overlay.overlay.";
 
-/// The opaque marker name; the clear-empty recipe writes it from here, and the
-/// projection layer keeps its own copy for use before this module is reachable.
-pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_XATTR_FULL_NAME: &str =
-    "trusted.overlay.opaque";
+/// The opaque marker name; the clear-empty recipe writes it from here.
+pub(in overlayfs) const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 
 /// The opaque marker value; the reader requires the first byte `b'y'`.
-pub(in crate::fs::fs_impls::overlayfs) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
+pub(super) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
 
-/// The whiteout recipe and the legacy-filesystem path consume this name; the
-/// projection layer keeps its own copy for use before this module is reachable.
-pub(in crate::fs::fs_impls::overlayfs) const WHITEOUT_XATTR_FULL_NAME: &str =
-    "trusted.overlay.whiteout";
+/// The whiteout recipe consumes this name.
+pub(in overlayfs) const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
+
+/// The whiteout marker value; the reader requires the first byte `b'y'`.
+pub(in overlayfs) const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
 
 /// The impure marker is only ever read/written/cleared through the internal
-/// [`OverlayXattrPolicy`] interface.
-pub(in crate::fs::fs_impls::overlayfs) const IMPURE_XATTR_FULL_NAME: &str =
-    "trusted.overlay.impure";
+/// [`XattrPolicy`] interface.
+pub(super) const IMPURE_XATTR_FULL_NAME: &str = "trusted.overlay.impure";
 
 /// The impure marker value; the reader is presence-based.
-pub(in crate::fs::fs_impls::overlayfs) const IMPURE_MARKER_VALUE: &[u8] = b"y";
+pub(super) const IMPURE_MARKER_VALUE: &[u8] = b"y";
 
 /// The xattr-copy failure policy of the shared xattr copy
-/// ([`OverlayXattrPolicy::copy_eligible_xattrs`]): strict aborts on a denied
+/// ([`XattrPolicy::copy_eligible_xattrs`]): strict aborts on a denied
 /// source read or temp write, best-effort warns and skips; the transient
 /// list/read race (`ENODATA`/`ERANGE`) always degrades to a skip.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) enum XattrCopyPolicy {
+pub(in overlayfs) enum XattrCopyPolicy {
     /// Best-effort source reads and temp writes: EVERY xattr-copy error — a
     /// denied source read or temp write (`EACCES`/`EPERM`), the transient
     /// list/read race (`ENODATA`/`ERANGE`), and resource/I-O failures
@@ -127,10 +144,20 @@ fn is_skippable_source_error(err: &Error, policy: XattrCopyPolicy) -> bool {
     policy == XattrCopyPolicy::BestEffort || matches!(err.error(), Errno::ENODATA | Errno::ERANGE)
 }
 
-impl OverlayXattrPolicy {
+/// The read semantics of an overlay marker xattr.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in overlayfs) enum MarkerReadSemantics {
+    /// Presence probe (impure): any successful read counts as present, and
+    /// `ERANGE` still counts as present.
+    Presence,
+    /// Value probe (whiteout/opaque): exactly one byte `b'y'` counts.
+    ValueY,
+}
+
+impl XattrPolicy {
     /// Classifies an xattr full name into the four-way
     /// `Public`/`Private`/`Escaped`/`Reserved` classes.
-    pub(in crate::fs::fs_impls::overlayfs) fn classify(&self, full_name: &str) -> XattrClass {
+    pub(super) fn classify(&self, full_name: &str) -> XattrClass {
         if let Some(suffix) = full_name
             .strip_prefix(TRUSTED_OVERLAY_PREFIX)
             .or_else(|| full_name.strip_prefix(USER_OVERLAY_PREFIX))
@@ -152,7 +179,7 @@ impl OverlayXattrPolicy {
     /// `true` exactly for the `Private`/`Escaped`/`Reserved` classes — the
     /// same name set the copy-time predicate excluded. This is the copy-time
     /// boundary filter; no duplicated predicate survives.
-    pub(in crate::fs::fs_impls::overlayfs) fn is_private(&self, full_name: &str) -> bool {
+    pub(in overlayfs) fn is_private(&self, full_name: &str) -> bool {
         !matches!(self.classify(full_name), XattrClass::Public)
     }
 
@@ -193,17 +220,15 @@ impl OverlayXattrPolicy {
         Ok(bytes_written)
     }
 
-    /// Copies the eligible public xattrs of `source` onto `temp` (copy-up /
-    /// clear-empty) in the `User`/`Trusted`/`Security` namespaces, filtering
-    /// overlay-private names (`System` is reserved for ACLs).
+    /// Copies the eligible public xattrs of `source` onto `temp`
+    /// (copy-up / clear-empty) in the `User`/`Trusted`/`Security` namespaces,
+    /// filtering overlay-private names.
     ///
-    /// Intentionally, source reads run under the caller's credentials:
-    /// `with_creator_credentials_fn` is a documented no-op, so the practical
-    /// alternative is to read under the caller's actual credentials. A denied
-    /// read therefore propagates as an error instead of silently dropping
-    /// `security.*`/`trusted.*` xattrs; this fail-closed behavior is
-    /// preferred over masking access denials during copy-up.
-    pub(in crate::fs::fs_impls::overlayfs) fn copy_eligible_xattrs(
+    /// No creator-credential scope is currently available,
+    /// so source reads run under the caller's credentials;
+    /// a denied read therefore propagates as an error
+    /// instead of silently dropping `security.*`/`trusted.*` xattrs.
+    pub(in overlayfs) fn copy_eligible_xattrs(
         &self,
         source: &Arc<dyn Inode>,
         temp: &Arc<dyn Inode>,
@@ -311,25 +336,58 @@ impl OverlayXattrPolicy {
         })
     }
 
+    /// Parses the opaque marker's full name — the shared parse of every
+    /// opaque-marker write/read site.
+    pub(in overlayfs) fn opaque_marker_name() -> Result<XattrName<'static>> {
+        XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
+        })
+    }
+
+    /// Parses the whiteout marker's full name — the shared parse of every
+    /// whiteout-marker write/read site.
+    pub(in overlayfs) fn whiteout_marker_name() -> Result<XattrName<'static>> {
+        XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
+        })
+    }
+
+    /// Reads one overlay marker xattr under `semantics`.
+    ///
+    /// `ENODATA`/`EOPNOTSUPP` mean "marker absent"; `ERANGE` follows the
+    /// semantics (present for `Presence`, absent for `ValueY`); other errors
+    /// propagate unchanged.
+    pub(in overlayfs) fn has_marker(
+        &self,
+        real_inode: &Arc<dyn Inode>,
+        name: XattrName<'static>,
+        semantics: MarkerReadSemantics,
+    ) -> Result<bool> {
+        let mut value = [0u8; 1];
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+        match real_inode.get_xattr(name, &mut writer) {
+            Ok(written) => match semantics {
+                MarkerReadSemantics::Presence => Ok(true),
+                MarkerReadSemantics::ValueY => Ok(written == 1 && value[0] == b'y'),
+            },
+            Err(err) if err.error() == Errno::ERANGE => {
+                Ok(matches!(semantics, MarkerReadSemantics::Presence))
+            }
+            Err(err) if matches!(err.error(), Errno::ENODATA | Errno::EOPNOTSUPP) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Returns whether `real_dir` carries the persisted impure marker.
     ///
     /// Presence probe on the real upper directory: the marker is interpreted
     /// by presence, not by value.
-    pub(in crate::fs::fs_impls::overlayfs) fn has_impure_marker(
-        &self,
-        real_dir: &Arc<dyn Inode>,
-    ) -> Result<bool> {
-        let name = Self::impure_marker_name()?;
-        let mut value = [0u8; IMPURE_MARKER_VALUE.len()];
-        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-        match real_dir.get_xattr(name, &mut writer) {
-            Ok(_) => Ok(true),
-            Err(err) if err.error() == Errno::ERANGE => Ok(true),
-            Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => {
-                Ok(false)
-            }
-            Err(err) => Err(err),
-        }
+    pub(super) fn has_impure_marker(&self, real_dir: &Arc<dyn Inode>) -> Result<bool> {
+        self.has_marker(
+            real_dir,
+            Self::impure_marker_name()?,
+            MarkerReadSemantics::Presence,
+        )
     }
 
     /// Persists the impure marker on the real upper directory `real_dir`.
@@ -337,10 +395,7 @@ impl OverlayXattrPolicy {
     /// The internal write goes directly through the underlying inode — never
     /// through the user-facing `OverlayInode` xattr entries, whose `Private`
     /// refusal surface is untouched.
-    pub(in crate::fs::fs_impls::overlayfs) fn set_impure_marker(
-        &self,
-        real_dir: &Arc<dyn Inode>,
-    ) -> Result<()> {
+    pub(in overlayfs) fn set_impure_marker(&self, real_dir: &Arc<dyn Inode>) -> Result<()> {
         if self.has_impure_marker(real_dir)? {
             return Ok(());
         }
@@ -355,10 +410,7 @@ impl OverlayXattrPolicy {
 
     /// Removes the impure marker from the real upper directory `real_dir`.
     /// Absence is already the cleared state, so clearing is idempotent.
-    pub(in crate::fs::fs_impls::overlayfs) fn clear_impure_marker(
-        &self,
-        real_dir: &Arc<dyn Inode>,
-    ) -> Result<()> {
+    pub(super) fn clear_impure_marker(&self, real_dir: &Arc<dyn Inode>) -> Result<()> {
         let name = Self::impure_marker_name()?;
         match real_dir.remove_xattr(name) {
             Ok(()) => Ok(()),
@@ -368,47 +420,63 @@ impl OverlayXattrPolicy {
     }
 }
 
+impl OverlayFs {
+    /// Writes the opaque marker onto `target` after the private-xattr
+    /// capability gate; `unsupported_message` is the caller-scoped static
+    /// `EOPNOTSUPP` message (the two call sites keep their distinct text).
+    pub(in overlayfs) fn set_opaque_marker(
+        &self,
+        target: &Arc<dyn Inode>,
+        unsupported_message: &'static str,
+    ) -> Result<()> {
+        let can_store_private_xattr = self
+            .policy
+            .upper_capabilities()
+            .is_some_and(|caps| caps.can_store_private_xattr());
+        if !can_store_private_xattr {
+            return Err(Error::with_message(Errno::EOPNOTSUPP, unsupported_message));
+        }
+        let marker_name = XattrPolicy::opaque_marker_name()?;
+        let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
+        target.set_xattr(
+            marker_name,
+            &mut marker_reader,
+            XattrSetFlags::CREATE_OR_REPLACE,
+        )
+    }
+}
+
 impl OverlayInode {
-    /// Refreshes the persisted impure marker after mutation, clearing it when
-    /// no visible child keeps a non-empty lower stack (best-effort).
+    /// Refreshes the persisted impure marker after mutation,
+    /// clearing it when no visible child keeps a non-empty lower stack.
     ///
-    /// The clear is valid only under the immutable-lower premise: the lower
-    /// stack is one the overlay never writes. Mounts with
-    /// `default_permissions` do not implement this premise yet and therefore
-    /// keep a documented limitation.
+    /// The clear is valid only under the immutable-lower premise:
+    /// the lower stack is one the overlay never writes.
+    /// Mounts with `default_permissions` do not implement this premise yet.
     ///
-    /// A residual check-use race with an external lower writer cannot be
-    /// closed by an overlay lock; a defensive re-check would only narrow the
-    /// window, never close it, so the race is deliberately not handled.
-    pub(in crate::fs::fs_impls::overlayfs) fn refresh_impure_marker(&self) -> Result<()> {
+    /// A residual check-use race with an external lower writer
+    /// cannot be closed by an overlay lock, so it is deliberately not handled.
+    pub(in overlayfs) fn refresh_impure_marker(&self) -> Result<()> {
         // Upper-present gate: the marker lives only on real upper
         // directories; a lower-only directory cannot carry one.
         let facts = self.facts_snapshot();
-        let Some(upper_real) = facts.upper() else {
+        let Some(upper_real) = facts.upper.as_ref() else {
             return Ok(());
         };
         let fs = self.fs_arc()?;
-        let xattr_policy = fs.xattr_policy();
+        let xattr_policy = &fs.xattr_policy;
         if !xattr_policy.has_impure_marker(upper_real.real_inode())? {
             return Ok(());
         }
         self.ensure_readdir_index(&facts)?;
         let children: Vec<Arc<OverlayInode>> = {
-            let index = self.readdir_index().ok_or_else(|| {
+            let index = self.readdir_index.as_ref().ok_or_else(|| {
                 Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
             })?;
-            let index = index.lock();
-            index
-                .entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    ReaddirIndexEntry::Visible { inode, .. } => Some(inode.clone()),
-                    ReaddirIndexEntry::Tombstone { .. } => None,
-                })
-                .collect()
+            index.lock().visible_inodes()
         };
         for child in &children {
-            if !child.facts_snapshot().lowers().is_empty() {
+            if !child.facts_snapshot().lowers.is_empty() {
                 return Ok(());
             }
         }
@@ -422,7 +490,7 @@ impl OverlayInode {
     /// `set_xattr`/`remove_xattr`).
     fn ensure_public_xattr(&self, name: &XattrName, refusal: (Errno, &'static str)) -> Result<()> {
         if matches!(
-            self.fs_arc()?.xattr_policy().classify(name.full_name()),
+            self.fs_arc()?.xattr_policy.classify(name.full_name()),
             XattrClass::Public
         ) {
             return Ok(());
@@ -430,7 +498,7 @@ impl OverlayInode {
         Err(Error::with_message(refusal.0, refusal.1))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn get_xattr_impl(
+    pub(in overlayfs) fn get_xattr_impl(
         &self,
         name: XattrName,
         value_writer: &mut VmWriter,
@@ -446,7 +514,7 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.get_xattr(name, value_writer))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_xattr_impl(
+    pub(in overlayfs) fn set_xattr_impl(
         &self,
         name: XattrName,
         value_reader: &mut VmReader,
@@ -467,7 +535,7 @@ impl OverlayInode {
     // no-op placeholder because the DAC block does not evaluate `MAY_ACCESS`
     // yet. Remove this placeholder once `check_local_permission` evaluates
     // `MAY_ACCESS` for the `ReadOnly` class.
-    pub(in crate::fs::fs_impls::overlayfs) fn list_xattr_impl(
+    pub(in overlayfs) fn list_xattr_impl(
         &self,
         namespace: XattrNamespace,
         list_writer: &mut VmWriter,
@@ -478,15 +546,12 @@ impl OverlayInode {
             let mut raw_writer = VmWriter::from(&mut raw_list[..]).to_fallible();
             let list_len = real.list_xattr(namespace, &mut raw_writer)?;
             let fs = self.fs_arc()?;
-            fs.xattr_policy()
+            fs.xattr_policy
                 .filter_private_names(&raw_list[..list_len], list_writer)
         })
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn remove_xattr_impl(
-        &self,
-        name: XattrName,
-    ) -> Result<()> {
+    pub(in overlayfs) fn remove_xattr_impl(&self, name: XattrName) -> Result<()> {
         self.ensure_public_xattr(
             &name,
             (

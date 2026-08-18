@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Mount option parsing for overlayfs.
 //!
 //! This module validates the mount option string into an
-//! [`OverlayMountOptions`] construction input. The recognized keys are the
-//! [`MountOptionKey`] variants; unknown keys fail with `EINVAL` before any
-//! layer state is created.
+//! [`MountOptions`] construction input. The recognized keys are the
+//! string keys `lowerdir`, `upperdir`, `workdir`, `uuid`, `xino`, and
+//! `default_permissions`; unknown keys fail with `EINVAL` before any layer
+//! state is created.
 //!
 //! ## References
 //!
@@ -13,16 +15,6 @@
 //!   (Linux stacks colon-separated lowerdirs with the first entry topmost)
 
 use crate::{fs::vfs::file_system::FsFlags, prelude::*};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MountOptionKey {
-    LowerDir,
-    UpperDir,
-    WorkDir,
-    Uuid,
-    DefaultPermissions,
-    Xino,
-}
 
 /// The UUID/`fsid` policy of an overlay mount.
 ///
@@ -54,10 +46,10 @@ pub(in overlayfs) enum XinoMode {
 
 /// Validated construction input for an overlay mount.
 ///
-/// The struct is constructed once by [`OverlayMountOptions::parse`],
+/// The struct is constructed once by [`MountOptions::parse`],
 /// consumed once by `OverlayFs::new`.
 #[derive(Debug)]
-pub(super) struct OverlayMountOptions {
+pub(super) struct MountOptions {
     /// Lower layer paths in option order; the first option is the topmost.
     pub(super) lower_dirs: Vec<String>,
     /// Upper layer path; `None` means a read-only overlay.
@@ -66,15 +58,15 @@ pub(super) struct OverlayMountOptions {
     pub(super) work_dir: Option<String>,
     pub(super) is_forced_read_only: bool,
     pub(super) is_default_permissions: bool,
-    /// The UUID persistence mode; defaults to [`UuidMode::Auto`].
-    pub(super) uuid_mode: UuidMode,
-    /// The `xino=` mode; defaults to [`XinoMode::Auto`].
-    pub(super) xino_mode: XinoMode,
+    /// The UUID persistence mode; `None` means [`UuidMode::Auto`].
+    pub(super) uuid_mode: Option<UuidMode>,
+    /// The `xino=` mode; `None` means [`XinoMode::Auto`].
+    pub(super) xino_mode: Option<XinoMode>,
 }
 
-impl OverlayMountOptions {
+impl MountOptions {
     /// Parses the comma-separated mount option string plus the mount flags
-    /// into a validated [`OverlayMountOptions`].
+    /// into a validated [`MountOptions`].
     ///
     /// Parsing contract (all violations fail with `EINVAL`):
     ///
@@ -95,12 +87,8 @@ impl OverlayMountOptions {
         let mut upper_dir = None;
         let mut work_dir = None;
         let mut is_default_permissions = false;
-        let mut uuid_mode = UuidMode::Auto;
-        // Boolean markers record which keys were seen, because some options
-        // have default values.
-        let mut saw_uuid = false;
-        let mut xino_mode = XinoMode::Auto;
-        let mut saw_xino = false;
+        let mut uuid_mode = None;
+        let mut xino_mode = None;
 
         let Some(args) = args else {
             return_errno_with_message!(
@@ -116,141 +104,115 @@ impl OverlayMountOptions {
                 Some((key_name, value)) => (key_name, Some(value)),
                 None => (entry, None),
             };
-            let key = match key_name {
-                "lowerdir" => MountOptionKey::LowerDir,
-                "upperdir" => MountOptionKey::UpperDir,
-                "workdir" => MountOptionKey::WorkDir,
-                "uuid" => MountOptionKey::Uuid,
-                "xino" => MountOptionKey::Xino,
-                "default_permissions" => MountOptionKey::DefaultPermissions,
-                _ => {
-                    return_errno_with_message!(Errno::EINVAL, "unknown overlay mount option");
-                }
-            };
-            match key {
-                MountOptionKey::LowerDir => {
-                    if !lower_dirs.is_empty() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "duplicate overlay mount option `lowerdir`"
-                        );
-                    }
+            match key_name {
+                "lowerdir" | "upperdir" | "workdir" | "uuid" | "xino" => {
                     let Some(value) = value else {
                         return_errno_with_message!(
                             Errno::EINVAL,
-                            "the `lowerdir` mount option requires a value"
+                            "the `{key_name}` mount option requires a value"
                         );
                     };
-                    if value.is_empty() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `lowerdir` mount option requires a non-empty value"
-                        );
-                    }
-                    lower_dirs = value.split(':').map(str::to_string).collect();
-                    if lower_dirs.iter().any(|lower_dir| lower_dir.is_empty()) {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `lowerdir` value contains an empty layer path"
-                        );
-                    }
-                }
-                MountOptionKey::UpperDir => {
-                    if upper_dir.is_some() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "duplicate overlay mount option `upperdir`"
-                        );
-                    }
-                    let Some(value) = value else {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `upperdir` mount option requires a value"
-                        );
-                    };
-                    if value.is_empty() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `upperdir` mount option requires a non-empty value"
-                        );
-                    }
-                    upper_dir = Some(value.to_string());
-                }
-                MountOptionKey::WorkDir => {
-                    if work_dir.is_some() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "duplicate overlay mount option `workdir`"
-                        );
-                    }
-                    let Some(value) = value else {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `workdir` mount option requires a value"
-                        );
-                    };
-                    if value.is_empty() {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `workdir` mount option requires a non-empty value"
-                        );
-                    }
-                    work_dir = Some(value.to_string());
-                }
-                MountOptionKey::Uuid => {
-                    if saw_uuid {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "duplicate overlay mount option `uuid`"
-                        );
-                    }
-                    saw_uuid = true;
-                    let Some(value) = value else {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `uuid` mount option requires a value"
-                        );
-                    };
-                    uuid_mode = match value {
-                        "off" => UuidMode::Off,
-                        "null" => UuidMode::Null,
-                        "on" => UuidMode::On,
-                        "auto" => UuidMode::Auto,
-                        _ => {
-                            return_errno_with_message!(
-                                Errno::EINVAL,
-                                "invalid `uuid` mount option value"
-                            );
+                    match key_name {
+                        "lowerdir" => {
+                            // The first lowerdir path is the topmost layer.
+                            if !lower_dirs.is_empty() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "duplicate overlay mount option `lowerdir`"
+                                );
+                            }
+                            if value.is_empty() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "the `lowerdir` mount option requires a non-empty value"
+                                );
+                            }
+                            lower_dirs = value.split(':').map(str::to_string).collect();
+                            if lower_dirs.iter().any(|lower_dir| lower_dir.is_empty()) {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "the `lowerdir` value contains an empty layer path"
+                                );
+                            }
                         }
-                    };
-                }
-                MountOptionKey::Xino => {
-                    if saw_xino {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "duplicate overlay mount option `xino`"
-                        );
-                    }
-                    saw_xino = true;
-                    let Some(value) = value else {
-                        return_errno_with_message!(
-                            Errno::EINVAL,
-                            "the `xino` mount option requires a value"
-                        );
-                    };
-                    xino_mode = match value {
-                        "off" => XinoMode::Off,
-                        "auto" => XinoMode::Auto,
-                        "on" => XinoMode::On,
-                        _ => {
-                            return_errno_with_message!(
-                                Errno::EINVAL,
-                                "invalid `xino` mount option value"
-                            );
+                        "upperdir" => {
+                            // The upperdir is the writable top layer on writable mounts.
+                            if upper_dir.is_some() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "duplicate overlay mount option `upperdir`"
+                                );
+                            }
+                            if value.is_empty() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "the `upperdir` mount option requires a non-empty value"
+                                );
+                            }
+                            upper_dir = Some(value.to_string());
                         }
-                    };
+                        "workdir" => {
+                            // The workdir stores the staging workspace for copy-up/remove.
+                            if work_dir.is_some() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "duplicate overlay mount option `workdir`"
+                                );
+                            }
+                            if value.is_empty() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "the `workdir` mount option requires a non-empty value"
+                                );
+                            }
+                            work_dir = Some(value.to_string());
+                        }
+                        "uuid" => {
+                            // The UUID mode controls overlay uuid/fsid behavior.
+                            if uuid_mode.is_some() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "duplicate overlay mount option `uuid`"
+                                );
+                            }
+                            uuid_mode = Some(match value {
+                                "off" => UuidMode::Off,
+                                "null" => UuidMode::Null,
+                                "on" => UuidMode::On,
+                                "auto" => UuidMode::Auto,
+                                _ => {
+                                    return_errno_with_message!(
+                                        Errno::EINVAL,
+                                        "invalid `uuid` mount option value"
+                                    );
+                                }
+                            });
+                        }
+                        "xino" => {
+                            // The xino mode controls dev/ino projection encoding.
+                            if xino_mode.is_some() {
+                                return_errno_with_message!(
+                                    Errno::EINVAL,
+                                    "duplicate overlay mount option `xino`"
+                                );
+                            }
+                            xino_mode = Some(match value {
+                                "off" => XinoMode::Off,
+                                "auto" => XinoMode::Auto,
+                                "on" => XinoMode::On,
+                                _ => {
+                                    return_errno_with_message!(
+                                        Errno::EINVAL,
+                                        "invalid `xino` mount option value"
+                                    );
+                                }
+                            });
+                        }
+                        _ => unreachable!("key_name was filtered above"),
+                    }
                 }
-                MountOptionKey::DefaultPermissions => {
+                "default_permissions" => {
+                    // This option takes no value.
                     if is_default_permissions {
                         return_errno_with_message!(
                             Errno::EINVAL,
@@ -264,6 +226,9 @@ impl OverlayMountOptions {
                         );
                     }
                     is_default_permissions = true;
+                }
+                _ => {
+                    return_errno_with_message!(Errno::EINVAL, "unknown overlay mount option");
                 }
             }
         }

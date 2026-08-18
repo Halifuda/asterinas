@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The `Binding` type for cached lookup results and the mount-wide cache that stores them.
 //!
 //! This module implements one `Binding` type used for both cache entries and
@@ -27,38 +28,41 @@
 
 use hashbrown::HashMap;
 
-use super::{entry::LayerLookup, inode::OverlayInode, inode_cache::RealObjectKey};
-use crate::{fs::vfs::inode::Inode, prelude::*};
+use super::{inode_cache::RealObjectKey, lookup::LayerLookup};
+use crate::{
+    fs::{fs_impls::overlayfs::inode::OverlayInode, vfs::inode::Inode},
+    prelude::*,
+};
 
 type BindingsByName = HashMap<Box<str>, Arc<Binding>>;
 type BindingsByParent = HashMap<RealObjectKey, BindingsByName>;
 
 #[derive(Clone)]
-pub(in crate::fs::fs_impls::overlayfs) enum Binding {
+pub(in overlayfs) enum Binding {
     Positive(PositiveBinding),
     Negative(NegativeBinding),
 }
 
 /// A positive per-name binding: the shared overlay inode.
 #[derive(Clone)]
-pub(in crate::fs::fs_impls::overlayfs) struct PositiveBinding {
+pub(in overlayfs) struct PositiveBinding {
     /// The shared inode for the bound name.
     pub(super) inode: Arc<OverlayInode>,
 }
 
 impl PositiveBinding {
-    pub(in crate::fs::fs_impls::overlayfs) fn new(inode: Arc<OverlayInode>) -> Self {
+    pub(in overlayfs) fn new(inode: Arc<OverlayInode>) -> Self {
         Self { inode }
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn inode(&self) -> Arc<OverlayInode> {
+    pub(in overlayfs) fn inode(&self) -> Arc<OverlayInode> {
         self.inode.clone()
     }
 }
 
 /// The per-name view classification of a positive binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) enum PositiveKind {
+pub(in overlayfs) enum PositiveKind {
     /// One real object backs the name.
     Single,
     /// A directory merging upper + lower observations backs the name.
@@ -71,7 +75,7 @@ pub(in crate::fs::fs_impls::overlayfs) enum PositiveKind {
 /// hidden bindings pin their barrier via [`HiddenEvidence`] for lifetime +
 /// revalidation of the cached negative answer.
 #[derive(Clone, Debug)]
-pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
+pub(in overlayfs) enum NegativeBinding {
     /// The name is absent from every layer.
     Absent,
     /// The name is hidden by a whiteout barrier.
@@ -82,7 +86,7 @@ pub(in crate::fs::fs_impls::overlayfs) enum NegativeBinding {
 
 impl NegativeBinding {
     /// Compares this negative binding against `other` for identity.
-    pub(in crate::fs::fs_impls::overlayfs) fn is_same_negative(&self, other: &Self) -> bool {
+    pub(super) fn is_same_negative(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Absent, Self::Absent) => true,
             (Self::HiddenByWhiteout(left), Self::HiddenByWhiteout(right))
@@ -97,17 +101,14 @@ impl NegativeBinding {
 
 /// The barrier evidence of a hidden name.
 #[derive(Clone, Debug)]
-pub(in crate::fs::fs_impls::overlayfs) struct HiddenEvidence {
+pub(in overlayfs) struct HiddenEvidence {
     pub(super) layer_index: usize,
     /// The real object whose marker hides the name.
     pub(super) real_inode: Arc<dyn Inode>,
 }
 
 impl HiddenEvidence {
-    pub(in crate::fs::fs_impls::overlayfs) fn new(
-        layer_index: usize,
-        real_inode: Arc<dyn Inode>,
-    ) -> Self {
+    pub(in overlayfs) fn new(layer_index: usize, real_inode: Arc<dyn Inode>) -> Self {
         Self {
             layer_index,
             real_inode,
@@ -118,13 +119,13 @@ impl HiddenEvidence {
 /// The publication key of one per-name binding: the parent directory
 /// identity plus the exact name in the parent.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) struct BindingKey {
+pub(in overlayfs) struct BindingKey {
     pub(super) parent_id: RealObjectKey,
     pub(super) name: Box<str>,
 }
 
 impl BindingKey {
-    pub(in crate::fs::fs_impls::overlayfs) fn new(parent_id: RealObjectKey, name: String) -> Self {
+    pub(in overlayfs) fn new(parent_id: RealObjectKey, name: String) -> Self {
         Self {
             parent_id,
             name: name.into(),
@@ -137,32 +138,24 @@ impl BindingKey {
 /// Invariant: entries are immutable `Arc<Binding>` snapshots (replaced, never
 /// mutated in place) — a cached positive pins its inode, a cached negative
 /// pins its barrier (`HiddenEvidence`).
-pub(in crate::fs::fs_impls::overlayfs) struct BindingCache {
+pub(in overlayfs) struct BindingCache {
     entries: RwMutex<BindingsByParent>,
 }
 
 impl BindingCache {
-    pub(in crate::fs::fs_impls::overlayfs) fn new() -> Self {
+    pub(in overlayfs) fn new() -> Self {
         Self {
             entries: RwMutex::new(HashMap::new()),
         }
     }
 
     /// Returns the cached binding for `(parent_id, name)`, if any.
-    pub(in crate::fs::fs_impls::overlayfs) fn get(
-        &self,
-        parent_id: &RealObjectKey,
-        name: &str,
-    ) -> Option<Arc<Binding>> {
+    pub(super) fn get(&self, parent_id: &RealObjectKey, name: &str) -> Option<Arc<Binding>> {
         self.entries.read().get(parent_id)?.get(name).cloned()
     }
 
     /// Inserts (or replaces) the cached binding for `(parent_id, name)`.
-    pub(in crate::fs::fs_impls::overlayfs) fn insert(
-        &self,
-        key: BindingKey,
-        binding: Arc<Binding>,
-    ) {
+    pub(in overlayfs) fn insert(&self, key: BindingKey, binding: Arc<Binding>) {
         let BindingKey { parent_id, name } = key;
         self.entries
             .write()
@@ -173,11 +166,7 @@ impl BindingCache {
 
     /// Removes the cached binding for `(parent_id, name)`. An emptied
     /// per-parent map is pruned.
-    pub(in crate::fs::fs_impls::overlayfs) fn invalidate(
-        &self,
-        parent_id: &RealObjectKey,
-        name: &str,
-    ) {
+    pub(in overlayfs) fn invalidate(&self, parent_id: &RealObjectKey, name: &str) {
         let mut guard = self.entries.write();
         if let Some(inner) = guard.get_mut(parent_id) {
             inner.remove(name);
@@ -194,7 +183,7 @@ impl BindingCache {
     /// identity are unreachable from new-key lookups but still strongly pin
     /// their inodes. Removing the outer map entry releases them. Absent
     /// keys are a no-op.
-    pub(in crate::fs::fs_impls::overlayfs) fn invalidate_parent(&self, parent_id: &RealObjectKey) {
+    pub(in overlayfs) fn invalidate_parent(&self, parent_id: &RealObjectKey) {
         self.entries.write().remove(parent_id);
     }
 }
@@ -202,9 +191,9 @@ impl BindingCache {
 impl Binding {
     /// Returns the shared inode for a positive binding; `None` for a
     /// negative binding.
-    pub(in crate::fs::fs_impls::overlayfs) fn into_inode(self) -> Option<Arc<OverlayInode>> {
+    pub(in overlayfs) fn inode(&self) -> Option<Arc<OverlayInode>> {
         match self {
-            Binding::Positive(positive) => Some(positive.inode),
+            Binding::Positive(positive) => Some(positive.inode.clone()),
             Binding::Negative(_) => None,
         }
     }
@@ -230,7 +219,7 @@ impl Binding {
         let Binding::Positive(positive) = self else {
             return false;
         };
-        if positive.inode.facts_snapshot().upper().is_none() {
+        if positive.inode.facts_snapshot().upper.is_none() {
             return false;
         }
         match truth {
@@ -240,7 +229,7 @@ impl Binding {
             LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(_)) => false,
             // A fresh positive truth that still carries an upper entry is an
             // overlay-owned replacement at the name (not stale).
-            LayerLookup::Positive(fresh) => fresh.upper().is_none(),
+            LayerLookup::Positive(fresh) => fresh.upper.is_none(),
             // The name is absent from every layer, or hidden by an opaque
             // barrier with no upper entry at the name: the previously
             // published upper object has vanished behind the overlay with no

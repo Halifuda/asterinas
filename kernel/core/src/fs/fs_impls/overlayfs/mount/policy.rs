@@ -1,80 +1,60 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Published mount policy state.
 //!
 //! A mount policy is the fixed per-mount decision state: whether the mount is
 //! effectively read-only or `default_permissions`, the `xino`/UUID modes, and
-//! the effective overlay UUID. The creator-credential policy is the stashed
-//! mounting-thread credential scope; the upper-filesystem capabilities are the
+//! the effective overlay UUID. The upper-filesystem capabilities are the
 //! probe-derived limits of the post-claim upper filesystem.
 //!
 //! This module owns the [`MountPolicy`] assembled by
-//! [`OverlayFs`](super::superblock::OverlayFs), the
-//! [`CreatorCredentialPolicy`], and the [`UpperFilesystemCapabilities`].
-
-use alloc::format;
-
-use aster_rights::ReadDupOp;
+//! [`OverlayFs`](crate::fs::fs_impls::overlayfs::superblock::OverlayFs) and
+//! the [`UpperFilesystemCapabilities`].
 
 use super::{
-    claims::{OVERLAY_UUID_SIZE, OverlayUuid, TRUSTED_OVERLAY_UUID},
-    options::{OverlayMountOptions, UuidMode, XinoMode},
+    claims::{OVERLAY_UUID_SIZE, Uuid},
+    options::{MountOptions, UuidMode, XinoMode},
 };
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
+        fs_impls::overlayfs::metadata_security::xattr::uuid_xattr_name,
         utils::DirentVisitor,
         vfs::{
             inode::{Inode, MknodType},
             path::is_dot_or_dotdot,
-            xattr::XattrName,
         },
     },
     prelude::*,
-    process::Credentials,
 };
 
 const CHAR_DEVICE_PROBE_PREFIX: &str = ".overlay-char-device-probe-";
 const D_TYPE_PROBE_PREFIX: &str = ".overlay-dtype-probe-";
 
-/// Generates a uniquely-named workdir staging-workspace temp entry for a
-/// capability probe.
-fn unique_temp_name(prefix: &str) -> String {
-    let mut probe_bytes = [0u8; 8];
-    crate::util::random::getrandom(&mut probe_bytes);
-    format!("{}{:016x}", prefix, u64::from_le_bytes(probe_bytes))
-}
-
 pub(in overlayfs) struct MountPolicy {
     is_effective_read_only: bool,
-    #[expect(
-        dead_code,
-        reason = "the uuid mode policy is not read yet; reserved for the future UUID/fsid policy surface"
-    )]
-    uuid_mode: UuidMode,
-    uuid: Option<OverlayUuid>,
-    credential_policy: CreatorCredentialPolicy,
+    uuid: Option<Uuid>,
     upper_capabilities: Option<UpperFilesystemCapabilities>,
     is_default_permissions: bool,
     xino_mode: XinoMode,
 }
 
+// TODO: Reintroduce a scoped creator-credential switch once the VFS provides a credentials API.
+
 impl MountPolicy {
     pub(super) fn assemble(
         is_effective_read_only: bool,
-        credential_policy: CreatorCredentialPolicy,
-        options: &OverlayMountOptions,
-        uuid: Option<OverlayUuid>,
+        options: &MountOptions,
+        uuid: Option<Uuid>,
         upper_capabilities: Option<UpperFilesystemCapabilities>,
     ) -> Self {
         Self {
             is_effective_read_only,
-            uuid_mode: options.uuid_mode,
             uuid,
-            credential_policy,
             upper_capabilities,
             is_default_permissions: options.is_default_permissions,
-            xino_mode: options.xino_mode,
+            xino_mode: options.xino_mode.unwrap_or(XinoMode::Auto),
         }
     }
 
@@ -83,75 +63,24 @@ impl MountPolicy {
         self.is_effective_read_only
     }
 
-    /// Reports the option value only.
+    /// Returns whether `default_permissions` was specified for this mount.
     pub(in overlayfs) fn is_default_permissions(&self) -> bool {
         self.is_default_permissions
     }
 
-    pub(in overlayfs) fn xino_mode(&self) -> XinoMode {
+    pub(super) fn xino_mode(&self) -> XinoMode {
         self.xino_mode
     }
 
     /// Returns the overlay UUID when effective.
-    pub(super) fn uuid(&self) -> Option<&OverlayUuid> {
+    pub(in overlayfs) fn uuid(&self) -> Option<&Uuid> {
         self.uuid.as_ref()
-    }
-
-    pub(in overlayfs) fn credential_policy(&self) -> &CreatorCredentialPolicy {
-        &self.credential_policy
     }
 
     /// Returns the post-claim upper-filesystem capabilities.
     pub(in overlayfs) fn upper_capabilities(&self) -> Option<&UpperFilesystemCapabilities> {
         self.upper_capabilities.as_ref()
     }
-}
-
-/// The creator-credential policy of an overlay mount.
-///
-/// Stashes the mounting thread's credentials once.
-pub(in overlayfs) struct CreatorCredentialPolicy {
-    snapshot: Credentials<ReadDupOp>,
-    source: CredentialSource,
-}
-
-impl CreatorCredentialPolicy {
-    pub(super) fn new(snapshot: Credentials<ReadDupOp>) -> Self {
-        Self {
-            snapshot,
-            source: CredentialSource::Creator,
-        }
-    }
-
-    // TODO: Consume this through a VFS API that runs a closure under the stashed credentials.
-    #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
-    pub(in crate::fs::fs_impls::overlayfs) fn snapshot(&self) -> &Credentials<ReadDupOp> {
-        &self.snapshot
-    }
-
-    #[expect(dead_code, reason = "the VFS has no scoped creator-credential switch")]
-    pub(in crate::fs::fs_impls::overlayfs) fn source(&self) -> CredentialSource {
-        self.source
-    }
-
-    /// Runs `operation_fn` with the caller's current credentials.
-    ///
-    /// This is a passthrough seam: the VFS has no scoped "run with stashed
-    /// credentials" API, so the stashed credentials cannot be installed and
-    /// callers must not rely on this for permission decisions.
-    ///
-    // TODO: restore the scope switch once the VFS provides a scoped credentials API.
-    pub(in crate::fs::fs_impls::overlayfs) fn with_creator_credentials_fn<T>(
-        &self,
-        operation_fn: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        operation_fn()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in overlayfs) enum CredentialSource {
-    Creator,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,9 +111,7 @@ impl UpperFilesystemCapabilities {
     }
 
     fn probe_private_xattr(upper_inode: &Arc<dyn Inode>) -> Result<bool> {
-        let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay xattr probe name")
-        })?;
+        let name = uuid_xattr_name()?;
         let mut value = [0u8; OVERLAY_UUID_SIZE];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper_inode.get_xattr(name, &mut writer) {
@@ -197,7 +124,8 @@ impl UpperFilesystemCapabilities {
     }
 
     fn probe_d_type(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
-        let d_type_probe_name = unique_temp_name(D_TYPE_PROBE_PREFIX);
+        let d_type_probe_name =
+            crate::fs::fs_impls::overlayfs::workdir::workdir_temp_name(D_TYPE_PROBE_PREFIX);
         workspace_inode.create(&d_type_probe_name, InodeType::File, InodeMode::empty())?;
         let mut d_type_probe = DTypeProbeVisitor::new();
         let mut offset = 0;
@@ -221,7 +149,8 @@ impl UpperFilesystemCapabilities {
     }
 
     fn probe_mknod_char(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
-        let probe_name = unique_temp_name(CHAR_DEVICE_PROBE_PREFIX);
+        let probe_name =
+            crate::fs::fs_impls::overlayfs::workdir::workdir_temp_name(CHAR_DEVICE_PROBE_PREFIX);
         match workspace_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
             Ok(_) => {
                 workspace_inode.unlink(&probe_name)?;
@@ -240,7 +169,7 @@ impl UpperFilesystemCapabilities {
     }
 
     /// Consumed by the origin-record store.
-    pub(in crate::fs::fs_impls::overlayfs) fn can_store_private_xattr(&self) -> bool {
+    pub(in overlayfs) fn can_store_private_xattr(&self) -> bool {
         self.can_store_private_xattr
     }
 
@@ -250,8 +179,41 @@ impl UpperFilesystemCapabilities {
 
     /// Reports whether the workdir supports the classic whiteout char device
     /// `0:0`.
-    pub(in crate::fs::fs_impls::overlayfs) fn can_mknod_char(&self) -> bool {
+    pub(in overlayfs) fn can_mknod_char(&self) -> bool {
         self.can_mknod_char
+    }
+
+    /// Applies the post-claim capability checks and derives whether the UUID
+    /// mode is effective.
+    ///
+    /// Returns whether the UUID is effective; the caller owns the
+    /// capabilities probe and the persistence step.
+    pub(super) fn validate_uuid_support(&self, uuid_mode: UuidMode) -> Result<bool> {
+        if !self.can_report_directory_type() {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "the upper filesystem cannot report directory entry types"
+            );
+        }
+        if !self.can_mknod_char() && !self.can_store_private_xattr() {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "the upper filesystem supports no whiteout form"
+            );
+        }
+        match uuid_mode {
+            UuidMode::On => {
+                if !self.can_store_private_xattr() {
+                    return_errno_with_message!(
+                        Errno::EOPNOTSUPP,
+                        "the upper filesystem cannot persist the overlay uuid"
+                    );
+                }
+                Ok(true)
+            }
+            UuidMode::Auto => Ok(self.can_store_private_xattr()),
+            UuidMode::Off | UuidMode::Null => Ok(false),
+        }
     }
 }
 

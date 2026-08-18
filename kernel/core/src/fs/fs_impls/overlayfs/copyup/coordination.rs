@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The per-object copy-up coordination payload.
 //!
 //! This module owns the two types of the coordination surface:
@@ -11,7 +12,7 @@
 //! `ostd::sync::Mutex` because promotion can perform block I/O under
 //! it.
 
-use crate::{fs::fs_impls::overlayfs::projection::OverlayInode, prelude::*};
+use crate::{fs::fs_impls::overlayfs::inode::OverlayInode, prelude::*};
 
 /// The copy-up publication coordinate and phase of one logical overlay object.
 ///
@@ -21,7 +22,7 @@ use crate::{fs::fs_impls::overlayfs::projection::OverlayInode, prelude::*};
 /// copy-up-completed history marker exists. The publication-parent chain is
 /// acyclic and root-terminated, so the trigger's top-down ancestor walk
 /// terminates and never re-enters the same instance.
-pub(in crate::fs::fs_impls::overlayfs) struct CopyUpTransition {
+pub(in overlayfs) struct CopyUpTransition {
     /// The logical parent overlay inode; its upper existence is resolved by
     /// the trigger's ancestor walk, which checks the parent's upper existence
     /// and may promote it first.
@@ -41,7 +42,7 @@ pub(in crate::fs::fs_impls::overlayfs) struct CopyUpTransition {
 ///   unchanged, no durable marker needed).
 /// - reconcile-required: [`CopyUpPhase::ReconcilePending`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) enum CopyUpPhase {
+pub(super) enum CopyUpPhase {
     /// The coordinate carries no unfinished transition; a lower authority (if
     /// any) is clean.
     Idle,

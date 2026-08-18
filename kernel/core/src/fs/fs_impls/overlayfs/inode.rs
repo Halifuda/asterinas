@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The Overlay inode and its canonical VFS trait surface.
 //!
 //! An [`OverlayInode`] is the published logical inode: one overlay object
-//! shared by every name bound to it. [`OverlayObjectFacts`] is the
+//! shared by every name bound to it. [`ObjectFacts`] is the
 //! per-object real-object facts — its per-name kind, the upper real object
 //! (the visible-metadata source for merged directories), and the
 //! topmost-first lower stack — replaced only by the copy-up transition.
@@ -24,7 +25,7 @@
 //! | Item | Owns |
 //! |---|---|
 //! | [`OverlayInode`] | The published logical inode and its `Inode`/`FileOps` surfaces. |
-//! | [`OverlayObjectFacts`] | The immutable real-object facts. |
+//! | [`ObjectFacts`] | The immutable real-object facts. |
 //!
 //! # References
 //!
@@ -33,16 +34,15 @@
 
 use core::time::Duration;
 
-use super::{
-    binding_cache::PositiveKind, entry::RealObject, identity::OverlayObjectId,
-    inode_cache::RealObjectKey, visible_source,
-};
 use crate::{
     fs::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
-            AccessType, copyup::coordination::CopyUpTransition, mount::OverlayFs,
+            AccessType,
+            copyup::coordination::CopyUpTransition,
+            projection::{ObjectId, PositiveKind, RealObject, RealObjectKey},
             readdir_index::ReaddirIndex,
+            superblock::OverlayFs,
         },
         utils::DirentVisitor,
         vfs::{
@@ -51,6 +51,7 @@ use crate::{
                 Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
                 RevalidationPolicy, SymbolicLink,
             },
+            path::Path,
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -61,37 +62,40 @@ use crate::{
 
 /// The logical Overlay inode exposed to the VFS: one logical overlay object
 /// shared by every name bound to it, with the real-object facts living once
-/// in [`OverlayObjectFacts`].
-pub(in crate::fs::fs_impls::overlayfs) struct OverlayInode {
+/// in [`ObjectFacts`].
+pub(super) struct OverlayInode {
     /// The owning mount.
     pub(super) fs: Weak<OverlayFs>,
     /// The inode-cache key of the visible-metadata source.
     pub(super) key: Mutex<RealObjectKey>,
     /// The per-object real-object facts, replaced only by the copy-up
     /// transition.
-    pub(super) facts: Mutex<OverlayObjectFacts>,
+    pub(super) facts: Mutex<ObjectFacts>,
     /// The per-directory transaction lock; `Some` iff this object is a
     /// directory.
     pub(super) dir_transaction_lock: Option<Mutex<()>>,
     /// The precomputed projected `st_dev`/`st_ino`.
-    pub(super) object_id: OverlayObjectId,
+    pub(super) object_id: ObjectId,
     /// The VFS inode extension groups (fs event publisher / fs lock context).
     pub(super) extension: Extension,
     /// The per-directory merged-readdir index; `Some` iff this object is a
     /// directory.
-    pub(in crate::fs::fs_impls::overlayfs) readdir_index: Option<Mutex<ReaddirIndex>>,
+    pub(super) readdir_index: Option<Mutex<ReaddirIndex>>,
     /// The copy-up transition coordinate; `None` until copy-up records the
     /// first positive-binding publication.
-    pub(in crate::fs::fs_impls::overlayfs) copyup_transition: Mutex<Option<CopyUpTransition>>,
+    pub(super) copyup_transition: Mutex<Option<CopyUpTransition>>,
 }
 
 /// The immutable real-object facts of one logical overlay object.
 ///
-/// Invariant: `upper.is_some() || !lowers.is_empty()`, enforced at the
-/// construction paths (the in-tree `projection` builders and the checked
-/// [`OverlayObjectFacts::try_new`] constructor).
+/// Invariant: `upper.is_some() || !lowers.is_empty()`,
+/// enforced at the construction paths
+/// (the in-tree `projection` builders and [`ObjectFacts::try_new`]).
+///
+/// Literal construction is allowed only on paths already satisfying the invariant;
+/// `try_new` remains the checked entry for fallible construction.
 #[derive(Clone, Debug)]
-pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectFacts {
+pub(super) struct ObjectFacts {
     /// The per-name view classification of this object.
     pub(super) kind: PositiveKind,
     /// The upper real object; the visible-metadata source for merged
@@ -102,22 +106,10 @@ pub(in crate::fs::fs_impls::overlayfs) struct OverlayObjectFacts {
     pub(super) lowers: Vec<RealObject>,
 }
 
-impl OverlayObjectFacts {
-    pub(in crate::fs::fs_impls::overlayfs) fn kind(&self) -> PositiveKind {
-        self.kind
-    }
-
-    pub(in crate::fs::fs_impls::overlayfs) fn upper(&self) -> Option<&RealObject> {
-        self.upper.as_ref()
-    }
-
-    pub(in crate::fs::fs_impls::overlayfs) fn lowers(&self) -> &[RealObject] {
-        &self.lowers
-    }
-
-    /// Constructs an [`OverlayObjectFacts`], returning `None` when both
+impl ObjectFacts {
+    /// Constructs an [`ObjectFacts`], returning `None` when both
     /// `upper` and `lowers` are empty.
-    pub(in crate::fs::fs_impls::overlayfs) fn try_new(
+    pub(super) fn try_new(
         kind: PositiveKind,
         upper: Option<RealObject>,
         lowers: Vec<RealObject>,
@@ -133,16 +125,20 @@ impl OverlayObjectFacts {
         }
     }
 
-    /// Compares this object's facts against `other` for visible identity.
+    /// Returns whether `self` and `other` share the same visible identity
+    /// by cache-alias pointer identity.
     ///
-    /// Kinds and upper identities must match; `Single` objects compare only
-    /// the visible source (post-copy-up inodes retain bookkeeping lowers),
-    /// `Merged` objects compare the full lower composition strictly.
-    pub(in crate::fs::fs_impls::overlayfs) fn same_visible_identity(&self, other: &Self) -> bool {
-        if self.kind() != other.kind() {
+    /// Kinds and upper identities must match;
+    /// `Single` objects compare only the visible source
+    /// (post-copy-up inodes retain bookkeeping lowers),
+    /// and `Merged` objects compare the full lower composition strictly.
+    /// For durable value-identity revalidation, use
+    /// [`ObjectFacts::same_layer_composition`].
+    pub(super) fn same_visible_identity(&self, other: &Self) -> bool {
+        if self.kind != other.kind {
             return false;
         }
-        let same_upper = match (self.upper(), other.upper()) {
+        let same_upper = match (self.upper.as_ref(), other.upper.as_ref()) {
             (Some(left), Some(right)) => Arc::ptr_eq(left.real_inode(), right.real_inode()),
             (None, None) => true,
             _ => false,
@@ -150,53 +146,94 @@ impl OverlayObjectFacts {
         if !same_upper {
             return false;
         }
-        match self.kind() {
+        match self.kind {
             PositiveKind::Single => Arc::ptr_eq(
-                visible_source(self).real_inode(),
-                visible_source(other).real_inode(),
+                self.visible_source().real_inode(),
+                other.visible_source().real_inode(),
             ),
             PositiveKind::Merged => {
-                self.lowers().len() == other.lowers().len()
+                self.lowers.len() == other.lowers.len()
                     && self
-                        .lowers()
+                        .lowers
                         .iter()
-                        .zip(other.lowers())
+                        .zip(other.lowers.iter())
                         .all(|(left, right)| Arc::ptr_eq(left.real_inode(), right.real_inode()))
             }
         }
     }
 
+    /// Returns whether `self` and `other` describe the same physical layer
+    /// composition by durable value identity (`fsid` + real inode number),
+    /// not by cached inode identity.
+    ///
+    /// This is the lock-free revalidation comparator: snapshots taken at
+    /// different moments may hold different `Arc`s for the same physical
+    /// object, so pointer identity is too strict. `kind`, the upper layer,
+    /// and every lower layer must match by `fsid`/`ino`.
+    pub(super) fn same_layer_composition(&self, other: &Self) -> bool {
+        let same_upper = match (self.upper.as_ref(), other.upper.as_ref()) {
+            (Some(left), Some(right)) => {
+                left.fsid() == right.fsid() && left.real_inode().ino() == right.real_inode().ino()
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        self.kind == other.kind
+            && same_upper
+            && self.lowers.len() == other.lowers.len()
+            && self
+                .lowers
+                .iter()
+                .zip(other.lowers.iter())
+                .all(|(left, right)| {
+                    left.fsid() == right.fsid()
+                        && left.real_inode().ino() == right.real_inode().ino()
+                })
+    }
+
     /// Returns whether `real_inode` is the same logical object as this
     /// object's visible source or any of its retained lowers.
-    pub(in crate::fs::fs_impls::overlayfs) fn contains_real_inode(
-        &self,
-        real_inode: &Arc<dyn Inode>,
-    ) -> bool {
-        Arc::ptr_eq(visible_source(self).real_inode(), real_inode)
+    pub(super) fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
+        Arc::ptr_eq(self.visible_source().real_inode(), real_inode)
             || self
-                .lowers()
+                .lowers
                 .iter()
                 .any(|lower| Arc::ptr_eq(lower.real_inode(), real_inode))
+    }
+
+    /// Returns the visible-metadata source: the upper real object when present,
+    /// else the topmost lower (`lowers[0]`).
+    ///
+    /// Precondition: `upper.is_some() || !lowers.is_empty()`.
+    pub(super) fn visible_source(&self) -> &RealObject {
+        match &self.upper {
+            Some(upper) => upper,
+            None => &self.lowers[0],
+        }
+    }
+
+    /// Returns the current real authority for one delegated call.
+    pub(super) fn select_real_inode(&self) -> Arc<dyn Inode> {
+        self.visible_source().real_inode().clone()
     }
 }
 
 impl OverlayInode {
-    /// Constructs the root overlay inode — the mount-root inode published in
-    /// `OverlayFs::new`.
+    /// Constructs the overlay mount root inode on demand.
     ///
     /// The root facts merge the upper root with all lower roots; the root is
     /// always a directory.
-    pub(in crate::fs::fs_impls::overlayfs) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
+    pub(super) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
         let fs = match fs.upgrade() {
             Some(fs) => fs,
             None => unreachable!(
-                "OverlayFs::new materializes the root inode right after publishing \
-                 the Arc; the mount reference is always alive at this call site"
+                "the root inode is constructed only through a live mount Arc; \
+                 the mount reference is always alive at this call site"
             ),
         };
-        let layer_stack = fs.layer_stack();
-        let upper = layer_stack.upper.as_ref().map(|layer| {
-            RealObject::with_path(
+        let layer_stack = &fs.layer_stack;
+        let upper = layer_stack.upper_layer().ok().map(|layer| {
+            RealObject::from_layer_path(
                 0,
                 layer.root_path.clone(),
                 layer.fsid,
@@ -204,11 +241,11 @@ impl OverlayInode {
             )
         });
         let lowers: Vec<_> = layer_stack
-            .lowers
+            .lower_layers()
             .iter()
             .enumerate()
             .map(|(layer_index, layer)| {
-                RealObject::with_path(
+                RealObject::from_layer_path(
                     layer_index + 1,
                     layer.root_path.clone(),
                     layer.fsid,
@@ -224,16 +261,16 @@ impl OverlayInode {
         } else {
             PositiveKind::Single
         };
-        let facts = OverlayObjectFacts {
+        let facts = ObjectFacts {
             kind,
             upper,
             lowers,
         };
         // The layer stack always carries at least one lower layer, so
-        // `visible_source` never indexes an empty `lowers`.
-        let visible = visible_source(&facts);
+        // `visible_source()` never indexes an empty `lowers`.
+        let visible = facts.visible_source();
         let key = RealObjectKey::from_facts(&facts);
-        let object_id = fs.identity().project_object_id(visible, true);
+        let object_id = fs.identity.project_object_id(visible, true);
         let inode = Arc::new(OverlayInode {
             fs: Arc::downgrade(&fs),
             key: Mutex::new(key),
@@ -245,13 +282,13 @@ impl OverlayInode {
             copyup_transition: Mutex::new(None),
         });
         // Register the root inode in the inode cache so every live inode
-        // resolves by its visible-source key; `publication_parent` then needs
+        // resolves by its visible-source key; the inlined parent probe needs
         // no root special case and `project_inode` never mints a duplicate.
-        fs.inodes().get_or_create(key, |_| true, || inode.clone());
+        fs.inodes.get_or_create(key, |_| true, || inode.clone());
         inode
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn key(&self) -> RealObjectKey {
+    pub(super) fn key(&self) -> RealObjectKey {
         *self.key.lock()
     }
 
@@ -259,12 +296,54 @@ impl OverlayInode {
     ///
     /// Copy-up re-projection keeps the lower-id-derived identity, so the
     /// value is stable across copy-up (authority-continuity invariant).
-    pub(in crate::fs::fs_impls::overlayfs) fn object_id(&self) -> OverlayObjectId {
+    pub(super) fn object_id(&self) -> ObjectId {
         self.object_id
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn facts_snapshot(&self) -> OverlayObjectFacts {
+    pub(super) fn facts_snapshot(&self) -> ObjectFacts {
         self.facts.lock().clone()
+    }
+
+    pub(super) fn select_real_inode(&self) -> Arc<dyn Inode> {
+        self.facts_snapshot().select_real_inode()
+    }
+
+    /// Returns the dentry-anchored path of the promoted upper real parent
+    /// directory.
+    ///
+    /// After promotion the facts guarantee an upper object that is always
+    /// dentry-anchored, so the checked `real_path()` accessor succeeds;
+    /// `EROFS`/`EIO` propagate when that guarantee does not hold.
+    pub(super) fn upper_parent_path(&self) -> Result<Path> {
+        let facts = self.facts_snapshot();
+        let upper = facts.upper.ok_or_else(|| {
+            Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
+        })?;
+        upper.real_path()
+    }
+
+    /// Returns `Err` when the inode does not belong to an overlay filesystem.
+    pub(super) fn fs_arc(&self) -> Result<Arc<OverlayFs>> {
+        let fs = self.fs();
+        Arc::downcast::<OverlayFs>(fs).map_err(|_| {
+            Error::with_message(
+                Errno::EIO,
+                "the inode does not belong to an overlay filesystem",
+            )
+        })
+    }
+
+    /// Locks the per-object copy-up coordination state.
+    pub(super) fn lock_copyup_transition(&self) -> MutexGuard<'_, Option<CopyUpTransition>> {
+        self.copyup_transition.lock()
+    }
+
+    /// Attempts to lock the per-object copy-up coordination state without
+    /// blocking; `None` when another coordinator holds the lock.
+    pub(super) fn try_lock_copyup_transition(
+        &self,
+    ) -> Option<MutexGuard<'_, Option<CopyUpTransition>>> {
+        self.copyup_transition.try_lock()
     }
 
     /// Serializes an `O_APPEND` write as one atomic size-read + write.
@@ -273,22 +352,15 @@ impl OverlayInode {
     /// does not process `O_APPEND` itself. This is the one exception to
     /// holding `facts` only briefly, and it serializes concurrent appends
     /// on the post-write size.
-    pub(in crate::fs::fs_impls::overlayfs) fn append_write(
+    pub(super) fn append_write(
         &self,
         reader: &mut VmReader,
         status_flags: StatusFlags,
     ) -> Result<usize> {
         let guard = self.facts.lock();
-        let real = match guard.upper() {
-            Some(upper) => upper.real_inode().clone(),
-            None => guard.lowers()[0].real_inode().clone(),
-        };
+        let real = guard.select_real_inode();
         let offset = real.size();
         real.write_at(offset, reader, status_flags)
-    }
-
-    pub(in crate::fs::fs_impls::overlayfs) fn dir(&self) -> Option<&Mutex<()>> {
-        self.dir_transaction_lock.as_ref()
     }
 
     /// Replaces the real-object facts of this inode — the copy-up transition.
@@ -298,21 +370,21 @@ impl OverlayInode {
     /// old-key mapping is retained, then the facts and published `key` are
     /// swapped. The alias runs first, so a displacement fails rather than
     /// silently orphaning the inode.
-    pub(in crate::fs::fs_impls::overlayfs) fn replace_facts(
+    pub(super) fn replace_facts(
         self: &Arc<Self>,
-        facts: OverlayObjectFacts,
+        facts: ObjectFacts,
         new_visible_source: &RealObject,
     ) -> Result<()> {
         let new_key = RealObjectKey::from_facts(&facts);
         // Capture the pre-transition visible-source key AND its real inode
         // under one brief `facts` lock: the old real inode becomes the
-        // keep-alive pin of the retained old-key alias (`alias_key`), so it
+        // keep-alive pin of the retained old-key alias (`rekey_keep_old_alias`), so it
         // cannot be recycled while the alias exists.
         let (old_key, old_real_inode) = {
             let old_facts = self.facts.lock();
             (
                 RealObjectKey::from_facts(&old_facts),
-                visible_source(&old_facts).real_inode().clone(),
+                old_facts.visible_source().real_inode().clone(),
             )
         };
         // A live inode cannot outlive its mount; the teardown arm swaps the
@@ -325,32 +397,139 @@ impl OverlayInode {
         };
         // The fallible alias runs first; only after it succeeds is the
         // inode's own state committed.
-        fs.inodes()
-            .alias_key(old_key, new_key, old_real_inode, new_visible_source)?;
+        fs.inodes
+            .rekey_keep_old_alias(old_key, new_key, old_real_inode, new_visible_source)?;
         *self.facts.lock() = facts;
         *self.key.lock() = new_key;
         debug_assert!(
-            fs.inodes()
+            fs.inodes
                 .get(new_key)
                 .is_some_and(|probe| Arc::ptr_eq(&probe, self)),
             "after replace_facts the inode cache maps the new visible-source key to THIS inode"
         );
         if self.dir_transaction_lock.is_some() {
-            fs.bindings().invalidate_parent(&old_key);
+            fs.bindings.invalidate_parent(&old_key);
         }
         Ok(())
     }
 }
 
 impl OverlayInode {
+    // A lower-backed read passes `O_NOATIME` so a read never updates the lower
+    // atime; the `O_NOATIME` decision and the real-inode selection share the
+    // same `facts` snapshot below, so no double-snapshot window remains.
+    pub(super) fn read_at_impl(
+        &self,
+        offset: usize,
+        writer: &mut VmWriter,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        let facts = self.facts_snapshot();
+        let is_lower_backed = facts.upper.is_none();
+        let real = facts.select_real_inode();
+        let status_flags = if is_lower_backed {
+            status_flags | StatusFlags::O_NOATIME
+        } else {
+            status_flags
+        };
+        real.read_at(offset, writer, status_flags)
+    }
+
+    // The `O_APPEND` branch serializes `offset := real size` + `write_at`
+    // under the `facts` guard (`append_write`) — a bare two-step
+    // size-read-then-write would be a TOCTOU where concurrent appends could
+    // read the same size and lose an update. Write-capable fds are upper by
+    // construction, so delegation never bypasses the trigger.
+    pub(super) fn write_at_impl(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        if status_flags.contains(StatusFlags::O_APPEND) {
+            return self.append_write(reader, status_flags);
+        }
+        let real = self.select_real_inode();
+        real.write_at(offset, reader, status_flags)
+    }
+
+    // The VFS handle uses this inode's own `FileOps`, so the successful path
+    // returns `None`; failures surface as `Some(Err)`.
+    pub(super) fn open_impl(
+        &self,
+        access_mode: AccessMode,
+        _status_flags: StatusFlags,
+    ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
+        if self.type_().is_directory() {
+            return None;
+        }
+        if !access_mode.is_writable() {
+            return None;
+        }
+        let fs = match self.fs_arc() {
+            Ok(fs) => fs,
+            Err(err) => return Some(Err(err)),
+        };
+        if fs.policy.is_effective_read_only() {
+            return Some(Err(Error::with_message(
+                Errno::EROFS,
+                "the overlay mount is read-only",
+            )));
+        }
+        match self.ensure_upper_authority() {
+            Ok(()) => None,
+            Err(err) => Some(Err(err)),
+        }
+    }
+
+    pub(super) fn seek_end_impl(&self) -> Option<usize> {
+        self.select_real_inode().seek_end()
+    }
+
+    // The path-based `truncate()` syscall performs no VFS-level `MAY_WRITE`
+    // check of its own, so this entry runs the uniform mutating admission
+    // before any side effect, including the copy-up promotion.
+    pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
+        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+        self.ensure_upper_authority()?;
+        self.select_real_inode().resize(new_size)
+    }
+
+    // Admission runs uniformly via `check_permission` at this entry:
+    // `fallocate` shares `resize`'s side-effect class, so the admission also
+    // runs here rather than relying on the fd path alone.
+    pub(super) fn fallocate_impl(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
+        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+        self.ensure_upper_authority()?;
+        self.select_real_inode().fallocate(mode, offset, len)
+    }
+
+    pub(super) fn sync_all_impl(&self) -> Result<()> {
+        self.select_real_inode().sync_all()
+    }
+
+    pub(super) fn sync_data_impl(&self) -> Result<()> {
+        self.select_real_inode().sync_data()
+    }
+
+    pub(super) fn read_link_impl(&self) -> Result<SymbolicLink> {
+        self.select_real_inode().read_link()
+    }
+
+    pub(super) fn page_cache_impl(&self) -> Option<Arc<Vmo>> {
+        self.select_real_inode().page_cache()
+    }
+}
+
+impl OverlayInode {
     fn size_impl(&self) -> usize {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().size()
+        facts.visible_source().real_inode().size()
     }
 
     fn metadata_impl(&self) -> Result<Metadata> {
         let facts = self.facts_snapshot();
-        let mut metadata = visible_source(&facts).real_inode().metadata()?;
+        let mut metadata = facts.visible_source().real_inode().metadata()?;
         metadata.ino = self.object_id.ino;
         metadata.container_dev_id = self.object_id.dev;
         Ok(metadata)
@@ -362,48 +541,45 @@ impl OverlayInode {
 
     fn type_impl(&self) -> InodeType {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().type_()
+        facts.visible_source().real_inode().type_()
     }
 
     fn mode_impl(&self) -> Result<InodeMode> {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().mode()
+        facts.visible_source().real_inode().mode()
     }
 
     fn owner_impl(&self) -> Result<Uid> {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().owner()
+        facts.visible_source().real_inode().owner()
     }
 
     fn group_impl(&self) -> Result<Gid> {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().group()
+        facts.visible_source().real_inode().group()
     }
 
     fn atime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().atime()
+        facts.visible_source().real_inode().atime()
     }
 
     fn mtime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().mtime()
+        facts.visible_source().real_inode().mtime()
     }
 
     fn ctime_impl(&self) -> Duration {
         let facts = self.facts_snapshot();
-        visible_source(&facts).real_inode().ctime()
+        facts.visible_source().real_inode().ctime()
     }
 
     fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
-        if !self.type_().is_directory() {
-            return_errno_with_message!(
+        let dir = self.dir_transaction_lock.as_ref().ok_or_else(|| {
+            Error::with_message(
                 Errno::ENOTDIR,
-                "lookup is supported on overlay directories only"
-            );
-        }
-        let dir = self.dir().ok_or_else(|| {
-            Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
+                "lookup is supported on overlay directories only",
+            )
         })?;
         let _dir_guard = dir.lock();
         let facts = self.facts_snapshot();
@@ -411,7 +587,7 @@ impl OverlayInode {
             Error::with_message(Errno::EIO, "the overlay mount is no longer alive")
         })?;
         let binding = fs.lookup_binding(&facts, name)?.binding;
-        match binding.into_inode() {
+        match binding.inode() {
             Some(inode) => Ok(inode),
             None => Err(Error::new(Errno::ENOENT)),
         }
@@ -650,160 +826,5 @@ impl Inode for OverlayInode {
         mode: RenameMode,
     ) -> Result<()> {
         self.rename_impl(old_name, target, new_name, mode)
-    }
-}
-
-impl OverlayInode {
-    /// Resolves the identity published for this directory's `..` entry.
-    ///
-    /// Serves the child-source-layer real parent identity (exact when the
-    /// overlay parent's visible source is on the same layer, otherwise an
-    /// approximation), falling back to the stable `d_ino("..") ==
-    /// d_ino(".")` self-parent when no disclosure-safe projection exists.
-    pub(in crate::fs::fs_impls::overlayfs) fn resolve_parent_object_id(
-        &self,
-        facts: &OverlayObjectFacts,
-    ) -> OverlayObjectId {
-        let fs = match self.fs_arc() {
-            Ok(fs) => fs,
-            Err(err) => {
-                warn!(
-                    "overlay readdir: the owning mount is unavailable ({:?}); \
-                     falling back to d_ino(\"..\") == d_ino(\".\")",
-                    err
-                );
-                return self.parent_fallback();
-            }
-        };
-        // Overlay-root special case: `..` is the root itself (Unix
-        // self-parent); the underlying `lookup("..")` is skipped.
-        if self.is_mount_root(&fs) {
-            return self.parent_fallback();
-        }
-        // Determinism short-circuit: on a multi-fs xino-off mount the
-        // projection matrix takes the xino-off/overflow directory branch for
-        // EVERY parent (a fresh fallback ino per call — unstable), so the
-        // whole route is predetermined to serve the stable self-parent
-        // approximation; skip the underlying `lookup("..")`/origin read whose
-        // result would only be discarded.
-        if !fs.identity().is_xino_effective() && !fs.identity().is_all_layers_same_fs() {
-            return self.parent_fallback();
-        }
-        let visible = visible_source(facts);
-        let parent_real_inode = match visible.real_inode().lookup("..") {
-            Ok(parent) => parent,
-            Err(err) => {
-                warn!(
-                    "overlay readdir: `..` resolution on the visible source failed \
-                     ({:?}); falling back to d_ino(\"..\") == d_ino(\".\")",
-                    err
-                );
-                return self.parent_fallback();
-            }
-        };
-        // Upper-backed real parent: prefer the durable lower-id record so the
-        // `..` identity matches the parent's record-derived `stat("..")`,
-        // gated on deterministic projection.
-        if visible.layer_index() == 0
-            && let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode)
-        {
-            return object_id;
-        }
-        if !fs
-            .identity()
-            .is_directory_projection_deterministic(visible.fsid(), parent_real_inode.ino())
-        {
-            return self.parent_fallback();
-        }
-        let parent_real = RealObject::new(
-            visible.layer_index(),
-            parent_real_inode,
-            visible.fsid(),
-            visible.container_dev_id(),
-        );
-        fs.identity().project_object_id(&parent_real, true)
-    }
-
-    /// Projects the upper-backed real parent's identity from its durable
-    /// origin record, gated on deterministic projection.
-    ///
-    /// Returns `None` when no readable record resolves to a current lower
-    /// layer or the projection would be non-deterministic; the caller then
-    /// attempts the visible-source projection. The underlying `read_lower_id`
-    /// is caller-credential-gated, so `d_ino("..")` may differ between
-    /// privileged and unprivileged readers (logged at `debug!`).
-    pub(in crate::fs::fs_impls::overlayfs) fn project_parent_from_lower_record(
-        &self,
-        fs: &OverlayFs,
-        parent_real_inode: &Arc<dyn Inode>,
-    ) -> Option<OverlayObjectId> {
-        match fs.read_lower_id(parent_real_inode) {
-            Ok(Some(record)) => {
-                // When all layers share one filesystem, projection passes the origin
-                // through without a layer id, so this caller skips the layer resolution.
-                if !fs.identity().is_all_layers_same_fs() {
-                    let layer_id = fs.identity().resolve_layer_id_for_record(
-                        record.container_dev_id(),
-                        record.lower_layer_root_ino(),
-                    )?;
-                    if !fs
-                        .identity()
-                        .is_directory_projection_deterministic(layer_id, record.real_ino())
-                    {
-                        return None;
-                    }
-                }
-                fs.identity().project_object_id_from_lower_id(&record, true)
-            }
-            Ok(None) => None,
-            Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
-                debug!(
-                    "overlay readdir: the parent's origin record is \
-                     credential-gated ({:?}); d_ino(\"..\") may differ between \
-                     privileged and unprivileged readers until the VFS can \
-                     read xattrs with the caller's credentials; falling back to the \
-                     visible-source projection",
-                    err
-                );
-                None
-            }
-            Err(err) => {
-                debug!(
-                    "overlay readdir: the parent's origin record is unreadable \
-                     ({:?}); falling back to the visible-source projection",
-                    err
-                );
-                None
-            }
-        }
-    }
-
-    /// Returns whether this inode is the overlay mount root (the self-parent
-    /// special case of the `..` route).
-    ///
-    /// The check compares the root inode's inode-cache key against
-    /// `self.key()` and fails closed (serves the self-parent fallback) when
-    /// the root is not an `OverlayInode`, never disclosing the backing-store
-    /// parent.
-    pub(in crate::fs::fs_impls::overlayfs) fn is_mount_root(&self, fs: &OverlayFs) -> bool {
-        match Arc::downcast::<OverlayInode>(fs.root_inode()) {
-            Ok(root_carrier) => root_carrier.key() == self.key(),
-            Err(_) => {
-                warn!(
-                    "overlay readdir: the mount root inode is not an OverlayInode; \
-                     serving the self-parent fallback"
-                );
-                true
-            }
-        }
-    }
-
-    /// Returns the `d_ino("..") == d_ino(".")` approximation: the stable
-    /// fallback identity served when the real parent cannot be resolved
-    /// disclosure-safely or deterministically (overlay root, xino-off /
-    /// overflow directory branch, unresolvable real parent, or unavailable
-    /// owning mount).
-    pub(in crate::fs::fs_impls::overlayfs) fn parent_fallback(&self) -> OverlayObjectId {
-        self.object_id()
     }
 }

@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The shared whiteout cache and whiteout-publish mechanics.
 //!
 //! This module owns [`WhiteoutCache`] (the one-slot shared cache),
 //! [`WhiteoutHandle`] (a cached or mutation-local workdir whiteout), and
 //! [`WhiteoutRepresentation`] (the char-device or xattr whiteout form).
 //!
-//! The whiteout cache lock covers only the short
-//! `take`/`store`/`disable_sharing` slot operations; sleep-capable work
-//! runs under the caller's parent directory transaction lock.
-//!
 //! Invariants: at most one cached whiteout (a workdir object, never a
 //! visible entry); `can_share_by_link` is set once and never re-enabled;
 //! a published whiteout is a visibility barrier, never an inode.
-
 //!
 //! ## References
 //!
@@ -28,19 +24,21 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::{
-            copyup::WorkdirTempRequest, metadata_security::xattr::WHITEOUT_XATTR_FULL_NAME,
-            mount::OverlayFs, projection::is_whiteout_inode,
+            metadata_security::xattr::{
+                WHITEOUT_MARKER_VALUE, WHITEOUT_XATTR_FULL_NAME, XattrPolicy,
+            },
+            projection::is_whiteout_inode,
+            superblock::OverlayFs,
+            workdir::WorkdirTempRequest,
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
-            path::{self, Path},
-            xattr::{XattrName, XattrSetFlags},
+            path::Path,
+            xattr::XattrSetFlags,
         },
     },
     prelude::*,
 };
-
-const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
 
 /// The classic-whiteout char device `0:0`.
 ///
@@ -55,13 +53,13 @@ const WHITEOUT_TEMP_NAME_COMPONENT: &str = "whiteout";
 /// A `Mutex` rather than an `RwMutex` because the critical sections are
 /// short slot operations with no read-mostly workload.
 #[derive(Debug)]
-pub(in crate::fs::fs_impls::overlayfs) struct WhiteoutCache {
+pub(in overlayfs) struct WhiteoutCache {
     cached: Option<WhiteoutHandle>,
     can_share_by_link: bool,
 }
 
 impl WhiteoutCache {
-    pub(in crate::fs::fs_impls::overlayfs) fn new() -> Self {
+    pub(in overlayfs) fn new() -> Self {
         Self {
             cached: None,
             can_share_by_link: true,
@@ -134,7 +132,7 @@ impl OverlayFs {
     /// a missing capability snapshot is `EROFS` and an unsupported upper is
     /// the defensive `EOPNOTSUPP`.
     fn whiteout_representation(&self) -> Result<WhiteoutRepresentation> {
-        let capabilities = self.policy().upper_capabilities().ok_or_else(|| {
+        let capabilities = self.policy.upper_capabilities().ok_or_else(|| {
             Error::with_message(
                 Errno::EROFS,
                 "the overlay mount has no writable upper capability snapshot",
@@ -161,48 +159,33 @@ impl OverlayFs {
     /// outlives the failed creation.
     fn create_whiteout_temp(&self) -> Result<WhiteoutHandle> {
         let representation = self.whiteout_representation()?;
-        let workdir_path = self.workdir_root_path()?;
-        match representation {
+        let (workdir_name, path) = match representation {
             WhiteoutRepresentation::CharDevice => {
                 let node = MknodType::CharDevice(WHITEOUT_CHAR_DEV);
-                let (workdir_name, path) = self
-                    .create_workdir_temp(
-                        WHITEOUT_TEMP_NAME_COMPONENT,
-                        &workdir_path,
-                        WorkdirTempRequest::Mknod {
-                            mode: InodeMode::empty(),
-                            node: &node,
-                        },
-                    )?
-                    .into_parts();
-                Ok(WhiteoutHandle {
-                    inode: path.inode().clone(),
-                    workdir_name,
-                    path,
-                })
+                self.create_workdir_temp(
+                    WHITEOUT_TEMP_NAME_COMPONENT,
+                    WorkdirTempRequest::Mknod {
+                        mode: InodeMode::empty(),
+                        node: &node,
+                    },
+                )?
+                .into_parts()
             }
             WhiteoutRepresentation::Xattr => {
                 // The representation derivation already gated this branch on
                 // `can_store_private_xattr`.
                 debug_assert!(
-                    self.xattr_policy().is_private(WHITEOUT_XATTR_FULL_NAME),
+                    self.xattr_policy.is_private(WHITEOUT_XATTR_FULL_NAME),
                     "the whiteout marker name must classify as an overlay-private record"
                 );
                 let temp = self.create_workdir_temp(
                     WHITEOUT_TEMP_NAME_COMPONENT,
-                    &workdir_path,
                     WorkdirTempRequest::Create {
                         kind: InodeType::File,
                         mode: InodeMode::empty(),
                     },
                 )?;
-                let marker_name = XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME)
-                    .ok_or_else(|| {
-                        Error::with_message(
-                            Errno::EINVAL,
-                            "invalid overlay whiteout marker xattr name",
-                        )
-                    })?;
+                let marker_name = XattrPolicy::whiteout_marker_name()?;
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
                 if let Err(err) = temp.inode().set_xattr(
                     marker_name,
@@ -214,14 +197,14 @@ impl OverlayFs {
                     let _ = self.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
-                let (workdir_name, path) = temp.into_parts();
-                Ok(WhiteoutHandle {
-                    inode: path.inode().clone(),
-                    workdir_name,
-                    path,
-                })
+                temp.into_parts()
             }
-        }
+        };
+        Ok(WhiteoutHandle {
+            inode: path.inode().clone(),
+            workdir_name,
+            path,
+        })
     }
 
     /// Publishes a whiteout at `(upper_parent_path, name)`.
@@ -256,7 +239,7 @@ impl OverlayFs {
         // cache hint whose consumer refreshes it best-effort, so a marker
         // failure must not abort the physical publish: warn and continue.
         if let Err(err) = self
-            .xattr_policy()
+            .xattr_policy
             .set_impure_marker(upper_parent_path.inode())
         {
             warn!(
@@ -280,23 +263,8 @@ impl OverlayFs {
                         Err(err) => return Err(err),
                     }
                 }
-                workdir_path.rename(
-                    &handle.workdir_name,
-                    upper_parent_path,
-                    name,
-                    RenameMode::Replace,
-                )?;
-                Ok(())
             }
-            Some(target_type) if !target_type.is_directory() => {
-                workdir_path.rename(
-                    &handle.workdir_name,
-                    upper_parent_path,
-                    name,
-                    RenameMode::Replace,
-                )?;
-                Ok(())
-            }
+            Some(target_type) if !target_type.is_directory() => {}
             Some(_) => {
                 workdir_path.rename(
                     &handle.workdir_name,
@@ -311,9 +279,16 @@ impl OverlayFs {
                         handle.workdir_name, cleanup_err
                     );
                 }
-                Ok(())
+                return Ok(());
             }
         }
+        workdir_path.rename(
+            &handle.workdir_name,
+            upper_parent_path,
+            name,
+            RenameMode::Replace,
+        )?;
+        Ok(())
     }
 }
 
@@ -324,9 +299,7 @@ impl OverlayFs {
 /// converges; it never recurses into directories and propagates errors
 /// unchanged.
 pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
-    let mut names: Vec<String> = Vec::new();
-    upper_dir_path.inode().readdir_at(0, &mut names)?;
-    names.retain(|name| !path::is_dot_or_dotdot(name));
+    let names = crate::fs::fs_impls::overlayfs::read_child_names(upper_dir_path.inode())?;
     validate_whiteout_children(upper_dir_path, &names)?;
     unlink_rechecked_whiteouts(upper_dir_path, &names)?;
     Ok(())
@@ -339,13 +312,7 @@ pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
 /// the base view's `DentryChildren` coherent. Underlying lookup errors
 /// propagate unchanged.
 fn is_whiteout_child(upper_dir_path: &Path, name: &str) -> Result<bool> {
-    let child_path = Path::new(
-        upper_dir_path.mount_node().clone(),
-        upper_dir_path
-            .dentry()
-            .as_dir_dentry_or_err()?
-            .lookup_child(name)?,
-    );
+    let child_path = super::super::lookup_child_path(upper_dir_path, name)?;
     is_whiteout_inode(child_path.inode())
 }
 

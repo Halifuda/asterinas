@@ -2,8 +2,7 @@
 
 //! The link recipe.
 //!
-//! Lock contract: the caller holds the target parent's directory
-//! transaction lock; this module enters the per-object copy-up coordination
+//! Lock contract: this module enters the per-object copy-up coordination
 //! lock only via source promotion.
 //!
 //! Owns [`OverlayInode::link_source`] and [`OverlayInode::link_over_whiteout`];
@@ -25,7 +24,7 @@
 
 use crate::{
     fs::{
-        fs_impls::overlayfs::{copyup::WorkdirTempRequest, projection::OverlayInode},
+        fs_impls::overlayfs::{inode::OverlayInode, workdir::WorkdirTempRequest},
         vfs::{inode::RenameMode, path::Path},
     },
     prelude::*,
@@ -38,7 +37,7 @@ impl OverlayInode {
     pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
         old.ensure_upper_authority()?;
         let facts = old.facts_snapshot();
-        let upper = facts.upper().ok_or_else(|| {
+        let upper = facts.upper.ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,
                 "the link source has no upper real object after promotion",
@@ -55,7 +54,6 @@ impl OverlayInode {
         let upper_parent_path = self.upper_parent_path()?;
         let temp = fs.create_workdir_temp(
             name,
-            &upper_parent_path,
             WorkdirTempRequest::Link {
                 source: source_path.clone(),
             },

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The copy-up promotion trigger — the single winner/waiter entry that
 //! promotes an existing logical overlay object to upper authority.
 //!
@@ -16,7 +17,7 @@
 /// `ELOOP` instead of risking a stack overflow.
 const MAX_COPYUP_DEPTH: usize = 1024;
 
-use crate::{fs::fs_impls::overlayfs::projection::OverlayInode, prelude::*};
+use crate::{fs::fs_impls::overlayfs::inode::OverlayInode, prelude::*};
 
 impl OverlayInode {
     /// Promotes this logical object to upper authority, winning or waiting on
@@ -27,7 +28,7 @@ impl OverlayInode {
     /// no publication coordinate is recorded, and propagates any underlying
     /// recipe failure unchanged. A deeper ancestor chain than
     /// [`MAX_COPYUP_DEPTH`] fails closed with `Errno::ELOOP`.
-    pub(in crate::fs::fs_impls::overlayfs) fn ensure_upper_authority(&self) -> Result<()> {
+    pub(in overlayfs) fn ensure_upper_authority(&self) -> Result<()> {
         self.ensure_upper_authority_inner(0)
     }
 
@@ -38,22 +39,27 @@ impl OverlayInode {
         // Pins the owning mount for the trigger's duration.
         let _fs = self.fs_arc()?;
 
-        if self.facts_snapshot().upper().is_some() {
+        if self.facts_snapshot().upper.is_some() {
             return Ok(());
         }
 
         // Publication coordinate: the brief
-        // `copyup_transition` read clones the logical parent so the guard is
-        // released before the recursive ancestor walk.
-        let publication_parent = {
-            let transition = self.copyup_transition.lock();
+        // `copyup_transition` read clones the logical parent and name so the
+        // guard is released before the recursive ancestor walk; both are
+        // fixed once the coordinate is recorded, so the winner body reuses
+        // this single binding.
+        let (publication_parent, name) = {
+            let transition = self.lock_copyup_transition();
             let Some(coordinate) = transition.as_ref() else {
                 return Err(Error::with_message(
                     Errno::ENOENT,
                     "the overlay object has no recorded copy-up publication coordinate",
                 ));
             };
-            coordinate.publication_parent.clone()
+            (
+                coordinate.publication_parent.clone(),
+                coordinate.name.clone(),
+            )
         };
 
         if depth >= MAX_COPYUP_DEPTH {
@@ -66,12 +72,12 @@ impl OverlayInode {
 
         // Winner/waiter serialization: the sleep-capable
         // `copyup_transition` lock wait.
-        let mut transition = self.copyup_transition.lock();
+        let mut transition = self.lock_copyup_transition();
 
         // Re-snapshot under the guard: another task won and promoted while
         // this task waited; re-observe upper authority and return the same
         // `Ok(())` success value (waiter path).
-        if self.facts_snapshot().upper().is_some() {
+        if self.facts_snapshot().upper.is_some() {
             return Ok(());
         }
 
@@ -85,9 +91,6 @@ impl OverlayInode {
                 ));
             }
         };
-        let publication_parent = coordinate.publication_parent.clone();
-        let name = coordinate.name.clone();
-
         self.promote(&publication_parent, &name, coordinate)?;
         Ok(())
     }

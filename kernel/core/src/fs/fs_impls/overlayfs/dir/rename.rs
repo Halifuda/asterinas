@@ -14,14 +14,13 @@
 //!   inverts via `Exchange`. The VFS interface has no `RENAME_WHITEOUT`, and
 //!   both steps run under the same directory transaction domain, so it is
 //!   the accepted design rather than a pending TODO.
-//! - Redirect is not implemented: see the `cross_device_gate` TODO.
+//! - Redirect is not implemented, so the flat EXDEV default applies.
 //! - Target fallback is covered by the moved source: after a successful move,
 //!   the target name is backed by the moved source's own upper/lower state,
 //!   so no separate target projection or whiteout is needed.
 //! - Overlay does not maintain merged `nlink` accounting: `metadata()` reports
 //!   the visible source real inode's link count, so lower-layer additional
 //!   links are not added into a synthetic overlay count.
-
 //!
 //! ## References
 //!
@@ -38,14 +37,10 @@ use crate::{
         file::Permission,
         fs_impls::overlayfs::{
             AccessType,
-            projection::{
-                Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode, PositiveBinding,
-            },
+            inode::OverlayInode,
+            projection::{Binding, BindingKey, NegativeBinding, PositiveBinding},
         },
-        vfs::{
-            inode::{Inode, RenameMode},
-            path::Path,
-        },
+        vfs::inode::{Inode, RenameMode},
     },
     prelude::*,
 };
@@ -61,13 +56,13 @@ impl OverlayInode {
     // redirect-policy probe bounded by the `redirect_max`-style length rule
     // when redirect support is implemented.
     pub(super) fn cross_device_gate(&self, source: &Binding) -> Result<()> {
-        let Some(source_inode) = source.clone().into_inode() else {
+        let Some(source_inode) = source.inode() else {
             return Ok(());
         };
         if !source_inode.type_().is_directory() {
             return Ok(());
         }
-        if source_inode.facts_snapshot().lowers().is_empty() {
+        if source_inode.facts_snapshot().lowers.is_empty() {
             return Ok(());
         }
         Err(Error::with_message(
@@ -89,17 +84,17 @@ impl OverlayInode {
         target: &Arc<OverlayInode>,
         new_name: &str,
         mode: RenameMode,
+        source_binding: &Binding,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
 
-        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?.binding;
-        let source_inode = source_binding.clone().into_inode().ok_or_else(|| {
+        let source_inode = source_binding.inode().ok_or_else(|| {
             Error::with_message(
                 Errno::ENOENT,
                 "the rename source is not visible under the parent DIR",
             )
         })?;
-        let source_has_lower = !source_inode.facts_snapshot().lowers().is_empty();
+        let source_has_lower = !source_inode.facts_snapshot().lowers.is_empty();
         let target_binding = fs
             .lookup_binding(&target.facts_snapshot(), new_name)?
             .binding;
@@ -127,11 +122,11 @@ impl OverlayInode {
         // sweep can run after the per-branch promotions.
         let gate_target_facts = if mode == RenameMode::Replace
             && target_is_positive
-            && let Some(target_object) = target_binding.clone().into_inode()
+            && let Some(target_object) = target_binding.inode()
             && target_object.type_().is_directory()
         {
             let target_facts = target_object.facts_snapshot();
-            if !target_facts.lowers().is_empty()
+            if !target_facts.lowers.is_empty()
                 && target_object.visible_child_count(&target_facts)? != 0
             {
                 return Err(Error::with_message(
@@ -154,11 +149,11 @@ impl OverlayInode {
         // When the `Replace` gate passed for a directory target with a
         // physical upper copy, sweep the target's physical whiteout residue
         // before the physical rename. Strict and pre-commit: a failure aborts
-        // before `run_recipe`, whose pre-commit cleanup is a no-op because
-        // no workdir temp is staged.
+        // before the inlined recipe, whose pre-commit cleanup is a no-op
+        // because no workdir temp is staged.
         if let Some(target_upper_dir) = gate_target_facts
             .as_ref()
-            .and_then(|target_facts| target_facts.upper())
+            .and_then(|target_facts| target_facts.upper.as_ref())
         {
             whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
         }
@@ -168,81 +163,68 @@ impl OverlayInode {
         // physical rename (before committing the rename).
         let same_parent = self.key() == target.key();
         if !same_parent && source_has_lower {
-            fs.xattr_policy()
+            fs.xattr_policy
                 .set_impure_marker(target_upper_parent_path.inode())?;
         }
 
-        self.run_recipe(
-            &fs,
-            None,
-            || self.invalidate_stale_cache(&[(target.as_ref(), new_name), (self, old_name)]),
-            |marker| {
-                // A whiteout target is always replaced or switched (never a
-                // visible `NOREPLACE` failure): a lower-backed source
-                // switches via `Exchange` (the whiteout lands at the source
-                // name, avoiding a composed second step), any other source
-                // consumes it with a plain `Replace`, and a caller-requested
-                // `Exchange` is preserved.
-                let effective_mode = match mode {
-                    RenameMode::Exchange => RenameMode::Exchange,
-                    _ if target_is_whiteout && source_has_lower => RenameMode::Exchange,
-                    _ if target_is_whiteout => RenameMode::Replace,
-                    _ => mode,
-                };
-                if same_parent {
-                    upper_parent_path.rename(
-                        old_name,
-                        &upper_parent_path,
-                        new_name,
-                        effective_mode,
-                    )?;
-                } else {
-                    upper_parent_path.rename(
-                        old_name,
-                        &target_upper_parent_path,
-                        new_name,
-                        effective_mode,
-                    )?;
+        let mut committed = false;
+        let result: Result<()> = (|| {
+            // A whiteout target is always replaced or switched (never a
+            // visible `NOREPLACE` failure): a lower-backed source
+            // switches via `Exchange` (the whiteout lands at the source
+            // name, avoiding a composed second step), any other source
+            // consumes it with a plain `Replace`, and a caller-requested
+            // `Exchange` is preserved.
+            let effective_mode = match mode {
+                RenameMode::Exchange => RenameMode::Exchange,
+                _ if target_is_whiteout && source_has_lower => RenameMode::Exchange,
+                _ if target_is_whiteout => RenameMode::Replace,
+                _ => mode,
+            };
+            if same_parent {
+                upper_parent_path.rename(old_name, &upper_parent_path, new_name, effective_mode)?;
+            } else {
+                upper_parent_path.rename(
+                    old_name,
+                    &target_upper_parent_path,
+                    new_name,
+                    effective_mode,
+                )?;
+            }
+            committed = true;
+            let mut source_whiteout_published = false;
+            if source_has_lower && !target_is_whiteout && mode != RenameMode::Exchange {
+                fs.publish_whiteout(&upper_parent_path, old_name, None)?;
+                source_whiteout_published = true;
+            }
+            if source_whiteout_published {
+                self.publish_whiteout_binding(&fs, &upper_parent_path, old_name)?;
+            } else {
+                fs.bindings.invalidate(&self.key(), old_name);
+            }
+            fs.bindings.insert(
+                BindingKey::new(target.key(), String::from(new_name)),
+                Arc::new(Binding::Positive(PositiveBinding::new(
+                    source_inode.clone(),
+                ))),
+            );
+            // Rename reorders the visible sequence; the conservative rule
+            // invalidates on every affected parent (same parent once).
+            self.invalidate_readdir_index();
+            if !same_parent {
+                target.invalidate_readdir_index();
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {}
+            Err(err) => {
+                if committed {
+                    self.invalidate_stale_cache(&[(target.as_ref(), new_name), (self, old_name)]);
                 }
-                marker.commit();
-                let mut source_whiteout_published = false;
-                if source_has_lower && !target_is_whiteout && mode != RenameMode::Exchange {
-                    fs.publish_whiteout(&upper_parent_path, old_name, None)?;
-                    source_whiteout_published = true;
-                }
-                if source_whiteout_published {
-                    let whiteout_path = Path::new(
-                        upper_parent_path.mount_node().clone(),
-                        upper_parent_path
-                            .dentry()
-                            .as_dir_dentry_or_err()?
-                            .lookup_child(old_name)?,
-                    );
-                    let whiteout_real = whiteout_path.inode().clone();
-                    fs.bindings().insert(
-                        BindingKey::new(self.key(), String::from(old_name)),
-                        Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(
-                            HiddenEvidence::new(0, whiteout_real),
-                        ))),
-                    );
-                } else {
-                    fs.bindings().invalidate(&self.key(), old_name);
-                }
-                fs.bindings().insert(
-                    BindingKey::new(target.key(), String::from(new_name)),
-                    Arc::new(Binding::Positive(PositiveBinding::new(
-                        source_inode.clone(),
-                    ))),
-                );
-                // Rename reorders the visible sequence; the conservative rule
-                // invalidates on every affected parent (same parent once).
-                self.invalidate_readdir_index();
-                if !same_parent {
-                    target.invalidate_readdir_index();
-                }
-                Ok(())
-            },
-        )?;
+                return Err(err);
+            }
+        }
         // A cross-directory rename may have restored purity in the source or
         // target parent (the overwrite-of-origin-target case can clear the
         // target's last origin-bearing entry) — refresh both markers

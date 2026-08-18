@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The durable lower-source identity record.
 //!
 //! This module owns the stateless `trusted.overlay.origin` record end-to-end
-//! (encode / persist / decode / read): [`LowerIdRecord`] is a pure value type
-//! carrying the pre-copy-up provenance triplet `(container_dev_id,
-//! lower_layer_root_ino, real_ino)` of the lower source — the origin layer's
-//! `st_dev`, configured root inode, and real inode number — the
-//! module-private `ORIGIN_*` consts freeze the native 32-byte wire layout
-//! (not Linux-wire-compatible; no export-style file handle exists in
-//! Asterinas), and the two [`OverlayFs`] methods (`store_lower_id` /
-//! `read_lower_id`) bridge the record to the upper inode's xattr surface.
+//! (encode, persist, decode, read) as a pure value type carrying the
+//! pre-copy-up provenance triplet, bridged to the upper inode's xattr surface.
+//!
+//! # Wire layout
+//!
+//! The module-private `ORIGIN_*` consts freeze the native 32-byte wire layout.
+//! It is not Linux-wire-compatible:
+//! no export-style file handle exists in Asterinas.
 //!
 //! Copy-up publishes the record through [`OverlayFs::store_lower_id`], and
 //! identity projection consumes it through [`OverlayFs::read_lower_id`]; the
@@ -36,14 +37,11 @@
 
 use device_id::DeviceId;
 
-use super::{entry::RealObject, inode::OverlayObjectFacts};
+use super::lookup::RealObject;
 use crate::{
     fs::{
-        fs_impls::overlayfs::mount::OverlayFs,
-        vfs::{
-            inode::Inode,
-            xattr::{XattrName, XattrSetFlags},
-        },
+        fs_impls::overlayfs::{metadata_security::xattr::origin_xattr_name, superblock::OverlayFs},
+        vfs::{inode::Inode, xattr::XattrSetFlags},
     },
     prelude::*,
 };
@@ -52,9 +50,9 @@ use crate::{
 /// the origin layer's `container_dev_id`, configured lower root inode, and
 /// real inode number (pre-copy-up provenance).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) struct LowerIdRecord {
+pub(in overlayfs) struct LowerIdRecord {
     /// Durable underlying-fs identity of the origin layer: the layer root's
-    /// `st_dev` (`OverlayLayer::container_dev_id`), replacing the mount-local
+    /// `st_dev` (`Layer::container_dev_id`), replacing the mount-local
     /// `fsid` ordinal.
     container_dev_id: DeviceId,
     /// Configured lower-layer root inode for pair-only record resolution.
@@ -62,8 +60,6 @@ pub(in crate::fs::fs_impls::overlayfs) struct LowerIdRecord {
     /// Real inode number of the lower source (pre-copy-up provenance).
     real_ino: u64,
 }
-
-const ORIGIN_XATTR_FULL_NAME: &str = "trusted.overlay.origin";
 
 /// Wire version. Every older or unknown version decodes as no origin.
 const ORIGIN_WIRE_VERSION: u8 = 3;
@@ -161,15 +157,15 @@ impl LowerIdRecord {
         }))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn container_dev_id(&self) -> DeviceId {
+    pub(in overlayfs) fn container_dev_id(&self) -> DeviceId {
         self.container_dev_id
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn lower_layer_root_ino(&self) -> u64 {
+    pub(in overlayfs) fn lower_layer_root_ino(&self) -> u64 {
         self.lower_layer_root_ino
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn real_ino(&self) -> u64 {
+    pub(in overlayfs) fn real_ino(&self) -> u64 {
         self.real_ino
     }
 }
@@ -178,22 +174,22 @@ impl OverlayFs {
     /// Persists the lower-source identity record on the upper inode with a
     /// single `set_xattr(..., CREATE_OR_REPLACE)` call; a missing
     /// capability or `EOPNOTSUPP` is a gated no-op.
-    pub(in crate::fs::fs_impls::overlayfs) fn store_lower_id(
+    pub(in overlayfs) fn store_lower_id(
         &self,
         upper: &Arc<dyn Inode>,
         lower: &RealObject,
     ) -> Result<()> {
-        let lower_layer_root_ino = self.lower_layer_root_ino_for_origin(lower)?;
-        let Some(capabilities) = self.policy().upper_capabilities() else {
+        let lower_layer_root_ino = self
+            .layer_stack
+            .lower_layer_root_ino_for_origin(lower.layer_index())?;
+        let Some(capabilities) = self.policy.upper_capabilities() else {
             return Ok(());
         };
         if !capabilities.can_store_private_xattr() {
             return Ok(());
         }
         let record = LowerIdRecord::try_from_lower(lower, lower_layer_root_ino)?;
-        let name = XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name")
-        })?;
+        let name = origin_xattr_name()?;
         let value = record.serialize();
         let mut reader = VmReader::from(value.as_slice()).to_fallible();
         match upper.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
@@ -208,13 +204,11 @@ impl OverlayFs {
     /// Returns `Ok(None)` for absent, malformed, foreign, or ambiguous
     /// evidence, preserving the visible-source fallback; genuine xattr-read
     /// errors propagate.
-    pub(in crate::fs::fs_impls::overlayfs) fn read_lower_id(
+    pub(in overlayfs) fn read_lower_id(
         &self,
         upper: &Arc<dyn Inode>,
     ) -> Result<Option<LowerIdRecord>> {
-        let name = XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name")
-        })?;
+        let name = origin_xattr_name()?;
         let mut value = [0u8; ORIGIN_WIRE_TOTAL_LEN];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper.get_xattr(name, &mut writer) {
@@ -223,7 +217,7 @@ impl OverlayFs {
                     return Ok(None);
                 };
                 let resolves = self
-                    .identity()
+                    .identity
                     .resolve_layer_id_for_record(
                         record.container_dev_id(),
                         record.lower_layer_root_ino(),
@@ -239,70 +233,5 @@ impl OverlayFs {
             Err(err) if err.error() == Errno::ERANGE => Ok(None),
             Err(err) => Err(err),
         }
-    }
-
-    /// Returns whether the persisted lower-source record is consistent with
-    /// the retained same-layer lower of `facts`: the record's real inode must
-    /// equal the retained lower's, so a forged or stale record falls back to
-    /// the visible-source projection (identity authenticity wins).
-    ///
-    // TODO(origin-verify): once the VFS gains an ino-to-inode / file-handle
-    // resolution surface, upgrade this cross-check to a full origin
-    // verification and drop the retained-lower approximation.
-    pub(super) fn origin_real_ino_resolves(
-        &self,
-        record: &LowerIdRecord,
-        facts: &OverlayObjectFacts,
-    ) -> bool {
-        // The record's layer is the unique current lower fsid matching its
-        // device/root pair; the retained lower at that layer is the
-        // same-layer evidence in the fresh facts.
-        let Some(layer_fsid) = self
-            .identity()
-            .resolve_layer_id_for_record(record.container_dev_id(), record.lower_layer_root_ino())
-        else {
-            return false;
-        };
-        match facts
-            .lowers()
-            .iter()
-            .find(|lower| lower.fsid() == layer_fsid)
-        {
-            // Accepted only when the record's real inode equals the retained
-            // same-layer lower; a mismatch (the lower was replaced since
-            // copy-up) or an absent retained lower (the lower no longer
-            // participates in the name) rejects the record.
-            Some(retained_lower) => record.real_ino() == retained_lower.real_inode().ino(),
-            None => false,
-        }
-    }
-
-    /// Returns the configured lower root inode for a copy-up origin source.
-    ///
-    /// `layer_index()` counts the upper as position 0, so when the stack has
-    /// an upper the origin's own lower position is `layer_index - 1`; the
-    /// checked subtraction rejects an origin that claims the upper's
-    /// position. The bounds check rejects a position that names no configured
-    /// lower layer. Both rejections are `EINVAL` — a copy-up programming
-    /// error, not a runtime condition.
-    fn lower_layer_root_ino_for_origin(&self, lower: &RealObject) -> Result<u64> {
-        let layer_stack = self.layer_stack();
-        let lower_index = if layer_stack.upper.is_some() {
-            lower.layer_index().checked_sub(1).ok_or_else(|| {
-                Error::with_message(
-                    Errno::EINVAL,
-                    "the origin source does not identify a configured lower layer",
-                )
-            })?
-        } else {
-            lower.layer_index()
-        };
-        let lower_layer = layer_stack.lowers.get(lower_index).ok_or_else(|| {
-            Error::with_message(
-                Errno::EINVAL,
-                "the origin source does not identify a configured lower layer",
-            )
-        })?;
-        Ok(lower_layer.root_inode.ino())
     }
 }

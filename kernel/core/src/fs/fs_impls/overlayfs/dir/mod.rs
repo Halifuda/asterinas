@@ -16,6 +16,10 @@
 //! - **whiteout**: an upper-layer visibility barrier published when a
 //!   lower-backed name is removed; the `whiteout` submodule owns its cache and
 //!   publish mechanics.
+//! - **entry admission contract**: the five namespace-mutation entries run
+//!   `lock_dir_transaction` + `check_permission(Mutating, MAY_WRITE)`; the
+//!   create/remove recipes therefore assume the caller already admitted the
+//!   request and do not re-check permission.
 //!
 //! ## Structure
 //!
@@ -30,7 +34,9 @@
 use self::remove::RemoveKind;
 use super::{
     AccessType,
-    projection::{Binding, BindingKey, NegativeBinding, OverlayInode, PositiveBinding},
+    inode::OverlayInode,
+    projection::{Binding, BindingKey, HiddenEvidence, NegativeBinding, PositiveBinding},
+    superblock::OverlayFs,
 };
 use crate::{
     fs::{
@@ -51,21 +57,9 @@ mod link;
 mod remove;
 mod rename;
 
-/// Maps the `mknod` kind request to the overlay-visible object type.
-///
-/// `MknodType` has no `InodeType` conversion, so this match is the only
-/// mapping.
-pub(super) fn mknod_object_type(mknod: &MknodType) -> InodeType {
-    match mknod {
-        MknodType::NamedPipe => InodeType::NamedPipe,
-        MknodType::CharDevice(_) => InodeType::CharDevice,
-        MknodType::BlockDevice(_) => InodeType::BlockDevice,
-    }
-}
-
 impl OverlayInode {
     // The symlink target is filled by the later `write_link` delegation.
-    pub(in crate::fs::fs_impls::overlayfs) fn create_impl(
+    pub(super) fn create_impl(
         &self,
         name: &str,
         type_: InodeType,
@@ -77,7 +71,7 @@ impl OverlayInode {
         Ok(projected)
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn mknod_impl(
+    pub(super) fn mknod_impl(
         &self,
         name: &str,
         mode: InodeMode,
@@ -91,22 +85,18 @@ impl OverlayInode {
         }
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let object_type = mknod_object_type(&type_);
+        let object_type = crate::fs::fs_impls::overlayfs::workdir::mknod_object_type(&type_);
         let projected: Arc<dyn Inode> = self.create_object(name, object_type, mode, Some(type_))?;
         Ok(projected)
     }
 
     // Thin delegation to the current authority with no promotion: the
     // created symlink is already upper-backed.
-    pub(in crate::fs::fs_impls::overlayfs) fn write_link_impl(&self, target: &str) -> Result<()> {
+    pub(super) fn write_link_impl(&self, target: &str) -> Result<()> {
         self.select_real_inode().write_link(target)
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn link_impl(
-        &self,
-        old: &Arc<dyn Inode>,
-        name: &str,
-    ) -> Result<()> {
+    pub(super) fn link_impl(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
@@ -130,8 +120,8 @@ impl OverlayInode {
         // so this source-side check is required; the base permission check
         // still remains authoritative.
         let source_metadata = old_overlay.metadata()?;
-        let source_owned =
-            OverlayInode::current_fsuid().is_some_and(|fsuid| fsuid == source_metadata.uid);
+        let source_owned = crate::fs::fs_impls::overlayfs::metadata_security::current_fsuid()
+            .is_some_and(|fsuid| fsuid == source_metadata.uid);
         // Non-owner source checks: when there is no current task/posix thread
         // (kernel-internal context), `current_fsuid()` is `None` and the
         // permission probe permits the operation (no user credential exists
@@ -159,7 +149,9 @@ impl OverlayInode {
             if (source_metadata.mode.has_set_uid()
                 || (source_metadata.mode.has_set_gid()
                     && source_metadata.mode.is_group_executable()))
-                && !OverlayInode::current_task_has_capability(CapSet::FOWNER)
+                && !crate::fs::fs_impls::overlayfs::metadata_security::current_task_has_capability(
+                    CapSet::FOWNER,
+                )
             {
                 return Err(Error::with_message(
                     Errno::EPERM,
@@ -171,8 +163,8 @@ impl OverlayInode {
         // A source with lower fallback makes this parent impure: persist the
         // impure marker to the upper parent before either physical-link
         // branch (before committing the link).
-        if !old_overlay.facts_snapshot().lowers().is_empty() {
-            fs.xattr_policy()
+        if !old_overlay.facts_snapshot().lowers.is_empty() {
+            fs.xattr_policy
                 .set_impure_marker(self.upper_parent_path()?.inode())?;
         }
         if target_is_whiteout {
@@ -180,31 +172,69 @@ impl OverlayInode {
         } else {
             self.upper_parent_path()?.link(&source_path, name)?;
         }
-        // Inline target publication: the positive binding shares the source
-        // `OverlayInode` — inode-cache reuse by `RealObjectKey`, so
-        // `project_new_upper` is not needed — and `readdir_index_insert`
-        // maintains the target parent index. Both steps are infallible, so
-        // no reconcile is needed.
-        let key = BindingKey::new(self.key(), String::from(name));
-        let binding = Arc::new(Binding::Positive(PositiveBinding::new(old_overlay.clone())));
-        fs.bindings().insert(key, binding);
-        self.readdir_index_insert(name, old_overlay.clone(), old_overlay.type_());
+        // Target publication via the shared positive-binding helper: the
+        // positive binding shares the source `OverlayInode` (inode-cache
+        // reuse by `RealObjectKey`, so `project_inode` is not needed) and
+        // `readdir_index_insert` maintains the target parent index.
+        self.publish_positive_binding(&fs, name, old_overlay.clone(), old_overlay.type_());
         Ok(())
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn unlink_impl(&self, name: &str) -> Result<()> {
+    /// Publishes the positive binding for a freshly materialized `(parent,
+    /// name)` entry and maintains the target parent readdir index.
+    ///
+    /// Both steps are infallible: the binding shares the created `inode`
+    /// (inode-cache reuse by `RealObjectKey`) and `readdir_index_insert`
+    /// records the visible name, so no reconcile is needed.
+    fn publish_positive_binding(
+        &self,
+        fs: &OverlayFs,
+        name: &str,
+        inode: Arc<OverlayInode>,
+        kind: InodeType,
+    ) {
+        fs.publish_binding(
+            &self.key(),
+            name,
+            Binding::Positive(PositiveBinding::new(inode.clone())),
+        );
+        self.readdir_index_insert(name, inode, kind);
+    }
+
+    /// Re-observes the freshly published whiteout at
+    /// `(upper_parent_path, name)` and publishes its negative binding for
+    /// this parent; the caller owns the readdir-index update (remove vs
+    /// whole-invalidate differ between unlink/rmdir and rename).
+    fn publish_whiteout_binding(
+        &self,
+        fs: &OverlayFs,
+        upper_parent_path: &Path,
+        name: &str,
+    ) -> Result<()> {
+        let whiteout_path = super::lookup_child_path(upper_parent_path, name)?;
+        let whiteout_inode = whiteout_path.inode().clone();
+        fs.bindings.insert(
+            BindingKey::new(self.key(), String::from(name)),
+            Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(
+                HiddenEvidence::new(0, whiteout_inode),
+            ))),
+        );
+        Ok(())
+    }
+
+    pub(super) fn unlink_impl(&self, name: &str) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.remove_target(name, RemoveKind::Unlink)
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn rmdir_impl(&self, name: &str) -> Result<()> {
+    pub(super) fn rmdir_impl(&self, name: &str) -> Result<()> {
         let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.remove_target(name, RemoveKind::Rmdir)
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn rename_impl(
+    pub(super) fn rename_impl(
         &self,
         old_name: &str,
         target: &Arc<dyn Inode>,
@@ -232,8 +262,10 @@ impl OverlayInode {
             self.cross_device_gate(&source_binding)?;
         }
         // Whether the source name needs a whiteout after the move is decided
-        // internally from the fresh source projection.
-        self.rename_upper(old_name, &target_overlay, new_name, mode)
+        // internally from the fresh source projection; the already-computed
+        // source binding is passed in so `rename_upper` does not re-scan the
+        // layers under the same transaction.
+        self.rename_upper(old_name, &target_overlay, new_name, mode, &source_binding)
     }
 }
 
@@ -241,7 +273,7 @@ impl OverlayInode {
     /// Returns the parent directory transaction guard
     /// (`MutexGuard<'_, ()>`) of this directory.
     pub(super) fn lock_dir_transaction(&self) -> MutexGuard<'_, ()> {
-        match self.dir() {
+        match self.dir_transaction_lock.as_ref() {
             Some(dir) => dir.lock(),
             None => unreachable!(
                 "mutation entries run on overlay directories only; the VFS routes child-name \
@@ -259,7 +291,7 @@ impl OverlayInode {
         &'a self,
         other: Option<&'b Arc<OverlayInode>>,
     ) -> Result<(MutexGuard<'a, ()>, Option<MutexGuard<'b, ()>>)> {
-        let self_dir = match self.dir() {
+        let self_dir = match self.dir_transaction_lock.as_ref() {
             Some(dir) => dir,
             None => {
                 return Err(Error::with_message(
@@ -271,7 +303,7 @@ impl OverlayInode {
         let Some(other) = other else {
             return Ok((self_dir.lock(), None));
         };
-        let other_dir = match other.dir() {
+        let other_dir = match other.dir_transaction_lock.as_ref() {
             Some(dir) => dir,
             None => {
                 return Err(Error::with_message(
@@ -296,20 +328,6 @@ impl OverlayInode {
         }
     }
 
-    /// Returns the dentry-anchored path of the promoted upper real parent
-    /// directory.
-    ///
-    /// After promotion the facts guarantee an upper object that is always
-    /// dentry-anchored, so the checked `real_path()` accessor succeeds;
-    /// `EROFS`/`EIO` propagate when that guarantee does not hold.
-    pub(super) fn upper_parent_path(&self) -> Result<Path> {
-        let facts = self.facts_snapshot();
-        let upper = facts.upper().ok_or_else(|| {
-            Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
-        })?;
-        upper.real_path()
-    }
-
     /// Reconciles the affected `(parent, name)` projections as a unit after
     /// a physical upper success whose semantic publication failed;
     /// best-effort, supports one- and two-parent operations.
@@ -318,7 +336,7 @@ impl OverlayInode {
             return;
         };
         for (parent, name) in affected {
-            fs.bindings().invalidate(&parent.key(), name);
+            fs.bindings.invalidate(&parent.key(), name);
             parent.invalidate_readdir_index();
         }
     }

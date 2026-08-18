@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Layer stack assembly for the overlay filesystem.
 //!
 //! This module resolves the real `upperdir`/`lowerdir` roots into pinned
-//! [`OverlayLayer`]s and freezes them into an [`OverlayLayerStack`]. It owns
+//! [`Layer`]s and freezes them into a [`LayerStack`]. It owns
 //! layer-root resolution, layer ordering, the per-unique-underlying-superblock
 //! `fsid` assignment, and the layer-root overlap validation. The stack is
-//! constructed once by [`OverlayLayerStack::assemble`] during `OverlayFs::new`.
+//! constructed once by [`LayerStack::assemble`] during `OverlayFs::new`.
 //!
 //! Lower layers are read-only: the overlay never writes the lower layers.
 //!
@@ -36,16 +37,19 @@
 use device_id::DeviceId;
 
 use crate::{
-    fs::vfs::{
-        file_system::{FileSystem, FsFlags},
-        inode::Inode,
-        path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
+    fs::{
+        fs_impls::overlayfs::projection::{LowerLayerIdentity, RealObject},
+        vfs::{
+            file_system::{FileSystem, FsFlags},
+            inode::Inode,
+            path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
+        },
     },
     prelude::*,
 };
 
 /// Two-phase assembly input: resolve-then-assign.
-type LayerParts = (RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId);
+type LayerParts = (RealPath, Arc<dyn FileSystem>, DeviceId);
 
 /// Resolves `raw_path` through `lookup_no_follow` in the mounting task's
 /// filesystem context: intermediate symlink components are followed, the
@@ -55,17 +59,43 @@ type LayerParts = (RealPath, Arc<dyn Inode>, Arc<dyn FileSystem>, DeviceId);
 /// instance-stability probe.
 pub(super) fn resolve_root_path(raw_path: &str) -> Result<Path> {
     let fs_path = FsPath::from_fd_at(AT_FDCWD, raw_path, EmptyPathStr::Reject)?;
-    super::with_current_posix_thread(|posix_thread| {
+    super::super::with_current_posix_thread(|_task, posix_thread| {
         let fs = posix_thread.read_fs();
         fs.resolver().read().lookup_no_follow(&fs_path)
     })
+    .ok_or_else(|| {
+        Error::with_message(
+            Errno::EINVAL,
+            "the overlay mount has no current task or POSIX thread",
+        )
+    })?
+}
+
+/// Probes that a root path resolves to a backend-instance-stable inode.
+///
+/// Both resolutions must match `pinned_inode`, so the checked object is the
+/// one that [`super::claims::UpperWorkdirClaim::claim`] later uses. This is a
+/// heuristic; a failing backend returns `EOPNOTSUPP`.
+pub(super) fn verify_inode_instance_stability(
+    raw_path: &str,
+    pinned_inode: &Arc<dyn Inode>,
+) -> Result<()> {
+    let first = resolve_root_path(raw_path)?.inode().clone();
+    let second = resolve_root_path(raw_path)?.inode().clone();
+    if !Arc::ptr_eq(&first, &second) || !Arc::ptr_eq(&first, pinned_inode) {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "the underlying filesystem does not provide instance-stable inodes for pinned roots"
+        );
+    }
+    Ok(())
 }
 
 /// The ordered, immutable layer stack of an overlay mount.
 #[derive(Debug)]
-pub(in overlayfs) struct OverlayLayerStack {
-    pub(in overlayfs) upper: Option<OverlayLayer>,
-    pub(in overlayfs) lowers: Vec<OverlayLayer>,
+pub(in overlayfs) struct LayerStack {
+    pub(super) upper: Option<Layer>,
+    pub(super) lowers: Vec<Layer>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,9 +133,8 @@ impl RealPath {
 
 /// One pinned real layer root of an overlay mount.
 #[derive(Debug)]
-pub(in overlayfs) struct OverlayLayer {
+pub(in overlayfs) struct Layer {
     pub(in overlayfs) root_path: RealPath,
-    pub(in overlayfs) root_inode: Arc<dyn Inode>,
     pub(in overlayfs) fs: Arc<dyn FileSystem>,
     /// Per-unique-underlying-superblock identifier assigned at assembly.
     pub(in overlayfs) fsid: u64,
@@ -113,7 +142,17 @@ pub(in overlayfs) struct OverlayLayer {
     pub(in overlayfs) container_dev_id: DeviceId,
 }
 
-impl OverlayLayer {
+impl Layer {
+    /// Builds the upper-layer (index 0) real object for `child_path`.
+    pub(in overlayfs) fn child_real_object(&self, child_path: &Path) -> RealObject {
+        RealObject::from_layer_path(
+            0,
+            RealPath::from_path(child_path),
+            self.fsid,
+            self.container_dev_id,
+        )
+    }
+
     /// Resolves `raw_path` into pinned layer-root parts, downgrading the
     /// `Path` into the layer-root anchor [`RealPath`].
     fn resolve_parts(raw_path: &str) -> Result<LayerParts> {
@@ -125,31 +164,28 @@ impl OverlayLayer {
         }
         Ok((
             RealPath::from_path(&path),
-            path.inode().clone(),
             path.fs(),
             path.metadata()?.container_dev_id,
         ))
     }
-
-    /// Rejects an overlap between `new` and every already-assembled layer
-    /// root in `others`.
+}
+impl LayerStack {
+    /// Rejects an overlap between `new` and every already-assembled layer root.
     ///
     /// - Same directory: identical dentry or inode objects.
-    /// - Ancestor/descendant: one root lies within the other's resolved
-    ///   hierarchy ([`Dentry::is_equal_or_descendant_of`]).
-    /// - Mount boundary: parent chains never cross a mount root, so another
-    ///   mount's root is never misjudged as nested.
+    /// - Ancestor/descendant: one root lies within the other's hierarchy.
+    /// - Mount boundary: parent chains never cross a mount root.
     ///
-    /// Only the layer roots themselves are compared, so legal nested
-    /// subdirectories are never rejected. Violations return `EINVAL`.
-    fn validate_layer_overlap(new: &OverlayLayer, others: &[&OverlayLayer]) -> Result<()> {
+    /// Only layer roots are compared, so legal nested subdirectories are never rejected;
+    /// violations return `EINVAL`.
+    fn validate_layer_overlap(new: &Layer, others: &[&Layer]) -> Result<()> {
         let new_path = new.root_path.upgrade()?;
         let new_dentry = new_path.dentry();
         for other in others {
             let other_path = other.root_path.upgrade()?;
             let other_dentry = other_path.dentry();
             if Arc::ptr_eq(new_dentry, other_dentry)
-                || Arc::ptr_eq(&new.root_inode, &other.root_inode)
+                || Arc::ptr_eq(new.root_path.inode(), other.root_path.inode())
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -167,9 +203,7 @@ impl OverlayLayer {
         }
         Ok(())
     }
-}
 
-impl OverlayLayerStack {
     /// Assembles the resolved upper/lower layer stack of an overlay mount.
     ///
     /// The upper root fails with `EROFS` when its backend is read-only and
@@ -182,12 +216,11 @@ impl OverlayLayerStack {
     ) -> Result<Self> {
         let mut upper_parts = None;
         if let Some(raw_path) = upper_dir {
-            let (root_path, root_inode, fs, container_dev_id) =
-                OverlayLayer::resolve_parts(&raw_path)?;
+            let (root_path, fs, container_dev_id) = Layer::resolve_parts(&raw_path)?;
             if !is_forced_read_only && fs.flags().contains(FsFlags::RDONLY) {
                 return_errno_with_message!(Errno::EROFS, "the upper filesystem is read-only");
             }
-            upper_parts = Some((root_path, root_inode, fs, container_dev_id));
+            upper_parts = Some((root_path, fs, container_dev_id));
         }
 
         if lower_dirs.is_empty() {
@@ -198,7 +231,7 @@ impl OverlayLayerStack {
         }
         let lower_parts: Vec<LayerParts> = lower_dirs
             .iter()
-            .map(|raw_path| OverlayLayer::resolve_parts(raw_path))
+            .map(|raw_path| Layer::resolve_parts(raw_path))
             .collect::<Result<_>>()?;
 
         // The upper filesystem owns `fsid` 0 on writable overlays.
@@ -215,11 +248,10 @@ impl OverlayLayerStack {
             }
         };
 
-        let upper = upper_parts.map(|(root_path, root_inode, fs, container_dev_id)| {
+        let upper = upper_parts.map(|(root_path, fs, container_dev_id)| {
             let fsid = fsid_of_fn(&fs);
-            OverlayLayer {
+            Layer {
                 root_path,
-                root_inode,
                 fs,
                 fsid,
                 container_dev_id,
@@ -227,11 +259,10 @@ impl OverlayLayerStack {
         });
         let lowers = lower_parts
             .into_iter()
-            .map(|(root_path, root_inode, fs, container_dev_id)| {
+            .map(|(root_path, fs, container_dev_id)| {
                 let fsid = fsid_of_fn(&fs);
-                OverlayLayer {
+                Layer {
                     root_path,
-                    root_inode,
                     fs,
                     fsid,
                     container_dev_id,
@@ -239,11 +270,110 @@ impl OverlayLayerStack {
             })
             .collect::<Vec<_>>();
 
-        let all_layers: Vec<&OverlayLayer> = upper.iter().chain(lowers.iter()).collect();
+        let all_layers: Vec<&Layer> = upper.iter().chain(lowers.iter()).collect();
         for (index, new_layer) in all_layers.iter().enumerate() {
-            OverlayLayer::validate_layer_overlap(new_layer, &all_layers[index + 1..])?;
+            Self::validate_layer_overlap(new_layer, &all_layers[index + 1..])?;
         }
 
         Ok(Self { upper, lowers })
+    }
+
+    /// Returns the writable upper layer, or `EROFS` when the stack has none.
+    pub(in overlayfs) fn upper_layer(&self) -> Result<&Layer> {
+        self.upper.as_ref().ok_or_else(|| {
+            Error::with_message(Errno::EROFS, "the overlay mount has no upper layer")
+        })
+    }
+
+    /// Returns the ordered lower layers.
+    pub(in overlayfs) fn lower_layers(&self) -> &[Layer] {
+        &self.lowers
+    }
+
+    /// Rejects a workdir root that is the same as, an ancestor of, or a
+    /// descendant of any lower layer root.
+    ///
+    /// The workdir is not a layer, so [`LayerStack::validate_layer_overlap`]
+    /// cannot cover it; a nested workdir would place the staging workspace
+    /// inside the lower tree. Violations return `EINVAL`.
+    pub(super) fn validate_workdir_against_lowers(&self, workdir_path: &Path) -> Result<()> {
+        let workdir_dentry = workdir_path.dentry();
+        for lower in &self.lowers {
+            let lower_path = lower.root_path.upgrade()?;
+            let lower_dentry = lower_path.dentry();
+            if Arc::ptr_eq(lower_dentry, workdir_dentry)
+                || Arc::ptr_eq(lower.root_path.inode(), workdir_path.inode())
+            {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "workdir must be distinct from every lower layer root"
+                );
+            }
+            if workdir_dentry.is_equal_or_descendant_of(lower_dentry)
+                || lower_dentry.is_equal_or_descendant_of(workdir_dentry)
+            {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "workdir must not be an ancestor or descendant of a lower layer root"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Converts a copy-up origin layer index to the configured lower index.
+    ///
+    /// `layer_index()` counts the upper as position 0, so when the stack has
+    /// an upper the origin's own lower position is `layer_index - 1`; both
+    /// out-of-range forms fail with `EINVAL`.
+    pub(in overlayfs) fn lower_layer_root_ino_for_origin(&self, layer_index: usize) -> Result<u64> {
+        let lower_index = if self.upper.is_some() {
+            layer_index.checked_sub(1).ok_or_else(|| {
+                Error::with_message(
+                    Errno::EINVAL,
+                    "the origin source does not identify a configured lower layer",
+                )
+            })?
+        } else {
+            layer_index
+        };
+        let lower_layer = self.lowers.get(lower_index).ok_or_else(|| {
+            Error::with_message(
+                Errno::EINVAL,
+                "the origin source does not identify a configured lower layer",
+            )
+        })?;
+        Ok(lower_layer.root_path.inode().ino())
+    }
+
+    /// Collects the construction-local layer identity inputs for
+    /// [`IdentityPolicy::new`](crate::fs::fs_impls::overlayfs::projection::IdentityPolicy::new).
+    ///
+    /// Returns the per-published-layer [`LowerLayerIdentity`] list (upper
+    /// first when present) with the upper's entry position. The exclusion is
+    /// by position, not by value: an upper sharing an underlying filesystem
+    /// with a lower must not also drop the lower's entry.
+    pub(super) fn collect_layer_devs(&self) -> (Vec<LowerLayerIdentity>, Option<usize>) {
+        let layer_capacity = self.lowers.len() + if self.upper.is_some() { 1 } else { 0 };
+        let mut layer_devs: Vec<LowerLayerIdentity> = Vec::with_capacity(layer_capacity);
+        let upper_layer_dev_index = if let Some(upper) = self.upper.as_ref() {
+            let index = layer_devs.len();
+            layer_devs.push(LowerLayerIdentity {
+                fsid: upper.fsid,
+                container_dev_id: upper.container_dev_id,
+                lower_layer_root_ino: upper.root_path.inode().ino(),
+            });
+            Some(index)
+        } else {
+            None
+        };
+        for lower in &self.lowers {
+            layer_devs.push(LowerLayerIdentity {
+                fsid: lower.fsid,
+                container_dev_id: lower.container_dev_id,
+                lower_layer_root_ino: lower.root_path.inode().ino(),
+            });
+        }
+        (layer_devs, upper_layer_dev_index)
     }
 }

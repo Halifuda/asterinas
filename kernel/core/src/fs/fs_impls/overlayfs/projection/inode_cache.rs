@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Inode identity-reuse cache of the overlay projection.
 //!
 //! This module owns the [`RealObjectKey`] identity pair and the mount-wide
@@ -24,17 +25,19 @@ use core::{
 
 use hashbrown::HashMap;
 
-use super::{
-    entry::RealObject,
-    inode::{OverlayInode, OverlayObjectFacts},
-    visible_source,
+use super::lookup::RealObject;
+use crate::{
+    fs::{
+        fs_impls::overlayfs::inode::{ObjectFacts, OverlayInode},
+        vfs::inode::Inode,
+    },
+    prelude::*,
 };
-use crate::{fs::vfs::inode::Inode, prelude::*};
 
 const SWEEP_INTERVAL: u64 = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) struct RealObjectKey {
+pub(in overlayfs) struct RealObjectKey {
     /// Layer fsid of the visible-metadata source (upper, else topmost lower).
     fsid: u64,
     /// Real inode number of the visible-metadata source.
@@ -42,15 +45,15 @@ pub(in crate::fs::fs_impls::overlayfs) struct RealObjectKey {
 }
 
 impl RealObjectKey {
-    pub(super) fn from_source(real: &RealObject) -> Self {
+    pub(in overlayfs) fn from_source(real: &RealObject) -> Self {
         Self {
             fsid: real.fsid(),
             real_ino: real.real_inode().ino(),
         }
     }
 
-    pub(super) fn from_facts(facts: &OverlayObjectFacts) -> Self {
-        Self::from_source(visible_source(facts))
+    pub(in overlayfs) fn from_facts(facts: &ObjectFacts) -> Self {
+        Self::from_source(facts.visible_source())
     }
 }
 
@@ -82,26 +85,26 @@ impl Debug for InodeCacheEntry {
 /// registered under a retained old-key alias, retired by the dead-pin sweep
 /// once the inode drops.
 #[derive(Debug)]
-pub(in crate::fs::fs_impls::overlayfs) struct InodeCache {
+pub(in overlayfs) struct InodeCache {
     /// Weak inode pins (with optional stale-alias keep-alives).
-    by_key: RwMutex<HashMap<RealObjectKey, InodeCacheEntry>>,
+    entries: RwMutex<HashMap<RealObjectKey, InodeCacheEntry>>,
     /// Miss-path insert counter driving the `SWEEP_INTERVAL`-based dead-entry
     /// sweep.
     misses_since_sweep: AtomicU64,
 }
 
 impl InodeCache {
-    pub(in crate::fs::fs_impls::overlayfs) fn new() -> Self {
+    pub(in overlayfs) fn new() -> Self {
         Self {
-            by_key: RwMutex::new(HashMap::new()),
+            entries: RwMutex::new(HashMap::new()),
             misses_since_sweep: AtomicU64::new(0),
         }
     }
 
     /// Returns the cached overlay inode for `key`, if a live inode is
     /// registered.
-    pub(super) fn get(&self, key: RealObjectKey) -> Option<Arc<OverlayInode>> {
-        self.by_key
+    pub(in overlayfs) fn get(&self, key: RealObjectKey) -> Option<Arc<OverlayInode>> {
+        self.entries
             .read()
             .get(&key)
             .and_then(|entry| entry.carrier.upgrade())
@@ -115,14 +118,14 @@ impl InodeCache {
     /// `new_key` for a different inode is either a displaced concurrent
     /// projection (`Err`, never silently clobbered) or an ino-reuse stale
     /// occupant that is replaced.
-    pub(super) fn alias_key(
+    pub(in overlayfs) fn rekey_keep_old_alias(
         &self,
         old_key: RealObjectKey,
         new_key: RealObjectKey,
         old_real_inode: Arc<dyn Inode>,
         new_visible_source: &RealObject,
     ) -> Result<()> {
-        let mut guard = self.by_key.write();
+        let mut guard = self.entries.write();
         let Some(old_entry) = guard.get(&old_key).cloned() else {
             // Nothing registered under the pre-transition key (already
             // aliased or never registered): no-op.
@@ -220,13 +223,13 @@ impl InodeCache {
     /// inode (backing-fs ino reuse) is evicted and replaced so the key is
     /// never served a different real object. The check-then-publish sequence
     /// is atomic.
-    pub(super) fn get_or_create(
+    pub(in overlayfs) fn get_or_create(
         &self,
         key: RealObjectKey,
         is_same_object: impl FnOnce(&Arc<OverlayInode>) -> bool,
         create_fn: impl FnOnce() -> Arc<OverlayInode>,
     ) -> Arc<OverlayInode> {
-        let guard = self.by_key.upread();
+        let guard = self.entries.upread();
         if let Some(inode) = guard.get(&key).and_then(|entry| entry.carrier.upgrade()) {
             if is_same_object(&inode) {
                 return inode;

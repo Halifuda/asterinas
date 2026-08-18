@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Real-object projection and the upper-first layer lookup core.
 //!
 //! This module owns [`RealObject`] — the pinned real (underlying) object of
@@ -26,22 +27,20 @@
 
 use device_id::DeviceId;
 
-use super::{
-    binding_cache::{HiddenEvidence, NegativeBinding, PositiveKind},
-    inode::OverlayObjectFacts,
-};
+use super::binding_cache::{HiddenEvidence, NegativeBinding, PositiveKind};
 use crate::{
     fs::{
         file::InodeType,
-        fs_impls::overlayfs::mount::{OverlayFs, RealPath},
-        vfs::{inode::Inode, path::Path, xattr::XattrName},
+        fs_impls::overlayfs::{
+            inode::ObjectFacts,
+            metadata_security::xattr::{MarkerReadSemantics, XattrPolicy},
+            mount::RealPath,
+            superblock::OverlayFs,
+        },
+        vfs::{inode::Inode, path::Path},
     },
     prelude::*,
 };
-
-const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
-
-const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 
 /// Returns whether `real_inode` is a whiteout.
 ///
@@ -51,30 +50,23 @@ const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 /// `trusted.overlay.whiteout` xattr value is exactly `'y'`. An `ERANGE`,
 /// `ENODATA`, or `EOPNOTSUPP` marker read is not a whiteout (`false`);
 /// any other error propagates.
-pub(in crate::fs::fs_impls::overlayfs) fn is_whiteout_inode(
-    real_inode: &Arc<dyn Inode>,
-) -> Result<bool> {
+pub(in overlayfs) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
     let metadata = real_inode.metadata()?;
     if metadata.type_ == InodeType::CharDevice
         && metadata.self_dev_id.is_none_or(|dev_id| dev_id.is_null())
     {
         return Ok(true);
     }
-    let name = XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
-    })?;
-    let mut value = [0u8; 1];
-    let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-    match real_inode.get_xattr(name, &mut writer) {
-        Ok(written) => Ok(written == 1 && value[0] == b'y'),
-        Err(err) if err.error() == Errno::ERANGE => Ok(false),
-        Err(err) if err.error() == Errno::ENODATA || err.error() == Errno::EOPNOTSUPP => Ok(false),
-        Err(err) => Err(err),
-    }
+    XattrPolicy::has_marker(
+        &XattrPolicy,
+        real_inode,
+        XattrPolicy::whiteout_marker_name()?,
+        MarkerReadSemantics::ValueY,
+    )
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::fs::fs_impls::overlayfs) struct RealObject {
+pub(in overlayfs) struct RealObject {
     pub(super) layer_index: usize,
     pub(super) real_inode: Arc<dyn Inode>,
     /// Dentry-anchored real-object [`RealPath`] value.
@@ -89,7 +81,7 @@ impl RealObject {
     /// The readdir `..` projection constructs one of these per visible
     /// child when it only needs the child's identity (dev/ino) — and not a
     /// dentry path — so the object carries no stored `real_path`.
-    pub(in crate::fs::fs_impls::overlayfs) fn new(
+    pub(in overlayfs) fn identity_only(
         layer_index: usize,
         real_inode: Arc<dyn Inode>,
         fsid: u64,
@@ -104,7 +96,7 @@ impl RealObject {
         }
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn with_path(
+    pub(in overlayfs) fn from_layer_path(
         layer_index: usize,
         real_path: RealPath,
         fsid: u64,
@@ -122,8 +114,8 @@ impl RealObject {
     /// Builds the dentry-anchored real object for one layer hit of a child
     /// lookup: the resolved child path at `layer_index` pinned through the
     /// hit layer's identity (`fsid` / `container_dev_id`).
-    fn for_lookup_child(layer_index: usize, child_path: &Path, layer_real: &RealObject) -> Self {
-        Self::with_path(
+    fn child_hit(layer_index: usize, child_path: &Path, layer_real: &RealObject) -> Self {
+        Self::from_layer_path(
             layer_index,
             RealPath::from_path(child_path),
             layer_real.fsid(),
@@ -131,11 +123,11 @@ impl RealObject {
         )
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn layer_index(&self) -> usize {
+    pub(in overlayfs) fn layer_index(&self) -> usize {
         self.layer_index
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn real_inode(&self) -> &Arc<dyn Inode> {
+    pub(in overlayfs) fn real_inode(&self) -> &Arc<dyn Inode> {
         &self.real_inode
     }
 
@@ -143,7 +135,7 @@ impl RealObject {
     ///
     /// `Err(EIO)` when no path is stored or the anchor mount is no longer
     /// alive.
-    pub(in crate::fs::fs_impls::overlayfs) fn real_path(&self) -> Result<Path> {
+    pub(in overlayfs) fn real_path(&self) -> Result<Path> {
         self.real_path
             .as_ref()
             .ok_or_else(|| {
@@ -155,11 +147,11 @@ impl RealObject {
             .upgrade()
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn fsid(&self) -> u64 {
+    pub(in overlayfs) fn fsid(&self) -> u64 {
         self.fsid
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn container_dev_id(&self) -> DeviceId {
+    pub(in overlayfs) fn container_dev_id(&self) -> DeviceId {
         self.container_dev_id
     }
 
@@ -174,36 +166,26 @@ impl RealObject {
     /// exactly when the `trusted.overlay.opaque` xattr value is `'y'`; an
     /// `ENODATA`, `EOPNOTSUPP`, or `ERANGE` read is not opaque (`false`),
     /// and any other error propagates.
-    pub(in crate::fs::fs_impls::overlayfs) fn is_opaque_directory(&self) -> Result<bool> {
+    pub(in overlayfs) fn is_opaque_directory(&self) -> Result<bool> {
         if !self.real_inode.type_().is_directory() {
             return Ok(false);
         }
-        let name = XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
-            Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
-        })?;
-        let mut value = [0u8; 1];
-        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-        match self.real_inode.get_xattr(name, &mut writer) {
-            Ok(written) => Ok(written == 1 && value[0] == b'y'),
-            Err(err)
-                if err.error() == Errno::ENODATA
-                    || err.error() == Errno::EOPNOTSUPP
-                    || err.error() == Errno::ERANGE =>
-            {
-                Ok(false)
-            }
-            Err(err) => Err(err),
-        }
+        XattrPolicy::has_marker(
+            &XattrPolicy,
+            &self.real_inode,
+            XattrPolicy::opaque_marker_name()?,
+            MarkerReadSemantics::ValueY,
+        )
     }
 }
 
 /// The module-private layer-lookup outcome of the lookup path.
 ///
-/// A `Positive` outcome carries [`OverlayObjectFacts`]; the caller consumes
+/// A `Positive` outcome carries [`ObjectFacts`]; the caller consumes
 /// those facts after [`OverlayFs::project_inode`] runs to assemble the
-/// published [`PositiveBinding`].
+/// published [`PositiveBinding`](crate::fs::fs_impls::overlayfs::projection::PositiveBinding).
 pub(super) enum LayerLookup {
-    Positive(OverlayObjectFacts),
+    Positive(ObjectFacts),
     Negative(NegativeBinding),
 }
 
@@ -212,38 +194,30 @@ impl OverlayFs {
     /// real layers, with overlayfs merge-stop semantics.
     pub(super) fn lookup_in_layers(
         &self,
-        parent_facts: &OverlayObjectFacts,
+        parent_facts: &ObjectFacts,
         name: &str,
     ) -> Result<LayerLookup> {
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
         if let Some(upper_real) = &parent_facts.upper {
             let upper_path = upper_real.real_path()?;
-            match upper_path
-                .dentry()
-                .as_dir_dentry_or_err()?
-                .lookup_child(name)
-            {
-                Ok(child_dentry) => {
-                    let child_path = Path::new(upper_path.mount_node().clone(), child_dentry);
-                    let hit = RealObject::for_lookup_child(0, &child_path, upper_real);
+            match super::super::lookup_child_path(&upper_path, name) {
+                Ok(child_path) => {
+                    let hit = RealObject::child_hit(0, &child_path, upper_real);
                     if hit.is_whiteout()? {
                         return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
-                            HiddenEvidence {
-                                layer_index: 0,
-                                real_inode: hit.real_inode().clone(),
-                            },
+                            HiddenEvidence::new(0, hit.real_inode().clone()),
                         )));
                     }
                     if !hit.real_inode().type_().is_directory() {
-                        return Ok(LayerLookup::Positive(OverlayObjectFacts {
+                        return Ok(LayerLookup::Positive(ObjectFacts {
                             kind: PositiveKind::Single,
                             upper: Some(hit),
                             lowers: Vec::new(),
                         }));
                     }
                     if hit.is_opaque_directory()? {
-                        return Ok(LayerLookup::Positive(OverlayObjectFacts {
+                        return Ok(LayerLookup::Positive(ObjectFacts {
                             kind: PositiveKind::Single,
                             upper: Some(hit),
                             lowers: Vec::new(),
@@ -254,10 +228,7 @@ impl OverlayFs {
                 Err(err) if err.error() == Errno::ENOENT => {
                     if upper_real.is_opaque_directory()? {
                         return Ok(LayerLookup::Negative(NegativeBinding::HiddenByOpaque(
-                            HiddenEvidence {
-                                layer_index: 0,
-                                real_inode: upper_real.real_inode().clone(),
-                            },
+                            HiddenEvidence::new(0, upper_real.real_inode().clone()),
                         )));
                     }
                 }
@@ -268,31 +239,23 @@ impl OverlayFs {
         for lower_real in &parent_facts.lowers {
             let layer_index = lower_real.layer_index();
             let lower_path = lower_real.real_path()?;
-            match lower_path
-                .dentry()
-                .as_dir_dentry_or_err()?
-                .lookup_child(name)
-            {
-                Ok(child_dentry) => {
-                    let child_path = Path::new(lower_path.mount_node().clone(), child_dentry);
-                    let hit = RealObject::for_lookup_child(layer_index, &child_path, lower_real);
+            match super::super::lookup_child_path(&lower_path, name) {
+                Ok(child_path) => {
+                    let hit = RealObject::child_hit(layer_index, &child_path, lower_real);
                     if hit.is_whiteout()? {
                         // A whiteout is the topmost occurrence of the name:
                         // the name is hidden. Below an already-visible
                         // directory it only ends the downward merge scan.
                         if dir_hits.is_empty() {
                             return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
-                                HiddenEvidence {
-                                    layer_index,
-                                    real_inode: hit.real_inode().clone(),
-                                },
+                                HiddenEvidence::new(layer_index, hit.real_inode().clone()),
                             )));
                         }
                         break;
                     }
                     if !hit.real_inode().type_().is_directory() {
                         if dir_hits.is_empty() {
-                            return Ok(LayerLookup::Positive(OverlayObjectFacts {
+                            return Ok(LayerLookup::Positive(ObjectFacts {
                                 kind: PositiveKind::Single,
                                 upper: None,
                                 lowers: vec![hit],
@@ -328,7 +291,7 @@ impl OverlayFs {
         } else {
             None
         };
-        Ok(LayerLookup::Positive(OverlayObjectFacts {
+        Ok(LayerLookup::Positive(ObjectFacts {
             kind,
             upper,
             lowers: dir_hits,

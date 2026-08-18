@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The merged-directory readdir index.
 //!
 //! A merged overlay directory must iterate its visible names in a stable,
@@ -15,12 +16,6 @@
 //! **opaque directory** in a lower layer is a lower-search barrier: the layer's own
 //! names still surface, but names in the layers below it never do.
 //!
-//! ## Lock contract
-//!
-//! The parent directory transaction lock is taken first, then a brief inode
-//! `facts` lock, then the inode `readdir_index` lock; this module acquires no
-//! other overlay lock.
-//!
 //! ## `..` identity
 //!
 //! The `..` entry carries the resolved overlay-parent identity from
@@ -29,15 +24,12 @@
 use hashbrown::HashSet;
 
 use super::{
-    mount::OverlayFs,
-    projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
+    inode::{ObjectFacts, OverlayInode},
+    projection::{ObjectId, PositiveKind, RealObject},
+    superblock::OverlayFs,
 };
 use crate::{
-    fs::{
-        file::InodeType,
-        utils::DirentVisitor,
-        vfs::{inode::Inode, path::is_dot_or_dotdot},
-    },
+    fs::{file::InodeType, utils::DirentVisitor, vfs::inode::Inode},
     prelude::*,
 };
 
@@ -57,7 +49,7 @@ pub(super) enum ReaddirIndexValidity {
 
 /// The readdir index for an overlay merged directory; `entries` are ordered by ascending `cookie`.
 pub(super) struct ReaddirIndex {
-    pub(super) entries: Vec<ReaddirIndexEntry>,
+    entries: Vec<ReaddirIndexEntry>,
     validity: ReaddirIndexValidity,
     next_cookie: ReaddirCookie,
     tombstone_count: usize,
@@ -84,12 +76,15 @@ impl OverlayInode {
     /// `offset` selects the next entry after that cookie, and the returned delta
     /// is `last_visited_cookie - offset` (0 when nothing is consumed). `Tombstone`
     /// entries are skipped; a non-directory receiver fails with `ENOTDIR`.
-    pub(in overlayfs) fn readdir_at_impl(
+    pub(super) fn readdir_at_impl(
         &self,
         offset: usize,
         visitor: &mut dyn DirentVisitor,
     ) -> Result<usize> {
-        let dir = self.dir().ok_or_else(|| Error::new(Errno::ENOTDIR))?;
+        let dir = self
+            .dir_transaction_lock
+            .as_ref()
+            .ok_or_else(|| Error::new(Errno::ENOTDIR))?;
 
         let _dir_guard = dir.lock();
         let facts = self.facts_snapshot();
@@ -120,7 +115,8 @@ impl OverlayInode {
             last_visited = Some(ReaddirCookie(2));
         }
         let index = self
-            .readdir_index()
+            .readdir_index
+            .as_ref()
             .ok_or_else(|| Error::new(Errno::ENOTDIR))?;
         let index = index.lock();
         let start = index
@@ -140,8 +136,7 @@ impl OverlayInode {
                 Ok(d_off) => d_off,
                 Err(_) => break,
             };
-            // `d_ino` derives from the shared identity policy: the child
-            // inode's precomputed `object_id` (`Inode::ino()`).
+            // `d_ino` is the shared identity-policy `object_id`.
             if let Err(err) = visitor.visit(name, inode.ino(), *type_, d_off) {
                 if last_visited.is_none() {
                     return Err(err);
@@ -158,7 +153,7 @@ impl OverlayInode {
     /// Invalidates the index for namespace mutations
     /// and copy-up directory-authority transitions.
     pub(super) fn invalidate_readdir_index(&self) {
-        if let Some(index) = self.readdir_index() {
+        if let Some(index) = self.readdir_index.as_ref() {
             index.lock().validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }
@@ -174,14 +169,14 @@ impl OverlayInode {
         type_: InodeType,
     ) {
         let facts = self.facts_snapshot();
-        let Some(index) = self.readdir_index() else {
+        let Some(index) = self.readdir_index.as_ref() else {
             return;
         };
         let mut index = index.lock();
         if index.validity == ReaddirIndexValidity::Valid
-            && facts.kind() == PositiveKind::Single
-            && facts.upper().is_some()
-            && facts.lowers().is_empty()
+            && facts.kind == PositiveKind::Single
+            && facts.upper.is_some()
+            && facts.lowers.is_empty()
         {
             if !index.insert_visible(name, inode, type_) {
                 index.validity = ReaddirIndexValidity::NeedsRebuild;
@@ -199,21 +194,19 @@ impl OverlayInode {
     /// already exposed remain stable; that is why a failed tombstone cannot
     /// stay `Valid`.
     pub(super) fn readdir_index_remove(&self, name: &str) {
-        let Some(index) = self.readdir_index() else {
+        let Some(index) = self.readdir_index.as_ref() else {
             return;
         };
         let mut index = index.lock();
-        if index.validity == ReaddirIndexValidity::Valid {
-            if !index.remove_visible(name) {
-                index.validity = ReaddirIndexValidity::NeedsRebuild;
-            }
+        if index.validity == ReaddirIndexValidity::Valid && !index.remove_visible(name) {
+            index.validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }
 
     /// Counts the visible children.
-    pub(super) fn visible_child_count(&self, facts: &OverlayObjectFacts) -> Result<usize> {
+    pub(super) fn visible_child_count(&self, facts: &ObjectFacts) -> Result<usize> {
         self.ensure_readdir_index(facts)?;
-        let index = self.readdir_index().ok_or_else(|| {
+        let index = self.readdir_index.as_ref().ok_or_else(|| {
             Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
         })?;
         let index = index.lock();
@@ -224,20 +217,13 @@ impl OverlayInode {
             .count())
     }
 
-    pub(super) fn readdir_index(&self) -> Option<&Mutex<ReaddirIndex>> {
-        self.readdir_index.as_ref()
-    }
-
     /// Ensures the directory's index is `Valid`.
     ///
     /// Returns the facts the index was published from; a persistent mismatch
     /// surfaces `EIO` and never publishes a stale index, and a failed scan
     /// leaves the previous `Valid` index intact.
-    pub(super) fn ensure_readdir_index(
-        &self,
-        facts: &OverlayObjectFacts,
-    ) -> Result<OverlayObjectFacts> {
-        let index = self.readdir_index().ok_or_else(|| {
+    pub(super) fn ensure_readdir_index(&self, facts: &ObjectFacts) -> Result<ObjectFacts> {
+        let index = self.readdir_index.as_ref().ok_or_else(|| {
             Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
         })?;
         {
@@ -250,29 +236,12 @@ impl OverlayInode {
         let mut retried = false;
         let sequence = loop {
             let sequence = self.readdir_sequence(&scan_facts)?;
-            // Revalidate the facts snapshot after the released-lock segment —
-            // the only equality signals available at the overlayfs ceiling.
+            // Revalidate the facts snapshot after the released-lock segment
+            // via the shared lock-free comparator
+            // (`ObjectFacts::same_layer_composition`), which compares by
+            // durable `fsid`/`ino` identity rather than pointer identity.
             let revalidated = self.facts_snapshot();
-            let unchanged = {
-                let same_kind = scan_facts.kind() == revalidated.kind();
-                let same_upper = match (scan_facts.upper(), revalidated.upper()) {
-                    (Some(left), Some(right)) => {
-                        left.fsid() == right.fsid()
-                            && left.real_inode().ino() == right.real_inode().ino()
-                    }
-                    (None, None) => true,
-                    _ => false,
-                };
-                let same_lowers =
-                    scan_facts.lowers().len() == revalidated.lowers().len()
-                        && scan_facts.lowers().iter().zip(revalidated.lowers()).all(
-                            |(left, right)| {
-                                left.fsid() == right.fsid()
-                                    && left.real_inode().ino() == right.real_inode().ino()
-                            },
-                        );
-                same_kind && same_upper && same_lowers
-            };
+            let unchanged = scan_facts.same_layer_composition(&revalidated);
             if unchanged {
                 break sequence;
             }
@@ -301,7 +270,7 @@ impl OverlayInode {
     /// never scans `.`/`..`.
     fn readdir_sequence(
         &self,
-        facts: &OverlayObjectFacts,
+        facts: &ObjectFacts,
     ) -> Result<Vec<(String, Arc<OverlayInode>, InodeType)>> {
         let fs = self.fs();
         let fs = fs.downcast_ref::<OverlayFs>().ok_or_else(|| {
@@ -310,19 +279,19 @@ impl OverlayInode {
                 "the overlay inode is not backed by an overlay mount",
             )
         })?;
-        let layers: Vec<&RealObject> = match facts.kind() {
+        let layers: Vec<&RealObject> = match facts.kind {
             PositiveKind::Single => {
-                let source = match facts.upper() {
+                let source = match facts.upper.as_ref() {
                     Some(upper) => upper,
                     // The `upper.is_some() || !lowers.is_empty()` facts
                     // invariant guarantees `lowers[0]`.
-                    None => &facts.lowers()[0],
+                    None => &facts.lowers[0],
                 };
                 vec![source]
             }
             PositiveKind::Merged => {
                 let mut layers = Vec::new();
-                for layer in facts.upper().into_iter().chain(facts.lowers().iter()) {
+                for layer in facts.upper.iter().chain(facts.lowers.iter()) {
                     layers.push(layer);
                     if layer.is_opaque_directory()? {
                         break;
@@ -334,11 +303,11 @@ impl OverlayInode {
         let mut seen = HashSet::new();
         let mut sequence = Vec::new();
         for layer in layers {
-            for name in self.collect_layer_names(layer)? {
+            for name in crate::fs::fs_impls::overlayfs::read_child_names(layer.real_inode())? {
                 if !seen.insert(name.clone()) {
                     continue;
                 }
-                if let Some(inode) = fs.lookup_binding(facts, &name)?.binding.into_inode() {
+                if let Some(inode) = fs.lookup_binding(facts, &name)?.binding.inode() {
                     let file_type = inode.type_();
                     sequence.push((name, inode, file_type));
                 }
@@ -346,12 +315,157 @@ impl OverlayInode {
         }
         Ok(sequence)
     }
+}
 
-    fn collect_layer_names(&self, layer: &RealObject) -> Result<Vec<String>> {
-        let mut names: Vec<String> = Vec::new();
-        layer.real_inode().readdir_at(0, &mut names)?;
-        names.retain(|name| !is_dot_or_dotdot(name));
-        Ok(names)
+impl OverlayInode {
+    /// Resolves the identity published for this directory's `..` entry.
+    ///
+    /// Serves the child-source-layer real parent identity (exact when the
+    /// overlay parent's visible source is on the same layer, otherwise an
+    /// approximation), falling back to the stable `d_ino("..") ==
+    /// d_ino(".")` self-parent when no disclosure-safe projection exists.
+    pub(super) fn resolve_parent_object_id(&self, facts: &ObjectFacts) -> ObjectId {
+        let fs = match self.fs_arc() {
+            Ok(fs) => fs,
+            Err(err) => {
+                warn!(
+                    "overlay readdir: the owning mount is unavailable ({:?}); \
+                     falling back to d_ino(\"..\") == d_ino(\".\")",
+                    err
+                );
+                return self.parent_fallback();
+            }
+        };
+        // Overlay-root special case: `..` is the root itself (Unix
+        // self-parent); the underlying `lookup("..")` is skipped.
+        if self.is_mount_root(&fs) {
+            return self.parent_fallback();
+        }
+        // Determinism short-circuit: on a multi-fs xino-off mount the
+        // projection matrix takes the xino-off/overflow directory branch for
+        // EVERY parent (a fresh fallback ino per call — unstable), so the
+        // whole route is predetermined to serve the stable self-parent
+        // approximation; skip the underlying `lookup("..")`/origin read whose
+        // result would only be discarded.
+        if !fs.identity.is_xino_effective() && !fs.identity.is_all_layers_same_fs() {
+            return self.parent_fallback();
+        }
+        let visible = facts.visible_source();
+        let parent_real_inode = match visible.real_inode().lookup("..") {
+            Ok(parent) => parent,
+            Err(err) => {
+                warn!(
+                    "overlay readdir: `..` resolution on the visible source failed \
+                     ({:?}); falling back to d_ino(\"..\") == d_ino(\".\")",
+                    err
+                );
+                return self.parent_fallback();
+            }
+        };
+        // Upper-backed real parent: prefer the durable lower-id record so the
+        // `..` identity matches the parent's record-derived `stat("..")`,
+        // gated on deterministic projection.
+        if visible.layer_index() == 0
+            && let Some(object_id) = self.project_parent_from_lower_record(&fs, &parent_real_inode)
+        {
+            return object_id;
+        }
+        if !fs
+            .identity
+            .is_directory_projection_deterministic(visible.fsid(), parent_real_inode.ino())
+        {
+            return self.parent_fallback();
+        }
+        let parent_real = RealObject::identity_only(
+            visible.layer_index(),
+            parent_real_inode,
+            visible.fsid(),
+            visible.container_dev_id(),
+        );
+        fs.identity.project_object_id(&parent_real, true)
+    }
+
+    /// Projects the upper-backed real parent's identity from its durable
+    /// origin record, gated on deterministic projection.
+    ///
+    /// Returns `None` when no readable record resolves to a current lower
+    /// layer or the projection would be non-deterministic; the caller then
+    /// attempts the visible-source projection. The underlying `read_lower_id`
+    /// is caller-credential-gated, so `d_ino("..")` may differ between
+    /// privileged and unprivileged readers (logged at `debug!`).
+    pub(super) fn project_parent_from_lower_record(
+        &self,
+        fs: &OverlayFs,
+        parent_real_inode: &Arc<dyn Inode>,
+    ) -> Option<ObjectId> {
+        match fs.read_lower_id(parent_real_inode) {
+            Ok(Some(record)) => {
+                // When all layers share one filesystem, projection passes the origin
+                // through without a layer id, so this caller skips the layer resolution.
+                if !fs.identity.is_all_layers_same_fs() {
+                    let layer_id = fs.identity.resolve_layer_id_for_record(
+                        record.container_dev_id(),
+                        record.lower_layer_root_ino(),
+                    )?;
+                    if !fs
+                        .identity
+                        .is_directory_projection_deterministic(layer_id, record.real_ino())
+                    {
+                        return None;
+                    }
+                }
+                fs.identity.project_object_id_from_lower_id(&record, true)
+            }
+            Ok(None) => None,
+            Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
+                debug!(
+                    "overlay readdir: the parent's origin record is \
+                     credential-gated ({:?}); d_ino(\"..\") may differ between \
+                     privileged and unprivileged readers until the VFS can \
+                     read xattrs with the caller's credentials; falling back to the \
+                     visible-source projection",
+                    err
+                );
+                None
+            }
+            Err(err) => {
+                debug!(
+                    "overlay readdir: the parent's origin record is unreadable \
+                     ({:?}); falling back to the visible-source projection",
+                    err
+                );
+                None
+            }
+        }
+    }
+
+    /// Returns whether this inode is the overlay mount root (the self-parent
+    /// special case of the `..` route).
+    ///
+    /// The check looks up the mount root's visible-source key in the inode
+    /// cache and compares it against `self.key()`. It fails closed (serves
+    /// the self-parent fallback) when the root is not registered, without
+    /// disclosing the backing-store parent.
+    pub(super) fn is_mount_root(&self, fs: &OverlayFs) -> bool {
+        match fs.inodes.get(fs.root_visible_key()) {
+            Some(root) => root.key() == self.key(),
+            None => {
+                warn!(
+                    "overlay readdir: the mount root inode is not registered in the inode cache; \
+                     serving the self-parent fallback"
+                );
+                true
+            }
+        }
+    }
+
+    /// Returns the `d_ino("..") == d_ino(".")` approximation: the stable
+    /// fallback identity served when the real parent cannot be resolved
+    /// disclosure-safely or deterministically (overlay root, xino-off /
+    /// overflow directory branch, unresolvable real parent, or unavailable
+    /// owning mount).
+    pub(super) fn parent_fallback(&self) -> ObjectId {
+        self.object_id()
     }
 }
 
@@ -369,17 +483,25 @@ impl ReaddirIndex {
         }
     }
 
+    /// Returns the visible inode pins in cookie order, skipping tombstones.
+    pub(super) fn visible_inodes(&self) -> Vec<Arc<OverlayInode>> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ReaddirIndexEntry::Visible { inode, .. } => Some(inode.clone()),
+                ReaddirIndexEntry::Tombstone { .. } => None,
+            })
+            .collect()
+    }
+
     /// Rebuilds the index from a complete visible sequence.
     ///
-    /// A name that was `Visible` before, points to the same logical object
-    /// (`Arc::ptr_eq`), and has its previous cookie above the last cookie
-    /// already assigned in this rebuild keeps that cookie. Any other
-    /// appearance receives a fresh cookie from the never-decreasing
-    /// `next_cookie`.
+    /// A name that was `Visible` before, points to the same logical object,
+    /// and has its previous cookie above `last_assigned` keeps that cookie;
+    /// any other appearance receives a fresh cookie.
     ///
     /// The rebuild discards every tombstone and sets `validity` to `Valid`;
-    /// `last_assigned` only moves forward, so the resulting cookie order stays
-    /// monotonic.
+    /// `last_assigned` only moves forward, so cookie order stays monotonic.
     fn rebuild(&mut self, sequence: Vec<(String, Arc<OverlayInode>, InodeType)>) {
         let mut entries = Vec::with_capacity(sequence.len());
         let mut last_assigned = ReaddirCookie(2);

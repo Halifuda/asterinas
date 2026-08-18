@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The metadata-mutation entries.
 //!
 //! This module hosts the six metadata setters: `set_mode`/`set_owner`/
@@ -30,24 +31,22 @@
 //!
 //! ## Local ownership/capability gate
 //!
-//! The gate's two inputs are `is_owner` (`fsuid == projected uid`) and
-//! `has_cap` (the probed capability; kernel contexts fail open). The
-//! chmod/chown syscall layer performs no owner/`CAP_FOWNER`/`CAP_CHOWN`
-//! pre-check and the real stage runs under root credentials, so this
-//! gate is the last line. The setters admit with `Permission::empty()`
-//! (never `MAY_WRITE`), so the gate is authoritative; ownership/
-//! capability alone is required — never write access (the
-//! chmod-000-then-chmod-644 owner idiom must not fail `EACCES`).
+//! The chmod/chown syscall layer performs no owner/`CAP_FOWNER`/`CAP_CHOWN`
+//! pre-check, and the real stage runs under root credentials,
+//! so this local gate is the last line.
+//! The setters admit with `Permission::empty()` (never `MAY_WRITE`),
+//! so ownership/capability alone is authoritative;
+//! never write access keeps the chmod-000-then-chmod-644 owner idiom
+//! from failing with `EACCES`.
 //!
 //! ## Time-setter admission
 //!
 //! The three time setters admit with the utimensat disjunction:
-//! `Permission::MAY_WRITE`, or an ownership/`CAP_FOWNER` fallback that
-//! re-runs the mutating admission with `Permission::empty()` (so the
-//! EROFS gate and copy-up promotion still run on the owner path).
-//! They are infallible VFS surfaces, best-effort: a local or real
-//! failure is a silent no-op at the overlay boundary. Read-driven
-//! atime updates stay with the copy-up module's `O_NOATIME`
+//! `Permission::MAY_WRITE`, or an ownership/`CAP_FOWNER` fallback
+//! that re-runs the mutating admission with `Permission::empty()`
+//! (so the EROFS gate and copy-up promotion still run on the owner path).
+//! They are best-effort: a local or real failure is a silent no-op.
+//! Read-driven atime updates stay with the copy-up module's `O_NOATIME`
 //! delegation; this module never models a read as a copy-up trigger.
 //!
 //! # References
@@ -61,7 +60,7 @@ use core::time::Duration;
 use crate::{
     fs::{
         file::{InodeMode, Permission},
-        fs_impls::overlayfs::{AccessType, projection::OverlayInode},
+        fs_impls::overlayfs::{AccessType, inode::OverlayInode},
         vfs::inode::Inode,
     },
     prelude::*,
@@ -76,22 +75,14 @@ use crate::{
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CallerOwnerFacts {
     /// `fsuid == projected uid`.
-    ///
-    /// `fsuid` is the filesystem credential used for ownership checks,
-    /// not the process's real or effective `uid`; a caller can set `fsuid`
-    /// independently, so comparing it preserves Linux ownership semantics.
-    /// See [`OverlayInode::current_fsuid`].
     is_owner: bool,
-    /// `true` when the caller holds the probed capability in its user
-    /// namespace. Kernel contexts fail open (`true` — there is no user to
-    /// gate); ordinary user contexts without a thread-local/user namespace
-    /// fail closed (`false`). See
-    /// [`OverlayInode::current_task_has_capability`].
+    /// `true` when the caller holds the probed capability;
+    /// kernel contexts fail open.
     has_cap: bool,
 }
 
 impl OverlayInode {
-    pub(in crate::fs::fs_impls::overlayfs) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
+    pub(in overlayfs) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
         let metadata = self.metadata()?;
         let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
         if !facts.is_owner && !facts.has_cap {
@@ -113,7 +104,7 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_mode(mode))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
+    pub(in overlayfs) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
         let metadata = self.metadata()?;
         if uid != metadata.uid && !self.caller_owner_facts(metadata.uid, CapSet::CHOWN).has_cap {
             return Err(Error::with_message(
@@ -125,14 +116,15 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_owner(uid))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_group_impl(&self, gid: Gid) -> Result<()> {
+    pub(in overlayfs) fn set_group_impl(&self, gid: Gid) -> Result<()> {
         let metadata = self.metadata()?;
         if gid != metadata.gid {
             let facts = self.caller_owner_facts(metadata.uid, CapSet::CHOWN);
             // The owner-chgrp exemption: the owner may change the group to one
             // of its own supplementary groups (kernel contexts default to
             // `false`).
-            let in_own_group = OverlayInode::current_in_group(gid);
+            let in_own_group =
+                crate::fs::fs_impls::overlayfs::metadata_security::current_in_group(gid);
             if !facts.has_cap && !(facts.is_owner && in_own_group) {
                 return Err(Error::with_message(
                     Errno::EPERM,
@@ -144,15 +136,15 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_group(gid))
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_atime_impl(&self, time: Duration) {
+    pub(in overlayfs) fn set_atime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_atime(time));
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_mtime_impl(&self, time: Duration) {
+    pub(in overlayfs) fn set_mtime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_mtime(time));
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn set_ctime_impl(&self, time: Duration) {
+    pub(in overlayfs) fn set_ctime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_ctime(time));
     }
 }
@@ -164,10 +156,13 @@ impl OverlayInode {
     /// Consumed by the ownership-sensitive setters and the best-effort
     /// time-setter gate.
     fn caller_owner_facts(&self, projected_uid: Uid, cap: CapSet) -> CallerOwnerFacts {
-        let is_owner = OverlayInode::current_fsuid().is_some_and(|fsuid| fsuid == projected_uid);
+        let is_owner = crate::fs::fs_impls::overlayfs::metadata_security::current_fsuid()
+            .is_some_and(|fsuid| fsuid == projected_uid);
         CallerOwnerFacts {
             is_owner,
-            has_cap: OverlayInode::current_task_has_capability(cap),
+            has_cap: crate::fs::fs_impls::overlayfs::metadata_security::current_task_has_capability(
+                cap,
+            ),
         }
     }
 

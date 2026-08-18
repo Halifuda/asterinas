@@ -1,33 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! Upper/workdir exclusivity claims and the unified 64-bit overlay identity.
 //!
 //! This module implements the inode `Extension` runtime lease that carries
 //! the claim. Each claimed root inode hosts a VFS-owned `OverlayInuseSlot`.
-//! The non-zero unified [`OverlayUuid`] value serves two roles:
+//! The non-zero unified [`Uuid`] value serves two roles:
 //!
 //! - claim token: the per-slot compare-and-swap (CAS) on the slot's owner
 //!   token guards this value so only one overlay can hold the claim;
 //! - persisted overlay UUID: when effective, the value is stored as
 //!   `trusted.overlay.uuid` on the upper root.
 
-use super::{layers, options::UuidMode};
+use super::options::UuidMode;
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        vfs::{
-            inode::Inode,
-            inode_ext::InodeExt,
-            path::{Path, is_dot_or_dotdot},
-            xattr::{XattrName, XattrSetFlags},
+        fs_impls::overlayfs::{
+            metadata_security::xattr::uuid_xattr_name, workdir::WorkdirWorkspace,
         },
+        vfs::{inode::Inode, inode_ext::InodeExt, path::Path, xattr::XattrSetFlags},
     },
     prelude::*,
 };
 
 pub(super) const OVERLAY_UUID_SIZE: usize = 8;
-
-pub(super) const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
 
 const WORKDIR_NAME: &str = "work";
 
@@ -42,10 +39,10 @@ const WORKDIR_CLEANUP_MAX_DEPTH: usize = 2;
 /// persisted as `trusted.overlay.uuid` and published through
 /// `MountPolicy::uuid()`/`SuperBlock::fsid`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(in overlayfs) struct OverlayUuid(u64);
+pub(in overlayfs) struct Uuid(u64);
 
-impl OverlayUuid {
-    /// Creates an [`OverlayUuid`], rejecting the zero value with `EINVAL`.
+impl Uuid {
+    /// Creates a [`Uuid`], rejecting the zero value with `EINVAL`.
     pub(super) fn try_new(value: u64) -> Result<Self> {
         if value == 0 {
             return_errno_with_message!(Errno::EINVAL, "the overlay uuid must be non-zero");
@@ -53,7 +50,7 @@ impl OverlayUuid {
         Ok(Self(value))
     }
 
-    pub(super) fn value(&self) -> u64 {
+    pub(in overlayfs) fn value(&self) -> u64 {
         self.0
     }
 
@@ -68,38 +65,6 @@ impl OverlayUuid {
             }
         }
     }
-
-    /// Reads an existing persisted identity from the upper root.
-    ///
-    /// Returns `Ok(None)` when no `trusted.overlay.uuid` xattr exists
-    /// (`ENODATA`); a malformed value fails with `EINVAL`.
-    fn read_from_upper(upper_inode: &Arc<dyn Inode>) -> Result<Option<Self>> {
-        let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
-            .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))?;
-        let mut value = [0u8; OVERLAY_UUID_SIZE];
-        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-        match upper_inode.get_xattr(name, &mut writer) {
-            Ok(written) if written == OVERLAY_UUID_SIZE => {
-                Ok(Some(Self::try_new(u64::from_le_bytes(value))?))
-            }
-            Ok(_) => return_errno_with_message!(
-                Errno::EINVAL,
-                "the persisted overlay uuid has a malformed value"
-            ),
-            Err(err) if err.error() == Errno::ENODATA => Ok(None),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Persists this identity as `trusted.overlay.uuid` on the upper root;
-    /// callers invoke it only when the identity is effective.
-    fn persist_on_upper(&self, upper_inode: &Arc<dyn Inode>) -> Result<()> {
-        let name = XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
-            .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))?;
-        let value = self.value().to_le_bytes();
-        let mut reader = VmReader::from(value.as_slice()).to_fallible();
-        upper_inode.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)
-    }
 }
 
 /// A runtime lease on one root inode's `OverlayInuseSlot`.
@@ -109,14 +74,14 @@ impl OverlayUuid {
 #[derive(Debug)]
 pub(super) struct InodeClaimGuard {
     inode: Arc<dyn Inode>,
-    token: OverlayUuid,
+    token: Uuid,
 }
 
 impl InodeClaimGuard {
     /// Claims the inode's `OverlayInuseSlot` with `identity` as the token.
     ///
     /// Returns `EBUSY` when the slot is already claimed by another holder.
-    pub(super) fn try_claim(inode: Arc<dyn Inode>, identity: OverlayUuid) -> Result<Self> {
+    pub(super) fn try_claim(inode: Arc<dyn Inode>, identity: Uuid) -> Result<Self> {
         inode.overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
             inode,
@@ -136,15 +101,8 @@ impl Drop for InodeClaimGuard {
 pub(in overlayfs) struct UpperWorkdirClaim {
     workdir: InodeClaimGuard,
     upper: InodeClaimGuard,
-    identity: OverlayUuid,
-    workdir_workspace: Option<WorkdirWorkspace>,
-}
-
-/// The prepared `<workdir>/work` staging workspace.
-#[derive(Debug)]
-struct WorkdirWorkspace {
-    inode: Arc<dyn Inode>,
-    path: Path,
+    identity: Uuid,
+    pub(in overlayfs) workdir_workspace: Option<WorkdirWorkspace>,
 }
 
 impl UpperWorkdirClaim {
@@ -193,24 +151,24 @@ impl UpperWorkdirClaim {
     pub(super) fn determine_identity(
         upper_inode: &Arc<dyn Inode>,
         uuid_mode: UuidMode,
-    ) -> Result<OverlayUuid> {
+    ) -> Result<Uuid> {
         match uuid_mode {
-            UuidMode::On => match OverlayUuid::read_from_upper(upper_inode)? {
+            UuidMode::On => match Self::read_identity_from_upper(upper_inode)? {
                 Some(existing) => Ok(existing),
-                None => Ok(OverlayUuid::generate()),
+                None => Ok(Uuid::generate()),
             },
-            UuidMode::Auto => match OverlayUuid::read_from_upper(upper_inode) {
+            UuidMode::Auto => match Self::read_identity_from_upper(upper_inode) {
                 Ok(Some(existing)) => Ok(existing),
-                Ok(None) | Err(_) => Ok(OverlayUuid::generate()),
+                Ok(None) | Err(_) => Ok(Uuid::generate()),
             },
-            UuidMode::Off | UuidMode::Null => Ok(OverlayUuid::generate()),
+            UuidMode::Off | UuidMode::Null => Ok(Uuid::generate()),
         }
     }
 
     pub(super) fn claim(
         upper_inode: Arc<dyn Inode>,
         workdir_inode: Arc<dyn Inode>,
-        identity: OverlayUuid,
+        identity: Uuid,
     ) -> Result<Self> {
         let upper = InodeClaimGuard::try_claim(upper_inode, identity)?;
         let workdir = match InodeClaimGuard::try_claim(workdir_inode, identity) {
@@ -245,23 +203,12 @@ impl UpperWorkdirClaim {
             Err(err) => return Err(err),
         }
         let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
-        self.workdir_workspace = Some(WorkdirWorkspace {
-            inode: workspace.inode().clone(),
-            path: workspace,
-        });
+        self.workdir_workspace = Some(WorkdirWorkspace { path: workspace });
         Ok(())
     }
 
     fn remove_work_entries(&self, dir: &Arc<dyn Inode>, level: usize) -> Result<()> {
-        let mut names: Vec<String> = Vec::new();
-        let mut offset = 0;
-        loop {
-            match dir.readdir_at(offset, &mut names)? {
-                0 => break,
-                visited => offset += visited,
-            }
-        }
-        names.retain(|name| !is_dot_or_dotdot(name));
+        let names = crate::fs::fs_impls::overlayfs::read_child_names(dir)?;
         for name in names {
             let child = dir.lookup(&name)?;
             if child.type_().is_directory() {
@@ -277,50 +224,32 @@ impl UpperWorkdirClaim {
     }
 
     pub(super) fn persist_identity(&self) -> Result<()> {
-        self.identity.persist_on_upper(&self.upper.inode)
+        let name = uuid_xattr_name()?;
+        let value = self.identity.value().to_le_bytes();
+        let mut reader = VmReader::from(value.as_slice()).to_fallible();
+        self.upper
+            .inode
+            .set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)
     }
 
-    pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
-        self.workdir_workspace
-            .as_ref()
-            .map(|workspace| &workspace.inode)
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EROFS,
-                    "the overlay workdir workspace is not prepared",
-                )
-            })
+    /// Reads an existing persisted identity from the upper root.
+    ///
+    /// Returns `Ok(None)` when no `trusted.overlay.uuid` xattr exists
+    /// (`ENODATA`); a malformed value fails with `EINVAL`.
+    fn read_identity_from_upper(upper_inode: &Arc<dyn Inode>) -> Result<Option<Uuid>> {
+        let name = uuid_xattr_name()?;
+        let mut value = [0u8; OVERLAY_UUID_SIZE];
+        let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+        match upper_inode.get_xattr(name, &mut writer) {
+            Ok(written) if written == OVERLAY_UUID_SIZE => {
+                Ok(Some(Uuid::try_new(u64::from_le_bytes(value))?))
+            }
+            Ok(_) => return_errno_with_message!(
+                Errno::EINVAL,
+                "the persisted overlay uuid has a malformed value"
+            ),
+            Err(err) if err.error() == Errno::ENODATA => Ok(None),
+            Err(err) => Err(err),
+        }
     }
-
-    pub(in crate::fs::fs_impls::overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
-        self.workdir_workspace
-            .as_ref()
-            .map(|workspace| &workspace.path)
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EROFS,
-                    "the overlay workdir workspace is not prepared",
-                )
-            })
-    }
-}
-
-/// Probes that a root path resolves to a backend-instance-stable inode.
-///
-/// Both resolutions must match `pinned_inode`, so the checked object is the
-/// one that [`UpperWorkdirClaim::claim`] later uses. This is a heuristic; a
-/// failing backend returns `EOPNOTSUPP`.
-pub(super) fn verify_inode_instance_stability(
-    raw_path: &str,
-    pinned_inode: &Arc<dyn Inode>,
-) -> Result<()> {
-    let first = layers::resolve_root_path(raw_path)?.inode().clone();
-    let second = layers::resolve_root_path(raw_path)?.inode().clone();
-    if !Arc::ptr_eq(&first, &second) || !Arc::ptr_eq(&first, pinned_inode) {
-        return_errno_with_message!(
-            Errno::EOPNOTSUPP,
-            "the underlying filesystem does not provide instance-stable inodes for pinned roots"
-        );
-    }
-    Ok(())
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+#![short_vis_path::add(overlayfs)]
 //! The copy-up winner body: object-kind promotion and upper publication.
 //!
 //! This module hosts the private winner body [`OverlayInode::promote`] and
@@ -13,17 +14,15 @@
 
 use core::cmp::min;
 
-use super::{
-    coordination::{CopyUpPhase, CopyUpTransition},
-    workdir::WorkdirTempRequest,
-};
+use super::coordination::{CopyUpPhase, CopyUpTransition};
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
+            inode::{ObjectFacts, OverlayInode},
             metadata_security::xattr::XattrCopyPolicy,
-            mount::{OverlayFs, RealPath},
-            projection::{OverlayInode, OverlayObjectFacts, PositiveKind, RealObject},
+            projection::{PositiveKind, RealObject},
+            workdir::WorkdirTempRequest,
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode, SymbolicLink},
@@ -40,6 +39,19 @@ use crate::{
 /// progress.
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
+/// The shared publication target of a staged promotion.
+struct PromoteTarget<'a> {
+    upper_dir_path: &'a Path,
+    name: &'a str,
+    lower: RealObject,
+}
+
+/// The per-object staged workdir temp identity.
+struct PreparedTemp {
+    temp_name: String,
+    temp_kind: InodeType,
+}
+
 impl OverlayInode {
     /// Runs the winner promotion body for this object.
     ///
@@ -55,27 +67,33 @@ impl OverlayInode {
     ) -> Result<()> {
         // 1) Idempotent upper fast path: a waiter may have completed the
         //    transition while this task waited for the arbitration guard.
-        if self.facts_snapshot().upper().is_some() {
+        if self.facts_snapshot().upper.is_some() {
             return Ok(());
         }
 
+        // The publication parent's upper directory path is computed once and
+        // shared by the ReconcilePending verification and the promotion body.
+        let upper_dir_path = publication_parent.upper_parent_path()?;
         // 2) ReconcilePending verification (recovery): the parent was
         //    promoted by the ancestor walk, so its real object is the upper
         //    directory; the verify helper consumes the passed `name`.
         if coordinate.phase == CopyUpPhase::ReconcilePending {
-            let upper_dir_path = publication_parent.upper_parent_path()?;
             self.verify_upper_target(&upper_dir_path, name)?;
         }
 
         let upper_dir = publication_parent.select_real_inode();
-        let upper_dir_path = publication_parent.upper_parent_path()?;
         let fs = self.fs_arc()?;
         // Impurity marker: every promoted object makes its publication
         // parent impure — persist the marker before the object-kind dispatch
         // and the physical upper commit (strict, pre-commit; read-first
         // idempotence makes an already-marked parent a no-op).
-        fs.xattr_policy().set_impure_marker(&upper_dir)?;
+        fs.xattr_policy.set_impure_marker(&upper_dir)?;
         let lower = self.lower_source()?;
+        let target = PromoteTarget {
+            upper_dir_path: &upper_dir_path,
+            name,
+            lower: lower.clone(),
+        };
         let result = match lower.real_inode().type_() {
             InodeType::Dir => {
                 // Directory copy-up: private workdir temp, metadata/xattr
@@ -86,107 +104,99 @@ impl OverlayInode {
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
                     name,
-                    &upper_dir_path,
                     WorkdirTempRequest::Create {
                         kind: InodeType::Dir,
                         mode,
                     },
                 )?;
                 let temp_kind = temp.kind();
-                let (temp_name, temp) = temp.into_parts();
-                self.run_recipe(
-                    &fs,
-                    Some((&temp_name, temp_kind)),
-                    || Self::mark_reconcile_pending(coordinate),
-                    |marker| {
-                        self.transfer_metadata(temp.inode())?;
-                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
-                        self.transfer_timestamps(temp.inode())?;
-                        let workdir_path = self.workdir_root_path()?;
-                        self.publish_via_rename(
-                            &workdir_path,
-                            &temp_name,
-                            &upper_dir_path,
-                            name,
-                            marker,
-                            lower.clone(),
-                        )
+                let (temp_name, temp_path) = temp.into_parts();
+                if let Err(err) = self
+                    .transfer_metadata(temp_path.inode())
+                    .and_then(|_| {
+                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                    })
+                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                {
+                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    return Err(err);
+                }
+                self.finish_promotion(
+                    coordinate,
+                    target,
+                    PreparedTemp {
+                        temp_name,
+                        temp_kind,
                     },
                 )
             }
             InodeType::File => {
+                // File copy-up: data is streamed into the workdir temp and
+                // synced before the atomic `RenameMode::Replace` publication;
+                // durability is guaranteed by `sync_all` preceding the rename.
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
                     name,
-                    &upper_dir_path,
                     WorkdirTempRequest::Create {
                         kind: InodeType::File,
                         mode,
                     },
                 )?;
                 let temp_kind = temp.kind();
-                let (temp_name, temp) = temp.into_parts();
-                self.run_recipe(
-                    &fs,
-                    Some((&temp_name, temp_kind)),
-                    || Self::mark_reconcile_pending(coordinate),
-                    |marker| {
-                        self.transfer_metadata(temp.inode())?;
-                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
-                        self.promote_regular_file(temp.inode())?;
-                        self.transfer_timestamps(temp.inode())?;
-                        // Durability: the data file is synced before
-                        // publication.
-                        temp.inode().sync_all()?;
-                        // Atomic publication: rename the private workdir temp
-                        // onto the upper target name; a whiteout at the name
-                        // is impossible for authority-only promotion.
-                        let workdir_path = self.workdir_root_path()?;
-                        self.publish_via_rename(
-                            &workdir_path,
-                            &temp_name,
-                            &upper_dir_path,
-                            name,
-                            marker,
-                            lower.clone(),
-                        )
+                let (temp_name, temp_path) = temp.into_parts();
+                if let Err(err) = self
+                    .transfer_metadata(temp_path.inode())
+                    .and_then(|_| {
+                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                    })
+                    .and_then(|_| self.promote_regular_file(temp_path.inode()))
+                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                    .and_then(|_| temp_path.inode().sync_all())
+                {
+                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    return Err(err);
+                }
+                self.finish_promotion(
+                    coordinate,
+                    target,
+                    PreparedTemp {
+                        temp_name,
+                        temp_kind,
                     },
                 )
             }
             InodeType::SymLink => {
                 // Symlink promotion side: a workdir symlink temp recreated
-                // from the lower target, then xattrs and the atomic rename
-                // (the symlink object itself is copied; its target is left
-                // unreferenced).
+                // from the lower target, then metadata/xattr transfer and the
+                // atomic rename (the symlink object itself is copied; its
+                // target is left unreferenced).
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
                     name,
-                    &upper_dir_path,
                     WorkdirTempRequest::Create {
                         kind: InodeType::SymLink,
                         mode,
                     },
                 )?;
                 let temp_kind = temp.kind();
-                let (temp_name, temp) = temp.into_parts();
-                self.run_recipe(
-                    &fs,
-                    Some((&temp_name, temp_kind)),
-                    || Self::mark_reconcile_pending(coordinate),
-                    |marker| {
-                        self.promote_symlink(temp.inode())?;
-                        self.transfer_metadata(temp.inode())?;
-                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
-                        self.transfer_timestamps(temp.inode())?;
-                        let workdir_path = self.workdir_root_path()?;
-                        self.publish_via_rename(
-                            &workdir_path,
-                            &temp_name,
-                            &upper_dir_path,
-                            name,
-                            marker,
-                            lower.clone(),
-                        )
+                let (temp_name, temp_path) = temp.into_parts();
+                if let Err(err) = self
+                    .promote_symlink(temp_path.inode())
+                    .and_then(|_| self.transfer_metadata(temp_path.inode()))
+                    .and_then(|_| {
+                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                    })
+                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                {
+                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    return Err(err);
+                }
+                self.finish_promotion(
+                    coordinate,
+                    target,
+                    PreparedTemp {
+                        temp_name,
+                        temp_kind,
                     },
                 )
             }
@@ -237,35 +247,29 @@ impl OverlayInode {
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
                     name,
-                    &upper_dir_path,
                     WorkdirTempRequest::Mknod {
                         mode,
                         node: &mknod_type,
                     },
                 )?;
                 let temp_kind = temp.kind();
-                let (temp_name, temp) = temp.into_parts();
-                self.run_recipe(
-                    &fs,
-                    Some((&temp_name, temp_kind)),
-                    || Self::mark_reconcile_pending(coordinate),
-                    |marker| {
-                        self.transfer_metadata(temp.inode())?;
-                        self.copy_eligible_xattrs(temp.inode(), XattrCopyPolicy::Strict)?;
-                        self.transfer_timestamps(temp.inode())?;
-                        // The workdir staging workspace resolves inside the
-                        // recipe closure: a resolution failure is a
-                        // pre-commit failure, so `run_recipe` best-effort
-                        // cleans the staged temp instead of leaking it.
-                        let workdir_path = self.workdir_root_path()?;
-                        self.publish_via_rename(
-                            &workdir_path,
-                            &temp_name,
-                            &upper_dir_path,
-                            name,
-                            marker,
-                            lower.clone(),
-                        )
+                let (temp_name, temp_path) = temp.into_parts();
+                if let Err(err) = self
+                    .transfer_metadata(temp_path.inode())
+                    .and_then(|_| {
+                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                    })
+                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                {
+                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    return Err(err);
+                }
+                self.finish_promotion(
+                    coordinate,
+                    target,
+                    PreparedTemp {
+                        temp_name,
+                        temp_kind,
                     },
                 )
             }
@@ -297,36 +301,40 @@ impl OverlayInode {
         self.publish_upper_authority(upper_real, lower)
     }
 
-    /// Runs a fallible upper-mutation recipe with the shared commit scaffold.
+    /// Completes a staged promotion after the per-kind preparation ran.
     ///
-    /// The recipe receives the [`CommitMarker`] and calls
-    /// [`CommitMarker::commit`] at the physical-upper-commit point; on
-    /// success its value is returned unchanged, on failure the scaffold runs
-    /// the `reconcile` closure when committed or best-effort cleans the
-    /// staged workdir temp otherwise.
-    pub(in crate::fs::fs_impls::overlayfs) fn run_recipe<T>(
+    /// The caller has already run the preparation and cleaned up on failure;
+    /// this tail performs the physical publication. Failures before commit
+    /// clean the workdir temp; failures after `CommitMarker::commit` mark the
+    /// coordinate `ReconcilePending` for the next winner. Success leaves the
+    /// caller to set the coordinate back to `Idle`.
+    fn finish_promotion(
         &self,
-        fs: &Arc<OverlayFs>,
-        temp: Option<(&str, InodeType)>,
-        reconcile: impl FnOnce(),
-        recipe: impl FnOnce(&mut CommitMarker) -> Result<T>,
-    ) -> Result<T> {
+        coordinate: &mut CopyUpTransition,
+        target: PromoteTarget<'_>,
+        temp: PreparedTemp,
+    ) -> Result<()> {
+        let fs = self.fs_arc()?;
         let mut marker = CommitMarker::default();
-        let recipe_result = recipe(&mut marker);
-        match recipe_result {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                if marker.is_committed() {
-                    reconcile();
-                } else if let Some((temp_name, kind)) = temp {
-                    // Pre-commit failure (pre-publication arm): best-effort
-                    // kind-aware temp cleanup; residue is a known cleanup
-                    // debt, never a visible source.
-                    let _ = fs.cleanup_workdir_temp(temp_name, kind);
-                }
-                Err(err)
+        let publish_result = self.workdir_root_path().and_then(|workdir_path| {
+            self.publish_via_rename(
+                &workdir_path,
+                &temp.temp_name,
+                target.upper_dir_path,
+                target.name,
+                &mut marker,
+                target.lower,
+            )
+        });
+        if let Err(err) = publish_result {
+            if marker.is_committed() {
+                Self::mark_reconcile_pending(coordinate);
+            } else {
+                let _ = fs.cleanup_workdir_temp(&temp.temp_name, temp.temp_kind);
             }
+            return Err(err);
         }
+        Ok(())
     }
 
     /// Streams the lower regular file's data into the workdir temp.
@@ -429,12 +437,8 @@ impl OverlayInode {
     fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>, policy: XattrCopyPolicy) -> Result<()> {
         let lower = self.lower_source()?;
         let fs = self.fs_arc()?;
-        fs.policy()
-            .credential_policy()
-            .with_creator_credentials_fn(|| {
-                fs.xattr_policy()
-                    .copy_eligible_xattrs(lower.real_inode(), temp, policy)
-            })
+        fs.xattr_policy
+            .copy_eligible_xattrs(lower.real_inode(), temp, policy)
     }
 
     /// Publishes the upper authority semantically.
@@ -457,22 +461,19 @@ impl OverlayInode {
         // stay `Merged` or the pre-existing lower children would vanish from
         // `getdents`. Non-directories keep their pre-copy-up kind; `lowers`
         // are retained regardless so whiteouts keep publishing.
-        let kind = if self.type_().is_directory() && !old_facts.lowers().is_empty() {
+        let kind = if self.type_().is_directory() && !old_facts.lowers.is_empty() {
             PositiveKind::Merged
         } else {
-            old_facts.kind()
+            old_facts.kind
         };
         // Keep `upper_real` in scope past the facts construction: it is the
         // post-transition visible source passed to `replace_facts`.
-        let new_facts = OverlayObjectFacts::try_new(
-            kind,
-            Some(upper_real.clone()),
-            old_facts.lowers().to_vec(),
-        )
-        .ok_or_else(|| {
-            Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
-        })?;
-        let carrier = fs.project_new_upper(&self.facts_snapshot());
+        let new_facts =
+            ObjectFacts::try_new(kind, Some(upper_real.clone()), old_facts.lowers.to_vec())
+                .ok_or_else(|| {
+                    Error::with_message(Errno::EIO, "cannot construct the post-copy-up facts")
+                })?;
+        let carrier = fs.project_inode(&self.facts_snapshot());
         carrier.replace_facts(new_facts, &upper_real)?;
         Ok(())
     }
@@ -502,31 +503,10 @@ impl OverlayInode {
 
     /// Resolves the real object now published at the upper target name.
     fn upper_real_object(&self, upper_dir_path: &Path, name: &str) -> Result<RealObject> {
-        let child_path = Path::new(
-            upper_dir_path.mount_node().clone(),
-            upper_dir_path
-                .dentry()
-                .as_dir_dentry_or_err()?
-                .lookup_child(name)?,
-        );
+        let child_path = super::super::lookup_child_path(upper_dir_path, name)?;
         let fs = self.fs_arc()?;
-        let upper_layer = fs.layer_stack().upper.as_ref().ok_or_else(|| {
-            Error::with_message(Errno::EROFS, "the overlay mount has no upper layer")
-        })?;
-        Ok(RealObject::with_path(
-            0,
-            RealPath::from_path(&child_path),
-            upper_layer.fsid,
-            upper_layer.container_dev_id,
-        ))
-    }
-
-    /// Returns the pinned workdir staging workspace path of this mount.
-    ///
-    /// Lets the copy-up recipe arms resolve the staging workspace without
-    /// re-upgrading the mount themselves.
-    pub(in crate::fs::fs_impls::overlayfs) fn workdir_root_path(&self) -> Result<Path> {
-        self.fs_arc()?.workdir_root_path()
+        let upper_layer = fs.layer_stack.upper_layer()?;
+        Ok(upper_layer.child_real_object(&child_path))
     }
 
     /// Called on failure after physical publication: the upper object at the
@@ -542,7 +522,7 @@ impl OverlayInode {
     /// the checked access surfaces a structural violation as `EIO`.
     fn lower_source(&self) -> Result<RealObject> {
         self.facts_snapshot()
-            .lowers()
+            .lowers
             .first()
             .cloned()
             .ok_or_else(|| {
@@ -554,24 +534,23 @@ impl OverlayInode {
     }
 }
 
-/// The physical-upper-commit marker of a [`run_recipe`](OverlayInode::run_recipe)
-/// recipe closure.
+/// The physical-upper-commit marker of a promotion tail.
 ///
-/// A one-way latch over the commit boolean: the recipe calls
+/// A one-way latch over the commit boolean: the promotion calls
 /// [`CommitMarker::commit`] exactly once at the physical-upper-commit point,
-/// and the scaffold reads [`CommitMarker::is_committed`] to classify a later
-/// failure as reconcile vs pre-publication cleanup.
+/// and the promotion tail reads [`CommitMarker::is_committed`] to classify a
+/// later failure as reconcile vs pre-publication cleanup.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(in crate::fs::fs_impls::overlayfs) struct CommitMarker {
+pub(in overlayfs) struct CommitMarker {
     committed: bool,
 }
 
 impl CommitMarker {
-    pub(in crate::fs::fs_impls::overlayfs) fn commit(&mut self) {
+    pub(in overlayfs) fn commit(&mut self) {
         self.committed = true;
     }
 
-    pub(in crate::fs::fs_impls::overlayfs) fn is_committed(&self) -> bool {
+    pub(super) fn is_committed(&self) -> bool {
         self.committed
     }
 }

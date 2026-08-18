@@ -1330,3 +1330,72 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     rmdir-emptiness gates”；PROJ-D2-16 改 “this caller skips the layer
     resolution”）；R2 执行 20/20 闭合（done=20 skipped=0）。全部 `.rs` diff
     非注释行 = 0；`git diff --check` clean；未编译；已 amend 入最新 wave-9 WIP。
+
+- **`task_creator_overlayfs_g8_mechanical_20260818`**
+  - **Kind**: bounded Creator wave（G8 机械子集；12 个 OBJ，user-directed 2026-08-18）。
+  - **Parent / covered micros**: `N/A` — 跨 meso 结构清理波，无新 feature claim；
+    逐 OBJ 主 meso 归属见 packet §3 表。
+  - **Scope slicing**: 1 个 **opencode-go + deepseek-v4-flash** Creator 顺序执行
+    OBJ-1…OBJ-12（依赖顺序：G-4/G-6 先；G-1/G-8/G-10 随 xattr 收口；
+    G-3 依赖 G-6；H-1 与 H-12(e) 同轮）。7 个设计/裁决项（G-2/G-5/H-2/D-12/
+    G-12/H-5/H-8）不在本轮，禁止触碰。
+  - **Basis**: `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_mechanical_20260818_dispatch.md`；
+    权威原文 = v2 报告 `components/code-structure-cleanup/
+    task_reviewer_overlayfs_code_structure_proposal_20260817_audit.md` §2 G/D/H 条目。
+  - **Boundaries**: 只改 packet write-set 20 个 `.rs` + 1 份收据；compile_preflight
+    **withheld**（Creator 不运行任何命令）；编译门由后续 Checker packet 只
+    `cargo check`（容器 `codex-asterinas-dev`）执行；不改 legacy_fs.rs；无 ktest。
+  - **Result (2026-08-18, main-agent 验收)**: 收据 12/12 disposition
+    （OBJ-12(f) = done(pre-applied)）；`git diff --check` clean；diff 恰为
+    packet write-set 20 个 `.rs`；验收 grep 通过；main agent 机械修复 1 处
+    顺带未用 import（`dir/create.rs::OverlayFs`）。compile withheld，**run06
+    待派 Checker**。七项设计/裁决方向见 handoff §3.1（S-29 不做；S-62 只
+    2/3 且第三点取方案 A；S-59 保留 CSPRNG 随机命名、删 composite+serial）。
+
+- **`task_creator_overlayfs_g8_direction_step1_20260818`**
+  - **Kind**: bounded Creator wave（G8 方向 Step 1；user-directed 2026-08-18）。
+  - **Scope**: S-64（H-5 单 facts 快照）、S-65（H-8 `same_layer_composition`）、
+    S-66（D-12 overlap helper 提取，不共享底层谓词、不裁决时机）、
+    S-62（H-2 仅第 2/3 点：删 resize/fallocate 冗余 EROFS 门 + 方案 A 删
+    三处内层 `check_permission` 并写 entry admission contract）。第 1 点前导
+    ×5 不合并；S-29 不派。
+  - **Basis**: `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_direction_step1_20260818_dispatch.md`。
+  - **Result (2026-08-18)**: opencode-go + deepseek-v4-flash 1 个 Creator，
+    4/4 done；main agent 验收 diff clean、grep 通过；compile withheld；
+    **run06 PASS（exit 0，main-agent 直跑）**；已随 user 指令 amend。
+
+- **`task_creator_overlayfs_g8_direction_step2_20260818`**
+  - **Kind**: bounded Creator wave（G8 方向 Step 2；user-directed 2026-08-18）。
+  - **Scope**: S-59（G-12 命名统一：保留 CSPRNG 随机方案，删
+    `workdir_temp_name` 组合名 + `NEXT_TEMP_SERIAL` 原子 serial；
+    `create_workdir_temp` 去 `upper_parent_path` 参数，10 调用点同步；
+    probe 改调共享命名）、S-61（G-2 promote 四臂共享骨架，无数据搬运
+    闭包，新增 `finish_promotion`；`run_recipe` 保留给 dir 调用方）。
+  - **Basis**: `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_direction_step2_20260818_dispatch.md`。
+  - **Result (2026-08-18)**: opencode-go + deepseek-v4-flash 1 个 Creator，
+    2/2 done；main agent 验收 grep 通过并修复 1 处顺带未用变量
+    （`whiteout.rs::create_whiteout_temp` 的 `workdir_path`）；compile
+    withheld；**run06 PASS（exit 0，main-agent 直跑）**；已随 user 指令
+    amend。
+
+- **`task_reviewer_overlayfs_g10_keep_relocation_20260818`**
+  - **Kind**: bounded Reviewer wave（G10 KEEP 归位研讨 + 六项方向改动
+    helper/method 审计；user-directed 2026-08-18，只读）。
+  - **Scope**: 当前树 active `.rs` 全部 `pub(in overlayfs)`（排除
+    legacy_fs.rs）逐条 disposition；方向项 13 个 `.rs` 的新增/改位实体审计
+    （`run_recipe`/`workdir_temp_name`/`finish_promotion` 等必答）。
+  - **Basis**: `subagent-tasks/code-structure-cleanup/
+    task_reviewer_overlayfs_g10_keep_relocation_20260818_dispatch.md`。
+  - **Result (2026-08-18, ACCEPTED)**: opencode-go + deepseek-v4-flash 1 个
+    Reviewer，只写 1 份报告、0 `.rs` 改动；**KEEP 清单 121/121 闭合**
+    （KEEP 119 / 需小调整 1：`OPAQUE_MARKER_VALUE`；可移动 1：
+    `workdir_workspace_path` co-location，建议保守 KEEP）；方向项实体审计
+    结论：`run_recipe` 不移 dir、`workdir_temp_name` 不纯随机简化、
+    `finish_promotion` 参数/归属合理；两份 Creator 收据 census 无遗漏。
+  - **Next**: **P1 已执行**（2026-08-18 主代理直改 `OPAQUE_MARKER_VALUE`
+    → `pub(super)`，1 行；run07 PASS，exit 0；当前 KEEP=120）；P2
+    （workdir_workspace_path co-location）未执行，报告建议保守 KEEP，
+    待 user 最终确认。

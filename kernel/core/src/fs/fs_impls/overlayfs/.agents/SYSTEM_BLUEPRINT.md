@@ -402,6 +402,60 @@ Record only active or recently changed passes here. Durable slicing rationale be
     `subagent-tasks/wave9-day2-flash-cleanup-20260817/{r1,r2}/`；提案/收据
     `components/wave9-day2-flash-cleanup-20260817/{r1,r2}/`。
 
+- **`task_creator_overlayfs_g8_mechanical_20260818`** — **ACCEPTED 2026-08-18（结构验收 + run06 PASS）**
+  - **Kind**: bounded Creator wave（G8 机械子集 12 OBJ；user-directed 2026-08-18；
+    provider `opencode-go` + model `deepseek-v4-flash`，workflow 直派）。
+  - **Scope**: S-52/S-63/S-36/S-42/S-49/S-41/S-53/S-39/S-54/S-45/S-60/S-67
+    （v2 G-6/G-4/G-1/G-8/G-10/D-8/G-7/G-3/G-11/G-9/H-1/H-12）。
+    G-2/G-5/H-2/D-12/G-12/H-5/H-8 七个设计/裁决项不派；七项方向裁决见
+    handoff §3.1（user-confirmed：S-29 不做；S-62 只 2/3、第三点方案 A；
+    S-59 保留 CSPRNG 随机命名、删 composite+serial）。
+  - **Boundaries**: 只改 packet write-set 20 个 `.rs` + 1 份收据；compile
+    withheld；不改 legacy_fs.rs；无 ktest。
+  - **Result**: 12/12 闭合（OBJ-12(f) done(pre-applied)）；main agent 验收
+    diff clean、grep 通过，并修复 1 处顺带未用 import；已随 user 指令
+    amend 进 WIP。
+  - **Next**: run06 **PASS**（2026-08-18，main-agent 直跑 `cargo check`，
+    exit 0）；方向项 13 个 `.rs` 已随 user 指令 amend。
+  - **Artifacts**: packet `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_mechanical_20260818_dispatch.md`；收据
+    `components/code-structure-cleanup/g8_mechanical_20260818/`。
+
+- **`task_creator_overlayfs_g8_direction_step1_20260818`** — **ACCEPTED 2026-08-18（结构验收 + run06 PASS）**
+  - **Kind**: bounded Creator wave（G8 方向 Step 1；opencode-go +
+    deepseek-v4-flash）。
+  - **Scope**: S-64/S-65/S-66/S-62(2,3 方案 A)。S-62 第 1 点与 S-29 不派。
+  - **Result**: 4/4 done；main agent 验收 diff clean、grep 通过；compile
+    withheld → run06 PASS（exit 0）；已随 user 指令 amend。
+  - **Artifacts**: `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_direction_step1_20260818_dispatch.md`；收据
+    `components/code-structure-cleanup/g8_direction_step1_20260818/`。
+
+- **`task_creator_overlayfs_g8_direction_step2_20260818`** — **ACCEPTED 2026-08-18（结构验收 + run06 PASS）**
+  - **Kind**: bounded Creator wave（G8 方向 Step 2；opencode-go +
+    deepseek-v4-flash，未触发周限额）。
+  - **Scope**: S-59（CSPRNG 命名统一，删 composite+serial）、S-61（promote
+    无闭包共享骨架 + `finish_promotion`）。
+  - **Result**: 2/2 done；main agent 验收 grep 通过并修复 1 处顺带未用变量；
+    compile withheld → run06 PASS（exit 0）；已随 user 指令 amend。
+  - **Artifacts**: `subagent-tasks/code-structure-cleanup/
+    task_creator_overlayfs_g8_direction_step2_20260818_dispatch.md`；收据
+    `components/code-structure-cleanup/g8_direction_step2_20260818/`。
+
+- **`task_reviewer_overlayfs_g10_keep_relocation_20260818`** — **ACCEPTED 2026-08-18**
+  - **Kind**: bounded Reviewer wave（G10 KEEP 归位研讨 + 方向项 helper/method
+    审计；opencode-go + deepseek-v4-flash，只读）。
+  - **Result**: 报告 121/121 闭合（KEEP 119；需小调整 1 = `OPAQUE_MARKER_VALUE`；
+    可移动 1 = `workdir_workspace_path` co-location，建议保守 KEEP）；方向项
+    实体审计：`run_recipe` 不移 dir、`workdir_temp_name` 不纯随机简化、
+    `finish_promotion` 合理；两份收据 census 无遗漏；0 `.rs` 改动。
+  - **Next**: **P1 已执行**（`OPAQUE_MARKER_VALUE` → `pub(super)`，1 行；
+    run07 PASS，当前 KEEP=120）；P2 未执行（报告建议保守 KEEP）。
+  - **Artifacts**: packet `subagent-tasks/code-structure-cleanup/
+    task_reviewer_overlayfs_g10_keep_relocation_20260818_dispatch.md`；报告
+    `components/code-structure-cleanup/visibility_keep_relocation_20260818/
+    task_reviewer_overlayfs_g10_keep_relocation_20260818_report.md`。
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the
