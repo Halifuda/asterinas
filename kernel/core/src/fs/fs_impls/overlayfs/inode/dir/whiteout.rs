@@ -195,10 +195,7 @@ impl OverlayFs {
                 temp.into_parts()
             }
         };
-        Ok(WhiteoutHandle {
-            workdir_name,
-            path,
-        })
+        Ok(WhiteoutHandle { workdir_name, path })
     }
 
     /// Publishes a whiteout at `(upper_parent_path, name)`.

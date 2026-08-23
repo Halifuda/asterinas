@@ -596,12 +596,7 @@ impl ReaddirIndex {
     /// is the end of the cookie order; a mid-sequence insert must instead
     /// mark `NeedsRebuild` — never renumber already-exposed cookies.
     #[must_use]
-    fn insert_visible(
-        &mut self,
-        name: &str,
-        inode: Arc<OverlayInode>,
-        type_: InodeType,
-    ) -> bool {
+    fn insert_visible(&mut self, name: &str, inode: Arc<OverlayInode>, type_: InodeType) -> bool {
         if let Some(index) = self.entries.iter().position(|entry| {
             matches!(
                 entry,

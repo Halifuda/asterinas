@@ -16,9 +16,7 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::{
-            fs::OverlayFs,
-            inode::OverlayInode,
-            mknod_object_type, workdir_temp_name,
+            fs::OverlayFs, inode::OverlayInode, mknod_object_type, workdir_temp_name,
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},

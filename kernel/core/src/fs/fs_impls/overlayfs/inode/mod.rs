@@ -214,11 +214,7 @@ impl OverlayInode {
     /// The per-inode `lock` is held across both steps because the underlying
     /// fs does not process `O_APPEND` itself. This serializes concurrent
     /// appends on the post-write size.
-    fn append_write(
-        &self,
-        reader: &mut VmReader,
-        status_flags: StatusFlags,
-    ) -> Result<usize> {
+    fn append_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
         let _guard = self.lock.lock();
         let real = self.select_real_inode();
         let offset = real.size();
