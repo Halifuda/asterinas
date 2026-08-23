@@ -46,10 +46,9 @@ impl OverlayInode {
             Lookup::Negative(NegativeLookup::HiddenByWhiteout) => {
                 self.create_over_whiteout(name, type_, mode, mknod_type, index)
             }
-            Lookup::Positive(_) => Err(Error::with_message(
-                Errno::EEXIST,
-                "the overlay target already exists and is visible",
-            )),
+            // create expects a negative target; a fresh positive means the
+            // negative expectation became stale (upper changed underneath us).
+            Lookup::Positive(_) => Err(Error::new(Errno::ESTALE)),
         }
     }
 

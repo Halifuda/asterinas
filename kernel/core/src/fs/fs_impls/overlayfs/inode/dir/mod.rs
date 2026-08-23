@@ -94,6 +94,27 @@ impl OverlayInode {
         Ok(projected)
     }
 
+    /// Detects a stale upper-backed name: `current_index` still remembers an
+    /// upper-backed inode for `name`, but `fresh_lookup` no longer resolves to
+    /// that same object.
+    pub(super) fn is_stale_upper(
+        &self,
+        name: &str,
+        fresh_lookup: &Lookup,
+        current_index: &Option<ReaddirIndex>,
+    ) -> bool {
+        let Some(old_inode) = current_index.as_ref().and_then(|idx| idx.visible_inode(name)) else {
+            return false;
+        };
+        if old_inode.upper.get().is_none() {
+            return false;
+        }
+        match fresh_lookup {
+            Lookup::Positive(inode) => !Arc::ptr_eq(inode, &old_inode),
+            Lookup::Negative(negative) => *negative != NegativeLookup::HiddenByWhiteout,
+        }
+    }
+
     // Thin delegation to the current authority with no promotion: the
     // created symlink is already upper-backed.
     pub(super) fn write_link_impl(&self, target: &str) -> Result<()> {
@@ -158,10 +179,11 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         let mut dir_guard = self.lock_dir_transaction();
         // Fresh target projection under the parent directory transaction
-        // lock: a visible target is never silently replaced.
+        // lock: link expects a negative target; a fresh positive means that
+        // expectation became stale, so surface ESTALE.
         let target_lookup = fs.lookup(self, name)?;
         if matches!(target_lookup, Lookup::Positive(_)) {
-            return Err(Error::new(Errno::EEXIST));
+            return Err(Error::new(Errno::ESTALE));
         }
         let target_is_whiteout = matches!(
             target_lookup,

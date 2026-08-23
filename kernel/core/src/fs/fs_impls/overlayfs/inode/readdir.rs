@@ -165,17 +165,15 @@ impl OverlayInode {
         type_: InodeType,
         index: &mut Option<ReaddirIndex>,
     ) {
-        let Some(index) = index.as_mut() else {
-            return;
-        };
-        if index.validity == ReaddirIndexValidity::Valid
-            && self.upper.get().is_some()
-            && self.lowers.is_empty()
+        // Always record the freshly visible inode so the remove path can
+        // detect a later stale-upper disappearance even in merged/lower-backed
+        // parents whose index has not been built by a prior readdir.
+        let index = index.get_or_insert_with(ReaddirIndex::new);
+        if !index.insert_visible(name, inode, type_)
+            || index.validity != ReaddirIndexValidity::Valid
+            || self.upper.get().is_none()
+            || !self.lowers.is_empty()
         {
-            if !index.insert_visible(name, inode, type_) {
-                index.validity = ReaddirIndexValidity::NeedsRebuild;
-            }
-        } else {
             index.validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }

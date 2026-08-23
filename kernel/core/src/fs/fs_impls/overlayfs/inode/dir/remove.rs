@@ -28,7 +28,7 @@ use crate::{
         fs_impls::overlayfs::{
             fs::OverlayFs,
             inode::{
-                Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
+                Lookup, OverlayInode, ReaddirIndex,
                 copyup::workdir::{WorkdirTemp, WorkdirTempRequest},
                 xattr::{XattrCopyPolicy, copy_eligible_xattrs},
             },
@@ -64,29 +64,15 @@ impl OverlayInode {
     ) -> Result<()> {
         let fs = self.fs_arc()?;
         let lookup = fs.lookup(self, name)?;
+        if self.is_stale_upper(name, &lookup, index) {
+            return Err(translate_stale_upper_enoent(Error::with_message(
+                Errno::ENOENT,
+                "the overlay target became stale behind the overlay",
+            )));
+        }
         let target_inode = match lookup {
             Lookup::Positive(inode) => inode,
-            Lookup::Negative(negative) => {
-                // A whiteout means the name was removed through the overlay;
-                // the normal `ENOENT` path applies.
-                if negative == NegativeLookup::HiddenByWhiteout {
-                    return Err(Error::new(Errno::ENOENT));
-                }
-                // Stale-upper routing: an upper-backed inode remembered by the
-                // parent readdir index while the fresh scan no longer finds the
-                // name (and no whiteout covers it) means the upper object
-                // vanished behind the overlay. `Once<RealObject>` carries the
-                // "was upper-backed" evidence.
-                if let Some(old_inode) = index.as_ref().and_then(|idx| idx.visible_inode(name))
-                    && old_inode.upper.get().is_some()
-                {
-                    return Err(translate_stale_upper_enoent(Error::with_message(
-                        Errno::ENOENT,
-                        "the overlay target became stale behind the overlay",
-                    )));
-                }
-                return Err(Error::new(Errno::ENOENT));
-            }
+            Lookup::Negative(_) => return Err(Error::new(Errno::ENOENT)),
         };
         let target_facts = target_inode.real_object_stack();
 

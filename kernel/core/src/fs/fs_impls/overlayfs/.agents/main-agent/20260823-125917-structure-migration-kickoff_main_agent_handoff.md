@@ -218,7 +218,10 @@
 
 1. **新代码与 proposal 对照**：要求没有冗余代码、没有错位摆放的代码块、所有可见性均收窄到它需要的最窄。
 2. **格式与警告**：运行 `rustfmt`；检查 `cargo check` / `cargo clippy` 的所有 warning，逐一决策并解决。
-3. **测试**：运行相关测试/验证（具体范围待用户确认）。
+3. **测试**：
+   - **21 例 overlay xfstests**：20 例可调度矩阵 `029/002/003/006/007/009/010/011/012/014/016/019/022/024/026/031/038/039/063/077` + `overlay/028`（028 为后续补测的第 21 例，PASS）。
+   - **regression 套件中 overlayfs 相关项**：`test/initramfs/src/regression/fs/overlayfs/ovl_test` 与 `readdir_small_buffer`（也可直接跑 `AUTO_TEST=regression`，其中包含这两项）。
+   - 依据：`20260813-rebase-upstream_main_agent_handoff.md` §3.6 记录 21 例全 PASS + regression 全 PASS。
 
 #### Phase 3 Step 1 Workflow 编排（已记录，暂不执行）
 
