@@ -2,7 +2,7 @@
 
 # Handoff: Overlayfs 代码结构实际搬移（2026-08-23）
 
-**Status:** READY TO EXECUTE — 这是开始实际搬移前的交接。
+**Status:** PHASE 0 COMPLETE — LSIF 已生成，旧代码已移入 `old/`，主代码空间已清空，等待 Phase 1 结构搬移。
 
 ## Goal
 
@@ -19,8 +19,19 @@
   - `structure-design-proposal.md`：目标结构 + 章节顺序已改为 top-down。
   - `structure-design-appendices.md`：包含 A/B/C 逻辑修改点、锁序附录 E。
   - `symbol-file-map.md`：符号→目标文件映射 + 文件级迁移表。
-- 工作区当前还有未提交的其它修改（`mount/layers.rs`、`mount/options.rs`、`superblock.rs`、`workdir.rs`），搬移前需要先确认这些修改是否要纳入搬移基线。
-- 环境：`codex-asterinas-dev` container 已打开，rust-analyzer / jq 可用。
+- Phase 0 开始时 `git status -- kernel/core/src/fs/fs_impls/overlayfs` 为 clean；handoff 原先提到的 `mount/layers.rs`、`mount/options.rs`、`superblock.rs`、`workdir.rs` 未提交修改在当前工作区不存在，搬移基线即当前 HEAD。
+- 环境：`codex-asterinas-dev` container 已打开，rust-analyzer / jq 可用；当前 rust-analyzer nightly 的 LSIF 会 panic，已改用 VSCode 内置 standalone rust-analyzer 0.3.3016 生成成功。
+
+## Phase 0 执行记录（2026-08-23）
+
+- [x] 生成 LSIF：`/tmp/asterinas.lsif`（容器内 162MB，projectRoot `/root/asterinas`）。
+  - 使用 `/usr/local/bin/rust-analyzer-vscode`（0.3.3016-standalone）生成；容器默认 nightly rust-analyzer 1.99.0 的 `lsif` 会 panic，不能使用。
+- [x] 创建 old/ 参考区：`kernel/core/src/fs/fs_impls/overlayfs/.agents/refactor/old/`
+  - 已将全部 active/legacy 代码（33 个跟踪文件，含 `legacy_fs.rs`）从主树移入 old/，并用 `git show HEAD:...` 逐一比对，全部与 HEAD 一致。
+- [x] 清空主代码空间：`kernel/core/src/fs/fs_impls/overlayfs/` 现在除 `.agents/` 外没有 `.rs` 文件或旧模块目录。
+- [x] 按用户要求不 ignore old/：`.agents/refactor/` 保持可跟踪，old/ 代码将随本次 commit 纳入 git。
+- [x] **LSIF 提醒**：`/tmp/asterinas.lsif` 是在搬移前基于旧代码生成的，索引中的 document URI 仍指向原主树路径（如 `file:///root/asterinas/kernel/core/src/fs/fs_impls/overlayfs/...`）。这些旧路径现在已不存在，实际代码已移到 `.agents/refactor/old/` 下。使用 LSIF 做符号查询时要注意路径映射，或在新树成形后重新生成。
+- 当前 `git status` 对该 overlayfs 路径显示为旧文件删除 + old/ 新文件待跟踪 + handoff 修改；将作为一个 commit 提交。
 
 ## 搬移大原则
 
@@ -210,11 +221,9 @@
 
 ## Next Action（给下一个 agent）
 
-1. 先读 `structure-design-proposal.md`、`structure-design-appendices.md`、`symbol-file-map.md`。
-2. 确认当前工作区未提交修改的处理方式（纳入基线 or 忽略）。
-3. 执行 Phase 0：创建 `.agents/refactor/old/` 参考区，确认 old/ 不参与编译。
-4. 从文件级迁移表中选第一个可独立完成的切片开始搬移，例如：
-   - 先搬 `fs_type.rs`、`mod.rs`、`superblock.rs → fs/mod.rs` 这一组；
+1. Phase 0 已完成（LSIF、old/、清空主树），无需重复。
+2. 从 `symbol-file-map.md` 文件级迁移表选第一个可独立完成的切片开始 Phase 1，例如：
+   - 先建 `mod.rs`、`fs_type.rs`、`layer.rs`、`real.rs` 与 `fs/`、`inode/` 骨架；
    - 或按依赖从 `real.rs`/`layer.rs` 基础类型开始。
-5. 每个切片完成后运行 `cargo check`（或按既定批次策略验证），并在 handoff/commit 中记录进度。
-6. 不要同时开始 Phase 2 的语义修改；先把 Phase 1 的结构搬移推进到可编译状态。
+3. 每个切片完成后运行 `cargo check`（或按既定批次策略验证），并在 handoff/commit 中记录进度。
+4. 不要同时开始 Phase 2 的语义修改；先把 Phase 1 的结构搬移推进到可编译状态。
