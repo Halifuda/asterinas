@@ -36,25 +36,12 @@ use crate::{
     process::{Gid, Uid, credentials::capabilities::CapSet},
 };
 
-/// The ownership/capability facts of the current caller against one projected
-/// owner.
-///
-/// The `is_owner`/`has_cap` pair is the gate decision shared by the
-/// ownership-sensitive setters and the best-effort time-setter gate.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct CallerOwnerFacts {
-    /// `fsuid == projected uid`.
-    is_owner: bool,
-    /// `true` when the caller holds the probed capability;
-    /// kernel contexts fail open.
-    has_cap: bool,
-}
-
 impl OverlayInode {
     pub(super) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
         let metadata = self.metadata()?;
-        let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
-        if !facts.is_owner && !facts.has_cap {
+        let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
+        let has_cap = current_task_has_capability(CapSet::FOWNER);
+        if !is_owner && !has_cap {
             return Err(Error::with_message(
                 Errno::EPERM,
                 "the caller is not the file owner and lacks CAP_FOWNER",
@@ -62,11 +49,9 @@ impl OverlayInode {
         }
         // A non-owner without `CAP_FSETID` cannot stamp set-id bits onto the
         // file.
-        let has_fsetid = self
-            .caller_owner_facts(metadata.uid, CapSet::FSETID)
-            .has_cap;
+        let has_fsetid = current_task_has_capability(CapSet::FSETID);
         let mut mode = mode;
-        if !facts.is_owner && !has_fsetid {
+        if !is_owner && !has_fsetid {
             mode.remove(InodeMode::S_ISUID | InodeMode::S_ISGID);
         }
         self.check_permission(AccessType::Mutating, Permission::empty())?;
@@ -75,7 +60,7 @@ impl OverlayInode {
 
     pub(super) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
         let metadata = self.metadata()?;
-        if uid != metadata.uid && !self.caller_owner_facts(metadata.uid, CapSet::CHOWN).has_cap {
+        if uid != metadata.uid && !current_task_has_capability(CapSet::CHOWN) {
             return Err(Error::with_message(
                 Errno::EPERM,
                 "the caller lacks CAP_CHOWN for an ownership change",
@@ -88,12 +73,13 @@ impl OverlayInode {
     pub(super) fn set_group_impl(&self, gid: Gid) -> Result<()> {
         let metadata = self.metadata()?;
         if gid != metadata.gid {
-            let facts = self.caller_owner_facts(metadata.uid, CapSet::CHOWN);
+            let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
+            let has_cap = current_task_has_capability(CapSet::CHOWN);
             // The owner-chgrp exemption: the owner may change the group to one
             // of its own supplementary groups (kernel contexts default to
             // `false`).
             let in_own_group = current_in_group(gid);
-            if !facts.has_cap && !(facts.is_owner && in_own_group) {
+            if !has_cap && !(is_owner && in_own_group) {
                 return Err(Error::with_message(
                     Errno::EPERM,
                     "the caller lacks CAP_CHOWN for a group change",
@@ -118,31 +104,19 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Resolves the caller's ownership/capability facts against the given
-    /// projected owner.
-    ///
-    /// Consumed by the ownership-sensitive setters and the best-effort
-    /// time-setter gate.
-    fn caller_owner_facts(&self, projected_uid: Uid, cap: CapSet) -> CallerOwnerFacts {
-        let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == projected_uid);
-        CallerOwnerFacts {
-            is_owner,
-            has_cap: current_task_has_capability(cap),
-        }
-    }
-
     /// Runs one best-effort time setter (the infallible VFS time-setter surface
     /// makes failures silent no-ops).
     fn best_effort_time_set(&self, operation_fn: impl FnOnce(&Arc<dyn Inode>)) {
         let Some(metadata) = self.metadata().ok() else {
             return;
         };
-        let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
+        let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
+        let has_cap = current_task_has_capability(CapSet::FOWNER);
         if self
             .check_permission(AccessType::Mutating, Permission::MAY_WRITE)
             .is_err()
         {
-            if !facts.is_owner && !facts.has_cap {
+            if !is_owner && !has_cap {
                 return;
             }
             if self

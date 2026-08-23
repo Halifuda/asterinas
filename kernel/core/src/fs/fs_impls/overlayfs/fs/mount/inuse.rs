@@ -41,7 +41,7 @@ pub(in super::super) struct Uuid(u64);
 
 impl Uuid {
     /// Creates a [`Uuid`], rejecting the zero value with `EINVAL`.
-    pub(super) fn try_new(value: u64) -> Result<Self> {
+    fn try_new(value: u64) -> Result<Self> {
         if value == 0 {
             return_errno_with_message!(Errno::EINVAL, "the overlay uuid must be non-zero");
         }
@@ -70,7 +70,7 @@ impl Uuid {
 /// The guard pins the claimed inode so the slot cannot be evicted while the
 /// claim is held and holds the unified non-zero token.
 #[derive(Debug)]
-pub(super) struct InuseGuard {
+struct InuseGuard {
     inode: Arc<dyn Inode>,
     token: Uuid,
 }
@@ -79,7 +79,7 @@ impl InuseGuard {
     /// Claims the inode's `OverlayInuseSlot` with `identity` as the token.
     ///
     /// Returns `EBUSY` when the slot is already claimed by another holder.
-    pub(super) fn try_claim(inode: Arc<dyn Inode>, identity: Uuid) -> Result<Self> {
+    fn try_claim(inode: Arc<dyn Inode>, identity: Uuid) -> Result<Self> {
         inode.overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
             inode,
@@ -100,7 +100,7 @@ pub(in overlayfs) struct UpperWorkdirInuse {
     workdir: InuseGuard,
     upper: InuseGuard,
     identity: Uuid,
-    pub(in overlayfs) workspace: Option<Path>,
+    workspace: Option<Path>,
 }
 
 impl UpperWorkdirInuse {
@@ -228,6 +228,29 @@ impl UpperWorkdirInuse {
         self.upper
             .inode
             .set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)
+    }
+
+    /// Returns the pinned `<workdir>/work` staging workspace inode.
+    pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
+        self.workspace
+            .as_ref()
+            .map(|workspace| workspace.inode())
+            .ok_or_else(|| {
+                Error::with_message(
+                    Errno::EROFS,
+                    "the overlay workdir workspace is not prepared",
+                )
+            })
+    }
+
+    /// Returns the pinned `<workdir>/work` staging workspace path.
+    pub(in overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
+        self.workspace.as_ref().ok_or_else(|| {
+            Error::with_message(
+                Errno::EROFS,
+                "the overlay workdir workspace is not prepared",
+            )
+        })
     }
 
     /// Reads an existing persisted identity from the upper root.

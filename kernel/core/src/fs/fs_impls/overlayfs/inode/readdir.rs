@@ -40,10 +40,10 @@ use crate::{
 /// `Ord` supports binary-search `partition_point`, while `Hash`/`Eq` keep the
 /// newtype usable as a key/cursor.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(super) struct ReaddirCookie(u64);
+struct ReaddirCookie(u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ReaddirIndexValidity {
+enum ReaddirIndexValidity {
     Valid,
     NeedsRebuild,
 }
@@ -56,7 +56,7 @@ pub(super) struct ReaddirIndex {
     tombstone_count: usize,
 }
 
-pub(super) enum ReaddirIndexEntry {
+enum ReaddirIndexEntry {
     Visible {
         name: String,
         cookie: ReaddirCookie,
@@ -313,7 +313,7 @@ impl OverlayInode {
     /// overlay parent's visible source is on the same layer, otherwise an
     /// approximation), falling back to the stable `d_ino("..") ==
     /// d_ino(".")` self-parent when no disclosure-safe projection exists.
-    pub(super) fn resolve_parent_object_id(&self, facts: &RealObjectStack) -> ObjectId {
+    fn resolve_parent_object_id(&self, facts: &RealObjectStack) -> ObjectId {
         let fs = match self.fs_arc() {
             Ok(fs) => fs,
             Err(err) => {
@@ -382,7 +382,7 @@ impl OverlayInode {
     /// attempts the visible-source projection. The underlying `read_lower_id`
     /// is caller-credential-gated, so `d_ino("..")` may differ between
     /// privileged and unprivileged readers (logged at `debug!`).
-    pub(super) fn project_parent_from_lower_record(
+    fn project_parent_from_lower_record(
         &self,
         fs: &OverlayFs,
         parent_real_inode: &Arc<dyn Inode>,
@@ -435,7 +435,7 @@ impl OverlayInode {
     /// cache and compares it against `self.key()`. It fails closed (serves
     /// the self-parent fallback) when the root is not registered, without
     /// disclosing the backing-store parent.
-    pub(super) fn is_mount_root(&self, fs: &OverlayFs) -> bool {
+    fn is_mount_root(&self, fs: &OverlayFs) -> bool {
         match fs.inodes().get(fs.root_visible_key()) {
             Some(root) => root.key() == self.key(),
             None => {
@@ -453,7 +453,7 @@ impl OverlayInode {
     /// disclosure-safely or deterministically (overlay root, xino-off /
     /// overflow directory branch, unresolvable real parent, or unavailable
     /// owning mount).
-    pub(super) fn parent_fallback(&self) -> ObjectId {
+    fn parent_fallback(&self) -> ObjectId {
         self.object_id()
     }
 }
@@ -559,7 +559,7 @@ impl ReaddirIndex {
     /// Converts the `Visible` entry `name` into a `Tombstone` in place (O(n)
     /// by-name find, the dominant maintenance cost).
     #[must_use]
-    pub(super) fn remove_visible(&mut self, name: &str) -> bool {
+    fn remove_visible(&mut self, name: &str) -> bool {
         let Some(index) = self.entries.iter().position(|entry| {
             matches!(
                 entry,
@@ -596,7 +596,7 @@ impl ReaddirIndex {
     /// is the end of the cookie order; a mid-sequence insert must instead
     /// mark `NeedsRebuild` — never renumber already-exposed cookies.
     #[must_use]
-    pub(super) fn insert_visible(
+    fn insert_visible(
         &mut self,
         name: &str,
         inode: Arc<OverlayInode>,

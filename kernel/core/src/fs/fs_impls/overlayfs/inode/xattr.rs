@@ -29,7 +29,7 @@ use crate::{
 
 /// The four-way classification result of an xattr full name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum XattrClass {
+enum XattrClass {
     /// A user.*/system.*/security.*/trusted.* (non-overlay) name: delegate to
     /// the real authority.
     Public,
@@ -58,7 +58,7 @@ const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
 const USER_OVERLAY_PREFIX: &str = "user.overlay.";
 
 /// The durable lower-source origin record name.
-pub(super) const ORIGIN_XATTR_FULL_NAME: &str = "trusted.overlay.origin";
+const ORIGIN_XATTR_FULL_NAME: &str = "trusted.overlay.origin";
 
 /// Returns the parsed [`XattrName`] for the overlay origin record.
 pub(super) fn origin_xattr_name() -> Result<XattrName<'static>> {
@@ -70,10 +70,10 @@ pub(super) fn origin_xattr_name() -> Result<XattrName<'static>> {
 const ESCAPED_OVERLAY_PREFIX: &str = "overlay.overlay.";
 
 /// The opaque marker name; the clear-empty recipe writes it from here.
-pub(super) const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
+const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
 
 /// The opaque marker value; the reader requires the first byte `b'y'`.
-pub(super) const OPAQUE_MARKER_VALUE: &[u8] = b"y";
+const OPAQUE_MARKER_VALUE: &[u8] = b"y";
 
 /// The whiteout recipe consumes this name.
 pub(super) const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
@@ -83,10 +83,10 @@ pub(super) const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
 
 /// The impure marker is only ever read/written/cleared through the internal
 /// xattr policy functions.
-pub(super) const IMPURE_XATTR_FULL_NAME: &str = "trusted.overlay.impure";
+const IMPURE_XATTR_FULL_NAME: &str = "trusted.overlay.impure";
 
 /// The impure marker value; the reader is presence-based.
-pub(super) const IMPURE_MARKER_VALUE: &[u8] = b"y";
+const IMPURE_MARKER_VALUE: &[u8] = b"y";
 
 /// The xattr-copy failure policy of the shared xattr copy
 /// ([`copy_eligible_xattrs`]): strict aborts on a denied
@@ -126,7 +126,7 @@ pub(super) enum MarkerReadSemantics {
 
 /// Classifies an xattr full name into the four-way
 /// `Public`/`Private`/`Escaped`/`Reserved` classes.
-pub(super) fn classify(full_name: &str) -> XattrClass {
+fn classify(full_name: &str) -> XattrClass {
     if let Some(suffix) = full_name
         .strip_prefix(TRUSTED_OVERLAY_PREFIX)
         .or_else(|| full_name.strip_prefix(USER_OVERLAY_PREFIX))
@@ -156,7 +156,7 @@ pub(super) fn is_private(full_name: &str) -> bool {
 /// overlay-private name; with a zero-capacity `list_writer` (the
 /// `listxattr(path, NULL, 0)` size probe) it reports the total filtered
 /// size without writing.
-pub(super) fn filter_private_names(raw_list: &[u8], list_writer: &mut VmWriter) -> Result<usize> {
+fn filter_private_names(raw_list: &[u8], list_writer: &mut VmWriter) -> Result<usize> {
     let mut bytes_written = 0;
     for name_bytes in raw_list.split(|&byte| byte == 0) {
         if name_bytes.is_empty() {
@@ -343,7 +343,7 @@ pub(super) fn has_marker(
 ///
 /// Presence probe on the real upper directory: the marker is interpreted
 /// by presence, not by value.
-pub(super) fn has_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<bool> {
+fn has_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<bool> {
     has_marker(
         real_dir,
         impure_marker_name()?,
@@ -371,7 +371,7 @@ pub(super) fn set_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<()> {
 
 /// Removes the impure marker from the real upper directory `real_dir`.
 /// Absence is already the cleared state, so clearing is idempotent.
-pub(super) fn clear_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<()> {
+fn clear_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<()> {
     let name = impure_marker_name()?;
     match real_dir.remove_xattr(name) {
         Ok(()) => Ok(()),
@@ -416,7 +416,7 @@ impl OverlayInode {
     ///
     /// A residual check-use race with an external lower writer
     /// cannot be closed by an overlay lock, so it is deliberately not handled.
-    pub(super) fn refresh_impure_marker(&self, index: &mut Option<ReaddirIndex>) -> Result<()> {
+    fn refresh_impure_marker(&self, index: &mut Option<ReaddirIndex>) -> Result<()> {
         // Upper-present gate: the marker lives only on real upper
         // directories; a lower-only directory cannot carry one.
         let Some(upper_real) = self.upper.get() else {

@@ -6,8 +6,8 @@
 //!
 //! [`OverlayInode::ensure_upper_authority`] is the single promotion entry.
 //! The per-object [`CopyUpTransition`] coordinate is recorded once at the
-//! first positive binding publication; the trigger promotes ancestors before
-//! the child and serializes winners through `copyup_transition`.
+//! first positive lookup; the trigger promotes ancestors before the child
+//! and serializes winners through `copyup_transition`.
 //!
 //! ## References
 //!
@@ -41,20 +41,20 @@ pub(super) mod workdir;
 
 /// The copy-up publication coordinate and phase of one logical overlay object.
 ///
-/// Recorded exactly once at the first positive-binding publication; its
-/// coordinate fields are fixed and only `phase` can transition thereafter;
+/// Recorded exactly once at the first positive lookup; its coordinate fields
+/// are fixed and only `phase` can transition thereafter;
 /// the upper authority in the real-object state is the durable outcome, so no
 /// copy-up-completed history marker exists. The publication-parent chain is
 /// acyclic and root-terminated, so the trigger's top-down ancestor walk
 /// terminates and never re-enters the same instance.
 pub(super) struct CopyUpTransition {
     /// The logical parent overlay inode; `None` until the first positive
-    /// binding records it. Its upper existence is resolved by the trigger's
+    /// lookup records it. Its upper existence is resolved by the trigger's
     /// ancestor walk, which checks the parent's upper existence and may
     /// promote it first.
-    pub(super) publication_parent: Option<Arc<OverlayInode>>,
-    pub(super) name: Option<String>,
-    pub(super) phase: CopyUpPhase,
+    publication_parent: Option<Arc<OverlayInode>>,
+    name: Option<String>,
+    phase: CopyUpPhase,
 }
 
 impl CopyUpTransition {
@@ -71,15 +71,16 @@ impl CopyUpTransition {
 /// The transition marker of one copy-up coordination.
 ///
 /// Maps the copy-up phase values to their semantic states:
-/// - lower-authoritative: `facts.upper` is `None` and [`CopyUpPhase::Idle`].
+/// - lower-authoritative: the real-object stack has no upper and
+///   [`CopyUpPhase::Idle`].
 /// - promotion-in-progress: the `copyup_transition` guard is held by
 ///   the winner (observable only as mutex contention).
-/// - upper-authoritative: `facts.upper` is `Some`.
+/// - upper-authoritative: the real-object stack has an upper.
 /// - retryable failure: the error is returned to the caller (authority
 ///   unchanged, no durable marker needed).
 /// - reconcile-required: [`CopyUpPhase::ReconcilePending`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CopyUpPhase {
+enum CopyUpPhase {
     /// The coordinate carries no unfinished transition; a lower authority (if
     /// any) is clean.
     Idle,
@@ -105,9 +106,9 @@ const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
 impl OverlayInode {
     /// Records the copy-up transition coordinate at the first positive
-    /// binding publication.
+    /// lookup.
     ///
-    /// The coordinate is set once — the first positive binding wins; the
+    /// The coordinate is set once — the first positive lookup wins; the
     /// non-blocking `try_lock` skips when contended because a transition
     /// already running has already set it.
     pub(super) fn try_record_copyup_transition(
@@ -153,7 +154,7 @@ impl OverlayInode {
         // `copyup_transition` read clones the logical parent and name so the
         // guard is released before the recursive ancestor walk; both are
         // fixed once the coordinate is recorded, so the winner body reuses
-        // this single binding.
+        // this single coordinate.
         let (publication_parent, name) = {
             let transition = self.lock_copyup_transition();
             let Some(publication_parent) = transition.publication_parent.as_ref().cloned() else {
@@ -202,7 +203,7 @@ impl OverlayInode {
     /// held. The object kind is dispatched internally; success commits the
     /// phase to [`CopyUpPhase::Idle`], and recipe-arm failures classify as
     /// cleanup-before-publication vs `ReconcilePending`.
-    pub(super) fn promote(
+    fn promote(
         &self,
         publication_parent: &Arc<OverlayInode>,
         name: &str,
@@ -250,7 +251,7 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(
+                        copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
@@ -285,7 +286,7 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(
+                        copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
@@ -324,7 +325,7 @@ impl OverlayInode {
                     .promote_symlink(temp.inode())
                     .and_then(|_| self.transfer_metadata(lower.real_inode(), temp.inode()))
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(
+                        copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
@@ -399,7 +400,7 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(
+                        copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
@@ -578,22 +579,6 @@ impl OverlayInode {
         Ok(())
     }
 
-    /// Copies only `Public` xattrs (`User`/`Trusted`/`Security` namespaces)
-    /// from the lower source; overlay-private names and the `System`
-    /// namespace stay excluded.
-    ///
-    /// The copy-up policy is strict: a denied source read
-    /// (`EACCES`/`EPERM`) propagates and fails the copy-up rather than
-    /// silently dropping `security.*`/`trusted.*` metadata.
-    pub(super) fn copy_eligible_xattrs(
-        &self,
-        source: &Arc<dyn Inode>,
-        temp: &Arc<dyn Inode>,
-        policy: XattrCopyPolicy,
-    ) -> Result<()> {
-        copy_eligible_xattrs(source, temp, policy)
-    }
-
     /// Publishes the upper authority semantically.
     ///
     /// After publication the visible source of this object is the upper real
@@ -620,7 +605,7 @@ impl OverlayInode {
     ///
     /// Covers the upper entry's object type and basic mode metadata; a
     /// mismatch rejects the reconcile with `EIO`.
-    pub(super) fn verify_upper_target(&self, upper_dir_path: &Path, name: &str) -> Result<()> {
+    fn verify_upper_target(&self, upper_dir_path: &Path, name: &str) -> Result<()> {
         let upper_real = self.upper_real_object(upper_dir_path, name)?;
         let lower = self.lower_source()?;
         if upper_real.real_inode().type_() != lower.real_inode().type_() {

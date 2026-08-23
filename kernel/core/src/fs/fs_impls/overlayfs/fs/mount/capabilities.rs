@@ -111,7 +111,7 @@ impl UpperFilesystemCapabilities {
         self.can_store_private_xattr
     }
 
-    pub(super) fn can_report_directory_type(&self) -> bool {
+    fn can_report_directory_type(&self) -> bool {
         self.can_report_directory_type
     }
 

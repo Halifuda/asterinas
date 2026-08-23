@@ -214,13 +214,27 @@
 > - `copyup_transition`：当前是 `Mutex<Option<CopyUpTransition>>`，proposal 要求 `Mutex<CopyUpTransition>`；列入 B 步骤对齐。
 > - 其余目标文件与 proposal / symbol-file-map 基本一致。
 
-### Phase 3：清理与验证
+### Phase 3：清理与验证（已更新 2026-08-23）
 
-1. 新树完整 `cargo check`、`make check`、相关 overlayfs 测试。
-2. `rg` 确认没有旧路径残留引用。
-3. 确认 `legacy_fs.rs` 和 `old/` 不影响编译。
-4. 测试通过后删除 `old/` 参考区。
-5. 最后整理 commit 历史，确保每个 commit 可读。
+1. **新代码与 proposal 对照**：要求没有冗余代码、没有错位摆放的代码块、所有可见性均收窄到它需要的最窄。
+2. **格式与警告**：运行 `rustfmt`；检查 `cargo check` / `cargo clippy` 的所有 warning，逐一决策并解决。
+3. **测试**：运行相关测试/验证（具体范围待用户确认）。
+
+#### Phase 3 Step 1 Workflow 编排（已记录，暂不执行）
+
+- **并行 Creator × 3**（write-set 互斥）：
+  - `p3s1-top-fs`：顶层 `mod.rs` / `fs_type.rs` / `real.rs` / `layer.rs` + `fs/` 子树
+  - `p3s1-inode-core`：`inode/mod.rs` / `inode_cache.rs` / `lookup.rs` / `identity.rs` / `readdir.rs` / `data.rs` / `permission.rs` / `metadata.rs` / `xattr.rs`
+  - `p3s1-inode-leaf`：`inode/copyup/` + `inode/dir/`
+- 每个 Creator：
+  - 对照 proposal / symbol-file-map / appendices 审计自己子树；
+  - 删除冗余代码（重复 helper、无用 re-export、死字段/类型）；
+  - 修正错位摆放（按 proposal 文件归属；跨子树移动只报告不代做）；
+  - 收窄可见性到最窄（顶层模块统一用 `pub(super)`，不滥用 `pub(in overlayfs)`）；
+  - 可运行 `cargo check` / `clippy` 做局部验证；
+  - 不改 `old/`、`.agents` 记录、`legacy_fs.rs`。
+- **收尾 Checker × 1**：跑一次 `cargo check` 确认可编译；用 `rg` 检查旧路径/旧符号残留。
+- **主代理复核**：检查 git diff 与 scope，输出汇总。
 
 ## 参考资料
 
@@ -241,5 +255,5 @@
 
 ## Next Action（给下一个 agent）
 
-1. Phase 0/1/2 均已完成；Phase 2 的 B/C/A/T/T7/B5 已执行，`cargo check` / `cargo clippy` 通过。
-2. 下一步是 Phase 3：清理与验证（`rg` 旧路径残留、确认 `legacy_fs.rs` 和 `old/` 不影响编译、整理 commit 历史），或按用户指示先提交当前 Phase 2 改动。
+1. Phase 0/1/2 均已完成并已提交；Phase 2 的 B/C/A/T/T7/B5 已执行，`cargo check` / `cargo clippy` 通过。
+2. 下一步是 Phase 3（按用户更新后的定义）：proposal 对照与冗余/错位/可见性收窄检查 → `rustfmt` + warning 逐项决策解决 → 测试。

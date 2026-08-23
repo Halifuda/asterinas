@@ -66,11 +66,11 @@ pub(super) struct ObjectId {
 #[derive(Clone, Copy, Debug)]
 pub(in overlayfs) struct LowerLayerIdentity {
     /// The per-mount layer ordinal.
-    pub(super) fsid: u64,
+    fsid: u64,
     /// The backend container device id of the layer.
-    pub(super) container_dev_id: DeviceId,
+    container_dev_id: DeviceId,
     /// The layer root's real inode number.
-    pub(super) lower_layer_root_ino: u64,
+    lower_layer_root_ino: u64,
 }
 
 /// Collects the construction-local layer identity inputs for
@@ -432,7 +432,7 @@ impl LowerIdOrigin {
     ///
     /// The per-mount `fsid` is deliberately not persisted — it is derived at
     /// read time from the device/root pair.
-    pub(super) fn try_from_lower(lower: &RealObject, lower_layer_root_ino: u64) -> Result<Self> {
+    fn try_from_lower(lower: &RealObject, lower_layer_root_ino: u64) -> Result<Self> {
         Ok(Self {
             container_dev_id: lower.container_dev_id(),
             lower_layer_root_ino,
@@ -441,7 +441,7 @@ impl LowerIdOrigin {
     }
 
     /// Serializes the record into the native 32-byte wire buffer.
-    pub(super) fn serialize(&self) -> Vec<u8> {
+    fn serialize(&self) -> Vec<u8> {
         let mut wire = Vec::with_capacity(ORIGIN_WIRE_TOTAL_LEN);
         wire.extend_from_slice(&ORIGIN_WIRE_MAGIC.to_ne_bytes());
         wire.push(ORIGIN_WIRE_VERSION);
@@ -473,7 +473,7 @@ impl LowerIdOrigin {
     /// Conservatively decodes a wire buffer into a record: `Ok(None)` on any
     /// structural mismatch (wrong length, bad magic, bad version, or unknown
     /// flag bits); `Err` is reserved and unreachable.
-    pub(super) fn decode(bytes: &[u8]) -> Result<Option<Self>> {
+    fn decode(bytes: &[u8]) -> Result<Option<Self>> {
         if bytes.len() != ORIGIN_WIRE_TOTAL_LEN {
             return Ok(None);
         }

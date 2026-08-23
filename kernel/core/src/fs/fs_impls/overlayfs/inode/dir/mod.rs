@@ -2,7 +2,7 @@
 
 //! The overlayfs namespace-mutation and whiteout subsystem.
 //!
-//! This module hosts thin `Inode`-trait entries for directory name-space
+//! This module hosts the `Inode`-trait entries for directory name-space
 //! mutations (create/mknod/link/unlink/rmdir/rename). Each entry resolves a
 //! fresh projection of the target name under the parent directory transaction
 //! lock and delegates the actual mutation to a per-directory recipe.
@@ -16,7 +16,7 @@
 //! - **whiteout**: an upper-layer visibility barrier published when a
 //!   lower-backed name is removed; the `whiteout` submodule owns its cache and
 //!   publish mechanics.
-//! - **entry admission contract**: the five namespace-mutation entries run
+//! - **entry admission contract**: the six namespace-mutation entries run
 //!   `check_permission(Mutating, MAY_WRITE)` (including any required
 //!   copy-up promotion) before acquiring the parent directory transaction
 //!   lock; rename additionally pre-promotes the source before taking either
@@ -256,7 +256,7 @@ impl OverlayInode {
     ///
     /// The payload is `Some(ReaddirIndex)` for directories; non-directories
     /// still carry the lock as a plain serialization token.
-    pub(super) fn lock_dir_transaction(&self) -> MutexGuard<'_, Option<ReaddirIndex>> {
+    fn lock_dir_transaction(&self) -> MutexGuard<'_, Option<ReaddirIndex>> {
         self.lock.lock()
     }
 
@@ -265,7 +265,7 @@ impl OverlayInode {
     ///
     /// `RealObjectKey` is not orderable, so the parents are ordered by
     /// `Arc::as_ptr`; the same-inode case acquires the single guard once.
-    pub(super) fn lock_parent_dir_transactions<'a, 'b>(
+    fn lock_parent_dir_transactions<'a, 'b>(
         &'a self,
         other: Option<&'b Arc<OverlayInode>>,
     ) -> Result<DirLockPair<'a, 'b>> {

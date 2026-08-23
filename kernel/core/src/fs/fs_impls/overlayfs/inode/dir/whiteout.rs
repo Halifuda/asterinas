@@ -35,7 +35,7 @@ use crate::{
             },
         },
         vfs::{
-            inode::{Inode, MknodType, RenameMode},
+            inode::{MknodType, RenameMode},
             path::Path,
             xattr::XattrSetFlags,
         },
@@ -102,15 +102,7 @@ impl WhiteoutCache {
 /// outlives its use in one mutation unless re-cached. Owned by
 /// `WhiteoutCache::cached` or a mutation-local.
 #[derive(Debug)]
-pub(super) struct WhiteoutHandle {
-    /// The whiteout object (char `0:0` device or zero-size file + whiteout
-    /// xattr).
-    #[expect(
-        dead_code,
-        reason = "retained strong pin: the strong inode pin keeps the workdir object alive \
-                  while the dentry-anchored `path` routes the publish arms"
-    )]
-    inode: Arc<dyn Inode>,
+struct WhiteoutHandle {
     /// Its name in the workdir; needed for rename-over publishes.
     workdir_name: String,
     /// The dentry-anchored workdir temp path of the whiteout; the
@@ -122,7 +114,7 @@ pub(super) struct WhiteoutHandle {
 /// because the two forms carry different recipe behavior (mknod vs
 /// create+xattr).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum WhiteoutRepresentation {
+enum WhiteoutRepresentation {
     /// Classic whiteout: char device `0:0` (workdir mknod).
     CharDevice,
     /// Xattr whiteout: zero-size regular file + `trusted.overlay.whiteout`
@@ -204,7 +196,6 @@ impl OverlayFs {
             }
         };
         Ok(WhiteoutHandle {
-            inode: path.inode().clone(),
             workdir_name,
             path,
         })

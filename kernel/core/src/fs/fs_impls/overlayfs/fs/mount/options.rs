@@ -24,15 +24,15 @@ use crate::{fs::vfs::file_system::FsFlags, prelude::*};
 #[derive(Debug)]
 pub(in super::super) struct MountOptions {
     /// Lower layer paths in option order; the first option is the topmost.
-    pub(in super::super) lower_dirs: Vec<String>,
+    pub(super) lower_dirs: Vec<String>,
     /// Upper layer path; `None` means a read-only overlay.
-    pub(in super::super) upper_dir: Option<String>,
+    pub(super) upper_dir: Option<String>,
     /// Work directory path; `Some` iff `upper_dir` is `Some`.
-    pub(in super::super) work_dir: Option<String>,
-    pub(in super::super) is_forced_read_only: bool,
+    pub(super) work_dir: Option<String>,
+    pub(super) is_forced_read_only: bool,
     pub(in super::super) is_default_permissions: bool,
     /// The UUID persistence mode; `None` means [`UuidMode::Auto`].
-    pub(in super::super) uuid_mode: Option<UuidMode>,
+    pub(super) uuid_mode: Option<UuidMode>,
     /// The `xino=` mode; `None` means [`XinoMode::Auto`].
     pub(in super::super) xino_mode: Option<XinoMode>,
 }
@@ -55,7 +55,7 @@ impl MountOptions {
     ///   most once.
     /// * Required-value constraint: `None` (no option string) fails like a
     ///   missing `lowerdir`.
-    pub(in super::super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
+    pub(super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
         let mut lower_dirs = Vec::new();
         let mut upper_dir = None;
         let mut work_dir = None;
@@ -94,12 +94,10 @@ impl MountOptions {
                                     "duplicate overlay mount option `lowerdir`"
                                 );
                             }
-                            if value.is_empty() {
-                                return_errno_with_message!(
-                                    Errno::EINVAL,
-                                    "the `lowerdir` mount option requires a non-empty value"
-                                );
-                            }
+                            Self::require_non_empty_value(
+                                value,
+                                "the `lowerdir` mount option requires a non-empty value",
+                            )?;
                             lower_dirs = value.split(':').map(str::to_string).collect();
                             if lower_dirs.iter().any(|lower_dir| lower_dir.is_empty()) {
                                 return_errno_with_message!(
@@ -116,12 +114,10 @@ impl MountOptions {
                                     "duplicate overlay mount option `upperdir`"
                                 );
                             }
-                            if value.is_empty() {
-                                return_errno_with_message!(
-                                    Errno::EINVAL,
-                                    "the `upperdir` mount option requires a non-empty value"
-                                );
-                            }
+                            Self::require_non_empty_value(
+                                value,
+                                "the `upperdir` mount option requires a non-empty value",
+                            )?;
                             upper_dir = Some(value.to_string());
                         }
                         "workdir" => {
@@ -132,12 +128,10 @@ impl MountOptions {
                                     "duplicate overlay mount option `workdir`"
                                 );
                             }
-                            if value.is_empty() {
-                                return_errno_with_message!(
-                                    Errno::EINVAL,
-                                    "the `workdir` mount option requires a non-empty value"
-                                );
-                            }
+                            Self::require_non_empty_value(
+                                value,
+                                "the `workdir` mount option requires a non-empty value",
+                            )?;
                             work_dir = Some(value.to_string());
                         }
                         "uuid" => {
@@ -228,5 +222,12 @@ impl MountOptions {
             uuid_mode,
             xino_mode,
         })
+    }
+
+    fn require_non_empty_value(value: &str, message: &'static str) -> Result<()> {
+        if value.is_empty() {
+            return_errno_with_message!(Errno::EINVAL, message);
+        }
+        Ok(())
     }
 }

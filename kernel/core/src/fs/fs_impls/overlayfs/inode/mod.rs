@@ -72,11 +72,11 @@ use crate::{
 /// upper object published at most once by copy-up.
 pub(super) struct OverlayInode {
     /// The owning mount.
-    pub(super) fs: Weak<OverlayFs>,
+    fs: Weak<OverlayFs>,
     /// The immutable lower real-object stack, topmost first.
-    pub(super) lowers: Vec<RealObject>,
+    lowers: Vec<RealObject>,
     /// The upper real object; unset until copy-up publishes one.
-    pub(super) upper: Once<RealObject>,
+    upper: Once<RealObject>,
     /// The per-inode transaction lock. Directories carry their merged-readdir
     /// index in the payload; non-directories use the lock as a pure
     /// serialization token with `None`.
@@ -84,7 +84,7 @@ pub(super) struct OverlayInode {
     /// The precomputed projected `st_dev`/`st_ino`.
     object_id: ObjectId,
     /// The VFS inode extension groups (fs event publisher / fs lock context).
-    pub(super) extension: Extension,
+    extension: Extension,
     /// The copy-up transition coordinate; `publication_parent`/`name` are
     /// `None` until the first positive-binding publication records them.
     copyup_transition: Mutex<CopyUpTransition>,
@@ -134,12 +134,12 @@ impl OverlayInode {
     }
 
     /// Returns the inode-cache key derived from the current visible source.
-    pub(super) fn key(&self) -> RealObjectKey {
+    fn key(&self) -> RealObjectKey {
         RealObjectKey::from_source(self.visible_source())
     }
 
     /// Returns the current visible real-object source.
-    pub(super) fn visible_source(&self) -> &RealObject {
+    fn visible_source(&self) -> &RealObject {
         self.upper.get().unwrap_or_else(|| {
             self.lowers
                 .first()
@@ -149,7 +149,7 @@ impl OverlayInode {
 
     /// Returns whether `real_inode` is this object's visible source or one of
     /// its retained lowers.
-    pub(super) fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
+    fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
         Arc::ptr_eq(self.visible_source().real_inode(), real_inode)
             || self
                 .lowers
@@ -158,7 +158,7 @@ impl OverlayInode {
     }
 
     /// Materializes the current real-object stack as an owned value.
-    pub(super) fn real_object_stack(&self) -> RealObjectStack {
+    fn real_object_stack(&self) -> RealObjectStack {
         RealObjectStack::new(self.upper.get().cloned(), self.lowers.clone())
     }
 
@@ -170,7 +170,7 @@ impl OverlayInode {
         self.object_id
     }
 
-    pub(super) fn select_real_inode(&self) -> Arc<dyn Inode> {
+    fn select_real_inode(&self) -> Arc<dyn Inode> {
         self.visible_source().real_inode().clone()
     }
 
@@ -180,7 +180,7 @@ impl OverlayInode {
     /// After promotion the object is guaranteed to have an upper object that
     /// is always dentry-anchored, so the checked `real_path()` accessor
     /// succeeds; `EROFS`/`EIO` propagate when that guarantee does not hold.
-    pub(super) fn upper_parent_path(&self) -> Result<Path> {
+    fn upper_parent_path(&self) -> Result<Path> {
         let upper = self.upper.get().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
@@ -188,7 +188,7 @@ impl OverlayInode {
     }
 
     /// Returns `Err` when the inode does not belong to an overlay filesystem.
-    pub(super) fn fs_arc(&self) -> Result<Arc<OverlayFs>> {
+    fn fs_arc(&self) -> Result<Arc<OverlayFs>> {
         let fs = self.fs();
         Arc::downcast::<OverlayFs>(fs).map_err(|_| {
             Error::with_message(
@@ -214,7 +214,7 @@ impl OverlayInode {
     /// The per-inode `lock` is held across both steps because the underlying
     /// fs does not process `O_APPEND` itself. This serializes concurrent
     /// appends on the post-write size.
-    pub(super) fn append_write(
+    fn append_write(
         &self,
         reader: &mut VmReader,
         status_flags: StatusFlags,
@@ -231,7 +231,7 @@ impl OverlayInode {
     /// The fallible inode-cache alias runs before the `Once` publication, so
     /// a displacement fails rather than silently orphaning the inode. `lowers`
     /// are immutable across copy-up.
-    pub(super) fn replace_facts(
+    fn replace_facts(
         self: &Arc<Self>,
         new_upper: RealObject,
         new_visible_source: &RealObject,
@@ -263,7 +263,7 @@ impl OverlayInode {
     ///
     /// Precondition: the permission stage has already admitted the operation
     /// (or the entry is a pure read delegation).
-    pub(super) fn delegate_to_real<T>(
+    fn delegate_to_real<T>(
         &self,
         operation_fn: impl FnOnce(&Arc<dyn Inode>) -> Result<T>,
     ) -> Result<T> {

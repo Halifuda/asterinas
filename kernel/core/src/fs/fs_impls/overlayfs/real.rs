@@ -48,12 +48,12 @@ impl RealPath {
 
 #[derive(Clone, Debug)]
 pub(super) struct RealObject {
-    pub(super) layer_index: usize,
-    pub(super) real_inode: Arc<dyn Inode>,
+    layer_index: usize,
+    real_inode: Arc<dyn Inode>,
     /// Dentry-anchored real-object [`RealPath`] value.
-    pub(super) real_path: Option<RealPath>,
-    pub(super) fsid: u64,
-    pub(super) container_dev_id: DeviceId,
+    real_path: Option<RealPath>,
+    fsid: u64,
+    container_dev_id: DeviceId,
 }
 
 impl RealObject {

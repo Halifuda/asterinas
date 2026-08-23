@@ -16,7 +16,7 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::{
-            fs::{OverlayFs, mount::inuse::UpperWorkdirInuse},
+            fs::OverlayFs,
             inode::OverlayInode,
             mknod_object_type, workdir_temp_name,
         },
@@ -53,29 +53,6 @@ pub(in super::super) struct WorkdirTemp {
 
 const MAX_WORKDIR_TEMP_CREATE_ATTEMPTS: usize = 8;
 
-impl UpperWorkdirInuse {
-    pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
-        self.workspace
-            .as_ref()
-            .map(|workspace| workspace.inode())
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EROFS,
-                    "the overlay workdir workspace is not prepared",
-                )
-            })
-    }
-
-    pub(in super::super) fn workdir_workspace_path(&self) -> Result<&Path> {
-        self.workspace.as_ref().ok_or_else(|| {
-            Error::with_message(
-                Errno::EROFS,
-                "the overlay workdir workspace is not prepared",
-            )
-        })
-    }
-}
-
 impl WorkdirTemp {
     pub(in super::super) fn name(&self) -> &str {
         &self.name
@@ -94,7 +71,7 @@ impl WorkdirTemp {
     }
 
     /// Returns the dentry-anchored path of the staged workdir temp.
-    pub(in super::super) fn path(&self) -> &Path {
+    fn path(&self) -> &Path {
         &self.path
     }
 

@@ -30,7 +30,7 @@ use crate::{
             inode::{
                 Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
                 copyup::workdir::{WorkdirTemp, WorkdirTempRequest},
-                xattr::XattrCopyPolicy,
+                xattr::{XattrCopyPolicy, copy_eligible_xattrs},
             },
             layer::RealObjectStack,
         },
@@ -263,7 +263,7 @@ impl OverlayInode {
         // while the temp is still owned by the caller (the creating task), so
         // a non-owner rmdir of a directory carrying xattrs does not fail
         // `EACCES` on the temp `set_xattr`.
-        self.copy_eligible_xattrs(&old_upper_dir, temp.inode(), XattrCopyPolicy::BestEffort)?;
+        copy_eligible_xattrs(&old_upper_dir, temp.inode(), XattrCopyPolicy::BestEffort)?;
         self.transfer_metadata(&old_upper_dir, temp.inode())?;
         self.transfer_timestamps(&old_upper_dir, temp.inode())?;
         let workdir_path = self.workdir_root_path()?;

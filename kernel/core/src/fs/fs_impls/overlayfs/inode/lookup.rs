@@ -97,7 +97,7 @@ pub(super) fn is_opaque_directory(real: &RealObject) -> Result<bool> {
 impl OverlayFs {
     /// Runs the upper-first layer lookup for `name` inside `parent`'s
     /// real layers, with overlayfs merge-stop semantics.
-    pub(super) fn lookup_in_layers(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
+    fn lookup_in_layers(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
         if let Some(upper_real) = parent.upper.get() {
