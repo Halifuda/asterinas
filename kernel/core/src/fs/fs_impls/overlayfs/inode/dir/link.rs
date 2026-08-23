@@ -2,11 +2,12 @@
 
 //! The link recipe.
 //!
-//! Lock contract: this module enters the per-object copy-up coordination
-//! lock only via source promotion.
+//! Lock contract: source promotion runs before the parent transaction lock
+//! is taken, so this module never enters the per-object copy-up coordination
+//! lock while holding a parent lock.
 //!
 //! Owns [`OverlayInode::link_source`] and [`OverlayInode::link_over_whiteout`];
-//! the `Inode::link` entry composes them under that transaction lock;
+//! the `Inode::link` entry composes them around that transaction lock;
 //! temp cleanup on failure is explicit and fallible, never an RAII rollback.
 //!
 //! Degradation note: without a persistent origin index (a lower-origin
@@ -36,8 +37,7 @@ impl OverlayInode {
     /// link shares with the source; promotion errors propagate unchanged.
     pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
         old.ensure_upper_authority()?;
-        let facts = old.facts_snapshot();
-        let upper = facts.upper.ok_or_else(|| {
+        let upper = old.upper.get().ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,
                 "the link source has no upper real object after promotion",
@@ -58,10 +58,7 @@ impl OverlayInode {
                 source: source_path.clone(),
             },
         )?;
-        let workdir_path = self.workdir_root_path()?;
-        if let Err(err) =
-            workdir_path.rename(temp.name(), &upper_parent_path, name, RenameMode::Replace)
-        {
+        if let Err(err) = fs.publish_temp(&temp, &upper_parent_path, name, RenameMode::Replace) {
             let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
             return Err(err);
         }

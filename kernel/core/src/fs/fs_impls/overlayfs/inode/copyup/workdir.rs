@@ -21,7 +21,7 @@ use crate::{
             mknod_object_type, workdir_temp_name,
         },
         vfs::{
-            inode::{Inode, MknodType},
+            inode::{Inode, MknodType, RenameMode},
             path::Path,
         },
     },
@@ -29,7 +29,7 @@ use crate::{
 };
 
 /// The operation to retry while creating a private workdir temp.
-pub(in overlayfs) enum WorkdirTempRequest<'a> {
+pub(in super::super) enum WorkdirTempRequest<'a> {
     Create {
         kind: InodeType,
         mode: InodeMode,
@@ -45,7 +45,7 @@ pub(in overlayfs) enum WorkdirTempRequest<'a> {
 
 /// A successful private workdir-temp creation; the handle carries the
 /// request-derived [`InodeType`] needed by the kind-aware cleanup dispatcher.
-pub(in overlayfs) struct WorkdirTemp {
+pub(in super::super) struct WorkdirTemp {
     name: String,
     path: Path,
     kind: InodeType,
@@ -53,17 +53,11 @@ pub(in overlayfs) struct WorkdirTemp {
 
 const MAX_WORKDIR_TEMP_CREATE_ATTEMPTS: usize = 8;
 
-/// The prepared `<workdir>/work` staging workspace.
-#[derive(Debug)]
-pub(in overlayfs) struct WorkdirWorkspace {
-    pub(in overlayfs) path: Path,
-}
-
 impl UpperWorkdirInuse {
     pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
-        self.workdir_workspace
+        self.workspace
             .as_ref()
-            .map(|workspace| workspace.path.inode())
+            .map(|workspace| workspace.inode())
             .ok_or_else(|| {
                 Error::with_message(
                     Errno::EROFS,
@@ -72,25 +66,22 @@ impl UpperWorkdirInuse {
             })
     }
 
-    pub(in overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
-        self.workdir_workspace
-            .as_ref()
-            .map(|workspace| &workspace.path)
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EROFS,
-                    "the overlay workdir workspace is not prepared",
-                )
-            })
+    pub(in super::super) fn workdir_workspace_path(&self) -> Result<&Path> {
+        self.workspace.as_ref().ok_or_else(|| {
+            Error::with_message(
+                Errno::EROFS,
+                "the overlay workdir workspace is not prepared",
+            )
+        })
     }
 }
 
 impl WorkdirTemp {
-    pub(in overlayfs) fn name(&self) -> &str {
+    pub(in super::super) fn name(&self) -> &str {
         &self.name
     }
 
-    pub(in overlayfs) fn kind(&self) -> InodeType {
+    pub(in super::super) fn kind(&self) -> InodeType {
         self.kind
     }
 
@@ -98,14 +89,19 @@ impl WorkdirTemp {
     ///
     /// Derived from the dentry-anchored [`Path`], so the inode and the path
     /// always refer to the same workdir object.
-    pub(in overlayfs) fn inode(&self) -> &Arc<dyn Inode> {
+    pub(in super::super) fn inode(&self) -> &Arc<dyn Inode> {
         self.path.inode()
+    }
+
+    /// Returns the dentry-anchored path of the staged workdir temp.
+    pub(in super::super) fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Consumes the handle into its `(name, path)` parts; the dentry-anchored
     /// path stays valid after the workdir-to-upper rename and doubles as the
     /// published upper object's path.
-    pub(in overlayfs) fn into_parts(self) -> (String, Path) {
+    pub(in super::super) fn into_parts(self) -> (String, Path) {
         (self.name, self.path)
     }
 }
@@ -147,7 +143,7 @@ impl OverlayFs {
     ///
     /// Staging lives in the workdir workspace; the caller owns publication
     /// and cleanup via the returned handle.
-    pub(in overlayfs) fn create_workdir_temp(
+    pub(in super::super) fn create_workdir_temp(
         &self,
         target_name: &str,
         request: WorkdirTempRequest<'_>,
@@ -176,12 +172,28 @@ impl OverlayFs {
         }
     }
 
+    /// Publishes a staged workdir temp at `(upper_parent_path, name)`.
+    ///
+    /// The token is the [`WorkdirTemp`] handle: its name routes the rename and
+    /// its dentry-anchored path remains valid as the published upper path.
+    pub(in super::super) fn publish_temp(
+        &self,
+        temp: &WorkdirTemp,
+        upper_parent_path: &Path,
+        name: &str,
+        mode: RenameMode,
+    ) -> Result<Path> {
+        let workdir_path = self.workdir_root_path()?;
+        workdir_path.rename(temp.name(), upper_parent_path, name, mode)?;
+        Ok(temp.path().clone())
+    }
+
     /// Removes a workdir temp object, dispatching on its known kind.
     ///
     /// Directories are removed with `rmdir` and every other kind with
     /// `unlink`, because the underlying filesystem refuses to `unlink` a
     /// directory (`EISDIR`) and would otherwise leak directory-temp residue.
-    pub(in overlayfs) fn cleanup_workdir_temp(
+    pub(in super::super) fn cleanup_workdir_temp(
         &self,
         temp_name: &str,
         kind: InodeType,
@@ -200,8 +212,8 @@ impl OverlayFs {
     /// The path is fixed at mount time and never re-resolves the `work` name;
     /// a missing claim or unprepared workspace means the mount is effectively
     /// read-only, so this entry returns `EROFS` before any workdir side effect.
-    pub(in overlayfs) fn workdir_root_path(&self) -> Result<Path> {
-        let claim = self.upper_workdir_pair.as_ref().ok_or_else(|| {
+    pub(in super::super) fn workdir_root_path(&self) -> Result<Path> {
+        let claim = self.upper_workdir_pair().as_ref().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")
         })?;
         Ok(claim.workdir_workspace_path()?.clone())
@@ -213,7 +225,7 @@ impl OverlayInode {
     ///
     /// Lets the copy-up recipe arms resolve the staging workspace without
     /// re-upgrading the mount themselves.
-    pub(in overlayfs) fn workdir_root_path(&self) -> Result<Path> {
+    pub(in super::super) fn workdir_root_path(&self) -> Result<Path> {
         self.fs_arc()?.workdir_root_path()
     }
 }

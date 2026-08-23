@@ -49,7 +49,7 @@ overlayfs/
 - `layer.rs` 提升为顶层单文件，包含 `Layer` / `LayerStack` / `RealObjectStack`。
 - 不设 `real/records.rs`；xattr marker 与记录读写归 `inode/xattr.rs`。
 - `RealObjectKey` 从旧 `inode/lookup/key.rs` 移到 `real.rs`。
-- `RealObjectStack` 表示一个 overlay 对象背后的真实对象组合（`upper` + `lowers`）；`PositiveKind` 改为派生或保留在 inode 侧。
+- `RealObjectStack` 表示一个 overlay 对象背后的真实对象组合（`upper` + `lowers`）；`PositiveKind` 不作为目标结构中的独立存储字段/枚举，按需用 `RealObjectStack::is_merged()` 等派生。
 - `lookup/key.rs` 不再单独存在；`RealObjectKey` 归 `real.rs`。
 
 ## 文件级迁移表（old/ → 新树）
@@ -99,7 +99,6 @@ overlayfs/
 
 ## overlayfs/mod.rs
 
-- `enum AccessType`
 - `fn with_current_posix_thread`
 - `fn lookup_child_path`
 - `fn read_child_names`
@@ -154,16 +153,16 @@ overlayfs/
 ## fs/mount/inuse.rs
 
 - `struct Uuid`
-- `struct InodeClaimGuard`（目标改名 `InuseGuard`）
-- `struct UpperWorkdirClaim`（目标改名 `UpperWorkdirInuse`）
+- `struct InuseGuard`
+- `struct UpperWorkdirInuse`
 - `fn Uuid::try_new`
 - `fn Uuid::generate`
-- `fn InodeClaimGuard::try_claim`
-- `fn UpperWorkdirClaim::validate_pair`
-- `fn UpperWorkdirClaim::determine_identity`
-- `fn UpperWorkdirClaim::claim`
-- `fn UpperWorkdirClaim::prepare_workdir`
-- `fn UpperWorkdirClaim::persist_identity`
+- `fn InuseGuard::try_claim`
+- `fn UpperWorkdirInuse::validate_pair`
+- `fn UpperWorkdirInuse::determine_identity`
+- `fn UpperWorkdirInuse::claim`
+- `fn UpperWorkdirInuse::prepare_workdir`
+- `fn UpperWorkdirInuse::persist_identity`
 
 ## fs/mount/capabilities.rs
 
@@ -178,7 +177,6 @@ overlayfs/
 ## inode/mod.rs
 
 - `struct OverlayInode`
-- `enum PositiveKind`
 - `fn OverlayInode::new_root`
 - `fn OverlayInode::replace_facts`
 - `fn OverlayInode::append_write`
@@ -361,6 +359,7 @@ overlayfs/
 
 ## inode/permission.rs
 
+- `enum AccessType`
 - `fn OverlayInode::check_permission`
 - `fn OverlayInode::check_local_permission`
 - `fn OverlayInode::check_real_permission`

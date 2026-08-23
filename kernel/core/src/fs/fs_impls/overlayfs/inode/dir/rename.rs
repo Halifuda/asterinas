@@ -3,9 +3,10 @@
 //! The rename recipes: the EXDEV gate ([`OverlayInode::cross_device_gate`])
 //! and the upper rename ([`OverlayInode::rename_upper`]).
 //!
-//! Lock contract: the caller holds both parent directory transaction locks;
-//! this module enters the per-object copy-up coordination lock only via
-//! promotions.
+//! Lock contract: the caller holds both parent directory transaction locks.
+//! Permission admission and source promotion are done by the entry before
+//! those locks are taken; this module never enters the per-object copy-up
+//! coordination lock while holding a parent lock.
 //!
 //! Notes:
 //! - No `RENAME_WHITEOUT`: a source name that still needs a whiteout after
@@ -34,15 +35,19 @@
 use super::whiteout;
 use crate::{
     fs::{
-        file::Permission,
-        fs_impls::overlayfs::{
-            AccessType,
-            inode::{Binding, BindingKey, NegativeBinding, OverlayInode, PositiveBinding},
+        fs_impls::overlayfs::inode::{
+            Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker,
         },
         vfs::inode::{Inode, RenameMode},
     },
     prelude::*,
 };
+
+/// The two parent directory transaction payloads held by a rename.
+pub(super) struct RenameLocks<'a> {
+    pub(super) self_index: &'a mut Option<ReaddirIndex>,
+    pub(super) target_index: Option<&'a mut Option<ReaddirIndex>>,
+}
 
 impl OverlayInode {
     /// Returns `Err(EXDEV)` for a cross-directory move of a lower-backed or
@@ -54,14 +59,14 @@ impl OverlayInode {
     // TODO(redirect_dir): replace this flat EXDEV default with a
     // redirect-policy probe bounded by the `redirect_max`-style length rule
     // when redirect support is implemented.
-    pub(super) fn cross_device_gate(&self, source: &Binding) -> Result<()> {
-        let Some(source_inode) = source.inode() else {
+    pub(super) fn cross_device_gate(&self, source: &Lookup) -> Result<()> {
+        let Lookup::Positive(source_inode) = source else {
             return Ok(());
         };
         if !source_inode.type_().is_directory() {
             return Ok(());
         }
-        if source_inode.facts_snapshot().lowers.is_empty() {
+        if source_inode.lowers.is_empty() {
             return Ok(());
         }
         Err(Error::with_message(
@@ -83,25 +88,27 @@ impl OverlayInode {
         target: &Arc<OverlayInode>,
         new_name: &str,
         mode: RenameMode,
-        source_binding: &Binding,
+        source_lookup: &Lookup,
+        mut locks: RenameLocks<'_>,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
 
-        let source_inode = source_binding.inode().ok_or_else(|| {
-            Error::with_message(
-                Errno::ENOENT,
-                "the rename source is not visible under the parent DIR",
-            )
-        })?;
-        let source_has_lower = !source_inode.facts_snapshot().lowers.is_empty();
-        let target_binding = fs
-            .lookup_binding(&target.facts_snapshot(), new_name)?
-            .binding;
+        let source_inode = match source_lookup {
+            Lookup::Positive(inode) => inode.clone(),
+            Lookup::Negative(_) => {
+                return Err(Error::with_message(
+                    Errno::ENOENT,
+                    "the rename source is not visible under the parent DIR",
+                ));
+            }
+        };
+        let source_has_lower = !source_inode.lowers.is_empty();
+        let target_lookup = fs.lookup(target, new_name)?;
         let target_is_whiteout = matches!(
-            &target_binding,
-            Binding::Negative(NegativeBinding::HiddenByWhiteout(_))
+            &target_lookup,
+            Lookup::Negative(NegativeLookup::HiddenByWhiteout)
         );
-        let target_is_positive = matches!(&target_binding, Binding::Positive(_));
+        let target_is_positive = matches!(&target_lookup, Lookup::Positive(_));
 
         // A visible target under `NoReplace` is `EEXIST`: the upper rename's
         // `NOREPLACE` only observes the upper namespace, so a lower-visible
@@ -121,13 +128,11 @@ impl OverlayInode {
         // sweep can run after the per-branch promotions.
         let gate_target_facts = if mode == RenameMode::Replace
             && target_is_positive
-            && let Some(target_object) = target_binding.inode()
+            && let Lookup::Positive(target_object) = &target_lookup
             && target_object.type_().is_directory()
         {
-            let target_facts = target_object.facts_snapshot();
-            if !target_facts.lowers.is_empty()
-                && target_object.visible_child_count(&target_facts)? != 0
-            {
+            let target_facts = target_object.real_object_stack();
+            if !target_facts.lowers.is_empty() && target_object.visible_child_count()? != 0 {
                 return Err(Error::with_message(
                     Errno::ENOTEMPTY,
                     "the overlay rename target directory is not empty",
@@ -137,10 +142,6 @@ impl OverlayInode {
         } else {
             None
         };
-
-        source_inode.ensure_upper_authority()?;
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        target.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
 
         let upper_parent_path = self.upper_parent_path()?;
         let target_upper_parent_path = target.upper_parent_path()?;
@@ -162,8 +163,7 @@ impl OverlayInode {
         // physical rename (before committing the rename).
         let same_parent = self.key() == target.key();
         if !same_parent && source_has_lower {
-            fs.xattr_policy
-                .set_impure_marker(target_upper_parent_path.inode())?;
+            set_impure_marker(target_upper_parent_path.inode())?;
         }
 
         let mut committed = false;
@@ -191,27 +191,17 @@ impl OverlayInode {
                 )?;
             }
             committed = true;
-            let mut source_whiteout_published = false;
             if source_has_lower && !target_is_whiteout && mode != RenameMode::Exchange {
                 fs.publish_whiteout(&upper_parent_path, old_name, None)?;
-                source_whiteout_published = true;
             }
-            if source_whiteout_published {
-                self.publish_whiteout_binding(&fs, &upper_parent_path, old_name)?;
-            } else {
-                fs.bindings.invalidate(&self.key(), old_name);
-            }
-            fs.bindings.insert(
-                BindingKey::new(target.key(), String::from(new_name)),
-                Arc::new(Binding::Positive(PositiveBinding::new(
-                    source_inode.clone(),
-                ))),
-            );
             // Rename reorders the visible sequence; the conservative rule
             // invalidates on every affected parent (same parent once).
-            self.invalidate_readdir_index();
+            self.finish_whiteout_index(None, locks.self_index);
             if !same_parent {
-                target.invalidate_readdir_index();
+                let Some(index) = locks.target_index.as_mut() else {
+                    unreachable!("a different rename target parent has a lock");
+                };
+                target.invalidate_readdir_index(index);
             }
             Ok(())
         })();
@@ -219,7 +209,16 @@ impl OverlayInode {
             Ok(()) => {}
             Err(err) => {
                 if committed {
-                    self.invalidate_stale_cache(&[(target.as_ref(), new_name), (self, old_name)]);
+                    if same_parent {
+                        target.invalidate_readdir_index(locks.self_index);
+                        self.invalidate_readdir_index(locks.self_index);
+                    } else {
+                        let Some(index) = locks.target_index.as_mut() else {
+                            unreachable!("a different rename target parent has a lock");
+                        };
+                        target.invalidate_readdir_index(index);
+                        self.invalidate_readdir_index(locks.self_index);
+                    }
                 }
                 return Err(err);
             }
@@ -230,20 +229,11 @@ impl OverlayInode {
         // best-effort (the mutation already committed; a refresh failure
         // never fails the rename).
         if !same_parent {
-            if let Err(err) = self.refresh_impure_marker() {
-                warn!(
-                    "overlay rename: the source-parent impure-marker refresh failed \
-                     (best-effort): {:?}",
-                    err
-                );
-            }
-            if let Err(err) = target.refresh_impure_marker() {
-                warn!(
-                    "overlay rename: the target-parent impure-marker refresh failed \
-                     (best-effort): {:?}",
-                    err
-                );
-            }
+            self.refresh_impure_marker_best_effort(locks.self_index, "rename: source parent");
+            let Some(index) = locks.target_index.as_mut() else {
+                unreachable!("a different rename target parent has a lock");
+            };
+            target.refresh_impure_marker_best_effort(index, "rename: target parent");
         }
         Ok(())
     }

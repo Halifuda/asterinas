@@ -10,7 +10,10 @@ use crate::{
     fs::{
         file::{InodeMode, InodeType},
         fs_impls::overlayfs::{
-            inode::{Binding, NegativeBinding, OverlayInode, copyup::workdir::WorkdirTempRequest},
+            inode::{
+                Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
+                copyup::workdir::WorkdirTempRequest,
+            },
             layer::RealObjectStack,
             mknod_object_type,
         },
@@ -24,27 +27,26 @@ impl OverlayInode {
     /// from the fresh `(parent, name)` projection under the parent
     /// directory transaction lock.
     ///
-    /// Decides on current `BindingCache` evidence, never the stale VFS
-    /// negative dentry that triggered the call.
+    /// Decides on the fresh layer lookup, never the stale VFS negative
+    /// dentry that triggered the call.
     pub(super) fn create_object(
         &self,
         name: &str,
         type_: InodeType,
         mode: InodeMode,
         mknod_type: Option<MknodType>,
+        index: &mut Option<ReaddirIndex>,
     ) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
-        let parent_facts = self.facts_snapshot();
-        let binding = fs.lookup_binding(&parent_facts, name)?.binding;
-        match binding {
-            Binding::Negative(NegativeBinding::Absent)
-            | Binding::Negative(NegativeBinding::HiddenByOpaque(_)) => {
-                self.create_upper_only(name, type_, mode, mknod_type)
+        let lookup = fs.lookup(self, name)?;
+        match lookup {
+            Lookup::Negative(NegativeLookup::Absent | NegativeLookup::HiddenByOpaque) => {
+                self.create_upper_only(name, type_, mode, mknod_type, index)
             }
-            Binding::Negative(NegativeBinding::HiddenByWhiteout(_)) => {
-                self.create_over_whiteout(name, type_, mode, mknod_type)
+            Lookup::Negative(NegativeLookup::HiddenByWhiteout) => {
+                self.create_over_whiteout(name, type_, mode, mknod_type, index)
             }
-            Binding::Positive(_) => Err(Error::with_message(
+            Lookup::Positive(_) => Err(Error::with_message(
                 Errno::EEXIST,
                 "the overlay target already exists and is visible",
             )),
@@ -63,6 +65,7 @@ impl OverlayInode {
         type_: InodeType,
         mode: InodeMode,
         mknod_type: Option<MknodType>,
+        index: &mut Option<ReaddirIndex>,
     ) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
         let upper_parent_path = self.upper_parent_path()?;
@@ -71,13 +74,10 @@ impl OverlayInode {
             Some(mknod) => upper_parent_path.mknod(name, mode, mknod)?,
             None => upper_parent_path.new_fs_child(name, type_, mode)?,
         };
-        let upper_layer = fs.layer_stack.upper_layer()?;
-        let new_facts = RealObjectStack {
-            upper: Some(upper_layer.child_real_object(&new_upper_path)),
-            lowers: Vec::new(),
-        };
+        let upper_layer = fs.layer_stack().upper_layer()?;
+        let new_facts = RealObjectStack::upper_only(upper_layer.child_real_object(&new_upper_path));
         let inode = fs.project_inode(&new_facts);
-        self.publish_positive_binding(&fs, name, inode.clone(), object_type);
+        self.readdir_index_insert(name, inode.clone(), object_type, index);
         Ok(inode)
     }
 
@@ -85,15 +85,14 @@ impl OverlayInode {
     /// workdir temp, then publishes it.
     ///
     /// A failure before the atomic upper commit best-effort-cleans the temp;
-    /// a failure after the commit reconciles the affected `(parent, name)`
-    /// projection as a unit via the shared
-    /// [`OverlayInode::invalidate_stale_cache`] entry.
+    /// a failure after the commit invalidates the parent readdir index.
     fn create_over_whiteout(
         &self,
         name: &str,
         type_: InodeType,
         mode: InodeMode,
         mknod_type: Option<MknodType>,
+        index: &mut Option<ReaddirIndex>,
     ) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
         let upper_parent_path = self.upper_parent_path()?;
@@ -104,8 +103,6 @@ impl OverlayInode {
                 fs.create_workdir_temp(name, WorkdirTempRequest::Create { kind: type_, mode })?
             }
         };
-        let temp_kind = temp.kind();
-        let (temp_name, temp) = temp.into_parts();
         let workdir_path = self.workdir_root_path()?;
         let mut committed = false;
         let result: Result<Arc<OverlayInode>> = (|| {
@@ -121,36 +118,38 @@ impl OverlayInode {
                      required for a directory over a whiteout",
                 )?;
             }
-            if object_type.is_directory() {
-                workdir_path.rename(&temp_name, &upper_parent_path, name, RenameMode::Exchange)?;
+            let published_path = if object_type.is_directory() {
+                let published =
+                    fs.publish_temp(&temp, &upper_parent_path, name, RenameMode::Exchange)?;
                 committed = true;
-                workdir_path.unlink(&temp_name)?;
+                workdir_path.unlink(temp.name())?;
+                published
             } else {
-                workdir_path.rename(&temp_name, &upper_parent_path, name, RenameMode::Replace)?;
+                let published =
+                    fs.publish_temp(&temp, &upper_parent_path, name, RenameMode::Replace)?;
                 committed = true;
-            }
-            // Semantic publication: the temp handle is the published object at
+                published
+            };
+            // Semantic publication: the temp path is the published object at
             // `(upper_parent_path, name)` (inode identity is stable across the
             // rename).
-            let upper_layer = fs.layer_stack.upper_layer()?;
-            let new_facts = RealObjectStack {
-                upper: Some(upper_layer.child_real_object(&temp)),
-                lowers: Vec::new(),
-            };
+            let upper_layer = fs.layer_stack().upper_layer()?;
+            let new_facts =
+                RealObjectStack::upper_only(upper_layer.child_real_object(&published_path));
             let inode = fs.project_inode(&new_facts);
-            self.publish_positive_binding(&fs, name, inode.clone(), object_type);
+            self.readdir_index_insert(name, inode.clone(), object_type, index);
             Ok(inode)
         })();
         match result {
             Ok(inode) => Ok(inode),
             Err(err) => {
                 if committed {
-                    self.invalidate_stale_cache(&[(self, name)]);
+                    self.invalidate_readdir_index(index);
                 } else {
                     // Pre-commit failure (pre-publication arm): best-effort
                     // kind-aware temp cleanup; residue is a known cleanup
                     // debt, never a visible source.
-                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                 }
                 Err(err)
             }

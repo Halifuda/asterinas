@@ -8,18 +8,20 @@
 //! lock and delegates the actual mutation to a per-directory recipe.
 //!
 //! Key concepts:
-//! - **projection**: the overlay-visible answer for a `(parent, name)` pair —
-//!   a positive binding for a visible object, or a negative binding for
-//!   absence, opaque hiding, or whiteout hiding.
+//! - **lookup**: the overlay-visible answer for a `(parent, name)` pair — a
+//!   positive inode, or a negative reason (`Absent`, `HiddenByWhiteout`,
+//!   `HiddenByOpaque`).
 //! - **parent directory transaction**: the per-directory `Mutex` guard that
 //!   serializes mutation recipes for one parent.
 //! - **whiteout**: an upper-layer visibility barrier published when a
 //!   lower-backed name is removed; the `whiteout` submodule owns its cache and
 //!   publish mechanics.
 //! - **entry admission contract**: the five namespace-mutation entries run
-//!   `lock_dir_transaction` + `check_permission(Mutating, MAY_WRITE)`; the
-//!   create/remove recipes therefore assume the caller already admitted the
-//!   request and do not re-check permission.
+//!   `check_permission(Mutating, MAY_WRITE)` (including any required
+//!   copy-up promotion) before acquiring the parent directory transaction
+//!   lock; rename additionally pre-promotes the source before taking either
+//!   parent lock. The recipes therefore assume the caller already admitted
+//!   the request and do not re-check permission.
 //!
 //! ## Structure
 //!
@@ -33,16 +35,12 @@
 
 use self::remove::RemoveKind;
 use super::{
-    super::{AccessType, fs::OverlayFs},
-    Binding, BindingKey, HiddenEvidence, NegativeBinding, OverlayInode, PositiveBinding,
+    AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker,
 };
 use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
-        vfs::{
-            inode::{Inode, MknodType, RenameMode},
-            path::Path,
-        },
+        vfs::inode::{Inode, MknodType, RenameMode},
     },
     prelude::*,
     process::credentials::capabilities::CapSet,
@@ -55,6 +53,12 @@ mod link;
 mod remove;
 mod rename;
 
+/// The two parent transaction guards acquired by rename.
+type DirLockPair<'a, 'b> = (
+    MutexGuard<'a, Option<ReaddirIndex>>,
+    Option<MutexGuard<'b, Option<ReaddirIndex>>>,
+);
+
 impl OverlayInode {
     // The symlink target is filled by the later `write_link` delegation.
     pub(super) fn create_impl(
@@ -63,9 +67,10 @@ impl OverlayInode {
         type_: InodeType,
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
-        let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let projected: Arc<dyn Inode> = self.create_object(name, type_, mode, None)?;
+        let mut dir_guard = self.lock_dir_transaction();
+        let projected: Arc<dyn Inode> =
+            self.create_object(name, type_, mode, None, &mut dir_guard)?;
         Ok(projected)
     }
 
@@ -81,10 +86,11 @@ impl OverlayInode {
                 "a raw 0:0 whiteout char device must not be user-creatable"
             );
         }
-        let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+        let mut dir_guard = self.lock_dir_transaction();
         let object_type = crate::fs::fs_impls::overlayfs::mknod_object_type(&type_);
-        let projected: Arc<dyn Inode> = self.create_object(name, object_type, mode, Some(type_))?;
+        let projected: Arc<dyn Inode> =
+            self.create_object(name, object_type, mode, Some(type_), &mut dir_guard)?;
         Ok(projected)
     }
 
@@ -95,19 +101,9 @@ impl OverlayInode {
     }
 
     pub(super) fn link_impl(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        let _dir_guard = self.lock_dir_transaction();
+        // Admission and source promotion run before the parent transaction
+        // lock so no lock is ever held while copy-up takes a CUL.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let fs = self.fs_arc()?;
-        // Fresh target projection under the parent directory transaction
-        // lock: a visible target is never silently replaced.
-        let binding = fs.lookup_binding(&self.facts_snapshot(), name)?.binding;
-        if matches!(&binding, Binding::Positive(_)) {
-            return Err(Error::new(Errno::EEXIST));
-        }
-        let target_is_whiteout = matches!(
-            &binding,
-            Binding::Negative(NegativeBinding::HiddenByWhiteout(_))
-        );
         // The source must be an Overlay inode (the VFS passes an inode of
         // this filesystem); a foreign inode is a defensive error, never a
         // silent cast.
@@ -155,79 +151,54 @@ impl OverlayInode {
                 ));
             }
         }
+        // Source promotion is also part of the pre-lock admission: the shared
+        // upper path must be ready before the parent lock serializes the
+        // target-name mutation.
         let source_path = self.link_source(&old_overlay)?;
+        let fs = self.fs_arc()?;
+        let mut dir_guard = self.lock_dir_transaction();
+        // Fresh target projection under the parent directory transaction
+        // lock: a visible target is never silently replaced.
+        let target_lookup = fs.lookup(self, name)?;
+        if matches!(target_lookup, Lookup::Positive(_)) {
+            return Err(Error::new(Errno::EEXIST));
+        }
+        let target_is_whiteout = matches!(
+            target_lookup,
+            Lookup::Negative(NegativeLookup::HiddenByWhiteout)
+        );
         // A source with lower fallback makes this parent impure: persist the
         // impure marker to the upper parent before either physical-link
         // branch (before committing the link).
-        if !old_overlay.facts_snapshot().lowers.is_empty() {
-            fs.xattr_policy
-                .set_impure_marker(self.upper_parent_path()?.inode())?;
+        if !old_overlay.lowers.is_empty() {
+            set_impure_marker(self.upper_parent_path()?.inode())?;
         }
         if target_is_whiteout {
             self.link_over_whiteout(name, &source_path)?;
         } else {
             self.upper_parent_path()?.link(&source_path, name)?;
         }
-        // Target publication via the shared positive-binding helper: the
-        // positive binding shares the source `OverlayInode` (inode-cache
-        // reuse by `RealObjectKey`, so `project_inode` is not needed) and
-        // `readdir_index_insert` maintains the target parent index.
-        self.publish_positive_binding(&fs, name, old_overlay.clone(), old_overlay.type_());
-        Ok(())
-    }
-
-    /// Publishes the positive binding for a freshly materialized `(parent,
-    /// name)` entry and maintains the target parent readdir index.
-    ///
-    /// Both steps are infallible: the binding shares the created `inode`
-    /// (inode-cache reuse by `RealObjectKey`) and `readdir_index_insert`
-    /// records the visible name, so no reconcile is needed.
-    fn publish_positive_binding(
-        &self,
-        fs: &OverlayFs,
-        name: &str,
-        inode: Arc<OverlayInode>,
-        kind: InodeType,
-    ) {
-        fs.publish_binding(
-            &self.key(),
+        // The new name shares the source `OverlayInode`; only the readdir
+        // index needs maintenance.
+        self.readdir_index_insert(
             name,
-            Binding::Positive(PositiveBinding::new(inode.clone())),
-        );
-        self.readdir_index_insert(name, inode, kind);
-    }
-
-    /// Re-observes the freshly published whiteout at
-    /// `(upper_parent_path, name)` and publishes its negative binding for
-    /// this parent; the caller owns the readdir-index update (remove vs
-    /// whole-invalidate differ between unlink/rmdir and rename).
-    fn publish_whiteout_binding(
-        &self,
-        fs: &OverlayFs,
-        upper_parent_path: &Path,
-        name: &str,
-    ) -> Result<()> {
-        let whiteout_path = super::super::lookup_child_path(upper_parent_path, name)?;
-        let whiteout_inode = whiteout_path.inode().clone();
-        fs.bindings.insert(
-            BindingKey::new(self.key(), String::from(name)),
-            Arc::new(Binding::Negative(NegativeBinding::HiddenByWhiteout(
-                HiddenEvidence::new(0, whiteout_inode),
-            ))),
+            old_overlay.clone(),
+            old_overlay.type_(),
+            &mut dir_guard,
         );
         Ok(())
     }
 
     pub(super) fn unlink_impl(&self, name: &str) -> Result<()> {
-        let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.remove_target(name, RemoveKind::Unlink)
+        let mut dir_guard = self.lock_dir_transaction();
+        self.remove_target(name, RemoveKind::Unlink, &mut dir_guard)
     }
 
     pub(super) fn rmdir_impl(&self, name: &str) -> Result<()> {
-        let _dir_guard = self.lock_dir_transaction();
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.remove_target(name, RemoveKind::Rmdir)
+        let mut dir_guard = self.lock_dir_transaction();
+        self.remove_target(name, RemoveKind::Rmdir, &mut dir_guard)
     }
 
     pub(super) fn rename_impl(
@@ -241,41 +212,52 @@ impl OverlayInode {
         let target_overlay = Arc::downcast::<OverlayInode>(target.clone()).map_err(|_| {
             Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
         })?;
-        let (_source_guard, _target_guard) =
-            self.lock_parent_dir_transactions(Some(&target_overlay))?;
+        // Both parent admission checks run before any parent lock is taken:
+        // each `Mutating` check promotes that directory to upper authority
+        // without holding the transaction lock.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         target_overlay.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         let fs = self.fs_arc()?;
-        // Fresh source projection under the parent directory transaction
-        // lock: the projection made while holding it is authoritative over a
-        // stale VFS dentry.
-        let source_binding = fs.lookup_binding(&self.facts_snapshot(), old_name)?.binding;
-        let _source_inode = match &source_binding {
-            Binding::Positive(positive) => positive.inode(),
-            Binding::Negative(_) => return Err(Error::new(Errno::ENOENT)),
+        // The source is pre-resolved before the parent locks so its copy-up
+        // promotion also happens without holding any transaction lock. The
+        // lookup may become stale while waiting for the locks; the later A3
+        // liveness recheck is the authority for that race.
+        let source_lookup = fs.lookup(self, old_name)?;
+        let source_inode = match &source_lookup {
+            Lookup::Positive(inode) => inode.clone(),
+            Lookup::Negative(_) => return Err(Error::new(Errno::ENOENT)),
         };
+        source_inode.ensure_upper_authority()?;
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
-            self.cross_device_gate(&source_binding)?;
+            self.cross_device_gate(&source_lookup)?;
         }
+        let (mut source_guard, mut target_guard) =
+            self.lock_parent_dir_transactions(Some(&target_overlay))?;
         // Whether the source name needs a whiteout after the move is decided
-        // internally from the fresh source projection; the already-computed
-        // source binding is passed in so `rename_upper` does not re-scan the
-        // layers under the same transaction.
-        self.rename_upper(old_name, &target_overlay, new_name, mode, &source_binding)
+        // internally from the pre-resolved source projection; the
+        // already-computed source lookup is passed in so `rename_upper`
+        // does not re-scan the layers under the transaction locks.
+        self.rename_upper(
+            old_name,
+            &target_overlay,
+            new_name,
+            mode,
+            &source_lookup,
+            rename::RenameLocks {
+                self_index: &mut source_guard,
+                target_index: target_guard.as_deref_mut(),
+            },
+        )
     }
 }
 
 impl OverlayInode {
-    /// Returns the parent directory transaction guard
-    /// (`MutexGuard<'_, ()>`) of this directory.
-    pub(super) fn lock_dir_transaction(&self) -> MutexGuard<'_, ()> {
-        match self.dir_transaction_lock.as_ref() {
-            Some(dir) => dir.lock(),
-            None => unreachable!(
-                "mutation entries run on overlay directories only; the VFS routes child-name \
-                 operations on directory inodes"
-            ),
-        }
+    /// Returns the per-inode transaction guard for this directory.
+    ///
+    /// The payload is `Some(ReaddirIndex)` for directories; non-directories
+    /// still carry the lock as a plain serialization token.
+    pub(super) fn lock_dir_transaction(&self) -> MutexGuard<'_, Option<ReaddirIndex>> {
+        self.lock.lock()
     }
 
     /// Acquires the two affected parent directory transaction guards in
@@ -286,54 +268,35 @@ impl OverlayInode {
     pub(super) fn lock_parent_dir_transactions<'a, 'b>(
         &'a self,
         other: Option<&'b Arc<OverlayInode>>,
-    ) -> Result<(MutexGuard<'a, ()>, Option<MutexGuard<'b, ()>>)> {
-        let self_dir = match self.dir_transaction_lock.as_ref() {
-            Some(dir) => dir,
-            None => {
-                return Err(Error::with_message(
-                    Errno::ENOTDIR,
-                    "the source parent is not an overlay directory",
-                ));
-            }
-        };
+    ) -> Result<DirLockPair<'a, 'b>> {
+        if self.lock.lock().is_none() {
+            return Err(Error::with_message(
+                Errno::ENOTDIR,
+                "the source parent is not an overlay directory",
+            ));
+        }
         let Some(other) = other else {
-            return Ok((self_dir.lock(), None));
+            return Ok((self.lock.lock(), None));
         };
-        let other_dir = match other.dir_transaction_lock.as_ref() {
-            Some(dir) => dir,
-            None => {
-                return Err(Error::with_message(
-                    Errno::ENOTDIR,
-                    "the target parent is not an overlay directory",
-                ));
-            }
-        };
+        if other.lock.lock().is_none() {
+            return Err(Error::with_message(
+                Errno::ENOTDIR,
+                "the target parent is not an overlay directory",
+            ));
+        }
         let self_addr = core::ptr::from_ref(self);
         let other_addr = Arc::as_ptr(other);
         if core::ptr::addr_eq(self_addr, other_addr) {
-            return Ok((self_dir.lock(), None));
+            return Ok((self.lock.lock(), None));
         }
         if self_addr < other_addr {
-            let self_guard = self_dir.lock();
-            let other_guard = other_dir.lock();
+            let self_guard = self.lock.lock();
+            let other_guard = other.lock.lock();
             Ok((self_guard, Some(other_guard)))
         } else {
-            let other_guard = other_dir.lock();
-            let self_guard = self_dir.lock();
+            let other_guard = other.lock.lock();
+            let self_guard = self.lock.lock();
             Ok((self_guard, Some(other_guard)))
-        }
-    }
-
-    /// Reconciles the affected `(parent, name)` projections as a unit after
-    /// a physical upper success whose semantic publication failed;
-    /// best-effort, supports one- and two-parent operations.
-    pub(super) fn invalidate_stale_cache(&self, affected: &[(&OverlayInode, &str)]) {
-        let Ok(fs) = self.fs_arc() else {
-            return;
-        };
-        for (parent, name) in affected {
-            fs.bindings.invalidate(&parent.key(), name);
-            parent.invalidate_readdir_index();
         }
     }
 }

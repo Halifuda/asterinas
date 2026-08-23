@@ -25,12 +25,11 @@ use core::time::Duration;
 
 use super::{
     OverlayInode,
-    permission::{current_fsuid, current_in_group, current_task_has_capability},
+    permission::{AccessType, current_fsuid, current_in_group, current_task_has_capability},
 };
 use crate::{
     fs::{
         file::{InodeMode, Permission},
-        fs_impls::overlayfs::AccessType,
         vfs::inode::Inode,
     },
     prelude::*,
@@ -52,7 +51,7 @@ struct CallerOwnerFacts {
 }
 
 impl OverlayInode {
-    pub(in overlayfs) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
+    pub(super) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
         let metadata = self.metadata()?;
         let facts = self.caller_owner_facts(metadata.uid, CapSet::FOWNER);
         if !facts.is_owner && !facts.has_cap {
@@ -74,7 +73,7 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_mode(mode))
     }
 
-    pub(in overlayfs) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
+    pub(super) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
         let metadata = self.metadata()?;
         if uid != metadata.uid && !self.caller_owner_facts(metadata.uid, CapSet::CHOWN).has_cap {
             return Err(Error::with_message(
@@ -86,7 +85,7 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_owner(uid))
     }
 
-    pub(in overlayfs) fn set_group_impl(&self, gid: Gid) -> Result<()> {
+    pub(super) fn set_group_impl(&self, gid: Gid) -> Result<()> {
         let metadata = self.metadata()?;
         if gid != metadata.gid {
             let facts = self.caller_owner_facts(metadata.uid, CapSet::CHOWN);
@@ -105,15 +104,15 @@ impl OverlayInode {
         self.delegate_to_real(|real| real.set_group(gid))
     }
 
-    pub(in overlayfs) fn set_atime_impl(&self, time: Duration) {
+    pub(super) fn set_atime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_atime(time));
     }
 
-    pub(in overlayfs) fn set_mtime_impl(&self, time: Duration) {
+    pub(super) fn set_mtime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_mtime(time));
     }
 
-    pub(in overlayfs) fn set_ctime_impl(&self, time: Duration) {
+    pub(super) fn set_ctime_impl(&self, time: Duration) {
         self.best_effort_time_set(|real| real.set_ctime(time));
     }
 }

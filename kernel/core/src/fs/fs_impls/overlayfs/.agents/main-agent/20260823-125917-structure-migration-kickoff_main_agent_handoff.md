@@ -2,7 +2,7 @@
 
 # Handoff: Overlayfs 代码结构实际搬移（2026-08-23）
 
-**Status:** PHASE 0 COMPLETE — LSIF 已生成，旧代码已移入 `old/`，主代码空间已清空，等待 Phase 1 结构搬移。
+**Status:** PHASE 2 COMPLETE — B/C/A/T/T7/B5 已执行，`cargo check` / `cargo clippy` 均通过。
 
 ## Goal
 
@@ -178,21 +178,41 @@
    - 可以临时用 re-export shim 过渡，但不要长期保留。
 6. 最终提交时用 `git diff -M` 确认 git 能识别为 rename；但操作本身是 copy + delete。
 
-### Phase 2：语义修改点
+### Phase 2：语义修改点（规划已确认，2026-08-23，暂未执行）
 
-按 `structure-design-appendices.md` 的 A/B/C/T 列表逐个执行：
+按 `structure-design-appendices.md` 的 A/B/C/T 列表执行，但有以下已确认约束：
 
-- A1–A5：行为语义变化（stale、negative dentry、commit 活性复查等）。
-- B1–B6：状态模型重写（facts → Once、锁合并等）。
-- C1–C4：调用顺序/协议重排（先升格后取锁等）。
-- T5–T7：类型消灭、去重、可见性收窄。
+- **A1**：不依赖 #3745。使用设计里已有的“Once 有内容 = 曾经 upper-backed；fresh 扫描 absent 且无 whiteout → ESTALE”方案，目标 inode 在 remove 路径直接可得，不等待 resolved-inode PR。
+- **B5**：整个 Phase 2 最后再决定（`ensure_readdir_index` 复核 + `EIO` 分支删留）。
+- **C3**：按模型修改即可，不需要额外死锁担忧；执行时仍做一次“持 lock 不取 CUL”的入口审计。
+- **T7**：顶层模块 `fs` / `inode` / `real` / `layer` 内，`pub(in overlayfs)` 与 `pub(super)` 是同一概念；统一优先用 `pub(super)`。
+- **Creator 权限**：允许 Creator 运行 `cargo check` 和 `cargo clippy` 用于自身验证。
+- **xfstests**：Phase 2 当前全部不做，只做编译/静态验证。
+- **commit message**：不要带 A/B/C/T 字母标号；用描述性短语，例如 `overlayfs: remove binding cache from lookup path`。
 
-每个点建议：
+执行顺序（每个点单独 commit）：
 
-1. 只改一个点。
-2. 运行对应测试或 xfstests。
-3. 保留 proposal 提到的可回撤开关，先对比新旧行为。
-4. commit message 标注编号，例如 `A3: commit段活性复查`。
+1. **状态模型 B1/B2/B3/B4/B6**：`facts → Once<RealObject>`、删除 `key`、两锁合并、`append_write` 改持新锁、引入 `spin::Once`。
+   - **同时处理 `kind` / `PositiveKind`**：旧 `ObjectFacts.kind` 存储字段随 facts 替换删除；`PositiveKind` 不是目标结构符号，按 proposal 修正后不再保留，改用 `RealObjectStack::is_merged()` 等派生判断。
+   - **`copyup_transition` 对齐 proposal**：字段从 `Mutex<Option<CopyUpTransition>>` 改为 `Mutex<CopyUpTransition>`（非 Option），并调整 `try_record_copyup_transition` / 调用点。
+2. **调用顺序 C1/C2/C3/C4**：先升格后取锁、源升格前置、commit 段入 `publication_parent.lock`、`object_id` 惰性化（仍保存在 `OverlayInode.object_id`，只是计算时机变惰性）。
+3. **行为语义 A1/A2/A3/A4/A5**：删除 BindingCache 及发布/失效逻辑，stale 用 Once 承载，负 dentry 永远信任，commit 活性复查。
+   - **必须落地 `Lookup` / `NegativeLookup`**：当前 `inode/lookup.rs` 仍用 `LayerLookup` / `LookupOutcome` / `Binding` 临时类型；按 proposal 正源，最终 lookup 返回形态应为 `Lookup` / `NegativeLookup`，在 A4/T5 时恢复。
+4. **类型消灭/去重 T5/T6**：
+   - T5：`WorkdirWorkspace`、`LookupOutcome`、`PreparedTemp`、`PromoteTarget`、`CommitMarker`、`XattrPolicy`、`PositiveBinding`/`HiddenEvidence`/`BindingKey` 等按提案消灭；`OverlayInode` 双构造点合一。
+   - T6：暂存发布骨架统一为 token 化 `publish_temp`；属性迁移两套合一；`mknod_object_type` 单点化。
+   - T6 已采纳的补充项也要做：best-effort impure marker 刷新 helper；whiteout 发布后的索引收尾 helper（按 remove/rename 共同子集抽，保留各自差异）；`RealObjectStack` 字面量构造统一走构造器；workdir root 单一权威来源。
+5. **可见性收窄 T7**：范围最大、最机械，最后做；顶层模块用 `pub(super)` 代替 `pub(in overlayfs)`。
+   - **同时按 proposal 文件结构把 `AccessType` 从 `overlayfs/mod.rs` 移到 `inode/permission.rs`**（proposal 正源；symbol-file-map 已同步修正）。
+6. **B5 裁决**：已决断并执行——删除 `ensure_readdir_index` 的复核 + `EIO` 分支（只读验证确认目录升格保持可见序列不变）。
+7. **最终验证**：`cargo check` + `cargo clippy`（xfstests 不做）。
+
+> 遗漏检查补充（2026-08-23 通读三文件后）：
+> - `PositiveKind`：proposal 文件结构原书写有误；设计描述中的 `OverlayInode` 结构并没有该字段。已修正 proposal 文件结构和 symbol-file-map，Phase 2 不保留 `PositiveKind`。
+> - `Lookup` / `NegativeLookup`：当前 `inode/lookup.rs` 缺少（proposal 明确列出；现被 Phase 2 将消灭的 Binding 临时类型替代），在 A4/T5 时恢复。
+> - `AccessType`：当前仍在 `overlayfs/mod.rs`，但 proposal 文件结构要求它在 `inode/permission.rs`；列入 T7 一并移动。
+> - `copyup_transition`：当前是 `Mutex<Option<CopyUpTransition>>`，proposal 要求 `Mutex<CopyUpTransition>`；列入 B 步骤对齐。
+> - 其余目标文件与 proposal / symbol-file-map 基本一致。
 
 ### Phase 3：清理与验证
 
@@ -221,9 +241,5 @@
 
 ## Next Action（给下一个 agent）
 
-1. Phase 0 已完成（LSIF、old/、清空主树），无需重复。
-2. 从 `symbol-file-map.md` 文件级迁移表选第一个可独立完成的切片开始 Phase 1，例如：
-   - 先建 `mod.rs`、`fs_type.rs`、`layer.rs`、`real.rs` 与 `fs/`、`inode/` 骨架；
-   - 或按依赖从 `real.rs`/`layer.rs` 基础类型开始。
-3. 每个切片完成后运行 `cargo check`（或按既定批次策略验证），并在 handoff/commit 中记录进度。
-4. 不要同时开始 Phase 2 的语义修改；先把 Phase 1 的结构搬移推进到可编译状态。
+1. Phase 0/1/2 均已完成；Phase 2 的 B/C/A/T/T7/B5 已执行，`cargo check` / `cargo clippy` 通过。
+2. 下一步是 Phase 3：清理与验证（`rg` 旧路径残留、确认 `legacy_fs.rs` 和 `old/` 不影响编译、整理 commit 历史），或按用户指示先提交当前 Phase 2 改动。

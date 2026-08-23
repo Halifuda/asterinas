@@ -15,7 +15,7 @@ use super::mount::{capabilities::UpperFilesystemCapabilities, inuse::Uuid, optio
 ///
 /// The default is [`UuidMode::Auto`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in overlayfs) enum UuidMode {
+pub(super) enum UuidMode {
     /// The overlay UUID is null and the fsid comes from the topmost underlying fs.
     Off,
     /// Same as [`UuidMode::Off`], plus underlying-layer UUIDs are ignored.
@@ -80,7 +80,7 @@ impl MountPolicy {
     }
 
     /// Returns the overlay UUID when effective.
-    pub(in overlayfs) fn uuid(&self) -> Option<&Uuid> {
+    pub(super) fn uuid(&self) -> Option<&Uuid> {
         self.uuid.as_ref()
     }
 

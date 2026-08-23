@@ -28,7 +28,10 @@ use crate::{
             inode::{
                 copyup::workdir::WorkdirTempRequest,
                 is_whiteout_inode,
-                xattr::{WHITEOUT_MARKER_VALUE, WHITEOUT_XATTR_FULL_NAME, XattrPolicy},
+                xattr::{
+                    WHITEOUT_MARKER_VALUE, WHITEOUT_XATTR_FULL_NAME, is_private, set_impure_marker,
+                    whiteout_marker_name,
+                },
             },
         },
         vfs::{
@@ -132,7 +135,7 @@ impl OverlayFs {
     /// a missing capability snapshot is `EROFS` and an unsupported upper is
     /// the defensive `EOPNOTSUPP`.
     fn whiteout_representation(&self) -> Result<WhiteoutRepresentation> {
-        let capabilities = self.policy.upper_capabilities().ok_or_else(|| {
+        let capabilities = self.policy().upper_capabilities().ok_or_else(|| {
             Error::with_message(
                 Errno::EROFS,
                 "the overlay mount has no writable upper capability snapshot",
@@ -175,7 +178,7 @@ impl OverlayFs {
                 // The representation derivation already gated this branch on
                 // `can_store_private_xattr`.
                 debug_assert!(
-                    self.xattr_policy.is_private(WHITEOUT_XATTR_FULL_NAME),
+                    is_private(WHITEOUT_XATTR_FULL_NAME),
                     "the whiteout marker name must classify as an overlay-private record"
                 );
                 let temp = self.create_workdir_temp(
@@ -185,7 +188,7 @@ impl OverlayFs {
                         mode: InodeMode::empty(),
                     },
                 )?;
-                let marker_name = XattrPolicy::whiteout_marker_name()?;
+                let marker_name = whiteout_marker_name()?;
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
                 if let Err(err) = temp.inode().set_xattr(
                     marker_name,
@@ -222,7 +225,7 @@ impl OverlayFs {
         replace_target: Option<InodeType>,
     ) -> Result<()> {
         let (cached, can_share_by_link) = {
-            let mut cache = self.whiteout_cache.lock();
+            let mut cache = self.whiteout_cache().lock();
             let cached = cache.take();
             let can_share_by_link = cache.can_share_by_link;
             (cached, can_share_by_link)
@@ -238,10 +241,7 @@ impl OverlayFs {
         // marker is refreshed before the physical publish. The marker is a
         // cache hint whose consumer refreshes it best-effort, so a marker
         // failure must not abort the physical publish: warn and continue.
-        if let Err(err) = self
-            .xattr_policy
-            .set_impure_marker(upper_parent_path.inode())
-        {
+        if let Err(err) = set_impure_marker(upper_parent_path.inode()) {
             warn!(
                 "overlay whiteout publish: failed to set the impure marker on {:?} \
                  (best-effort cache hint; continuing with the physical publish): {:?}",
@@ -254,11 +254,11 @@ impl OverlayFs {
                 if can_share_by_link {
                     match upper_parent_path.link(&handle.path, name) {
                         Ok(()) => {
-                            self.whiteout_cache.lock().store(handle);
+                            self.whiteout_cache().lock().store(handle);
                             return Ok(());
                         }
                         Err(err) if matches!(err.error(), Errno::EMLINK | Errno::EOPNOTSUPP) => {
-                            self.whiteout_cache.lock().disable_sharing();
+                            self.whiteout_cache().lock().disable_sharing();
                         }
                         Err(err) => return Err(err),
                     }

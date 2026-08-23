@@ -278,7 +278,7 @@ overlayfs/
 │       └── capabilities.rs   — UpperFilesystemCapabilities / DTypeProbeVisitor
 │
 └── inode/                    — 逻辑对象
-    ├── mod.rs                — OverlayInode / PositiveKind + Inode·FileOps 实现
+    ├── mod.rs                — OverlayInode + Inode·FileOps 实现
     ├── inode_cache.rs        — InodeCache / InodeCacheEntry
     ├── lookup.rs             — Lookup / NegativeLookup + 层扫描 + 构造编排
     ├── identity.rs           — ObjectId / IdentityPolicy / LowerLayerIdentity / LowerIdOrigin

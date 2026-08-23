@@ -16,10 +16,8 @@
 //! whiteout, an opaque directory, or a non-directory below an accumulated
 //! directory — or the upper-miss opaque-parent case.
 
-use super::binding_cache::{
-    Binding, BindingKey, HiddenEvidence, LayerLookup, LookupOutcome, NegativeBinding,
-    PositiveBinding,
-};
+use spin::Once;
+
 use crate::{
     fs::{
         file::InodeType,
@@ -27,15 +25,35 @@ use crate::{
             fs::OverlayFs,
             inode::{
                 OverlayInode,
-                xattr::{MarkerReadSemantics, XattrPolicy},
+                xattr::{
+                    MarkerReadSemantics, has_marker, opaque_marker_name, whiteout_marker_name,
+                },
             },
             layer::RealObjectStack,
-            real::{RealObject, RealObjectKey},
+            real::RealObject,
         },
         vfs::inode::{Extension, Inode},
     },
     prelude::*,
 };
+
+/// The overlay-visible result of resolving one name under a directory.
+#[derive(Clone)]
+pub(super) enum Lookup {
+    Positive(Arc<OverlayInode>),
+    Negative(NegativeLookup),
+}
+
+/// The reason a name is not visible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NegativeLookup {
+    /// The name is absent from every layer.
+    Absent,
+    /// The name is hidden by a whiteout barrier.
+    HiddenByWhiteout,
+    /// The name is hidden by an opaque-directory barrier.
+    HiddenByOpaque,
+}
 
 /// Returns whether `real_inode` is a whiteout.
 ///
@@ -45,17 +63,16 @@ use crate::{
 /// `trusted.overlay.whiteout` xattr value is exactly `'y'`. An `ERANGE`,
 /// `ENODATA`, or `EOPNOTSUPP` marker read is not a whiteout (`false`);
 /// any other error propagates.
-pub(in overlayfs) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
+pub(super) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
     let metadata = real_inode.metadata()?;
     if metadata.type_ == InodeType::CharDevice
         && metadata.self_dev_id.is_none_or(|dev_id| dev_id.is_null())
     {
         return Ok(true);
     }
-    XattrPolicy::has_marker(
-        &XattrPolicy,
+    has_marker(
         real_inode,
-        XattrPolicy::whiteout_marker_name()?,
+        whiteout_marker_name()?,
         MarkerReadSemantics::ValueY,
     )
 }
@@ -66,64 +83,53 @@ pub(in overlayfs) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bo
 /// when the `trusted.overlay.opaque` xattr value is `'y'`; an `ENODATA`,
 /// `EOPNOTSUPP`, or `ERANGE` read is not opaque (`false`), and any other
 /// error propagates.
-pub(in overlayfs) fn is_opaque_directory(real: &RealObject) -> Result<bool> {
+pub(super) fn is_opaque_directory(real: &RealObject) -> Result<bool> {
     if !real.real_inode().type_().is_directory() {
         return Ok(false);
     }
-    XattrPolicy::has_marker(
-        &XattrPolicy,
+    has_marker(
         real.real_inode(),
-        XattrPolicy::opaque_marker_name()?,
+        opaque_marker_name()?,
         MarkerReadSemantics::ValueY,
     )
 }
 
 impl OverlayFs {
-    /// Runs the upper-first layer lookup for `name` inside `parent_facts`'s
+    /// Runs the upper-first layer lookup for `name` inside `parent`'s
     /// real layers, with overlayfs merge-stop semantics.
-    pub(super) fn lookup_in_layers(
-        &self,
-        parent_facts: &RealObjectStack,
-        name: &str,
-    ) -> Result<LayerLookup> {
+    pub(super) fn lookup_in_layers(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
-        if let Some(upper_real) = &parent_facts.upper {
+        if let Some(upper_real) = parent.upper.get() {
             let upper_path = upper_real.real_path()?;
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&upper_path, name) {
                 Ok(child_path) => {
                     let hit = RealObject::child_hit(0, &child_path, upper_real);
                     if is_whiteout_inode(hit.real_inode())? {
-                        return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
-                            HiddenEvidence::new(0, hit.real_inode().clone()),
-                        )));
+                        return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                     }
                     if !hit.real_inode().type_().is_directory() {
-                        return Ok(LayerLookup::Positive(RealObjectStack {
-                            upper: Some(hit),
-                            lowers: Vec::new(),
-                        }));
+                        return Ok(Lookup::Positive(
+                            self.project_inode(&RealObjectStack::upper_only(hit)),
+                        ));
                     }
                     if is_opaque_directory(&hit)? {
-                        return Ok(LayerLookup::Positive(RealObjectStack {
-                            upper: Some(hit),
-                            lowers: Vec::new(),
-                        }));
+                        return Ok(Lookup::Positive(
+                            self.project_inode(&RealObjectStack::upper_only(hit)),
+                        ));
                     }
                     dir_hits.push(hit);
                 }
                 Err(err) if err.error() == Errno::ENOENT => {
                     if is_opaque_directory(upper_real)? {
-                        return Ok(LayerLookup::Negative(NegativeBinding::HiddenByOpaque(
-                            HiddenEvidence::new(0, upper_real.real_inode().clone()),
-                        )));
+                        return Ok(Lookup::Negative(NegativeLookup::HiddenByOpaque));
                     }
                 }
                 Err(err) => return Err(err),
             }
         }
 
-        for lower_real in &parent_facts.lowers {
+        for lower_real in &parent.lowers {
             let layer_index = lower_real.layer_index();
             let lower_path = lower_real.real_path()?;
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&lower_path, name) {
@@ -134,18 +140,15 @@ impl OverlayFs {
                         // the name is hidden. Below an already-visible
                         // directory it only ends the downward merge scan.
                         if dir_hits.is_empty() {
-                            return Ok(LayerLookup::Negative(NegativeBinding::HiddenByWhiteout(
-                                HiddenEvidence::new(layer_index, hit.real_inode().clone()),
-                            )));
+                            return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                         }
                         break;
                     }
                     if !hit.real_inode().type_().is_directory() {
                         if dir_hits.is_empty() {
-                            return Ok(LayerLookup::Positive(RealObjectStack {
-                                upper: None,
-                                lowers: vec![hit],
-                            }));
+                            return Ok(Lookup::Positive(
+                                self.project_inode(&RealObjectStack::lower_only(hit)),
+                            ));
                         }
                         // A non-directory below an accumulated directory hit
                         // stops the downward merge: every deeper layer stays
@@ -164,7 +167,7 @@ impl OverlayFs {
         }
 
         if dir_hits.is_empty() {
-            return Ok(LayerLookup::Negative(NegativeBinding::Absent));
+            return Ok(Lookup::Negative(NegativeLookup::Absent));
         }
 
         let upper = if dir_hits[0].layer_index() == 0 {
@@ -172,45 +175,21 @@ impl OverlayFs {
         } else {
             None
         };
-        Ok(LayerLookup::Positive(RealObjectStack {
-            upper,
-            lowers: dir_hits,
-        }))
+        Ok(Lookup::Positive(
+            self.project_inode(&RealObjectStack::new(upper, dir_hits)),
+        ))
     }
 
-    /// Resolves one `name` under `parent_facts` into a [`LookupOutcome`].
+    /// Resolves one `name` under `parent` into a [`Lookup`].
     ///
-    /// The flow is verify-then-serve: the layer-ordered lookup re-observes
-    /// the fresh layer truth, and a cached binding is served only when it
-    /// matches that truth; otherwise the binding is rebuilt and published.
-    pub(super) fn lookup_binding(
-        &self,
-        parent_facts: &RealObjectStack,
-        name: &str,
-    ) -> Result<LookupOutcome> {
-        let parent_id = parent_facts.key();
-        let truth = self.lookup_in_layers(parent_facts, name)?;
-        let is_stale_upper = if let Some(binding) = self.bindings.get(&parent_id, name) {
-            if binding.matches_truth(&truth) {
-                return Ok(LookupOutcome {
-                    binding: binding.as_ref().clone(),
-                    is_stale_upper: false,
-                });
-            }
-            binding.is_stale_upper(&truth)
-        } else {
-            false
-        };
-        let binding = match truth {
-            LayerLookup::Positive(facts) => {
-                let inode = self.project_inode(&facts);
-                Binding::Positive(PositiveBinding::new(inode))
-            }
-            LayerLookup::Negative(negative) => Binding::Negative(negative),
-        };
-        if let Binding::Positive(positive) = &binding {
-            if let Some(parent) = self.inodes.get(parent_id) {
-                positive.inode.try_record_copyup_transition(parent, name);
+    /// The flow is pure resolve: the layer-ordered lookup re-observes fresh
+    /// layer truth and projects it directly, with no verify-then-serve cache.
+    pub(super) fn lookup(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
+        let parent_id = parent.key();
+        let lookup = self.lookup_in_layers(parent, name)?;
+        if let Lookup::Positive(inode) = &lookup {
+            if let Some(parent) = self.inodes().get(parent_id) {
+                inode.try_record_copyup_transition(parent, name);
             } else {
                 debug_assert!(
                     false,
@@ -223,32 +202,42 @@ impl OverlayFs {
                 );
             }
         }
-        self.publish_binding(&parent_id, name, binding.clone());
-        Ok(LookupOutcome {
-            binding,
-            is_stale_upper,
-        })
-    }
-
-    /// Publishes `binding` for `(parent_id, name)` into the binding cache.
-    pub(super) fn publish_binding(&self, parent_id: &RealObjectKey, name: &str, binding: Binding) {
-        self.bindings.insert(
-            BindingKey::new(*parent_id, String::from(name)),
-            Arc::new(binding),
-        );
+        Ok(lookup)
     }
 
     /// Creates or reuses the shared [`OverlayInode`] for `facts`.
     ///
-    /// The `object_id` is precomputed from [`IdentityPolicy`] before the
-    /// inode-cache check-and-create, because the upper-source lower-id read
-    /// may block on the underlying xattr and must never run inside the
-    /// cache's upgraded guard.
+    /// The `object_id` is computed lazily: a valid cache hit is returned
+    /// without reading the upper's lower-id origin record. On a miss the
+    /// lower-id read is still done before the inode-cache write path, so it
+    /// never runs inside the cache's upgraded guard.
     pub(super) fn project_inode(&self, facts: &RealObjectStack) -> Arc<OverlayInode> {
         let source = facts.visible_source();
         let key = facts.key();
         let is_directory = facts.is_merged() || source.real_inode().type_().is_directory();
-        let fallback_fn = || self.identity.project_object_id(source, is_directory);
+        // Clone the visible source before the closures move `facts`: the
+        // get-or-create predicate validates a cached hit against this real
+        // inode, replacing an ino-reuse stale occupant. The fresh-truth
+        // upper presence is captured here as well, because the predicate
+        // must distinguish a lower-only fresh truth (below) from an
+        // upper-backed one.
+        let source_inode = facts.visible_source().real_inode().clone();
+        let fresh_is_lower_only = facts.upper.is_none();
+        if let Some(inode) = self.inodes().get(key) {
+            let hit_valid = if fresh_is_lower_only {
+                // Reuse only an inode whose visible source is exactly
+                // this lower; a stale-upper inode must not be reused even
+                // though `contains_real_inode` matches the retained
+                // lower, because its dead-upper metadata would be wrong.
+                Arc::ptr_eq(inode.visible_source().real_inode(), &source_inode)
+            } else {
+                inode.contains_real_inode(&source_inode)
+            };
+            if hit_valid {
+                return inode;
+            }
+        }
+        let fallback_fn = || self.identity().project_object_id(source, is_directory);
         let object_id = if source.layer_index() == 0 {
             match self.read_lower_id(source.real_inode()) {
                 // Defensive: the record was device-validated at the read boundary,
@@ -257,8 +246,8 @@ impl OverlayFs {
                     // The record is accepted only when its real inode is
                     // consistent with the retained same-layer lower of the
                     // fresh facts.
-                    if self.identity.origin_real_ino_resolves(&record, facts) {
-                        self.identity
+                    if self.identity().origin_real_ino_resolves(&record, facts) {
+                        self.identity()
                             .project_object_id_from_lower_id(&record, is_directory)
                             .unwrap_or_else(fallback_fn)
                     } else {
@@ -278,17 +267,10 @@ impl OverlayFs {
         } else {
             fallback_fn()
         };
-        // Clone the visible source before the closures move `facts`: the
-        // get-or-create predicate validates a cached hit against this real
-        // inode, replacing an ino-reuse stale occupant. The fresh-truth
-        // upper presence is captured here as well, because the predicate
-        // must distinguish a lower-only fresh truth (below) from an
-        // upper-backed one.
-        let source_inode = facts.visible_source().real_inode().clone();
-        let fresh_is_lower_only = facts.upper.is_none();
-        let fs = self.self_weak.clone();
-        let facts = facts.clone();
-        self.inodes.get_or_create(
+        let fs = self.self_weak().clone();
+        let lowers = facts.lowers.clone();
+        let upper = facts.upper.clone();
+        self.inodes().get_or_create(
             key,
             move |carrier| {
                 if fresh_is_lower_only {
@@ -296,34 +278,30 @@ impl OverlayFs {
                     // this lower; a stale-upper inode must not be reused even
                     // though `contains_real_inode` matches the retained
                     // lower, because its dead-upper metadata would be wrong.
-                    Arc::ptr_eq(
-                        carrier.facts_snapshot().visible_source().real_inode(),
-                        &source_inode,
-                    )
+                    Arc::ptr_eq(carrier.visible_source().real_inode(), &source_inode)
                 } else {
-                    carrier.facts_snapshot().contains_real_inode(&source_inode)
+                    carrier.contains_real_inode(&source_inode)
                 }
             },
             move || {
+                let upper = match upper {
+                    Some(upper) => Once::initialized(upper),
+                    None => Once::new(),
+                };
                 Arc::new(OverlayInode {
                     fs,
-                    key: Mutex::new(key),
-                    facts: Mutex::new(facts),
-                    dir_transaction_lock: if is_directory {
-                        Some(Mutex::new(()))
+                    lowers,
+                    upper,
+                    lock: Mutex::new(if is_directory {
+                        Some(crate::fs::fs_impls::overlayfs::inode::readdir::ReaddirIndex::new())
                     } else {
                         None
-                    },
+                    }),
                     object_id,
                     extension: Extension::new(),
-                    readdir_index: if is_directory {
-                        Some(Mutex::new(
-                            crate::fs::fs_impls::overlayfs::inode::readdir::ReaddirIndex::new(),
-                        ))
-                    } else {
-                        None
-                    },
-                    copyup_transition: Mutex::new(None),
+                    copyup_transition: Mutex::new(
+                        crate::fs::fs_impls::overlayfs::inode::copyup::CopyUpTransition::new(),
+                    ),
                 })
             },
         )

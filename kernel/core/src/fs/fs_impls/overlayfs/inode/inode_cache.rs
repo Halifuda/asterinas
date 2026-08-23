@@ -75,7 +75,7 @@ impl InodeCache {
 
     /// Returns the cached overlay inode for `key`, if a live inode is
     /// registered.
-    pub(in overlayfs) fn get(&self, key: RealObjectKey) -> Option<Arc<OverlayInode>> {
+    pub(super) fn get(&self, key: RealObjectKey) -> Option<Arc<OverlayInode>> {
         self.entries
             .read()
             .get(&key)
@@ -90,7 +90,7 @@ impl InodeCache {
     /// `new_key` for a different inode is either a displaced concurrent
     /// projection (`Err`, never silently clobbered) or an ino-reuse stale
     /// occupant that is replaced.
-    pub(in overlayfs) fn rekey_keep_old_alias(
+    pub(super) fn rekey_keep_old_alias(
         &self,
         old_key: RealObjectKey,
         new_key: RealObjectKey,
@@ -121,10 +121,7 @@ impl InodeCache {
                         "the overlay inode-cache occupant disappeared during the alias transition",
                     ));
                 };
-                if existing_carrier
-                    .facts_snapshot()
-                    .contains_real_inode(new_visible_source.real_inode())
-                {
+                if existing_carrier.contains_real_inode(new_visible_source.real_inode()) {
                     // The same real object was projected early under the new key by
                     // a concurrent lookup; keep the displacement error instead of
                     // silently reusing it.
@@ -195,7 +192,7 @@ impl InodeCache {
     /// inode (backing-fs ino reuse) is evicted and replaced so the key is
     /// never served a different real object. The check-then-publish sequence
     /// is atomic.
-    pub(in overlayfs) fn get_or_create(
+    pub(super) fn get_or_create(
         &self,
         key: RealObjectKey,
         is_same_object: impl FnOnce(&Arc<OverlayInode>) -> bool,

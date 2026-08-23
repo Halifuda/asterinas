@@ -20,13 +20,13 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
-pub(in overlayfs) struct RealPath {
+pub(super) struct RealPath {
     mount: Weak<Mount>,
     dentry: Arc<Dentry>,
 }
 
 impl RealPath {
-    pub(in overlayfs) fn from_path(path: &Path) -> Self {
+    pub(super) fn from_path(path: &Path) -> Self {
         Self {
             mount: Arc::downgrade(path.mount_node()),
             dentry: path.dentry().clone(),
@@ -35,7 +35,7 @@ impl RealPath {
 
     /// Returns `Err(EIO)` when the anchor mount is no longer alive (the
     /// parent overlay was unmounted while a stored path survived).
-    pub(in overlayfs) fn upgrade(&self) -> Result<Path> {
+    pub(super) fn upgrade(&self) -> Result<Path> {
         let mount = self.mount.upgrade().ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,
@@ -47,7 +47,7 @@ impl RealPath {
 }
 
 #[derive(Clone, Debug)]
-pub(in overlayfs) struct RealObject {
+pub(super) struct RealObject {
     pub(super) layer_index: usize,
     pub(super) real_inode: Arc<dyn Inode>,
     /// Dentry-anchored real-object [`RealPath`] value.
@@ -62,7 +62,7 @@ impl RealObject {
     /// The readdir `..` projection constructs one of these per visible
     /// child when it only needs the child's identity (dev/ino) — and not a
     /// dentry path — so the object carries no stored `real_path`.
-    pub(in overlayfs) fn identity_only(
+    pub(super) fn identity_only(
         layer_index: usize,
         real_inode: Arc<dyn Inode>,
         fsid: u64,
@@ -81,7 +81,7 @@ impl RealObject {
     ///
     /// The inode is taken from `path` before it is pinned into a [`RealPath`],
     /// so `RealPath` does not need to cache a redundant inode.
-    pub(in overlayfs) fn from_layer_path(
+    pub(super) fn from_layer_path(
         layer_index: usize,
         path: &Path,
         fsid: u64,
@@ -99,7 +99,7 @@ impl RealObject {
     /// Builds the dentry-anchored real object for one layer hit of a child
     /// lookup: the resolved child path at `layer_index` pinned through the
     /// hit layer's identity (`fsid` / `container_dev_id`).
-    pub(in overlayfs) fn child_hit(
+    pub(super) fn child_hit(
         layer_index: usize,
         child_path: &Path,
         layer_real: &RealObject,
@@ -112,11 +112,11 @@ impl RealObject {
         )
     }
 
-    pub(in overlayfs) fn layer_index(&self) -> usize {
+    pub(super) fn layer_index(&self) -> usize {
         self.layer_index
     }
 
-    pub(in overlayfs) fn real_inode(&self) -> &Arc<dyn Inode> {
+    pub(super) fn real_inode(&self) -> &Arc<dyn Inode> {
         &self.real_inode
     }
 
@@ -124,7 +124,7 @@ impl RealObject {
     ///
     /// `Err(EIO)` when no path is stored or the anchor mount is no longer
     /// alive.
-    pub(in overlayfs) fn real_path(&self) -> Result<Path> {
+    pub(super) fn real_path(&self) -> Result<Path> {
         self.real_path
             .as_ref()
             .ok_or_else(|| {
@@ -136,17 +136,17 @@ impl RealObject {
             .upgrade()
     }
 
-    pub(in overlayfs) fn fsid(&self) -> u64 {
+    pub(super) fn fsid(&self) -> u64 {
         self.fsid
     }
 
-    pub(in overlayfs) fn container_dev_id(&self) -> DeviceId {
+    pub(super) fn container_dev_id(&self) -> DeviceId {
         self.container_dev_id
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(in overlayfs) struct RealObjectKey {
+pub(super) struct RealObjectKey {
     /// Layer fsid of the visible-metadata source (upper, else topmost lower).
     fsid: u64,
     /// Real inode number of the visible-metadata source.
@@ -154,7 +154,7 @@ pub(in overlayfs) struct RealObjectKey {
 }
 
 impl RealObjectKey {
-    pub(in overlayfs) fn from_source(real: &RealObject) -> Self {
+    pub(super) fn from_source(real: &RealObject) -> Self {
         Self {
             fsid: real.fsid(),
             real_ino: real.real_inode().ino(),

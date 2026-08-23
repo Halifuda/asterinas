@@ -23,7 +23,7 @@
 
 use hashbrown::HashSet;
 
-use super::{OverlayInode, identity::ObjectId, lookup::is_opaque_directory};
+use super::{Lookup, OverlayInode, identity::ObjectId, lookup::is_opaque_directory};
 use crate::{
     fs::{
         file::InodeType,
@@ -49,7 +49,7 @@ pub(super) enum ReaddirIndexValidity {
 }
 
 /// The readdir index for an overlay merged directory; `entries` are ordered by ascending `cookie`.
-pub(in overlayfs) struct ReaddirIndex {
+pub(super) struct ReaddirIndex {
     entries: Vec<ReaddirIndexEntry>,
     validity: ReaddirIndexValidity,
     next_cookie: ReaddirCookie,
@@ -82,15 +82,11 @@ impl OverlayInode {
         offset: usize,
         visitor: &mut dyn DirentVisitor,
     ) -> Result<usize> {
-        let dir = self
-            .dir_transaction_lock
-            .as_ref()
-            .ok_or_else(|| Error::new(Errno::ENOTDIR))?;
-
-        let _dir_guard = dir.lock();
-        let facts = self.facts_snapshot();
+        let mut lock = self.lock.lock();
+        let index = lock.as_mut().ok_or_else(|| Error::new(Errno::ENOTDIR))?;
+        let facts = self.real_object_stack();
         let input_cookie = ReaddirCookie(offset as u64);
-        let facts = self.ensure_readdir_index(&facts)?;
+        let facts = self.ensure_readdir_index(&facts, index)?;
         let mut last_visited: Option<ReaddirCookie> = None;
         let delta_fn = |last_visited: Option<ReaddirCookie>| -> usize {
             let delta = match last_visited {
@@ -115,11 +111,6 @@ impl OverlayInode {
             }
             last_visited = Some(ReaddirCookie(2));
         }
-        let index = self
-            .readdir_index
-            .as_ref()
-            .ok_or_else(|| Error::new(Errno::ENOTDIR))?;
-        let index = index.lock();
         let start = index
             .first_entry_after(input_cookie)
             .unwrap_or(index.entries.len());
@@ -153,9 +144,11 @@ impl OverlayInode {
 impl OverlayInode {
     /// Invalidates the index for namespace mutations
     /// and copy-up directory-authority transitions.
-    pub(super) fn invalidate_readdir_index(&self) {
-        if let Some(index) = self.readdir_index.as_ref() {
-            index.lock().validity = ReaddirIndexValidity::NeedsRebuild;
+    ///
+    /// Callers must already hold `self.lock`.
+    pub(super) fn invalidate_readdir_index(&self, index: &mut Option<ReaddirIndex>) {
+        if let Some(index) = index.as_mut() {
+            index.validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }
 
@@ -163,21 +156,21 @@ impl OverlayInode {
     /// publication) into a `Valid` upper-only index without a full rebuild
     /// because a merged/lower-backed or stale index cannot provably keep
     /// the cookie order.
+    ///
+    /// Callers must already hold `self.lock`.
     pub(super) fn readdir_index_insert(
         &self,
         name: &str,
         inode: Arc<OverlayInode>,
         type_: InodeType,
+        index: &mut Option<ReaddirIndex>,
     ) {
-        let facts = self.facts_snapshot();
-        let Some(index) = self.readdir_index.as_ref() else {
+        let Some(index) = index.as_mut() else {
             return;
         };
-        let mut index = index.lock();
         if index.validity == ReaddirIndexValidity::Valid
-            && !facts.is_merged()
-            && facts.upper.is_some()
-            && facts.lowers.is_empty()
+            && self.upper.get().is_some()
+            && self.lowers.is_empty()
         {
             if !index.insert_visible(name, inode, type_) {
                 index.validity = ReaddirIndexValidity::NeedsRebuild;
@@ -194,23 +187,45 @@ impl OverlayInode {
     /// Tombstoning preserves the removed name's cookie, so readdir positions
     /// already exposed remain stable; that is why a failed tombstone cannot
     /// stay `Valid`.
-    pub(super) fn readdir_index_remove(&self, name: &str) {
-        let Some(index) = self.readdir_index.as_ref() else {
+    ///
+    /// Callers must already hold `self.lock`.
+    pub(super) fn readdir_index_remove(&self, name: &str, index: &mut Option<ReaddirIndex>) {
+        let Some(index) = index.as_mut() else {
             return;
         };
-        let mut index = index.lock();
         if index.validity == ReaddirIndexValidity::Valid && !index.remove_visible(name) {
             index.validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }
 
+    /// Updates this parent's index after a whiteout publication.
+    ///
+    /// Remove tombstones the hidden name; rename invalidates the whole index
+    /// because the visible sequence is reordered. `name` is `Some` for the
+    /// remove-style single-name update and `None` for the rename-style
+    /// invalidation.
+    pub(super) fn finish_whiteout_index(
+        &self,
+        name: Option<&str>,
+        index: &mut Option<ReaddirIndex>,
+    ) {
+        match name {
+            Some(name) => self.readdir_index_remove(name, index),
+            None => self.invalidate_readdir_index(index),
+        }
+    }
+
     /// Counts the visible children.
-    pub(super) fn visible_child_count(&self, facts: &RealObjectStack) -> Result<usize> {
-        self.ensure_readdir_index(facts)?;
-        let index = self.readdir_index.as_ref().ok_or_else(|| {
+    ///
+    /// This method acquires the target directory's own `lock`; callers that
+    /// already hold it must use `ensure_readdir_index` directly.
+    pub(super) fn visible_child_count(&self) -> Result<usize> {
+        let mut lock = self.lock.lock();
+        let index = lock.as_mut().ok_or_else(|| {
             Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
         })?;
-        let index = index.lock();
+        let facts = self.real_object_stack();
+        self.ensure_readdir_index(&facts, index)?;
         Ok(index
             .entries
             .iter()
@@ -222,45 +237,21 @@ impl OverlayInode {
     ///
     /// Returns the facts the index was published from; a persistent mismatch
     /// surfaces `EIO` and never publishes a stale index, and a failed scan
-    /// leaves the previous `Valid` index intact.
-    pub(super) fn ensure_readdir_index(&self, facts: &RealObjectStack) -> Result<RealObjectStack> {
-        let index = self.readdir_index.as_ref().ok_or_else(|| {
-            Error::with_message(Errno::ENOTDIR, "the overlay inode is not a directory")
-        })?;
-        {
-            let index = index.lock();
-            if index.validity == ReaddirIndexValidity::Valid {
-                return Ok(facts.clone());
-            }
+    /// leaves the previous `Valid` index intact. The caller must already hold
+    /// `self.lock` and pass the locked index payload.
+    pub(super) fn ensure_readdir_index(
+        &self,
+        facts: &RealObjectStack,
+        index: &mut ReaddirIndex,
+    ) -> Result<RealObjectStack> {
+        if index.validity == ReaddirIndexValidity::Valid {
+            return Ok(facts.clone());
         }
-        let mut scan_facts = facts.clone();
-        let mut retried = false;
-        let sequence = loop {
-            let sequence = self.readdir_sequence(&scan_facts)?;
-            // Revalidate the facts snapshot after the released-lock segment
-            // via the shared lock-free comparator
-            // (`RealObjectStack::same_real_object_stack`), which compares by
-            // durable `fsid`/`ino` identity rather than pointer identity.
-            let revalidated = self.facts_snapshot();
-            let unchanged = scan_facts.same_real_object_stack(&revalidated);
-            if unchanged {
-                break sequence;
-            }
-            if retried {
-                // Persistent mismatch: a copy-up transition kept racing the
-                // rebuild; never publish a stale index — leave
-                // `NeedsRebuild` and surface the refusal (`EIO` is the tree's
-                // consistency-refusal convention).
-                return Err(Error::with_message(
-                    Errno::EIO,
-                    "the overlay directory facts changed while the readdir index was being rebuilt",
-                ));
-            }
-            retried = true;
-            scan_facts = revalidated;
-        };
-        index.lock().rebuild(sequence);
-        Ok(scan_facts)
+        // Directory copy-up preserves the visible sequence (empty upper +
+        // retained lowers), so no post-scan facts revalidation is needed.
+        let sequence = self.readdir_sequence(facts)?;
+        index.rebuild(sequence);
+        Ok(facts.clone())
     }
 
     /// Observes the current visible sequence of this directory from the
@@ -305,7 +296,7 @@ impl OverlayInode {
                 if !seen.insert(name.clone()) {
                     continue;
                 }
-                if let Some(inode) = fs.lookup_binding(facts, &name)?.binding.inode() {
+                if let Lookup::Positive(inode) = fs.lookup(self, &name)? {
                     let file_type = inode.type_();
                     sequence.push((name, inode, file_type));
                 }
@@ -345,7 +336,7 @@ impl OverlayInode {
         // whole route is predetermined to serve the stable self-parent
         // approximation; skip the underlying `lookup("..")`/origin read whose
         // result would only be discarded.
-        if !fs.identity.is_xino_effective() && !fs.identity.is_all_layers_same_fs() {
+        if !fs.identity().is_xino_effective() && !fs.identity().is_all_layers_same_fs() {
             return self.parent_fallback();
         }
         let visible = facts.visible_source();
@@ -369,7 +360,7 @@ impl OverlayInode {
             return object_id;
         }
         if !fs
-            .identity
+            .identity()
             .is_directory_projection_deterministic(visible.fsid(), parent_real_inode.ino())
         {
             return self.parent_fallback();
@@ -380,7 +371,7 @@ impl OverlayInode {
             visible.fsid(),
             visible.container_dev_id(),
         );
-        fs.identity.project_object_id(&parent_real, true)
+        fs.identity().project_object_id(&parent_real, true)
     }
 
     /// Projects the upper-backed real parent's identity from its durable
@@ -400,19 +391,19 @@ impl OverlayInode {
             Ok(Some(record)) => {
                 // When all layers share one filesystem, projection passes the origin
                 // through without a layer id, so this caller skips the layer resolution.
-                if !fs.identity.is_all_layers_same_fs() {
-                    let layer_id = fs.identity.resolve_layer_id_for_record(
+                if !fs.identity().is_all_layers_same_fs() {
+                    let layer_id = fs.identity().resolve_layer_id_for_record(
                         record.container_dev_id(),
                         record.lower_layer_root_ino(),
                     )?;
                     if !fs
-                        .identity
+                        .identity()
                         .is_directory_projection_deterministic(layer_id, record.real_ino())
                     {
                         return None;
                     }
                 }
-                fs.identity.project_object_id_from_lower_id(&record, true)
+                fs.identity().project_object_id_from_lower_id(&record, true)
             }
             Ok(None) => None,
             Err(err) if matches!(err.error(), Errno::EACCES | Errno::EPERM) => {
@@ -445,7 +436,7 @@ impl OverlayInode {
     /// the self-parent fallback) when the root is not registered, without
     /// disclosing the backing-store parent.
     pub(super) fn is_mount_root(&self, fs: &OverlayFs) -> bool {
-        match fs.inodes.get(fs.root_visible_key()) {
+        match fs.inodes().get(fs.root_visible_key()) {
             Some(root) => root.key() == self.key(),
             None => {
                 warn!(
@@ -490,6 +481,21 @@ impl ReaddirIndex {
                 ReaddirIndexEntry::Tombstone { .. } => None,
             })
             .collect()
+    }
+
+    /// Returns the still-remembered visible inode for `name`, if any.
+    ///
+    /// This is the in-overlay per-name record used to detect an upper-backed
+    /// name that disappeared behind the overlay.
+    pub(super) fn visible_inode(&self, name: &str) -> Option<Arc<OverlayInode>> {
+        self.entries.iter().find_map(|entry| match entry {
+            ReaddirIndexEntry::Visible {
+                name: entry_name,
+                inode,
+                ..
+            } if entry_name == name => Some(inode.clone()),
+            _ => None,
+        })
     }
 
     /// Rebuilds the index from a complete visible sequence.

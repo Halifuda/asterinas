@@ -10,13 +10,12 @@
 //!
 //! # Locking
 //!
-//! `dir_transaction_lock` serializes directory mutations (present only on
-//! directories). `facts` guards the per-object facts and is normally held
-//! only briefly; the one non-obvious hold is [`OverlayInode::append_write`],
-//! which keeps the `facts` guard across the underlying `size()` + `write_at`
-//! so concurrent appends serialize on the post-write size.
+//! `lock` is the per-inode transaction lock; directories carry a
+//! [`ReaddirIndex`] in its payload, while non-directories use it as a plain
+//! serialization token. [`OverlayInode::append_write`] holds this lock across
+//! the underlying `size()` + `write_at` so concurrent appends serialize on the
+//! post-write size.
 
-mod binding_cache;
 mod copyup;
 mod data;
 mod dir;
@@ -30,23 +29,23 @@ mod xattr;
 
 use core::time::Duration;
 
+use spin::Once;
+
 pub(super) use self::{
-    binding_cache::{
-        Binding, BindingCache, BindingKey, HiddenEvidence, NegativeBinding, PositiveBinding,
-    },
-    copyup::workdir::WorkdirWorkspace,
     dir::whiteout::WhiteoutCache,
-    identity::{IdentityPolicy, ObjectId, collect_layer_devs},
+    identity::{IdentityPolicy, collect_layer_devs},
     inode_cache::InodeCache,
-    lookup::{is_opaque_directory, is_whiteout_inode},
+};
+use self::{
+    identity::ObjectId,
+    lookup::{Lookup, NegativeLookup, is_opaque_directory, is_whiteout_inode},
+    permission::AccessType,
     readdir::ReaddirIndex,
-    xattr::XattrPolicy,
 };
 use crate::{
     fs::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
-            AccessType,
             fs::OverlayFs,
             inode::copyup::CopyUpTransition,
             layer::RealObjectStack,
@@ -57,7 +56,7 @@ use crate::{
             file_system::FileSystem,
             inode::{
                 Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
-                RevalidationPolicy, SymbolicLink,
+                SymbolicLink,
             },
             path::Path,
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
@@ -69,36 +68,35 @@ use crate::{
 };
 
 /// The logical overlay inode exposed to the VFS: one logical overlay object
-/// shared by every name bound to it, with the real-object facts living once
-/// in [`RealObjectStack`].
+/// shared by every name bound to it, with an immutable lower stack and an
+/// upper object published at most once by copy-up.
 pub(super) struct OverlayInode {
     /// The owning mount.
     pub(super) fs: Weak<OverlayFs>,
-    /// The inode-cache key of the visible-metadata source.
-    pub(super) key: Mutex<RealObjectKey>,
-    /// The per-object real-object facts, replaced only by the copy-up
-    /// transition.
-    pub(super) facts: Mutex<RealObjectStack>,
-    /// The per-directory transaction lock; `Some` iff this object is a
-    /// directory.
-    pub(super) dir_transaction_lock: Option<Mutex<()>>,
+    /// The immutable lower real-object stack, topmost first.
+    pub(super) lowers: Vec<RealObject>,
+    /// The upper real object; unset until copy-up publishes one.
+    pub(super) upper: Once<RealObject>,
+    /// The per-inode transaction lock. Directories carry their merged-readdir
+    /// index in the payload; non-directories use the lock as a pure
+    /// serialization token with `None`.
+    lock: Mutex<Option<ReaddirIndex>>,
     /// The precomputed projected `st_dev`/`st_ino`.
-    pub(super) object_id: ObjectId,
+    object_id: ObjectId,
     /// The VFS inode extension groups (fs event publisher / fs lock context).
     pub(super) extension: Extension,
-    /// The per-directory merged-readdir index; `Some` iff this object is a
-    /// directory.
-    pub(super) readdir_index: Option<Mutex<ReaddirIndex>>,
-    /// The copy-up transition coordinate; `None` until copy-up records the
-    /// first positive-binding publication.
-    pub(super) copyup_transition: Mutex<Option<CopyUpTransition>>,
+    /// The copy-up transition coordinate; `publication_parent`/`name` are
+    /// `None` until the first positive-binding publication records them.
+    copyup_transition: Mutex<CopyUpTransition>,
 }
 
 impl OverlayInode {
     /// Constructs the overlay mount root inode on demand.
     ///
     /// The root facts merge the upper root with all lower roots; the root is
-    /// always a directory.
+    /// always a directory. Construction is delegated to the shared
+    /// [`OverlayFs::project_inode`] path so the root uses the same inode-cache
+    /// and identity projection as every other logical object.
     pub(super) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
         let fs = match fs.upgrade() {
             Some(fs) => fs,
@@ -107,7 +105,7 @@ impl OverlayInode {
                  the mount reference is always alive at this call site"
             ),
         };
-        let layer_stack = &fs.layer_stack;
+        let layer_stack = &fs.layer_stack();
         let upper = layer_stack.upper_layer().ok().map(|layer| {
             let root_path = layer
                 .root_path
@@ -132,58 +130,58 @@ impl OverlayInode {
                 )
             })
             .collect();
-        let facts = RealObjectStack { upper, lowers };
-        // The layer stack always carries at least one lower layer, so
-        // `visible_source()` never indexes an empty `lowers`.
-        let visible = facts.visible_source();
-        let key = facts.key();
-        let object_id = fs.identity.project_object_id(visible, true);
-        let inode = Arc::new(OverlayInode {
-            fs: Arc::downgrade(&fs),
-            key: Mutex::new(key),
-            facts: Mutex::new(facts),
-            dir_transaction_lock: Some(Mutex::new(())),
-            object_id,
-            extension: Extension::new(),
-            readdir_index: Some(Mutex::new(ReaddirIndex::new())),
-            copyup_transition: Mutex::new(None),
-        });
-        // Register the root inode in the inode cache so every live inode
-        // resolves by its visible-source key; the inlined parent probe needs
-        // no root special case and `project_inode` never mints a duplicate.
-        fs.inodes.get_or_create(key, |_| true, || inode.clone());
-        inode
+        fs.project_inode(&RealObjectStack::new(upper, lowers))
     }
 
+    /// Returns the inode-cache key derived from the current visible source.
     pub(super) fn key(&self) -> RealObjectKey {
-        *self.key.lock()
+        RealObjectKey::from_source(self.visible_source())
+    }
+
+    /// Returns the current visible real-object source.
+    pub(super) fn visible_source(&self) -> &RealObject {
+        self.upper.get().unwrap_or_else(|| {
+            self.lowers
+                .first()
+                .expect("a real-object stack is never empty")
+        })
+    }
+
+    /// Returns whether `real_inode` is this object's visible source or one of
+    /// its retained lowers.
+    pub(super) fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
+        Arc::ptr_eq(self.visible_source().real_inode(), real_inode)
+            || self
+                .lowers
+                .iter()
+                .any(|lower| Arc::ptr_eq(lower.real_inode(), real_inode))
+    }
+
+    /// Materializes the current real-object stack as an owned value.
+    pub(super) fn real_object_stack(&self) -> RealObjectStack {
+        RealObjectStack::new(self.upper.get().cloned(), self.lowers.clone())
     }
 
     /// Returns the precomputed projected `st_dev`/`st_ino`.
     ///
     /// Copy-up re-projection keeps the lower-id-derived identity, so the
     /// value is stable across copy-up (authority-continuity invariant).
-    pub(super) fn object_id(&self) -> ObjectId {
+    fn object_id(&self) -> ObjectId {
         self.object_id
     }
 
-    pub(super) fn facts_snapshot(&self) -> RealObjectStack {
-        self.facts.lock().clone()
-    }
-
     pub(super) fn select_real_inode(&self) -> Arc<dyn Inode> {
-        self.facts_snapshot().select_real_inode()
+        self.visible_source().real_inode().clone()
     }
 
     /// Returns the dentry-anchored path of the promoted upper real parent
     /// directory.
     ///
-    /// After promotion the facts guarantee an upper object that is always
-    /// dentry-anchored, so the checked `real_path()` accessor succeeds;
-    /// `EROFS`/`EIO` propagate when that guarantee does not hold.
+    /// After promotion the object is guaranteed to have an upper object that
+    /// is always dentry-anchored, so the checked `real_path()` accessor
+    /// succeeds; `EROFS`/`EIO` propagate when that guarantee does not hold.
     pub(super) fn upper_parent_path(&self) -> Result<Path> {
-        let facts = self.facts_snapshot();
-        let upper = facts.upper.as_ref().ok_or_else(|| {
+        let upper = self.upper.get().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
         upper.real_path()
@@ -201,83 +199,63 @@ impl OverlayInode {
     }
 
     /// Locks the per-object copy-up coordination state.
-    pub(super) fn lock_copyup_transition(&self) -> MutexGuard<'_, Option<CopyUpTransition>> {
+    fn lock_copyup_transition(&self) -> MutexGuard<'_, CopyUpTransition> {
         self.copyup_transition.lock()
     }
 
     /// Attempts to lock the per-object copy-up coordination state without
     /// blocking; `None` when another coordinator holds the lock.
-    pub(super) fn try_lock_copyup_transition(
-        &self,
-    ) -> Option<MutexGuard<'_, Option<CopyUpTransition>>> {
+    fn try_lock_copyup_transition(&self) -> Option<MutexGuard<'_, CopyUpTransition>> {
         self.copyup_transition.try_lock()
     }
 
     /// Serializes an `O_APPEND` write as one atomic size-read + write.
     ///
-    /// The `facts` lock is held across both steps because the underlying fs
-    /// does not process `O_APPEND` itself. This is the one exception to
-    /// holding `facts` only briefly, and it serializes concurrent appends
-    /// on the post-write size.
+    /// The per-inode `lock` is held across both steps because the underlying
+    /// fs does not process `O_APPEND` itself. This serializes concurrent
+    /// appends on the post-write size.
     pub(super) fn append_write(
         &self,
         reader: &mut VmReader,
         status_flags: StatusFlags,
     ) -> Result<usize> {
-        let guard = self.facts.lock();
-        let real = guard.select_real_inode();
+        let _guard = self.lock.lock();
+        let real = self.select_real_inode();
         let offset = real.size();
         real.write_at(offset, reader, status_flags)
     }
 
-    /// Replaces the real-object facts of this inode — the copy-up transition.
+    /// Publishes the upper real object of this inode — the copy-up
+    /// transition.
     ///
-    /// The transition is fallible and self-consistent: the inode-cache
-    /// registration is aliased under the new visible-source key while the
-    /// old-key mapping is retained, then the facts and published `key` are
-    /// swapped. The alias runs first, so a displacement fails rather than
-    /// silently orphaning the inode.
+    /// The fallible inode-cache alias runs before the `Once` publication, so
+    /// a displacement fails rather than silently orphaning the inode. `lowers`
+    /// are immutable across copy-up.
     pub(super) fn replace_facts(
         self: &Arc<Self>,
-        facts: RealObjectStack,
+        new_upper: RealObject,
         new_visible_source: &RealObject,
     ) -> Result<()> {
-        let new_key = facts.key();
-        // Capture the pre-transition visible-source key AND its real inode
-        // under one brief `facts` lock: the old real inode becomes the
-        // keep-alive pin of the retained old-key alias
-        // (`rekey_keep_old_alias`), so it cannot be recycled while the alias
-        // exists.
-        let (old_key, old_real_inode) = {
-            let old_facts = self.facts.lock();
-            (
-                old_facts.key(),
-                old_facts.visible_source().real_inode().clone(),
-            )
-        };
-        // A live inode cannot outlive its mount; the teardown arm swaps the
-        // facts locally and skips the cache alias (no live lookup can
-        // observe this inode then).
+        let new_key = RealObjectKey::from_source(new_visible_source);
+        let old_key = self.key();
+        let old_real_inode = self.visible_source().real_inode().clone();
         let Some(fs) = self.fs.upgrade() else {
-            *self.facts.lock() = facts;
-            *self.key.lock() = new_key;
+            // Teardown arm: no live lookup can observe this inode, so only
+            // publish the local upper object.
+            self.upper.call_once(|| new_upper);
             return Ok(());
         };
         // The fallible alias runs first; only after it succeeds is the
-        // inode's own state committed.
-        fs.inodes
+        // upper object published.
+        fs.inodes()
             .rekey_keep_old_alias(old_key, new_key, old_real_inode, new_visible_source)?;
-        *self.facts.lock() = facts;
-        *self.key.lock() = new_key;
+        self.upper.call_once(|| new_upper);
         debug_assert!(
-            fs.inodes
+            fs.inodes()
                 .get(new_key)
                 .is_some_and(|probe| Arc::ptr_eq(&probe, self)),
             "after replace_facts the inode cache maps the new visible-source key to THIS inode"
         );
-        if self.dir_transaction_lock.is_some() {
-            fs.bindings.invalidate_parent(&old_key);
-        }
         Ok(())
     }
 
@@ -291,109 +269,6 @@ impl OverlayInode {
     ) -> Result<T> {
         let real = self.select_real_inode();
         operation_fn(&real)
-    }
-}
-
-impl OverlayInode {
-    fn size_impl(&self) -> usize {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().size()
-    }
-
-    fn metadata_impl(&self) -> Result<Metadata> {
-        let facts = self.facts_snapshot();
-        let mut metadata = facts.visible_source().real_inode().metadata()?;
-        metadata.ino = self.object_id.ino;
-        metadata.container_dev_id = self.object_id.dev;
-        Ok(metadata)
-    }
-
-    fn ino_impl(&self) -> u64 {
-        self.object_id.ino
-    }
-
-    fn type_impl(&self) -> InodeType {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().type_()
-    }
-
-    fn mode_impl(&self) -> Result<InodeMode> {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().mode()
-    }
-
-    fn owner_impl(&self) -> Result<Uid> {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().owner()
-    }
-
-    fn group_impl(&self) -> Result<Gid> {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().group()
-    }
-
-    fn atime_impl(&self) -> Duration {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().atime()
-    }
-
-    fn mtime_impl(&self) -> Duration {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().mtime()
-    }
-
-    fn ctime_impl(&self) -> Duration {
-        let facts = self.facts_snapshot();
-        facts.visible_source().real_inode().ctime()
-    }
-
-    fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
-        let dir = self.dir_transaction_lock.as_ref().ok_or_else(|| {
-            Error::with_message(
-                Errno::ENOTDIR,
-                "lookup is supported on overlay directories only",
-            )
-        })?;
-        let _dir_guard = dir.lock();
-        let facts = self.facts_snapshot();
-        let fs = self.fs.upgrade().ok_or_else(|| {
-            Error::with_message(Errno::EIO, "the overlay mount is no longer alive")
-        })?;
-        let binding = fs.lookup_binding(&facts, name)?.binding;
-        match binding.inode() {
-            Some(inode) => Ok(inode),
-            None => Err(Error::new(Errno::ENOENT)),
-        }
-    }
-
-    fn fs_impl(&self) -> Arc<dyn FileSystem> {
-        match self.fs.upgrade() {
-            Some(fs) => fs,
-            None => unreachable!("a live OverlayInode keeps its OverlayFs alive"),
-        }
-    }
-
-    /// Returns the revalidation policy for this inode.
-    ///
-    /// Directories use `REVALIDATE_ABSENT`: an absent name may have appeared
-    /// behind the overlay since the last lookup (a lower-layer change or a
-    /// concurrent mutation), so a cached negative dentry must be re-checked.
-    /// Non-directories return the empty policy: their existence is pinned by
-    /// the positive lookup result, so no absent-name revalidation applies.
-    fn revalidation_policy_impl(&self) -> RevalidationPolicy {
-        match self.type_() {
-            InodeType::Dir => RevalidationPolicy::REVALIDATE_ABSENT,
-            _ => RevalidationPolicy::empty(),
-        }
-    }
-
-    fn revalidate_absent_impl(&self, _name: &str) -> bool {
-        // A negative dentry hit is always re-looked-up.
-        false
-    }
-
-    fn extension_impl(&self) -> &Extension {
-        &self.extension
     }
 }
 
@@ -423,63 +298,74 @@ impl FileOps for OverlayInode {
 
 impl Inode for OverlayInode {
     fn size(&self) -> usize {
-        self.size_impl()
+        self.visible_source().real_inode().size()
     }
 
     fn metadata(&self) -> Result<Metadata> {
-        self.metadata_impl()
+        let mut metadata = self.visible_source().real_inode().metadata()?;
+        metadata.ino = self.object_id.ino;
+        metadata.container_dev_id = self.object_id.dev;
+        Ok(metadata)
     }
 
     fn ino(&self) -> u64 {
-        self.ino_impl()
+        self.object_id.ino
     }
 
     fn type_(&self) -> InodeType {
-        self.type_impl()
+        self.visible_source().real_inode().type_()
     }
 
     fn mode(&self) -> Result<InodeMode> {
-        self.mode_impl()
+        self.visible_source().real_inode().mode()
     }
 
     fn owner(&self) -> Result<Uid> {
-        self.owner_impl()
+        self.visible_source().real_inode().owner()
     }
 
     fn group(&self) -> Result<Gid> {
-        self.group_impl()
+        self.visible_source().real_inode().group()
     }
 
     fn atime(&self) -> Duration {
-        self.atime_impl()
+        self.visible_source().real_inode().atime()
     }
 
     fn mtime(&self) -> Duration {
-        self.mtime_impl()
+        self.visible_source().real_inode().mtime()
     }
 
     fn ctime(&self) -> Duration {
-        self.ctime_impl()
+        self.visible_source().real_inode().ctime()
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
-        self.lookup_impl(name)
+        let _dir_guard = self.lock.lock();
+        if _dir_guard.is_none() {
+            return Err(Error::with_message(
+                Errno::ENOTDIR,
+                "lookup is supported on overlay directories only",
+            ));
+        }
+        let fs = self.fs.upgrade().ok_or_else(|| {
+            Error::with_message(Errno::EIO, "the overlay mount is no longer alive")
+        })?;
+        match fs.lookup(self, name)? {
+            Lookup::Positive(inode) => Ok(inode),
+            Lookup::Negative(_) => Err(Error::new(Errno::ENOENT)),
+        }
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
-        self.fs_impl()
-    }
-
-    fn revalidation_policy(&self) -> RevalidationPolicy {
-        self.revalidation_policy_impl()
-    }
-
-    fn revalidate_absent(&self, name: &str) -> bool {
-        self.revalidate_absent_impl(name)
+        match self.fs.upgrade() {
+            Some(fs) => fs,
+            None => unreachable!("a live OverlayInode keeps its OverlayFs alive"),
+        }
     }
 
     fn extension(&self) -> &Extension {
-        self.extension_impl()
+        &self.extension
     }
 
     fn open(

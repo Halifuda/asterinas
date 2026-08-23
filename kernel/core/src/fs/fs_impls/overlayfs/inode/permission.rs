@@ -17,13 +17,17 @@
 //! The read-only `Inode::check_permission` forwarder calls this entry
 //! with `AccessType::ReadOnly`, never promoting.
 
+/// Classifies a projected overlayfs request as read-only or mutating for
+/// permission checks and copy-up triggering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AccessType {
+    ReadOnly,
+    Mutating,
+}
+
 use super::OverlayInode;
 use crate::{
-    fs::{
-        file::Permission,
-        fs_impls::overlayfs::{AccessType, with_current_posix_thread},
-        vfs::inode::Inode,
-    },
+    fs::{file::Permission, fs_impls::overlayfs::with_current_posix_thread, vfs::inode::Inode},
     prelude::*,
     process::{Gid, Uid, credentials::capabilities::CapSet},
     security::lsm::hooks as lsm_hooks,
@@ -88,11 +92,7 @@ impl OverlayInode {
     /// 3. Real-handle re-check: unless `default_permissions` is enabled.
     ///
     /// Verdicts are never cached.
-    pub(in overlayfs) fn check_permission(
-        &self,
-        access: AccessType,
-        perm: Permission,
-    ) -> Result<()> {
+    pub(super) fn check_permission(&self, access: AccessType, perm: Permission) -> Result<()> {
         // This two-parameter form shadows the one-parameter
         // `Inode::check_permission` forwarder.
         // Read-only entries never promote, so the forwarder supplies only
@@ -101,7 +101,7 @@ impl OverlayInode {
         if access == AccessType::Mutating {
             self.ensure_upper_authority()?;
         }
-        if !self.fs_arc()?.policy.is_default_permissions() {
+        if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(perm)?;
         }
         Ok(())
@@ -115,7 +115,7 @@ impl OverlayInode {
     /// `Inode::check_permission`, comparing the projected `metadata()` and
     /// the current credentials.
     fn check_local_permission(&self, access: AccessType, mut perm: Permission) -> Result<()> {
-        if access == AccessType::Mutating && self.fs_arc()?.policy.is_effective_read_only() {
+        if access == AccessType::Mutating && self.fs_arc()?.policy().is_effective_read_only() {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
 

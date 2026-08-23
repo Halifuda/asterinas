@@ -5,6 +5,7 @@
 **消灭的非实体类型**（内容内联或改自由函数）：`PositiveBinding`、
 `HiddenEvidence`、`BindingKey`、`LookupOutcome`、`WorkdirWorkspace`、
 `PreparedTemp`、`PromoteTarget`、`CommitMarker`、`XattrPolicy`（ZST）。
+`PositiveKind` 不作为目标结构符号保留，按需用 `RealObjectStack::is_merged()` 等派生。
 
 **合并的文件**：`inode/copyup/mod.rs`（仲裁/制备/发布三段）、`readdir.rs`（服务/索引/
 `..` 三段）、`inode/inode_cache.rs`（`RealObjectKey` 原在 `lookup/key.rs`，

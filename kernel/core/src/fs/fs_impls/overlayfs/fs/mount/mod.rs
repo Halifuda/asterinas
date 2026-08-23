@@ -7,10 +7,10 @@
 //! overlay filesystem object lives in `fs::mod` and VFS registration lives
 //! in the top-level `fs_type` module.
 
-pub(in overlayfs) mod capabilities;
+pub(super) mod capabilities;
 pub(in overlayfs) mod inuse;
 mod layer_parts;
-pub(in overlayfs) mod options;
+pub(super) mod options;
 
 use self::{
     capabilities::UpperFilesystemCapabilities,
@@ -25,10 +25,7 @@ use super::{
 use crate::{
     fs::{
         fs_impls::overlayfs::{
-            inode::{
-                BindingCache, IdentityPolicy, InodeCache, WhiteoutCache, XattrPolicy,
-                collect_layer_devs,
-            },
+            inode::{IdentityPolicy, InodeCache, WhiteoutCache, collect_layer_devs},
             layer::LayerStack,
         },
         pseudofs::AnonDeviceId,
@@ -151,7 +148,6 @@ impl OverlayFs {
             policy.xino_mode(),
         )?;
 
-        let bindings = BindingCache::new();
         let inodes = InodeCache::new();
 
         let overlay_fs = Arc::new_cyclic(move |weak| OverlayFs {
@@ -160,11 +156,9 @@ impl OverlayFs {
             policy,
             fs_event_stats: FsEventSubscriberStats::new(),
             self_weak: weak.clone(),
-            bindings,
             inodes,
             identity,
             _anon_device_id: anon_device_id,
-            xattr_policy: XattrPolicy,
             whiteout_cache: Mutex::new(WhiteoutCache::new()),
         });
         Ok(overlay_fs)

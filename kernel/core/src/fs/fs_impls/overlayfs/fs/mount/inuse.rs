@@ -16,7 +16,7 @@ use super::super::policy::UuidMode;
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::{inode::WorkdirWorkspace, read_child_names, uuid_xattr_name},
+        fs_impls::overlayfs::{read_child_names, uuid_xattr_name},
         vfs::{inode::Inode, inode_ext::InodeExt, path::Path, xattr::XattrSetFlags},
     },
     prelude::*,
@@ -37,7 +37,7 @@ const WORKDIR_CLEANUP_MAX_DEPTH: usize = 2;
 /// persisted as `trusted.overlay.uuid` and published through
 /// `MountPolicy::uuid()`/`SuperBlock::fsid`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(in overlayfs) struct Uuid(u64);
+pub(in super::super) struct Uuid(u64);
 
 impl Uuid {
     /// Creates a [`Uuid`], rejecting the zero value with `EINVAL`.
@@ -48,7 +48,7 @@ impl Uuid {
         Ok(Self(value))
     }
 
-    pub(in overlayfs) fn value(&self) -> u64 {
+    pub(in super::super) fn value(&self) -> u64 {
         self.0
     }
 
@@ -100,7 +100,7 @@ pub(in overlayfs) struct UpperWorkdirInuse {
     workdir: InuseGuard,
     upper: InuseGuard,
     identity: Uuid,
-    pub(in overlayfs) workdir_workspace: Option<WorkdirWorkspace>,
+    pub(in overlayfs) workspace: Option<Path>,
 }
 
 impl UpperWorkdirInuse {
@@ -180,7 +180,7 @@ impl UpperWorkdirInuse {
             workdir,
             upper,
             identity,
-            workdir_workspace: None,
+            workspace: None,
         })
     }
 
@@ -201,7 +201,7 @@ impl UpperWorkdirInuse {
             Err(err) => return Err(err),
         }
         let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
-        self.workdir_workspace = Some(WorkdirWorkspace { path: workspace });
+        self.workspace = Some(workspace);
         Ok(())
     }
 

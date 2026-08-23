@@ -18,13 +18,15 @@
 
 use core::cmp::min;
 
-use self::workdir::WorkdirTempRequest;
+use self::workdir::{WorkdirTemp, WorkdirTempRequest};
 use crate::{
     fs::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
-            inode::{OverlayInode, xattr::XattrCopyPolicy},
-            layer::RealObjectStack,
+            inode::{
+                Lookup, OverlayInode,
+                xattr::{XattrCopyPolicy, copy_eligible_xattrs, set_impure_marker},
+            },
             real::RealObject,
         },
         vfs::{
@@ -41,17 +43,29 @@ pub(super) mod workdir;
 ///
 /// Recorded exactly once at the first positive-binding publication; its
 /// coordinate fields are fixed and only `phase` can transition thereafter;
-/// the upper authority in the facts record is the durable outcome, so no
+/// the upper authority in the real-object state is the durable outcome, so no
 /// copy-up-completed history marker exists. The publication-parent chain is
 /// acyclic and root-terminated, so the trigger's top-down ancestor walk
 /// terminates and never re-enters the same instance.
-pub(in overlayfs) struct CopyUpTransition {
-    /// The logical parent overlay inode; its upper existence is resolved by
-    /// the trigger's ancestor walk, which checks the parent's upper existence
-    /// and may promote it first.
-    pub(super) publication_parent: Arc<OverlayInode>,
-    pub(super) name: String,
+pub(super) struct CopyUpTransition {
+    /// The logical parent overlay inode; `None` until the first positive
+    /// binding records it. Its upper existence is resolved by the trigger's
+    /// ancestor walk, which checks the parent's upper existence and may
+    /// promote it first.
+    pub(super) publication_parent: Option<Arc<OverlayInode>>,
+    pub(super) name: Option<String>,
     pub(super) phase: CopyUpPhase,
+}
+
+impl CopyUpTransition {
+    /// Constructs an unrecorded transition coordinate.
+    pub(super) fn new() -> Self {
+        Self {
+            publication_parent: None,
+            name: None,
+            phase: CopyUpPhase::Idle,
+        }
+    }
 }
 
 /// The transition marker of one copy-up coordination.
@@ -89,19 +103,6 @@ const MAX_COPYUP_DEPTH: usize = 1024;
 /// progress.
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
-/// The shared publication target of a staged promotion.
-struct PromoteTarget<'a> {
-    upper_dir_path: &'a Path,
-    name: &'a str,
-    lower: RealObject,
-}
-
-/// The per-object staged workdir temp identity.
-struct PreparedTemp {
-    temp_name: String,
-    temp_kind: InodeType,
-}
-
 impl OverlayInode {
     /// Records the copy-up transition coordinate at the first positive
     /// binding publication.
@@ -117,14 +118,12 @@ impl OverlayInode {
         let Some(mut guard) = self.try_lock_copyup_transition() else {
             return;
         };
-        if guard.is_some() {
+        if guard.publication_parent.is_some() {
             return;
         }
-        *guard = Some(CopyUpTransition {
-            publication_parent,
-            name: String::from(name),
-            phase: CopyUpPhase::Idle,
-        });
+        guard.publication_parent = Some(publication_parent);
+        guard.name = Some(String::from(name));
+        guard.phase = CopyUpPhase::Idle;
     }
 
     /// Promotes this logical object to upper authority, winning or waiting on
@@ -135,7 +134,7 @@ impl OverlayInode {
     /// no publication coordinate is recorded, and propagates any underlying
     /// recipe failure unchanged. A deeper ancestor chain than
     /// [`MAX_COPYUP_DEPTH`] fails closed with `Errno::ELOOP`.
-    pub(in overlayfs) fn ensure_upper_authority(&self) -> Result<()> {
+    pub(super) fn ensure_upper_authority(&self) -> Result<()> {
         self.ensure_upper_authority_inner(0)
     }
 
@@ -146,7 +145,7 @@ impl OverlayInode {
         // Pins the owning mount for the trigger's duration.
         let _fs = self.fs_arc()?;
 
-        if self.facts_snapshot().upper.is_some() {
+        if self.upper.get().is_some() {
             return Ok(());
         }
 
@@ -157,16 +156,19 @@ impl OverlayInode {
         // this single binding.
         let (publication_parent, name) = {
             let transition = self.lock_copyup_transition();
-            let Some(coordinate) = transition.as_ref() else {
+            let Some(publication_parent) = transition.publication_parent.as_ref().cloned() else {
                 return Err(Error::with_message(
                     Errno::ENOENT,
                     "the overlay object has no recorded copy-up publication coordinate",
                 ));
             };
-            (
-                coordinate.publication_parent.clone(),
-                coordinate.name.clone(),
-            )
+            let Some(name) = transition.name.as_ref().cloned() else {
+                return Err(Error::with_message(
+                    Errno::ENOENT,
+                    "the overlay object has no recorded copy-up publication coordinate",
+                ));
+            };
+            (publication_parent, name)
         };
 
         if depth >= MAX_COPYUP_DEPTH {
@@ -181,23 +183,15 @@ impl OverlayInode {
         // `copyup_transition` lock wait.
         let mut transition = self.lock_copyup_transition();
 
-        // Re-snapshot under the guard: another task won and promoted while
-        // this task waited; re-observe upper authority and return the same
+        // Re-check under the guard: another task won and promoted while this
+        // task waited; re-observe upper authority and return the same
         // `Ok(())` success value (waiter path).
-        if self.facts_snapshot().upper.is_some() {
+        if self.upper.get().is_some() {
             return Ok(());
         }
 
         // Winner body:
-        let coordinate = match transition.as_mut() {
-            Some(coordinate) => coordinate,
-            None => {
-                return Err(Error::with_message(
-                    Errno::ENOENT,
-                    "the overlay object has no recorded copy-up publication coordinate",
-                ));
-            }
-        };
+        let coordinate = &mut *transition;
         self.promote(&publication_parent, &name, coordinate)?;
         Ok(())
     }
@@ -216,7 +210,7 @@ impl OverlayInode {
     ) -> Result<()> {
         // 1) Idempotent upper fast path: a waiter may have completed the
         //    transition while this task waited for the arbitration guard.
-        if self.facts_snapshot().upper.is_some() {
+        if self.upper.get().is_some() {
             return Ok(());
         }
 
@@ -236,13 +230,8 @@ impl OverlayInode {
         // parent impure — persist the marker before the object-kind dispatch
         // and the physical upper commit (strict, pre-commit; read-first
         // idempotence makes an already-marked parent a no-op).
-        fs.xattr_policy.set_impure_marker(&upper_dir)?;
+        set_impure_marker(&upper_dir)?;
         let lower = self.lower_source()?;
-        let target = PromoteTarget {
-            upper_dir_path: &upper_dir_path,
-            name,
-            lower: lower.clone(),
-        };
         let result = match lower.real_inode().type_() {
             InodeType::Dir => {
                 // Directory copy-up: private workdir temp, metadata/xattr
@@ -258,25 +247,27 @@ impl OverlayInode {
                         mode,
                     },
                 )?;
-                let temp_kind = temp.kind();
-                let (temp_name, temp_path) = temp.into_parts();
                 if let Err(err) = self
-                    .transfer_metadata(temp_path.inode())
+                    .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                        self.copy_eligible_xattrs(
+                            lower.real_inode(),
+                            temp.inode(),
+                            XattrCopyPolicy::Strict,
+                        )
                     })
-                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
-                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
                 self.finish_promotion(
                     coordinate,
-                    target,
-                    PreparedTemp {
-                        temp_name,
-                        temp_kind,
-                    },
+                    publication_parent,
+                    name,
+                    &upper_dir_path,
+                    lower.clone(),
+                    &temp,
                 )
             }
             InodeType::File => {
@@ -291,27 +282,29 @@ impl OverlayInode {
                         mode,
                     },
                 )?;
-                let temp_kind = temp.kind();
-                let (temp_name, temp_path) = temp.into_parts();
                 if let Err(err) = self
-                    .transfer_metadata(temp_path.inode())
+                    .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                        self.copy_eligible_xattrs(
+                            lower.real_inode(),
+                            temp.inode(),
+                            XattrCopyPolicy::Strict,
+                        )
                     })
-                    .and_then(|_| self.promote_regular_file(temp_path.inode()))
-                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
-                    .and_then(|_| temp_path.inode().sync_all())
+                    .and_then(|_| self.promote_regular_file(temp.inode()))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
+                    .and_then(|_| temp.inode().sync_all())
                 {
-                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
                 self.finish_promotion(
                     coordinate,
-                    target,
-                    PreparedTemp {
-                        temp_name,
-                        temp_kind,
-                    },
+                    publication_parent,
+                    name,
+                    &upper_dir_path,
+                    lower.clone(),
+                    &temp,
                 )
             }
             InodeType::SymLink => {
@@ -327,26 +320,28 @@ impl OverlayInode {
                         mode,
                     },
                 )?;
-                let temp_kind = temp.kind();
-                let (temp_name, temp_path) = temp.into_parts();
                 if let Err(err) = self
-                    .promote_symlink(temp_path.inode())
-                    .and_then(|_| self.transfer_metadata(temp_path.inode()))
+                    .promote_symlink(temp.inode())
+                    .and_then(|_| self.transfer_metadata(lower.real_inode(), temp.inode()))
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                        self.copy_eligible_xattrs(
+                            lower.real_inode(),
+                            temp.inode(),
+                            XattrCopyPolicy::Strict,
+                        )
                     })
-                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
-                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
                 self.finish_promotion(
                     coordinate,
-                    target,
-                    PreparedTemp {
-                        temp_name,
-                        temp_kind,
-                    },
+                    publication_parent,
+                    name,
+                    &upper_dir_path,
+                    lower.clone(),
+                    &temp,
                 )
             }
             InodeType::CharDevice
@@ -401,25 +396,27 @@ impl OverlayInode {
                         node: &mknod_type,
                     },
                 )?;
-                let temp_kind = temp.kind();
-                let (temp_name, temp_path) = temp.into_parts();
                 if let Err(err) = self
-                    .transfer_metadata(temp_path.inode())
+                    .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        self.copy_eligible_xattrs(temp_path.inode(), XattrCopyPolicy::Strict)
+                        self.copy_eligible_xattrs(
+                            lower.real_inode(),
+                            temp.inode(),
+                            XattrCopyPolicy::Strict,
+                        )
                     })
-                    .and_then(|_| self.transfer_timestamps(temp_path.inode()))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
-                    let _ = fs.cleanup_workdir_temp(&temp_name, temp_kind);
+                    let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
                 self.finish_promotion(
                     coordinate,
-                    target,
-                    PreparedTemp {
-                        temp_name,
-                        temp_kind,
-                    },
+                    publication_parent,
+                    name,
+                    &upper_dir_path,
+                    lower.clone(),
+                    &temp,
                 )
             }
             InodeType::Unknown => Err(Error::with_message(
@@ -432,54 +429,55 @@ impl OverlayInode {
         Ok(())
     }
 
-    /// Publishes the staged workdir temp onto the upper target name via an
-    /// atomic rename, commits the physical-upper marker, and runs the
-    /// semantic authority publication.
-    fn publish_via_rename(
-        &self,
-        workdir_path: &Path,
-        temp_name: &str,
-        upper_dir_path: &Path,
-        name: &str,
-        marker: &mut CommitMarker,
-        lower: RealObject,
-    ) -> Result<()> {
-        workdir_path.rename(temp_name, upper_dir_path, name, RenameMode::Replace)?;
-        marker.commit();
-        let upper_real = self.upper_real_object(upper_dir_path, name)?;
-        self.publish_upper_authority(upper_real, lower)
-    }
-
     /// Completes a staged promotion after the per-kind preparation ran.
     ///
     /// The caller has already run the preparation and cleaned up on failure;
     /// this tail performs the physical publication. Failures before commit
-    /// clean the workdir temp; failures after `CommitMarker::commit` mark the
+    /// clean the workdir temp; failures after the physical rename mark the
     /// coordinate `ReconcilePending` for the next winner. Success leaves the
     /// caller to set the coordinate back to `Idle`.
+    ///
+    /// The physical rename and the semantic upper-authority commit run while
+    /// holding `publication_parent.lock`. This is the single `CUL -> lock`
+    /// edge in the overlayfs lock graph: every entry must finish copy-up
+    /// promotion before taking any directory transaction lock.
     fn finish_promotion(
         &self,
         coordinate: &mut CopyUpTransition,
-        target: PromoteTarget<'_>,
-        temp: PreparedTemp,
+        publication_parent: &Arc<OverlayInode>,
+        name: &str,
+        upper_dir_path: &Path,
+        lower: RealObject,
+        temp: &WorkdirTemp,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
-        let mut marker = CommitMarker::default();
-        let publish_result = self.workdir_root_path().and_then(|workdir_path| {
-            self.publish_via_rename(
-                &workdir_path,
-                &temp.temp_name,
-                target.upper_dir_path,
-                target.name,
-                &mut marker,
-                target.lower,
-            )
-        });
+        let committed;
+        let publish_result = {
+            let _publication_guard = publication_parent.lock.lock();
+            // Liveness recheck under `publication_parent.lock`: if the name
+            // was removed (or replaced) while this copy-up was being prepared,
+            // abort before the rename would resurrect it.
+            match fs.lookup(publication_parent, name)? {
+                Lookup::Positive(current) if core::ptr::addr_eq(Arc::as_ptr(&current), self) => {}
+                _ => {
+                    return Err(Error::with_message(
+                        Errno::ENOENT,
+                        "the copy-up target name is no longer visible",
+                    ));
+                }
+            }
+            let rename_result = fs.publish_temp(temp, upper_dir_path, name, RenameMode::Replace);
+            committed = rename_result.is_ok();
+            rename_result.and_then(|_| {
+                let upper_real = self.upper_real_object(upper_dir_path, name)?;
+                self.publish_upper_authority(upper_real, lower)
+            })
+        };
         if let Err(err) = publish_result {
-            if marker.is_committed() {
+            if committed {
                 Self::mark_reconcile_pending(coordinate);
             } else {
-                let _ = fs.cleanup_workdir_temp(&temp.temp_name, temp.temp_kind);
+                let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
             }
             return Err(err);
         }
@@ -546,16 +544,18 @@ impl OverlayInode {
     /// The mode transfer skips symlinks because the backing filesystems treat
     /// a symlink `set_mode` as a no-op or reject it, so the copy-up does not
     /// depend on that per-fs behavior.
-    fn transfer_metadata(&self, temp: &Arc<dyn Inode>) -> Result<()> {
-        let lower = self.lower_source()?;
-        let lower_inode = lower.real_inode();
-        temp.set_owner(lower_inode.owner()?)?;
-        temp.set_group(lower_inode.group()?)?;
-        if !matches!(lower_inode.type_(), InodeType::SymLink) {
-            temp.set_mode(lower_inode.mode()?)?;
+    pub(super) fn transfer_metadata(
+        &self,
+        source: &Arc<dyn Inode>,
+        temp: &Arc<dyn Inode>,
+    ) -> Result<()> {
+        temp.set_owner(source.owner()?)?;
+        temp.set_group(source.group()?)?;
+        if !matches!(source.type_(), InodeType::SymLink) {
+            temp.set_mode(source.mode()?)?;
         }
-        if lower_inode.type_().is_regular_file() {
-            temp.resize(lower_inode.size())?;
+        if source.type_().is_regular_file() {
+            temp.resize(source.size())?;
         }
         Ok(())
     }
@@ -567,12 +567,14 @@ impl OverlayInode {
     /// preserves the lower timestamps instead of publishing the copy-up
     /// instant; it runs last, after every data/metadata/xattr step that
     /// could refresh `mtime`/`ctime`.
-    fn transfer_timestamps(&self, temp: &Arc<dyn Inode>) -> Result<()> {
-        let lower = self.lower_source()?;
-        let lower_inode = lower.real_inode();
-        temp.set_atime(lower_inode.atime());
-        temp.set_mtime(lower_inode.mtime());
-        temp.set_ctime(lower_inode.ctime());
+    pub(super) fn transfer_timestamps(
+        &self,
+        source: &Arc<dyn Inode>,
+        temp: &Arc<dyn Inode>,
+    ) -> Result<()> {
+        temp.set_atime(source.atime());
+        temp.set_mtime(source.mtime());
+        temp.set_ctime(source.ctime());
         Ok(())
     }
 
@@ -583,11 +585,13 @@ impl OverlayInode {
     /// The copy-up policy is strict: a denied source read
     /// (`EACCES`/`EPERM`) propagates and fails the copy-up rather than
     /// silently dropping `security.*`/`trusted.*` metadata.
-    fn copy_eligible_xattrs(&self, temp: &Arc<dyn Inode>, policy: XattrCopyPolicy) -> Result<()> {
-        let lower = self.lower_source()?;
-        let fs = self.fs_arc()?;
-        fs.xattr_policy
-            .copy_eligible_xattrs(lower.real_inode(), temp, policy)
+    pub(super) fn copy_eligible_xattrs(
+        &self,
+        source: &Arc<dyn Inode>,
+        temp: &Arc<dyn Inode>,
+        policy: XattrCopyPolicy,
+    ) -> Result<()> {
+        copy_eligible_xattrs(source, temp, policy)
     }
 
     /// Publishes the upper authority semantically.
@@ -604,20 +608,10 @@ impl OverlayInode {
     ) -> Result<()> {
         let fs = self.fs_arc()?;
         fs.store_lower_id(upper_real.real_inode(), &lower_real)?;
-        let old_facts = self.facts_snapshot();
-        // A copied-up DIRECTORY keeps the merged view: the upper directory is
-        // created empty, so a directory that still carries a lower stack must
-        // stay merged or the pre-existing lower children would vanish from
-        // `getdents`. Non-directories keep their pre-copy-up composition;
-        // `lowers` are retained regardless so whiteouts keep publishing.
-        let new_facts = RealObjectStack {
-            upper: Some(upper_real.clone()),
-            lowers: old_facts.lowers.to_vec(),
-        };
-        // Keep `upper_real` in scope past the facts construction: it is the
-        // post-transition visible source passed to `replace_facts`.
-        let carrier = fs.project_inode(&self.facts_snapshot());
-        carrier.replace_facts(new_facts, &upper_real)?;
+        // `lowers` are immutable across copy-up, so the carrier only publishes
+        // the newly created upper object.
+        let carrier = fs.project_inode(&self.real_object_stack());
+        carrier.replace_facts(upper_real.clone(), &upper_real)?;
         Ok(())
     }
 
@@ -648,7 +642,7 @@ impl OverlayInode {
     fn upper_real_object(&self, upper_dir_path: &Path, name: &str) -> Result<RealObject> {
         let child_path = super::super::lookup_child_path(upper_dir_path, name)?;
         let fs = self.fs_arc()?;
-        let upper_layer = fs.layer_stack.upper_layer()?;
+        let upper_layer = fs.layer_stack().upper_layer()?;
         Ok(upper_layer.child_real_object(&child_path))
     }
 
@@ -661,39 +655,14 @@ impl OverlayInode {
 
     /// Returns the topmost lower real object of this object (`lowers[0]`).
     ///
-    /// Safe by the facts invariant `upper.is_some() || !lowers.is_empty()`;
+    /// Safe by the real-object invariant `upper.is_some() || !lowers.is_empty()`;
     /// the checked access surfaces a structural violation as `EIO`.
     fn lower_source(&self) -> Result<RealObject> {
-        self.facts_snapshot()
-            .lowers
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EIO,
-                    "a lower-backed overlay object has no lower source",
-                )
-            })
-    }
-}
-
-/// The physical-upper-commit marker of a promotion tail.
-///
-/// A one-way latch over the commit boolean: the promotion calls
-/// [`CommitMarker::commit`] exactly once at the physical-upper-commit point,
-/// and the promotion tail reads [`CommitMarker::is_committed`] to classify a
-/// later failure as reconcile vs pre-publication cleanup.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(in overlayfs) struct CommitMarker {
-    committed: bool,
-}
-
-impl CommitMarker {
-    pub(in overlayfs) fn commit(&mut self) {
-        self.committed = true;
-    }
-
-    pub(super) fn is_committed(&self) -> bool {
-        self.committed
+        self.lowers.first().cloned().ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "a lower-backed overlay object has no lower source",
+            )
+        })
     }
 }

@@ -27,7 +27,11 @@ use crate::{
         file::InodeType,
         fs_impls::overlayfs::{
             fs::OverlayFs,
-            inode::{OverlayInode, copyup::workdir::WorkdirTempRequest, xattr::XattrCopyPolicy},
+            inode::{
+                Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
+                copyup::workdir::{WorkdirTemp, WorkdirTempRequest},
+                xattr::XattrCopyPolicy,
+            },
             layer::RealObjectStack,
         },
         vfs::{
@@ -52,27 +56,42 @@ impl OverlayInode {
     /// upper removal or whiteout publication (clear-empty exchange for
     /// lower-backed directories). `unlink` refuses directories (`EISDIR`);
     /// `rmdir` publishes a whiteout for opaque upper directories instead.
-    pub(super) fn remove_target(&self, name: &str, kind: RemoveKind) -> Result<()> {
+    pub(super) fn remove_target(
+        &self,
+        name: &str,
+        kind: RemoveKind,
+        index: &mut Option<ReaddirIndex>,
+    ) -> Result<()> {
         let fs = self.fs_arc()?;
-        let parent_facts = self.facts_snapshot();
-        let lookup = fs.lookup_binding(&parent_facts, name)?;
-        // Stale-upper routing: a previously published upper-backed binding
-        // whose physical upper object vanished behind the overlay (no
-        // whiteout left) surfaces `ESTALE` before the rmdir emptiness gate
-        // and the unlink `EISDIR` type gate.
-        if lookup.is_stale_upper {
-            return Err(translate_stale_upper_enoent(Error::with_message(
-                Errno::ENOENT,
-                "the overlay target became stale behind the overlay",
-            )));
-        }
-        let target_inode = lookup.binding.inode().ok_or_else(|| {
-            Error::with_message(Errno::ENOENT, "the overlay target does not exist")
-        })?;
-        let target_facts = target_inode.facts_snapshot();
+        let lookup = fs.lookup(self, name)?;
+        let target_inode = match lookup {
+            Lookup::Positive(inode) => inode,
+            Lookup::Negative(negative) => {
+                // A whiteout means the name was removed through the overlay;
+                // the normal `ENOENT` path applies.
+                if negative == NegativeLookup::HiddenByWhiteout {
+                    return Err(Error::new(Errno::ENOENT));
+                }
+                // Stale-upper routing: an upper-backed inode remembered by the
+                // parent readdir index while the fresh scan no longer finds the
+                // name (and no whiteout covers it) means the upper object
+                // vanished behind the overlay. `Once<RealObject>` carries the
+                // "was upper-backed" evidence.
+                if let Some(old_inode) = index.as_ref().and_then(|idx| idx.visible_inode(name))
+                    && old_inode.upper.get().is_some()
+                {
+                    return Err(translate_stale_upper_enoent(Error::with_message(
+                        Errno::ENOENT,
+                        "the overlay target became stale behind the overlay",
+                    )));
+                }
+                return Err(Error::new(Errno::ENOENT));
+            }
+        };
+        let target_facts = target_inode.real_object_stack();
 
         if kind == RemoveKind::Rmdir {
-            match target_inode.visible_child_count(&target_facts) {
+            match target_inode.visible_child_count() {
                 Ok(0) => {}
                 Ok(_) => {
                     return Err(Error::with_message(
@@ -125,26 +144,19 @@ impl OverlayInode {
             }
             // A physical-upper `ENOENT` means the asserted upper object
             // became stale and maps to `ESTALE`; other upper errors
-            // propagate as-is. The binding invalidate and readdir-index
-            // remove are both infallible, so no reconcile arm exists here.
+            // propagate as-is. The readdir-index remove is infallible, so no
+            // reconcile arm exists here.
             let result = if kind == RemoveKind::Rmdir {
                 upper_parent_path.rmdir(name)
             } else {
                 upper_parent_path.unlink(name)
             };
             result.map_err(translate_stale_upper_enoent)?;
-            fs.bindings.invalidate(&self.key(), name);
-            self.readdir_index_remove(name);
+            self.readdir_index_remove(name, index);
             // The removal may have restored purity — refresh the marker
             // best-effort (the mutation already committed; a refresh failure
             // never fails the removal).
-            if let Err(err) = self.refresh_impure_marker() {
-                warn!(
-                    "overlay remove: the impure-marker refresh failed after the \
-                     pure-upper removal (best-effort): {:?}",
-                    err
-                );
-            }
+            self.refresh_impure_marker_best_effort(index, "remove");
             return Ok(());
         }
 
@@ -183,14 +195,7 @@ impl OverlayInode {
         let mut committed = false;
         let result: Result<()> = (|| {
             if let Some(temp) = clear_empty_temp.as_ref() {
-                self.clear_empty_exchange(
-                    &fs,
-                    &target_facts,
-                    name,
-                    &upper_parent_path,
-                    temp.name(),
-                    temp.inode(),
-                )?;
+                self.clear_empty_exchange(&fs, &target_facts, name, &upper_parent_path, temp)?;
                 committed = true;
             }
             fs.publish_whiteout(&upper_parent_path, name, replace_target)
@@ -202,21 +207,14 @@ impl OverlayInode {
                     }
                 })?;
             committed = true;
-            // Semantic publication — shared helper: the whiteout is
-            // re-observed from the upper (layer 0) so the published
-            // `HiddenByWhiteout` binding pins its strong `HiddenEvidence`
-            // barrier, then the parent index tombstones the now-hidden
-            // name. The re-observation is fallible: on failure the
-            // whiteout is already published — reconcile.
-            self.publish_whiteout_binding(&fs, &upper_parent_path, name)?;
-            self.readdir_index_remove(name);
+            self.finish_whiteout_index(Some(name), index);
             Ok(())
         })();
         match result {
             Ok(()) => {}
             Err(err) => {
                 if committed {
-                    self.invalidate_stale_cache(&[(self, name)]);
+                    self.invalidate_readdir_index(index);
                 } else if let Some((temp_name, kind)) = staged_temp {
                     // Pre-commit failure (pre-publication arm): best-effort
                     // kind-aware temp cleanup; residue is a known cleanup
@@ -226,13 +224,7 @@ impl OverlayInode {
                 return Err(err);
             }
         }
-        if let Err(err) = self.refresh_impure_marker() {
-            warn!(
-                "overlay remove: the impure-marker refresh failed after the \
-                 whiteout publish (best-effort): {:?}",
-                err
-            );
-        }
+        self.refresh_impure_marker_best_effort(index, "remove");
         Ok(())
     }
 
@@ -249,8 +241,7 @@ impl OverlayInode {
         target_facts: &RealObjectStack,
         name: &str,
         upper_parent_path: &Path,
-        temp_name: &str,
-        temp_inode: &Arc<dyn Inode>,
+        temp: &WorkdirTemp,
     ) -> Result<()> {
         let Some(upper_obj) = target_facts.upper.as_ref() else {
             return Err(Error::with_message(
@@ -264,7 +255,7 @@ impl OverlayInode {
         // instant of the swap (crash window included), gated by the
         // private-xattr capability.
         fs.set_opaque_marker(
-            temp_inode,
+            temp.inode(),
             "the upper filesystem cannot store the opaque marker \
              required for the clear-empty directory exchange",
         )?;
@@ -272,22 +263,13 @@ impl OverlayInode {
         // while the temp is still owned by the caller (the creating task), so
         // a non-owner rmdir of a directory carrying xattrs does not fail
         // `EACCES` on the temp `set_xattr`.
-        fs.xattr_policy.copy_eligible_xattrs(
-            &old_upper_dir,
-            temp_inode,
-            XattrCopyPolicy::BestEffort,
-        )?;
-        temp_inode.set_owner(old_upper_dir.owner()?)?;
-        temp_inode.set_group(old_upper_dir.group()?)?;
-        temp_inode.set_mode(old_upper_dir.mode()?)?;
-        temp_inode.set_atime(old_upper_dir.atime());
-        temp_inode.set_mtime(old_upper_dir.mtime());
-        temp_inode.set_ctime(old_upper_dir.ctime());
+        self.copy_eligible_xattrs(&old_upper_dir, temp.inode(), XattrCopyPolicy::BestEffort)?;
+        self.transfer_metadata(&old_upper_dir, temp.inode())?;
+        self.transfer_timestamps(&old_upper_dir, temp.inode())?;
         let workdir_path = self.workdir_root_path()?;
-        workdir_path
-            .rename(temp_name, upper_parent_path, name, RenameMode::Exchange)
+        fs.publish_temp(temp, upper_parent_path, name, RenameMode::Exchange)
             .map_err(translate_stale_upper_enoent)?;
-        match super::super::super::lookup_child_path(&workdir_path, temp_name) {
+        match super::super::super::lookup_child_path(&workdir_path, temp.name()) {
             Ok(displaced_path) => {
                 if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&displaced_path) {
                     warn!(
@@ -296,11 +278,12 @@ impl OverlayInode {
                         cleanup_err
                     );
                 }
-                if let Err(cleanup_err) = workdir_path.rmdir(temp_name) {
+                if let Err(cleanup_err) = workdir_path.rmdir(temp.name()) {
                     warn!(
                         "overlay clear-empty: workdir cleanup of the displaced \
                          directory {:?} failed (residue, never a visible source): {:?}",
-                        temp_name, cleanup_err
+                        temp.name(),
+                        cleanup_err
                     );
                 }
             }
@@ -308,7 +291,8 @@ impl OverlayInode {
                 warn!(
                     "overlay clear-empty: re-observation of the displaced \
                      directory {:?} failed (residue, never a visible source): {:?}",
-                    temp_name, reobserve_err
+                    temp.name(),
+                    reobserve_err
                 );
             }
         }

@@ -22,19 +22,19 @@ use crate::{fs::vfs::file_system::FsFlags, prelude::*};
 /// The struct is constructed once by [`MountOptions::parse`],
 /// consumed once by `OverlayFs::new`.
 #[derive(Debug)]
-pub(in overlayfs) struct MountOptions {
+pub(in super::super) struct MountOptions {
     /// Lower layer paths in option order; the first option is the topmost.
-    pub(in overlayfs) lower_dirs: Vec<String>,
+    pub(in super::super) lower_dirs: Vec<String>,
     /// Upper layer path; `None` means a read-only overlay.
-    pub(in overlayfs) upper_dir: Option<String>,
+    pub(in super::super) upper_dir: Option<String>,
     /// Work directory path; `Some` iff `upper_dir` is `Some`.
-    pub(in overlayfs) work_dir: Option<String>,
-    pub(in overlayfs) is_forced_read_only: bool,
-    pub(in overlayfs) is_default_permissions: bool,
+    pub(in super::super) work_dir: Option<String>,
+    pub(in super::super) is_forced_read_only: bool,
+    pub(in super::super) is_default_permissions: bool,
     /// The UUID persistence mode; `None` means [`UuidMode::Auto`].
-    pub(in overlayfs) uuid_mode: Option<UuidMode>,
+    pub(in super::super) uuid_mode: Option<UuidMode>,
     /// The `xino=` mode; `None` means [`XinoMode::Auto`].
-    pub(in overlayfs) xino_mode: Option<XinoMode>,
+    pub(in super::super) xino_mode: Option<XinoMode>,
 }
 
 impl MountOptions {
@@ -55,7 +55,7 @@ impl MountOptions {
     ///   most once.
     /// * Required-value constraint: `None` (no option string) fails like a
     ///   missing `lowerdir`.
-    pub(super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
+    pub(in super::super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
         let mut lower_dirs = Vec::new();
         let mut upper_dir = None;
         let mut work_dir = None;

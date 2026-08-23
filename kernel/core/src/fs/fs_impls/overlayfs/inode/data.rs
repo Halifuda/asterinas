@@ -7,13 +7,12 @@
 //! `O_NOATIME` so a read never updates the lower atime. Writes are
 //! upper-backed by construction: the write-capable open path runs the copy-up
 //! trigger before the handle is used, so delegation never bypasses the
-//! trigger. `O_APPEND` is serialized under the per-object `facts` guard.
+//! trigger. `O_APPEND` is serialized under the per-inode transaction lock.
 
-use super::OverlayInode;
+use super::{OverlayInode, permission::AccessType};
 use crate::{
     fs::{
         file::{AccessMode, PerOpenFileOps, Permission, StatusFlags},
-        fs_impls::overlayfs::AccessType,
         vfs::inode::{FallocMode, Inode, SymbolicLink},
     },
     prelude::*,
@@ -30,9 +29,8 @@ impl OverlayInode {
         writer: &mut VmWriter,
         status_flags: StatusFlags,
     ) -> Result<usize> {
-        let facts = self.facts_snapshot();
-        let is_lower_backed = facts.upper.is_none();
-        let real = facts.select_real_inode();
+        let is_lower_backed = self.upper.get().is_none();
+        let real = self.select_real_inode();
         let status_flags = if is_lower_backed {
             status_flags | StatusFlags::O_NOATIME
         } else {
@@ -42,7 +40,7 @@ impl OverlayInode {
     }
 
     // The `O_APPEND` branch serializes `offset := real size` + `write_at`
-    // under the `facts` guard (`append_write`) — a bare two-step
+    // under the per-inode lock (`append_write`) — a bare two-step
     // size-read-then-write would be a TOCTOU where concurrent appends could
     // read the same size and lose an update. Write-capable fds are upper by
     // construction, so delegation never bypasses the trigger.
@@ -76,7 +74,7 @@ impl OverlayInode {
             Ok(fs) => fs,
             Err(err) => return Some(Err(err)),
         };
-        if fs.policy.is_effective_read_only() {
+        if fs.policy().is_effective_read_only() {
             return Some(Err(Error::with_message(
                 Errno::EROFS,
                 "the overlay mount is read-only",

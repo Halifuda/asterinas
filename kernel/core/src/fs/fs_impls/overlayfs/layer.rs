@@ -12,31 +12,31 @@ use device_id::DeviceId;
 
 use super::real::{RealObject, RealObjectKey, RealPath};
 use crate::{
-    fs::vfs::{file_system::FileSystem, inode::Inode, path::Path},
+    fs::vfs::{file_system::FileSystem, path::Path},
     prelude::*,
 };
 
 /// One pinned real layer root of an overlay mount.
 #[derive(Debug)]
-pub(in overlayfs) struct Layer {
-    pub(in overlayfs) root_path: RealPath,
-    pub(in overlayfs) fs: Arc<dyn FileSystem>,
+pub(super) struct Layer {
+    pub(super) root_path: RealPath,
+    pub(super) fs: Arc<dyn FileSystem>,
     /// Per-unique-underlying-superblock identifier assigned at assembly.
-    pub(in overlayfs) fsid: u64,
+    pub(super) fsid: u64,
     /// `st_dev` of the layer root, used for same-filesystem comparisons.
-    pub(in overlayfs) container_dev_id: DeviceId,
+    pub(super) container_dev_id: DeviceId,
 }
 
 impl Layer {
     /// Builds the upper-layer (index 0) real object for `child_path`.
-    pub(in overlayfs) fn child_real_object(&self, child_path: &Path) -> RealObject {
+    pub(super) fn child_real_object(&self, child_path: &Path) -> RealObject {
         RealObject::from_layer_path(0, child_path, self.fsid, self.container_dev_id)
     }
 }
 
 /// The ordered, immutable layer stack of an overlay mount.
 #[derive(Debug)]
-pub(in overlayfs) struct LayerStack {
+pub(super) struct LayerStack {
     pub(super) upper: Option<Layer>,
     pub(super) lowers: Vec<Layer>,
 }
@@ -77,14 +77,14 @@ impl LayerStack {
     }
 
     /// Returns the writable upper layer, or `EROFS` when the stack has none.
-    pub(in overlayfs) fn upper_layer(&self) -> Result<&Layer> {
+    pub(super) fn upper_layer(&self) -> Result<&Layer> {
         self.upper.as_ref().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no upper layer")
         })
     }
 
     /// Returns the ordered lower layers.
-    pub(in overlayfs) fn lower_layers(&self) -> &[Layer] {
+    pub(super) fn lower_layers(&self) -> &[Layer] {
         &self.lowers
     }
 
@@ -124,7 +124,7 @@ impl LayerStack {
     /// `layer_index()` counts the upper as position 0, so when the stack has
     /// an upper the origin's own lower position is `layer_index - 1`; both
     /// out-of-range forms fail with `EINVAL`.
-    pub(in overlayfs) fn lower_layer_root_ino_for_origin(&self, layer_index: usize) -> Result<u64> {
+    pub(super) fn lower_layer_root_ino_for_origin(&self, layer_index: usize) -> Result<u64> {
         let lower_index = if self.upper.is_some() {
             layer_index.checked_sub(1).ok_or_else(|| {
                 Error::with_message(
@@ -150,7 +150,7 @@ impl LayerStack {
 /// Invariant: `upper.is_some() || !lowers.is_empty()`, enforced by the
 /// construction paths.
 #[derive(Clone, Debug)]
-pub(in overlayfs) struct RealObjectStack {
+pub(super) struct RealObjectStack {
     /// The upper real object; the visible-metadata source for merged
     /// directories.
     pub(super) upper: Option<RealObject>,
@@ -160,11 +160,36 @@ pub(in overlayfs) struct RealObjectStack {
 }
 
 impl RealObjectStack {
+    /// Constructs a stack from an optional upper and an ordered lower list.
+    ///
+    /// Callers must keep the real-object invariant: at least one of the upper
+    /// or lower slots is populated.
+    pub(super) fn new(upper: Option<RealObject>, lowers: Vec<RealObject>) -> Self {
+        debug_assert!(upper.is_some() || !lowers.is_empty());
+        Self { upper, lowers }
+    }
+
+    /// Constructs an upper-only real-object stack.
+    pub(super) fn upper_only(upper: RealObject) -> Self {
+        Self {
+            upper: Some(upper),
+            lowers: Vec::new(),
+        }
+    }
+
+    /// Constructs a lower-only real-object stack.
+    pub(super) fn lower_only(lower: RealObject) -> Self {
+        Self {
+            upper: None,
+            lowers: vec![lower],
+        }
+    }
+
     /// Returns whether this stack represents a merged directory view.
     ///
     /// A stack is merged when it has both an upper and lower contribution, or
     /// when more than one lower layer contributes.
-    pub(in overlayfs) fn is_merged(&self) -> bool {
+    pub(super) fn is_merged(&self) -> bool {
         (self.upper.is_some() && !self.lowers.is_empty()) || self.lowers.len() > 1
     }
 
@@ -172,7 +197,7 @@ impl RealObjectStack {
     /// else the topmost lower (`lowers[0]`).
     ///
     /// Precondition: `upper.is_some() || !lowers.is_empty()`.
-    pub(in overlayfs) fn visible_source(&self) -> &RealObject {
+    pub(super) fn visible_source(&self) -> &RealObject {
         match &self.upper {
             Some(upper) => upper,
             None => &self.lowers[0],
@@ -180,45 +205,7 @@ impl RealObjectStack {
     }
 
     /// Returns the cache key derived from the visible-metadata source.
-    pub(in overlayfs) fn key(&self) -> RealObjectKey {
+    pub(super) fn key(&self) -> RealObjectKey {
         RealObjectKey::from_source(self.visible_source())
-    }
-
-    /// Returns whether `real_inode` is the same logical object as this
-    /// stack's visible source or any of its retained lowers.
-    pub(in overlayfs) fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
-        Arc::ptr_eq(self.visible_source().real_inode(), real_inode)
-            || self
-                .lowers
-                .iter()
-                .any(|lower| Arc::ptr_eq(lower.real_inode(), real_inode))
-    }
-
-    /// Returns whether `self` and `other` describe the same physical layer
-    /// composition by durable value identity (`fsid` + real inode number),
-    /// not by cached inode pointer identity.
-    pub(in overlayfs) fn same_real_object_stack(&self, other: &Self) -> bool {
-        let same_upper = match (self.upper.as_ref(), other.upper.as_ref()) {
-            (Some(left), Some(right)) => {
-                left.fsid() == right.fsid() && left.real_inode().ino() == right.real_inode().ino()
-            }
-            (None, None) => true,
-            _ => false,
-        };
-        same_upper
-            && self.lowers.len() == other.lowers.len()
-            && self
-                .lowers
-                .iter()
-                .zip(other.lowers.iter())
-                .all(|(left, right)| {
-                    left.fsid() == right.fsid()
-                        && left.real_inode().ino() == right.real_inode().ino()
-                })
-    }
-
-    /// Returns the current real authority for one delegated call.
-    pub(in overlayfs) fn select_real_inode(&self) -> Arc<dyn Inode> {
-        self.visible_source().real_inode().clone()
     }
 }

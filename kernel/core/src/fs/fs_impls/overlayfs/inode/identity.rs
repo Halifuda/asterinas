@@ -55,22 +55,22 @@ const U64_BITS: u32 = u64::BITS;
 /// stored on the `OverlayInode`; it identifies one logical overlay object
 /// wherever that object is reached.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in overlayfs) struct ObjectId {
+pub(super) struct ObjectId {
     /// Published `st_dev`.
-    pub(in overlayfs) dev: DeviceId,
+    pub(super) dev: DeviceId,
     /// Published `st_ino`.
-    pub(in overlayfs) ino: u64,
+    pub(super) ino: u64,
 }
 
 /// One published layer's identity triplet.
 #[derive(Clone, Copy, Debug)]
 pub(in overlayfs) struct LowerLayerIdentity {
     /// The per-mount layer ordinal.
-    pub(in overlayfs) fsid: u64,
+    pub(super) fsid: u64,
     /// The backend container device id of the layer.
-    pub(in overlayfs) container_dev_id: DeviceId,
+    pub(super) container_dev_id: DeviceId,
     /// The layer root's real inode number.
-    pub(in overlayfs) lower_layer_root_ino: u64,
+    pub(super) lower_layer_root_ino: u64,
 }
 
 /// Collects the construction-local layer identity inputs for
@@ -188,14 +188,14 @@ impl IdentityPolicy {
         })
     }
 
-    pub(in overlayfs) fn is_xino_effective(&self) -> bool {
+    pub(super) fn is_xino_effective(&self) -> bool {
         if self.is_all_layers_same_fs {
             return false;
         }
         matches!(self.xino_mode, XinoMode::Auto | XinoMode::On)
     }
 
-    pub(in overlayfs) fn is_all_layers_same_fs(&self) -> bool {
+    pub(super) fn is_all_layers_same_fs(&self) -> bool {
         self.is_all_layers_same_fs
     }
 
@@ -207,11 +207,7 @@ impl IdentityPolicy {
     /// object), as opposed to the lower-id entry that starts from a durable
     /// record, so callers need not unpack the three `RealObject` fields into
     /// `project` themselves.
-    pub(in overlayfs) fn project_object_id(
-        &self,
-        real: &RealObject,
-        is_directory: bool,
-    ) -> ObjectId {
+    pub(super) fn project_object_id(&self, real: &RealObject, is_directory: bool) -> ObjectId {
         self.project(
             real.fsid(),
             real.real_inode().ino(),
@@ -223,7 +219,7 @@ impl IdentityPolicy {
     /// Projects the dev/ino identity from the durable lower-id record
     /// through the shared [`IdentityPolicy::project`] matrix; an unresolved
     /// origin pair leaves the caller on the visible-source fallback.
-    pub(in overlayfs) fn project_object_id_from_lower_id(
+    pub(super) fn project_object_id_from_lower_id(
         &self,
         lower_id: &LowerIdOrigin,
         is_directory: bool,
@@ -310,7 +306,7 @@ impl IdentityPolicy {
     /// directory is deterministic — same-fs passthrough or a fitting xino
     /// encode — rather than the xino-off directory branch that allocates a
     /// fresh fallback ino per call.
-    pub(in overlayfs) fn is_directory_projection_deterministic(
+    pub(super) fn is_directory_projection_deterministic(
         &self,
         layer_id: u64,
         real_ino: u64,
@@ -344,7 +340,7 @@ impl IdentityPolicy {
     /// The LOWER-only table is consulted because origin records only ever
     /// come from lower sources; an absent pair or multiple matching fsids
     /// returns `None` to keep the visible-source fallback.
-    pub(in overlayfs) fn resolve_layer_id_for_record(
+    pub(super) fn resolve_layer_id_for_record(
         &self,
         container_dev_id: DeviceId,
         lower_layer_root_ino: u64,
@@ -400,7 +396,7 @@ impl IdentityPolicy {
 /// the origin layer's `container_dev_id`, configured lower root inode, and
 /// real inode number (pre-copy-up provenance).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in overlayfs) struct LowerIdOrigin {
+pub(super) struct LowerIdOrigin {
     /// Durable underlying-fs identity of the origin layer: the layer root's
     /// `st_dev` (`Layer::container_dev_id`), replacing the mount-local
     /// `fsid` ordinal.
@@ -507,15 +503,15 @@ impl LowerIdOrigin {
         }))
     }
 
-    pub(in overlayfs) fn container_dev_id(&self) -> DeviceId {
+    pub(super) fn container_dev_id(&self) -> DeviceId {
         self.container_dev_id
     }
 
-    pub(in overlayfs) fn lower_layer_root_ino(&self) -> u64 {
+    pub(super) fn lower_layer_root_ino(&self) -> u64 {
         self.lower_layer_root_ino
     }
 
-    pub(in overlayfs) fn real_ino(&self) -> u64 {
+    pub(super) fn real_ino(&self) -> u64 {
         self.real_ino
     }
 }
@@ -524,15 +520,11 @@ impl OverlayFs {
     /// Persists the lower-source identity record on the upper inode with a
     /// single `set_xattr(..., CREATE_OR_REPLACE)` call; a missing
     /// capability or `EOPNOTSUPP` is a gated no-op.
-    pub(in overlayfs) fn store_lower_id(
-        &self,
-        upper: &Arc<dyn Inode>,
-        lower: &RealObject,
-    ) -> Result<()> {
+    pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
         let lower_layer_root_ino = self
-            .layer_stack
+            .layer_stack()
             .lower_layer_root_ino_for_origin(lower.layer_index())?;
-        let Some(capabilities) = self.policy.upper_capabilities() else {
+        let Some(capabilities) = self.policy().upper_capabilities() else {
             return Ok(());
         };
         if !capabilities.can_store_private_xattr() {
@@ -554,10 +546,7 @@ impl OverlayFs {
     /// Returns `Ok(None)` for absent, malformed, foreign, or ambiguous
     /// evidence, preserving the visible-source fallback; genuine xattr-read
     /// errors propagate.
-    pub(in overlayfs) fn read_lower_id(
-        &self,
-        upper: &Arc<dyn Inode>,
-    ) -> Result<Option<LowerIdOrigin>> {
+    pub(super) fn read_lower_id(&self, upper: &Arc<dyn Inode>) -> Result<Option<LowerIdOrigin>> {
         let name = origin_xattr_name()?;
         let mut value = [0u8; ORIGIN_WIRE_TOTAL_LEN];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
@@ -567,7 +556,7 @@ impl OverlayFs {
                     return Ok(None);
                 };
                 let resolves = self
-                    .identity
+                    .identity()
                     .resolve_layer_id_for_record(
                         record.container_dev_id(),
                         record.lower_layer_root_ino(),

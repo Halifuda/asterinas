@@ -6,8 +6,7 @@
 //! registers [`fs_type::OverlayFsType`], after which the VFS can mount
 //! overlays and access them through the standard filesystem trait
 //! interfaces. A mount merges one writable upper layer with one or more
-//! read-only lower layers; [`AccessType`] classifies each projected request
-//! as read-only or mutating for permission checks and copy-up triggering.
+//! read-only lower layers.
 //!
 //! # References
 //!
@@ -21,12 +20,6 @@ mod fs_type;
 mod inode;
 mod layer;
 mod real;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in overlayfs) enum AccessType {
-    ReadOnly,
-    Mutating,
-}
 
 use alloc::format;
 

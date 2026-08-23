@@ -15,9 +15,7 @@ use crate::{
     fs::{
         fs_impls::overlayfs::{
             fs_type::OVERLAY_FS_NAME,
-            inode::{
-                BindingCache, IdentityPolicy, InodeCache, OverlayInode, WhiteoutCache, XattrPolicy,
-            },
+            inode::{IdentityPolicy, InodeCache, OverlayInode, WhiteoutCache},
             layer::LayerStack,
             real::{RealObject, RealObjectKey},
         },
@@ -35,30 +33,23 @@ use crate::{
 /// Created by [`OverlayFs::new`]; owns the layer stack, claims, policy,
 /// projection state.
 pub(super) struct OverlayFs {
-    pub(super) layer_stack: LayerStack,
+    layer_stack: LayerStack,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
     /// Established single-threaded before publication,
     /// and released by the claim guard's `Drop`.
     /// The claim additionally pins the prepared workdir staging workspace inode
     /// (`<workdir>/work`) once `prepare_workdir` completes.
-    pub(super) upper_workdir_pair: Option<UpperWorkdirInuse>,
-    pub(super) policy: MountPolicy,
-    pub(super) fs_event_stats: FsEventSubscriberStats,
-    pub(super) self_weak: Weak<OverlayFs>,
-    /// The mount-wide binding cache — the first source for `(parent, name)`
-    /// lookup results.
-    ///
-    /// A positive binding pins its inode, a negative one pins its barrier;
-    /// insert/update happen under the caller's parent directory transaction
-    /// lock.
-    pub(super) bindings: BindingCache,
+    upper_workdir_pair: Option<UpperWorkdirInuse>,
+    policy: MountPolicy,
+    fs_event_stats: FsEventSubscriberStats,
+    self_weak: Weak<OverlayFs>,
     /// The mount-wide inode identity-reuse cache.
     ///
     /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
-    pub(super) inodes: InodeCache,
+    inodes: InodeCache,
     /// The dev/ino projection policy.
-    pub(super) identity: IdentityPolicy,
+    identity: IdentityPolicy,
     /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
     ///
     /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
@@ -67,13 +58,11 @@ pub(super) struct OverlayFs {
     /// on the fs struct) or the minor number could be recycled under a live
     /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
     /// and suppresses the unused-field lint.
-    pub(super) _anon_device_id: AnonDeviceId,
-    /// The xattr classification policy.
-    pub(super) xattr_policy: XattrPolicy,
+    _anon_device_id: AnonDeviceId,
     /// The mount-scoped reusable whiteout cache.
     ///
     /// Bounded to one workdir staging slot.
-    pub(super) whiteout_cache: Mutex<WhiteoutCache>,
+    whiteout_cache: Mutex<WhiteoutCache>,
 }
 
 impl OverlayFs {
@@ -109,6 +98,34 @@ impl OverlayFs {
                 ))
             }
         }
+    }
+
+    pub(super) fn layer_stack(&self) -> &LayerStack {
+        &self.layer_stack
+    }
+
+    pub(super) fn upper_workdir_pair(&self) -> &Option<UpperWorkdirInuse> {
+        &self.upper_workdir_pair
+    }
+
+    pub(super) fn policy(&self) -> &MountPolicy {
+        &self.policy
+    }
+
+    pub(super) fn self_weak(&self) -> &Weak<OverlayFs> {
+        &self.self_weak
+    }
+
+    pub(super) fn inodes(&self) -> &InodeCache {
+        &self.inodes
+    }
+
+    pub(super) fn identity(&self) -> &IdentityPolicy {
+        &self.identity
+    }
+
+    pub(super) fn whiteout_cache(&self) -> &Mutex<WhiteoutCache> {
+        &self.whiteout_cache
     }
 
     /// Returns the real filesystem that superblock hooks forward to: the upper
