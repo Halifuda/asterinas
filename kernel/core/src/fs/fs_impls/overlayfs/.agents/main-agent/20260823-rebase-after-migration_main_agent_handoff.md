@@ -2,7 +2,7 @@
 
 # Handoff: Overlayfs 代码迁移完成后的 Rebase（2026-08-23）
 
-**Status:** RECORDED ONLY — 代码迁移已完成，rebase 尚未执行。
+**Status:** CLOSED — 新分支迁移已完成并 push 到 origin（Halifuda），静态检查与核心 overlay 验证通过。
 
 ## Goal
 
@@ -303,3 +303,16 @@ Checker 已按更优雅方案实现并验证：
   - `readdir_small_buffer`：**12/12 全部通过**（之前 3 项失败已消失）。
 - 注意：临时 runner 最后打印的是 `All overlay regression tests passed.`，而 Makefile 的 regression 门禁 grep `^All regression tests passed.`，所以 `make` 返回 Error 1 只是输出字符串不匹配，不是测试失败。
 - 日志：`.overlay-regression2.log`。
+
+## Close Note (2026-08-24)
+
+- 本 handoff 关闭。
+- 最终交付分支：`codex/overlayfs-refactor-new`，已 push 到 `origin`（Halifuda）。
+- 静态检查：`make check` PASS、`make docs` PASS。
+- 核心验证：overlay xfstests `full.list` 21/21 PASS；overlay regression `ovl_test` + `readdir_small_buffer` PASS。
+- 重建 Docker 镜像的方法**不在本 handoff 中**；请参考仓库内：
+  - `tools/docker/README.md`
+  - `tools/docker/Dockerfile`
+  - `tools/docker/kernel-dev/Dockerfile`
+  - `tools/docker/prebuilt-nix-packages/Dockerfile`
+  - `osdk/tools/docker/Dockerfile`
