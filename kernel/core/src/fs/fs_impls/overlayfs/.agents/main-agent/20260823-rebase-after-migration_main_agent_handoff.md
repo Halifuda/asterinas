@@ -284,3 +284,22 @@ Checker 已按更优雅方案实现并验证：
   - `short.list` = 有代表性的 6 个已通过用例：002/003/007/012/014/077
 - 使用 `XFSTESTS_RUNLIST=full.list` 实际复跑：**21/21 全部 PASS**。
 - 日志：`.overlay-full.log`（未提交，可保留作证据或删除）。
+
+## Note (2026-08-24): overlay regression 两例单独测试结果
+
+- 两个 overlay 相关 regression：`test/initramfs/src/regression/fs/overlayfs/ovl_test` 和 `readdir_small_buffer`。
+- 单独测试方式：临时把 `run_regression_test.sh` 改成只跑这两个二进制，再 `make run_kernel AUTO_TEST=regression`；跑完已恢复原脚本。
+- 结果：
+  - `ovl_test`：通过。
+  - `readdir_small_buffer`：失败 3 项（`result.deleted`、`result.whiteout`、`result.total_entries`），且 cleanup 时 `rmdir(WORK_DIR)` 因目录非空失败。
+- 日志：`.overlay-regression.log`（未提交，可保留或删除）。
+- 可能原因：当前分支未携带旧分支对 `readdir_small_buffer.c` 的适配修改，或 overlayfs 行为与该测试预期仍有差异；需后续单独处理。
+
+## Note (2026-08-24): readdir_small_buffer 旧分支适配迁移后复测
+
+- 已将旧分支对 `test/initramfs/src/regression/fs/overlayfs/readdir_small_buffer.c` 的修改迁移到新分支（Linux 格式 whiteout：char device 0:0，cleanup 增加 `rmdir(WORK_DIR "/work")`）。
+- 单独复测两个 overlay regression：
+  - `ovl_test`：通过。
+  - `readdir_small_buffer`：**12/12 全部通过**（之前 3 项失败已消失）。
+- 注意：临时 runner 最后打印的是 `All overlay regression tests passed.`，而 Makefile 的 regression 门禁 grep `^All regression tests passed.`，所以 `make` 返回 Error 1 只是输出字符串不匹配，不是测试失败。
+- 日志：`.overlay-regression2.log`。
