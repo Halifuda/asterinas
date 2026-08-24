@@ -229,3 +229,58 @@ git push -u origin codex/overlayfs-refactor-new
 ```
 
 不要 push 到 `upstream`。push 完成后再根据情况决定是否保留 `origin` tracking 或额外配置 `upstream/main` 作为参考 tracking。
+
+## Note (2026-08-24): overlay xfstests 调研结论
+
+只读调研结论（旧分支 vs 当前 upstream base）：
+
+- 旧分支 overlay xfstests 是手动跑的，命令形如：
+  ```bash
+  make run_kernel AUTO_TEST=conformance CONFORMANCE_TEST_SUITE=xfstests \
+      XFSTESTS_FS_TYPE=overlay XFSTESTS_DISK_SIZE=6G \
+      XFSTESTS_RUNLIST=short.list
+  ```
+- 旧分支对 upstream PR #3298 做了结构性魔改：删除顶层 `build_config.mk`、内联 per-fs build config、把 `XFSTESTS_RUNLIST` 改成完整 guest 路径、混入 exfat 脚手架。这些不应搬到新分支。
+- 新分支最小方案：保留 upstream 文件结构，新增 `test/initramfs/src/conformance/xfstests/overlay/`，在 `run_xfstests.sh` 加 overlay 专用分支（`append_common_rc_asterinas_compat` + `./check -overlay`），并在 `xfstests.nix` 增加 `attr`，README 增加 overlay 说明。
+- 风险：`common/rc` 运行时 patch 较脆弱；runlist 在新分支使用文件名（如 `short.list`），不是旧分支的绝对路径。
+- 更优雅的方案待进一步调研。
+
+## Note (2026-08-24): overlay xfstests 更优雅方案调研
+
+进一步只读调研（含容器内 `/opt/xfstests` 源码）结论：
+
+- xfstests 原生支持 `FSTYP=overlay`：`common/config` 会在 `FSTYP=overlay` 时自动调用 `_overlay_config_override()`，不需要 `./check -overlay`。
+- 因此 `run_xfstests.sh` 可以完全不改；overlay 支持可以自包含在 `overlay/` 目录内。
+- `common/rc` 的 Asterinas 兼容注入可以移到 `overlay/prepare.sh`（已有 per-fs 预处理 hook，tmpfs 也有类似先例），而不是放进通用 runner。
+- runlist 不需要改：当前 upstream 的 filename-based `XFSTESTS_RUNLIST` 已兼容 `overlay/run_list/`。
+- 推荐方案（比旧分支更优雅）：
+  1. 新增 `overlay/config/build_config.mk`（`XFSTESTS_NEEDS_BLOCK_DEVICES=true`、`XFSTESTS_MKFS=mkfs.ext2`）
+  2. 新增 `overlay/config/xfstests.config`（`FSTYP=overlay`、`OVL_BASE_FSTYP=ext2`、块设备/目录变量）
+  3. 新增 `overlay/prepare.sh`（做 `common/rc` 兼容注入，幂等）
+  4. 新增 `overlay/common_rc_asterinas_compat.sh`
+  5. 新增 `overlay/run_list/{short,full,block}.list`
+  6. `xfstests.nix` 增加 `attr`
+  7. README 增加 overlay 示例
+- 不需要改 `run_xfstests.sh`、顶层 `build_config.mk`、`test/initramfs/Makefile`、根 `Makefile`、`tools/qemu_args.sh`、CI action。
+- 风险：`common/rc` 运行时 patch 仍是最脆弱部分；`FSTYP=overlay` 路径需要一次实际 smoke 验证。
+
+## Note (2026-08-24): overlay xfstests Checker 验证结果
+
+Checker 已按更优雅方案实现并验证：
+
+- 新增 `test/initramfs/src/conformance/xfstests/overlay/`（config / prepare / common_rc_asterinas_compat / run_list）。
+- `xfstests.nix` 增加 `attr`，README 增加 overlay 示例。
+- 未修改 `run_xfstests.sh`、顶层 `build_config.mk`、`test/initramfs/Makefile`、根 `Makefile`、`tools/qemu_args.sh`、CI action。
+- Nix 打包验证通过：`overlay/` 进入 `/opt/xfstests`，`attr` 进入 runtime path。
+- 实际 smoke run（`XFSTESTS_FS_TYPE=overlay XFSTESTS_RUNLIST=short.list`）成功启动并执行 6 个用例：5 通过，1 失败（`overlay/021` output mismatch）。
+- 失败定位为 overlayfs 实现/行为差异（lower directory find 行为），不是脚手架或打包问题。
+- 后续需要单独处理 `overlay/021` 或确认是否属于已知 overlayfs 行为差距。
+
+## Note (2026-08-24): overlay xfstests list 修正 + 21 例 full 复跑
+
+- 根据 wave7/wave8 handoff，修正 overlay run_list：
+  - `full.list` = 21 个已通过用例：029/002/003/006/007/009/010/011/012/014/016/019/022/024/026/031/038/039/063/077/028
+  - `block.list` = 其余 59 个预计无法通过的 packaged overlay 用例
+  - `short.list` = 有代表性的 6 个已通过用例：002/003/007/012/014/077
+- 使用 `XFSTESTS_RUNLIST=full.list` 实际复跑：**21/21 全部 PASS**。
+- 日志：`.overlay-full.log`（未提交，可保留作证据或删除）。
