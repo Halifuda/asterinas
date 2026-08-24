@@ -476,10 +476,19 @@ impl Inode for OverlayInode {
     fn rename(
         &self,
         old_name: &str,
-        target: &Arc<dyn Inode>,
+        old_inode: &Arc<dyn Inode>,
+        new_dir_inode: &Arc<dyn Inode>,
         new_name: &str,
+        replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
-        self.rename_impl(old_name, target, new_name, mode)
+        self.rename_impl(
+            old_name,
+            old_inode,
+            new_dir_inode,
+            new_name,
+            replaced_inode,
+            mode,
+        )
     }
 }

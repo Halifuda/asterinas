@@ -54,15 +54,13 @@ impl OverlayInode {
     /// merged directory: the `redirect_dir` policy is not implemented, so
     /// the EXDEV default applies (future work is tracked below).
     ///
-    /// The gate runs from the fresh source projection before any upper side
-    /// effect.
+    /// The gate runs from the resolved source overlay inode before any upper
+    /// side effect; the source liveness recheck in `rename_upper` remains the
+    /// authority for races after this point.
     // TODO(redirect_dir): replace this flat EXDEV default with a
     // redirect-policy probe bounded by the `redirect_max`-style length rule
     // when redirect support is implemented.
-    pub(super) fn cross_device_gate(&self, source: &Lookup) -> Result<()> {
-        let Lookup::Positive(source_inode) = source else {
-            return Ok(());
-        };
+    pub(super) fn cross_device_gate(&self, source_inode: &Arc<OverlayInode>) -> Result<()> {
         if !source_inode.type_().is_directory() {
             return Ok(());
         }
@@ -79,36 +77,59 @@ impl OverlayInode {
     /// Runs the upper rename recipe under the caller's two parent directory
     /// transaction guards.
     ///
-    /// Any failure after the physical upper rename committed triggers the
-    /// conservative reconcile of the whole affected set as a unit before the
-    /// error is returned.
+    /// It first performs a fresh overlay-internal source liveness recheck, so
+    /// a stale VFS-supplied source inode is rejected with `ESTALE` before any
+    /// physical upper rename. Any failure after that physical rename commits
+    /// triggers the conservative reconcile of the whole affected set as a unit
+    /// before the error is returned.
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn rename_upper(
         &self,
         old_name: &str,
+        source_inode: &Arc<OverlayInode>,
         target: &Arc<OverlayInode>,
         new_name: &str,
+        replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
-        source_lookup: &Lookup,
         mut locks: RenameLocks<'_>,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
 
-        let source_inode = match source_lookup {
-            Lookup::Positive(inode) => inode.clone(),
-            Lookup::Negative(_) => {
-                return Err(Error::with_message(
-                    Errno::ENOENT,
-                    "the rename source is not visible under the parent DIR",
-                ));
+        // The VFS-provided `old_inode` is only an optimization for the
+        // pre-lock admission path. Under the parent transaction locks,
+        // re-resolve the source name and require that it still resolves to
+        // the same overlay inode; otherwise the rename source went stale.
+        let fresh_source = fs.lookup(self, old_name)?;
+        match &fresh_source {
+            Lookup::Positive(fresh) => {
+                if !Arc::ptr_eq(fresh, source_inode) {
+                    return Err(Error::new(Errno::ESTALE));
+                }
             }
-        };
+            Lookup::Negative(_) => {
+                return Err(Error::new(Errno::ESTALE));
+            }
+        }
+
         let source_has_lower = !source_inode.lowers.is_empty();
-        let target_lookup = fs.lookup(target, new_name)?;
-        let target_is_whiteout = matches!(
-            &target_lookup,
-            Lookup::Negative(NegativeLookup::HiddenByWhiteout)
-        );
-        let target_is_positive = matches!(&target_lookup, Lookup::Positive(_));
+
+        // When the VFS provides the replaced target inode, it is the source
+        // of truth for a positive target and no fresh target scan is needed.
+        // For a `None` replaced inode, keep the overlay lookup path so
+        // whiteout/negative target classification still reflects merged
+        // layer truth.
+        let target_lookup = if replaced_inode.is_none() {
+            Some(fs.lookup(target, new_name)?)
+        } else {
+            None
+        };
+        let target_is_whiteout = replaced_inode.is_none()
+            && matches!(
+                &target_lookup,
+                Some(Lookup::Negative(NegativeLookup::HiddenByWhiteout))
+            );
+        let target_is_positive =
+            replaced_inode.is_some() || matches!(&target_lookup, Some(Lookup::Positive(_)));
 
         // A visible target under `NoReplace` is `EEXIST`: the upper rename's
         // `NOREPLACE` only observes the upper namespace, so a lower-visible
@@ -126,19 +147,33 @@ impl OverlayInode {
         // to the upper rename's own emptiness enforcement). The gate records
         // the fresh target facts so the target's physical whiteout-residue
         // sweep can run after the per-branch promotions.
-        let gate_target_facts = if mode == RenameMode::Replace
-            && target_is_positive
-            && let Lookup::Positive(target_object) = &target_lookup
-            && target_object.type_().is_directory()
-        {
-            let target_facts = target_object.real_object_stack();
-            if !target_facts.lowers.is_empty() && target_object.visible_child_count()? != 0 {
-                return Err(Error::with_message(
-                    Errno::ENOTEMPTY,
-                    "the overlay rename target directory is not empty",
-                ));
+        let gate_target_facts = if mode == RenameMode::Replace && target_is_positive {
+            let target_object = match replaced_inode {
+                Some(replaced) => {
+                    Arc::downcast::<OverlayInode>(replaced.clone()).map_err(|_| {
+                        Error::with_message(
+                            Errno::EIO,
+                            "the rename replaced inode is not an overlay inode",
+                        )
+                    })?
+                }
+                None => match &target_lookup {
+                    Some(Lookup::Positive(target_object)) => target_object.clone(),
+                    _ => unreachable!("a positive rename target always has a target object"),
+                },
+            };
+            if target_object.type_().is_directory() {
+                let target_facts = target_object.real_object_stack();
+                if !target_facts.lowers.is_empty() && target_object.visible_child_count()? != 0 {
+                    return Err(Error::with_message(
+                        Errno::ENOTEMPTY,
+                        "the overlay rename target directory is not empty",
+                    ));
+                }
+                Some(target_facts)
+            } else {
+                None
             }
-            Some(target_facts)
         } else {
             None
         };

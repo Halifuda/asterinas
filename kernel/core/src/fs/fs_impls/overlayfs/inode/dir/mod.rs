@@ -103,7 +103,10 @@ impl OverlayInode {
         fresh_lookup: &Lookup,
         current_index: &Option<ReaddirIndex>,
     ) -> bool {
-        let Some(old_inode) = current_index.as_ref().and_then(|idx| idx.visible_inode(name)) else {
+        let Some(old_inode) = current_index
+            .as_ref()
+            .and_then(|idx| idx.visible_inode(name))
+        else {
             return false;
         };
         if old_inode.upper.get().is_none() {
@@ -226,45 +229,41 @@ impl OverlayInode {
     pub(super) fn rename_impl(
         &self,
         old_name: &str,
-        target: &Arc<dyn Inode>,
+        old_inode: &Arc<dyn Inode>,
+        new_dir_inode: &Arc<dyn Inode>,
         new_name: &str,
+        replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
         // A foreign inode is a defensive error, never a silent cast.
-        let target_overlay = Arc::downcast::<OverlayInode>(target.clone()).map_err(|_| {
-            Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
+        let source_overlay = Arc::downcast::<OverlayInode>(old_inode.clone()).map_err(|_| {
+            Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
         })?;
+        let target_overlay =
+            Arc::downcast::<OverlayInode>(new_dir_inode.clone()).map_err(|_| {
+                Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
+            })?;
         // Both parent admission checks run before any parent lock is taken:
         // each `Mutating` check promotes that directory to upper authority
         // without holding the transaction lock.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         target_overlay.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let fs = self.fs_arc()?;
-        // The source is pre-resolved before the parent locks so its copy-up
-        // promotion also happens without holding any transaction lock. The
-        // lookup may become stale while waiting for the locks; the later A3
-        // liveness recheck is the authority for that race.
-        let source_lookup = fs.lookup(self, old_name)?;
-        let source_inode = match &source_lookup {
-            Lookup::Positive(inode) => inode.clone(),
-            Lookup::Negative(_) => return Err(Error::new(Errno::ENOENT)),
-        };
-        source_inode.ensure_upper_authority()?;
+        // The VFS-provided source inode is used for the pre-lock source
+        // promotion and the EXDEV gate; `rename_upper` performs a fresh
+        // liveness recheck after the parent locks are taken.
+        source_overlay.ensure_upper_authority()?;
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
-            self.cross_device_gate(&source_lookup)?;
+            self.cross_device_gate(&source_overlay)?;
         }
         let (mut source_guard, mut target_guard) =
             self.lock_parent_dir_transactions(Some(&target_overlay))?;
-        // Whether the source name needs a whiteout after the move is decided
-        // internally from the pre-resolved source projection; the
-        // already-computed source lookup is passed in so `rename_upper`
-        // does not re-scan the layers under the transaction locks.
         self.rename_upper(
             old_name,
+            &source_overlay,
             &target_overlay,
             new_name,
+            replaced_inode,
             mode,
-            &source_lookup,
             rename::RenameLocks {
                 self_index: &mut source_guard,
                 target_index: target_guard.as_deref_mut(),

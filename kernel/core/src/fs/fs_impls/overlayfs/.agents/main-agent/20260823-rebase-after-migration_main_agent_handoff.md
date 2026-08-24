@@ -207,3 +207,25 @@ kernel/core/src/fs/vfs/range_lock/*
 ## Note (2026-08-24): `DirentCounter` cleanup
 
 During the new-branch migration, `kernel/core/src/fs/utils/dirent_visitor.rs` and `kernel/core/src/fs/utils/mod.rs` were kept as upstream (with `pub(crate)` visibility and `DirentCounter`). The refactored overlayfs does **not** need `DirentCounter`; it should be removed in a later cleanup pass. This note is to prevent it from being treated as a required dependency of the new overlayfs.
+
+## Note (2026-08-24): xfstests 测试脚手架暂不迁移
+
+旧分支的 xfstests 脚手架虽然源自 upstream PR #3298，但旧分支在其上做了较大的本地改动（例如删除顶层 `build_config.mk`、改为直接 include 各 fs 的 `config/build_config.mk`、`run_xfstests.sh` 增加 overlay 专用逻辑等）。
+
+当前决策：
+
+- 本阶段**不迁移**测试脚手架。
+- 后续开始做测试时，尽量从当前 upstream base **重新实现** xfstests 脚手架，旧分支仅作参考。
+- 至少保持 upstream 的 `build_config.mk` 结构不变，不要沿用旧分支删除顶层 `build_config.mk` 的大改动。
+
+## Note (2026-08-24): 新分支推送策略
+
+当前 `codex/overlayfs-refactor-new` 暂不恢复 upstream tracking，也不执行 push。
+
+后续等新分支上的事情全部调好之后，直接 push 到 `origin`：
+
+```bash
+git push -u origin codex/overlayfs-refactor-new
+```
+
+不要 push 到 `upstream`。push 完成后再根据情况决定是否保留 `origin` tracking 或额外配置 `upstream/main` 作为参考 tracking。
