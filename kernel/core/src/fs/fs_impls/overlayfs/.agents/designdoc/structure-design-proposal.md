@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Overlayfs 代码结构设计提案（->重新实现）
+# Overlayfs 代码结构设计提案
 
 ## 动机
 
@@ -47,13 +47,13 @@ pub struct OverlayFs {
 }
 ```
 
-字段说明：(可写为注释)（此处可添加overlayfs语义说明）
+字段说明：
 
 - `inodes`：inode 身份复用缓存，保证同一真实对象映射到同一 `OverlayInode`。
 - `identity`：基于 `st_dev`/`st_ino` 向 VFS 暴露 dev 与 ino 的策略。
 - `layer_stack`：overlay 的层栈；`LayerStack` 定义见第 5 节。
 - `policy`：运行期只读的挂载策略。
-- `upper_workdir_pair`：upper/workdir 的排他持有；`Some` 仅对可写挂载存在。（介绍upper/lower后介绍与底层并发操作时的假设）
+- `upper_workdir_pair`：upper/workdir 的排他持有；`Some` 仅对可写挂载存在。
 - `whiteout_cache`：whiteout 单槽共享缓存。
 
 职责：代表一次 mount 的全局状态，并提供 `FileSystem` 实现与访问器契约。
@@ -79,7 +79,7 @@ struct OverlayInode {
     copyup_transition: Mutex<CopyUpTransition>,
     extension: Extension,
     fs: Weak<OverlayFs>,
-    lock: Mutex<Option<ReaddirIndex>>, (普通文件是否需要锁)
+    lock: Mutex<Option<ReaddirIndex>>,
     lowers: Vec<RealObject>,
     object_id: ObjectId,
     upper: Once<RealObject>,
@@ -89,7 +89,7 @@ struct OverlayInode {
 字段说明：
 
 - `lowers`、`upper`：对象引用的底层 fs 真实对象（`RealObject` 定义见第 5 节）。`upper: Once<RealObject>` 表示 copy-up 是 lower→upper 的单向、至多一次发布；读路径无锁，发布时原子写入。
-- `copyup_transition`：copy-up 协调状态（CUL）。copy-up 是多步、可阻塞 IO 的协议，每个对象至多执行一次；`Once` 只能表达“已完成/未开始”，无法表达“进行中”，因此需要一把可睡眠的每对象锁做 winner/waiter 仲裁：winner 持锁跑完整个 copy-up，waiter 睡到锁后用 `upper.get()` 复查并退出。（detail）
+- `copyup_transition`：copy-up 协调状态（CUL）。copy-up 是多步、可阻塞 IO 的协议，每个对象至多执行一次；`Once` 只能表达“已完成/未开始”，无法表达“进行中”，因此需要一把可睡眠的每对象锁做 winner/waiter 仲裁：winner 持锁跑完整个 copy-up，waiter 睡到锁后用 `upper.get()` 复查并退出。
 - `extension`：VFS 提供的每 inode 扩展状态（事件发布/锁上下文），由 VFS 自己同步，在 OverlayFs 中主要负责处理 `OverlayInuseSlot`。
 - `lock: Mutex<Option<ReaddirIndex>>`：每 inode 唯一的事务锁。目录时 payload 为 `ReaddirIndex`，作为命名空间事务域；mutation、lookup、readdir、索引维护都在域内。非目录时 payload 为 `None`，锁仅为纯串行令牌。
 - `object_id`：预计算的对外 `st_dev`/`st_ino`。
