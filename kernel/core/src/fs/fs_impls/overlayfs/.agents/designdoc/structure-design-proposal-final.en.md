@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Introducing a structural refactor design for `overlayfs`
+# Introducing a structural reimplementation design for `overlayfs`
 
 ## Motivation
 
@@ -63,7 +63,7 @@ Here we briefly explain the corresponding overlay concepts for several fields:
 - `layer_stack`: at mount time, overlayfs assembles multiple underlying directories into a layer stack in order and maintains an upper-first merged view; see §5 for the layer model.
 - `policy`: stores runtime mount policies such as read-only mode and permission settings, and determines whether writes and copy-up are allowed.
 - `identity`: holds the dev/ino translation policy used to compute each overlay object's visible identity; see §10.
-- `upper_workdir_pair`: holds the exclusive upper/workdir claim and the workdir staging resources for writable mounts; see §3 and §9.
+- `upper_workdir_pair`: holds the exclusive upper/workdir claim and the workdir staging resources for writable mounts. The workdir is a temporary directory on the filesystem holding the upper layer, where copy-up and whiteout objects are staged before being atomically renamed into place; see §3, §9, and §12.
 - `whiteout_cache`: a mount-level shared cache related to the whiteout mechanism that hides lower names; here we only note that it serves directory namespace changes, see §12.
 - `inodes`: the inode identity reuse cache; see §8.
 
@@ -129,7 +129,7 @@ pub struct Layer {
 }
 ```
 
-`Layer` is the overlay's **single strong owner** of an underlying mount/fs: only by strongly holding the mount can it guarantee that the underlying file system will not be unmounted first while the overlay mount is alive. `RealPath` (see §6) uses a weak mount and is a transient, re-resolvable anchor, so it cannot bear the keep-alive responsibility.
+`Layer` is the overlay's **single strong owner** of an underlying mount/fs: only by strongly holding the mount can it guarantee that the underlying file system stays mounted while the overlay mount is alive. `RealPath` (see §6) uses a weak mount and is a transient, re-resolvable anchor, so it cannot bear the keep-alive responsibility.
 
 `root_dentry` is not necessarily the same as `mount.root_dentry()`. `lowerdir` / `upperdir` may point to a subdirectory under a mount and need not equal that mount's root; therefore `Layer` must explicitly store the layer root dentry and cannot assume the layer root is always the mount root.
 
@@ -207,7 +207,7 @@ The lookup rule is:
 - **first-wins**: the merged result keeps only the first occurrence of a name, with upper layers taking precedence.
 - **whiteout stops**: a whiteout in some layer hides the same-named object further down, and scanning for that name stops.
 - **opaque directory stops**: when a directory in some layer carries the opaque marker, same-named directories further down stop participating in merging.
-- **same-named non-directory stops**: when a name is a non-directory in a higher layer, it cannot merge with a lower-layer directory, and scanning continues downward no more.
+- **same-named non-directory stops**: when a name is a non-directory in a higher layer, it cannot merge with a lower-layer directory, and scanning stops.
 
 A whiteout is a hiding marker in some layer, used to hide a same-named object in lower layers; an opaque directory is a marker on a directory in some layer, used to prevent lower-layer directories from continuing to participate in merging. These markers are usually written by upper, but when they appear in any layer they affect lower layers. Detailed representation and publication are in §12.
 
@@ -318,7 +318,7 @@ fn copy_up(inode: &Arc<OverlayInode>) -> Result<()> {
 }
 ```
 
-The ancestor chain in the lock-based promotion trigger ensures a child is published only after its parent directory already exists in upper. Workdir staging prevents exposing half-finished objects: a crash before publication leaves only a private workdir object, not a visible upper entry.
+Copy-up proceeds level by level along the ancestor chain: before a child is published, its parent directory has already been copied up and exists in upper. Workdir staging prevents exposing half-finished objects: a crash before publication leaves only a private workdir object, not a visible upper entry.
 
 When the physical rename has already succeeded but the overlay's internal state update fails, `need_repair` is set. The next copy-up first verifies whether the upper target is consistent with lower, and then either continues reusing it or reports an error.
 
@@ -326,7 +326,7 @@ When the physical rename has already succeeded but the overlay's internal state 
 
 overlayfs needs a separate identity module because after merging multiple underlying file systems, the underlying `st_dev` / `st_ino` cannot simply be exposed:
 
-- different underlying file systems may have conflicting `st_dev` / `st_ino`, and passing them through directly would make user space misjudge distinct objects as the same;
+- different underlying file systems may have conflicting `st_dev` / `st_ino`, and passing them through directly would make distinct objects look identical to user space;
 - overlayfs needs to choose among passthrough (directly passing through the underlying dev/ino), xino encoding (re-encoding the underlying ino to avoid conflicts), or fallback (falling back to identities allocated by overlayfs) based on underlying capabilities and mount configuration, in order to provide stable, non-conflicting external identities;
 - identity must remain stable before and after copy-up: copy-up changes the physical source, but the user still sees the same overlay object;
 - `ObjectId` and `LowerIdOrigin` are the core entities of this module.

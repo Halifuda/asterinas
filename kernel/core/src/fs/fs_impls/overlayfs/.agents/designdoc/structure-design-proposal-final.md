@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# 介绍 `overlayfs` 的结构性重构设计
+# 介绍 `overlayfs` 的结构性重新实现设计
 
 ## 动机
 
@@ -10,7 +10,7 @@ legacy overlayfs 是单文件实现，扩展性和可维护性差，存在并发
 
 - **单文件 monolith**：所有功能都挤在一个 `legacy_fs.rs` 文件中，读者很难按类型定位行为，也难以扩展。
 - **身份与并发不安全**：同一个底层文件被多次访问时会生成多个不同的 overlay inode，状态无法共享；并发写者可能重复执行同一操作。
-- **工作目录行为不符合 Linux**：复制提升不使用隔离的工作目录做原子替换，崩溃时可能留下半成品；多个 overlay 可能共用同一个工作目录，互相干扰。
+- **工作目录行为不符合 Linux**：copy-up 不使用隔离的工作目录做原子替换，崩溃时可能留下半成品；多个 overlay 可能共用同一个工作目录，互相干扰。
 - **功能与正确性不足**：只读 overlay、跨目录重命名、同步、超级块信息和权限检查等能力缺失；目录枚举在大目录下低效且续读位置不稳定，对外文件标识（dev/ino）也不稳定。
 
 ### 重新实现的目标
@@ -63,7 +63,7 @@ pub struct OverlayFs {
 - `layer_stack`：overlayfs 在挂载时把多个底层目录按顺序组装成层栈，并维持一个 upper-first 的合并视图；详见 §5 层模型。
 - `policy`：保存运行期挂载策略，例如只读模式和权限设置，并决定是否允许写入和 copy-up。
 - `identity`：持有 dev/ino 身份换算策略，用于计算每个 overlay 对象的对外可见身份；详见 §10。
-- `upper_workdir_pair`：持有可写挂载的 upper/workdir 排他认领与 workdir 暂存资源；详见 §3 与 §9。
+- `upper_workdir_pair`：持有可写挂载的 upper/workdir 排他认领与 workdir 暂存资源。workdir 是 upper 所在文件系统上的一个临时目录，copy-up 与 whiteout 的对象先在其中暂存，再原子改名发布到最终位置；详见 §3、§9 与 §12。
 - `whiteout_cache`：与隐藏 lower 名字的 whiteout 机制相关的挂载级共享缓存；这里先只说明它服务于目录命名空间变更，详见 §12。
 - `inodes`：inode 身份复用缓存；详见 §8。
 
@@ -129,7 +129,7 @@ pub struct Layer {
 }
 ```
 
-`Layer` 是 overlay 对底层 mount/fs 的**单一强持有者**：只有强持有 mount，才能保证 overlay 挂载存活期间底层文件系统不会被先卸载；`RealPath`（见 §6）使用 weak mount，属于临时、可重新解析的锚点，不能承担 keep-alive 责任。
+`Layer` 是 overlay 对底层 mount/fs 的**单一强持有者**：只有强持有 mount，才能保证 overlay 挂载存活期间底层文件系统不会被提前卸载；`RealPath`（见 §6）使用 weak mount，属于临时、可重新解析的锚点，不能承担 keep-alive 责任。
 
 `root_dentry` 与 `mount.root_dentry()` 不一定相同。`lowerdir` / `upperdir` 可以指向某个 mount 下的子目录，不一定等于该 mount 的根；因此 `Layer` 必须显式保存层根 dentry，不能假设层根一定是 mount root。
 
@@ -313,7 +313,7 @@ fn copy_up(inode: &Arc<OverlayInode>) -> Result<()> {
 }
 ```
 
-基于锁的提升触发中的祖先链保证：child 只有在 parent 目录已存在于 upper 之后才会被发布。workdir 暂存避免暴露半成品：发布前崩溃只会留下一个私有 workdir 对象，而不会留下可见的 upper 条目。
+copy-up 会沿祖先目录链逐级进行：发布 child 之前，其 parent 目录已先完成 copy-up、存在于 upper 中。workdir 暂存避免暴露半成品：发布前崩溃只会留下一个私有 workdir 对象，而不会留下可见的 upper 条目。
 
 当物理 rename 已经成功、但 overlay 内部状态更新失败时，会设置 `need_repair`。下一次 copy-up 会先验证 upper 目标是否与 lower 一致，然后要么继续复用它，要么报错。
 
@@ -321,7 +321,7 @@ fn copy_up(inode: &Arc<OverlayInode>) -> Result<()> {
 
 overlayfs 需要单独的 identity 模块，因为合并多个底层文件系统后不能简单暴露底层 `st_dev` / `st_ino`：
 
-- 不同底层文件系统可能有冲突的 `st_dev` / `st_ino`，直接透传会造成用户态误判同一对象；
+- 不同底层文件系统可能有冲突的 `st_dev` / `st_ino`，直接透传会让用户态把不同对象误判为同一对象；
 - overlay 需要根据底层能力和挂载配置选择 passthrough（直接透传底层 dev/ino）、xino 编码（对底层 ino 重新编码以避免冲突）或 fallback（回退到 overlay 分配的身份），以提供稳定且不冲突的对外身份；
 - 身份在 copy-up 前后必须保持稳定：copy-up 改变物理来源，但用户看到的还是同一个 overlay 对象；
 - `ObjectId` 与 `LowerIdOrigin` 是这一模块的核心实体。
@@ -365,7 +365,7 @@ readdir 的目标是提供稳定、可续的枚举顺序，避免每次 getdents
 
 ### 13. 权限、属性、xattr、数据
 
-- `inode/permission.rs`：两段式权限检查——先做 overlay 本地权限检查，需要时按需执行 copy-up，再检查底层真实对象权限；copy-up 是两段之间的动作，不是第三段权限检查。
+- `inode/permission.rs`：两段式权限检查——先做 overlay 本地权限检查，需要时执行 copy-up，再检查底层真实对象权限；copy-up 是两段之间的动作，不是第三段权限检查。
 - `inode/metadata.rs`：属性写。
 - `inode/xattr.rs`：xattr 操作与 overlay 私有 xattr。
 - `inode/data.rs`：数据读写转发，读 lower 时带 `O_NOATIME`，`O_APPEND` 在每 inode 事务锁下串行。

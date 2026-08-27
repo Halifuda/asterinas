@@ -2,12 +2,61 @@
 
 # 2026-08-26 Parent Pointer and CopyUpState Design Handoff
 
-> This handoff records the converged overlay parent-pointer and copy-up state
-> design after the Designer 7, 8, and 9 discussions. The existing
-> `20260825-143236-final-code-design-decision_main_agent_handoff.md` remains
-> the active consolidated handoff for the proposal revision; this is a separate
-> design record for the parent/copy-up rewrite and the related `RealObject`
-> simplification.
+> **Status (consolidated 2026-08-27). This is the live main handoff** for all
+> subsequent overlayfs implementation rounds. The authoritative target design
+> is `designdoc/structure-design-proposal-final.md`; this record supplies the
+> details the proposal summarizes (parent pointer, copy-up state,
+> path-backed `RealObject`). Where the older
+> `20260825-143236-final-code-design-decision_main_agent_handoff.md`
+> conflicts with this record or with proposal-final — most notably its plan
+> to keep a `RealObjectHandle::{Inode, Path}` enum with fallible
+> `real_inode()`, and its persistent `RealObjectStack` enum /
+> `RealObjectSnapshot` rename — those points are **superseded**; the older
+> file stays readable for background (field-order rationale, mount
+> assembly) only. Working rule for this record: where the prose abbreviates
+> or drifts from current code behavior, code reality wins for describing the
+> present (e.g. the cache keeps `rekey_keep_old_alias`, not the docs' plain
+> `rekey`).
+>
+> Provenance: converged design of the 2026-08-26 parent/copy-up round;
+> Designer 7's analysis is absorbed into this document, and the surviving
+> packets of that round are
+> `.agents/components/designer-20260826g/designer-8-three-questions.md` and
+> `.agents/components/designer-20260826h/designer-9-lock-order-nocache.md`.
+>
+> **Amendments 2026-08-27 (accepted study**
+> `.agents/components/study-facts-enum-and-project-inode/report.md`**):**
+>
+> - *(Q2)* `project_inode` is reshaped **in place keeping its name**, taking
+>   a two-variant `ProjectionBinding` parameter (`Root` vs
+>   `Child { parent, name }`); sections 2.b, 3.2, 3.3, 5.4 and 5.5 below were
+>   edited to match. NO renamed sibling `project_inode_with_parent`: a
+>   still-generic entry point could mint coordinate-less lower-backed inodes,
+>   which is exactly the bug class this rewrite removes. Census basis: of all
+>   construction routes only the mount root lacks `(parent, name)` at the
+>   call site; its self-parent `Weak` is built by `Arc::new_cyclic` inside
+>   the existing cache-create closure (same pattern `OverlayFs::new` already
+>   uses for `self_weak`).
+> - *(Q1 — deliberately NOT adopted, kept for future explanation)* adding an
+>   `Inode` variant to the persistent facts enum is **dropped**. Rationale,
+>   in one place so it need not be re-derived: the claimed win does not
+>   exist at measurable scale — every upper-state read today is
+>   `spin::Once::get()`, an acquire load, which lowers to a plain `MOV` plus
+>   a predicted branch on x86_64 (~1 cycle); upper-only objects execute only
+>   1–2 such loads per read-class operation and ~4 per mutating operation,
+>   against mutex/backend-I/O-scale operations. Reading
+>   `UpperOnly(Arc<dyn Inode>)` fares worse: live `RealObject` already caches
+>   the real inode (`real.rs:52`), so that payload drops fields needed for
+>   cache keys. The cost side is real: ~15 `.upper` and ~15 `.lowers` access
+>   sites, roughly seven new accessors plus per-variant constructor and
+>   publish branching, and forced re-review of the sensitive
+>   rekey-before-`call_once` and winner/waiter paths — against anti-bloat
+>   rules forbidding unrelated bundling, and against the death of the old
+>   bundling premise (its `RealObjectHandle` partner was superseded by the
+>   path-backed, enum-less `RealObject`). If upper-state reads ever show up
+>   in profiles, the two found redundancies are fixed directly instead:
+>   double `upper.get()` per `read_at`, and a double authority select in the
+>   mutating pipeline.
 
 ## Decision note
 
@@ -193,12 +242,14 @@ parent*, which is adequate for the current "first positive lookup wins" copy-up 
 
 **Call-site changes.**
 
-- `lookup.rs`: add a binding-aware projection entry, e.g.
-  `project_inode_with_parent(parent, name, &facts)`, and call it for every positive
-  lookup inside `lookup_in_layers`. Remove the `try_record_copyup_transition` call at
-  the end of `OverlayFs::lookup`.
+- `lookup.rs`: reshape `project_inode` in place to take a two-variant
+  `ProjectionBinding` parameter, and pass
+  `ProjectionBinding::Child { parent, name }` for every positive lookup inside
+  `lookup_in_layers`. Remove the `try_record_copyup_transition` call at the end of
+  `OverlayFs::lookup`. No renamed sibling function is added.
 - `inode/mod.rs`: add `parent`, replace `copyup_transition` with `copyup` state, and
-  adjust the lock accessors. Root construction uses `Arc::new_cyclic` to initialize
+  adjust the lock accessors. Root construction builds through `Arc::new_cyclic`
+  inside the cache-create closure when the binding is `Root`, initializing
   `parent` with a self-`Weak`.
 - `copyup/mod.rs`: read `parent` from the inode and `name`/`need_repair` from `CopyUpState`;
   the winner/waiter protocol stays otherwise unchanged.
@@ -384,8 +435,8 @@ The two historical pathless uses are replaced:
 
 - `OverlayFs::root_visible_key()` derives the root key from `Layer`/`RealPath::inode()`
   directly, not from a pathless `RealObject`.
-- `readdir ::` uses `OverlayInode::parent` instead of constructing an identity-only
-  `RealObject` to project the parent.
+- `readdir` resolves `..` via `OverlayInode::parent` instead of constructing an
+  identity-only `RealObject` to project the parent.
 
 ---
 
@@ -420,10 +471,10 @@ This section applies the requested analysis to the recommended design (2.b + 2.c
 | File | Current code | New code |
 | --- | --- | --- |
 | `inode/mod.rs` | `copyup_transition: Mutex<CopyUpTransition>` | `parent: RwMutex<Weak<OverlayInode>>` + `copyup: Mutex<CopyUpState>` |
-| `lookup.rs` | `project_inode(...)` then `try_record_copyup_transition(...)` | `project_inode_with_parent(parent, name, ...)` on all positive lookup branches; delete `try_record...` |
-| `copyup/mod.rs` | `CopyUpTransition` with `Arc` parent; `try_record`; read coordinate from transition | `CopyUpState`; `ensure_upper_authority` upgrades `self.parent`; `promote`/`finish_promotion` receive the upgraded `Arc<OverlayInode>` and `&str` name; keep `ReconcilePending` logic |
+| `lookup.rs` | `project_inode(...)` then `try_record_copyup_transition(...)` | `project_inode(facts, ProjectionBinding::Child { parent, name })` on all positive lookup branches; delete `try_record...`; no sibling entry point |
+| `copyup/mod.rs` | `CopyUpTransition` with `Arc` parent; `try_record`; read coordinate from transition | `CopyUpState`; `ensure_upper_authority` upgrades `self.parent`; `promote`/`finish_promotion` receive the upgraded `Arc<OverlayInode>` and `&str` name; repair semantics carried by `need_repair: bool` instead of the phase enum |
 | `readdir.rs` | `resolve_parent_object_id` does real `lookup("..")` and lower-id projection | `resolve_parent_object_id` reads `self.parent` and returns the parent's `object_id()`; root self-parent makes `.. == .` |
-| `dir/create.rs` | `project_inode(new_facts)` for new upper objects | `project_inode_with_parent(self, name, new_facts)` so `parent` and `CopyUpState::Done` are initialised |
+| `dir/create.rs` | `project_inode(new_facts)` for new upper objects | `project_inode(new_facts, ProjectionBinding::Child { parent: self, name })` so `parent` and `CopyUpState::Done` are initialised |
 | `dir/rename.rs` | promotes source first, then upper renames; no overlay parent update | after successful rename, update `parent` (cross-parent case); future redirect also updates `CopyUpState.name` |
 | `dir/mod.rs` | rename admission uses `ensure_upper_authority` before locks | unchanged; but document the new `parent` update in the rename recipe |
 | `dir/link.rs` | source promotion; no parent update | unchanged (first canonical parent remains) |
@@ -452,15 +503,16 @@ acquire PARENT, CUL, or DIR while holding the cache lock.
 
 #### Initialization
 
-The create closure in `InodeCache::get_or_create` gets access to `parent` and `name`
-on a miss. For a lower-backed child it constructs
+The create closure in `InodeCache::get_or_create` receives the resolved
+`ProjectionBinding` on a miss. For a lower-backed child it constructs
 
 ```rust
 parent: RwMutex::new(Arc::downgrade(parent)),
 copyup: Mutex::new(CopyUpState::Outstanding(CopyUpTarget { name, need_repair: false })),
 ```
 
-and the root constructor uses `Arc::new_cyclic` for the self-parent. For an upper-backed
+and the `ProjectionBinding::Root` case builds the inode through `Arc::new_cyclic`,
+whose cyclic weak becomes the self-parent. For an upper-backed
 child it constructs `CopyUpState::Done`. The inode is fully initialised before it is
 inserted into the cache, so no `try_lock` write is ever needed. For a cache hit, the
 existing inode already has its canonical state; no write occurs.
@@ -608,8 +660,9 @@ Use a **hybrid of 2.b, 2.c.ii, and 2.e**:
 1. Add one unified `parent: RwMutex<Weak<OverlayInode>>` field to `OverlayInode`; the
    mount root uses `Arc::new_cyclic` and points to itself.
 2. Replace `CopyUpTransition` with `CopyUpState = Done | Outstanding(CopyUpTarget)`.
-3. Eliminate `NotRecorded` by initialising every lower-backed lookup result through a
-   binding-aware projection; root and upper-only creations are `Done`.
+3. Eliminate `NotRecorded` by initialising every lower-backed lookup result through
+   the reshaped in-place `project_inode(facts, ProjectionBinding)` entry point;
+   root and upper-only creations are `Done`.
 4. Keep the winner/waiter `copyup` mutex as today, but read `parent` from the field
    and `name` from `CopyUpState`.
 5. Remove `RealObjectHandle::Inode` / `RealObject::identity_only`; make `RealObject`
@@ -683,15 +736,15 @@ impl RealObject {
 
 ### 5.4 Initialization/update rules
 
-- **Miss in `project_inode_with_parent`:** create the `OverlayInode` with
-  `parent = Arc::downgrade(parent)` and
+- **Miss in `project_inode(facts, ProjectionBinding::Child { parent, name })`:**
+  create the `OverlayInode` with `parent = Arc::downgrade(parent)` and
   `copyup = if facts.upper.is_some() { Done } else { Outstanding(CopyUpTarget { name, need_repair: false }) }`.
-- **Root construction:** use `Arc::new_cyclic`; the root's `parent` is the resulting
-  self-`Weak`, and `copyup = Done`.
-- **Hit in `project_inode_with_parent`:** return the existing inode; do not write
-  state.
-- **Generic `project_inode` (root/create/copy-up carrier):** create with
-  `parent` as appropriate and `copyup = Done`.
+- **Root (`ProjectionBinding::Root`):** build through `Arc::new_cyclic` so the root's
+  `parent` is the resulting self-`Weak`; `copyup = Done`.
+- **Hit:** return the existing inode; do not write state.
+- **Upper-backed child creations (create / copy-up carrier):** same `Child`
+  binding as lower-backed ones; because the facts are upper-only,
+  `copyup = Done`.
 - **Rename (current):** after the physical upper rename succeeds, update the source
   directory's `parent` to the new parent. Since the source is already upper-backed,
   `CopyUpState` is `Done`; no CUL is needed.
@@ -703,8 +756,13 @@ impl RealObject {
 
 1. `inode/mod.rs` — new fields and accessors; delete `try_lock_copyup_transition`
    (or keep only if needed for future diagnostics).
-2. `lookup.rs` — introduce `project_inode_with_parent`; route all positive lookup
-   branches through it; delete the post-lookup `try_record_copyup_transition`.
+2. `lookup.rs` / `fs/mod.rs` — reshape `project_inode` in place into
+   `project_inode(facts, ProjectionBinding)` with variants `Root` and
+   `Child { parent, name }`; route all positive lookup branches through it;
+   delete the post-lookup `try_record_copyup_transition`. No sibling function
+   is added: a still-generic variant could mint coordinate-less lower-backed
+   inodes (census 2026-08-27: the mount root is the only construction site
+   that lacks a binding).
 3. `copyup/mod.rs` — rename/reshape the state; update `ensure_upper_authority_inner`,
    `promote`, `finish_promotion`, and `mark_reconcile_pending`.
 4. `readdir.rs` — replace `resolve_parent_object_id` with the `parent`-based
@@ -733,3 +791,112 @@ impl RealObject {
 - No binding cache, per-name state, or dentry-level rewrite is introduced now; that
   remains a possible later evolution if multiple-parent tracking ever becomes
   necessary.
+
+---
+
+## Implementation scope (2026-08-27, complete change list)
+
+Verdicts of the accepted study (`.agents/components/study-facts-enum-and-project-inode/report.md`)
+are binding: no `Inode` variant in the persistent facts enum (Q1), and
+`project_inode` is reshaped in place with a `ProjectionBinding` parameter,
+no sibling function (Q2). Where a step below cites a doc that conflicts with
+code, code reality wins (e.g. `rekey_keep_old_alias` stays; the inode cache's
+`get_or_create` contract is unchanged and the create closure at
+`inode/lookup.rs:273` is the only one).
+
+### Batch A — Layer strong-mount + path-backed RealObject
+
+1. `layer.rs` — `Layer` becomes `{ mount: Arc<Mount>, root_dentry: Arc<Dentry>,
+   fsid, container_dev_id }` (replaces `root_path: RealPath` + `fs: Arc<dyn FileSystem>`);
+   delete all `.upgrade()?`/`.expect(...)` at `layer.rs:54,57,100,144`.
+2. `real.rs` — `RealObject` becomes `{ layer_index, path: RealPath, fsid,
+   container_dev_id }`; drop cached `real_inode` and `Option<RealPath>`; delete
+   `identity_only()` (`real.rs:65`); `real_path()` loses its `None` arm; add
+   infallible `RealPath::inode()` reading `Dentry::inode()`.
+3. `vfs/path/dentry.rs` — widen `Dentry::inode()` from `pub(super)` to
+   `pub(in crate::fs)` (`dentry.rs:297`).
+4. `fs/mod.rs` — rewrite `root_visible_key()` (`fs/mod.rs:70`) to derive the key
+   from `Layer`/`RealPath::inode()` directly; the two `identity_only`
+   constructions at `fs/mod.rs:72,89` disappear.
+5. `fs/mount/layer_parts.rs` — `Layer::resolve_parts` produces
+   `(Arc<Mount>, Arc<Dentry>)` inputs for `Layer` (`layer_parts.rs:126,130,158,161,169,172`).
+6. `fs/mount/mod.rs` — adapt the four `upper.root_path.upgrade()?` uses at
+   `mount/mod.rs:77,84,88,97` to the new `Layer` shape.
+7. `inode/mod.rs` — `new_root`'s two layer-root upgrades at `inode/mod.rs:110-127`
+   become direct reads.
+8. `inode/identity.rs` — `collect_layer_devs` adapts its `Layer` reads at
+   `identity.rs:94,109` (was `.root_path.upgrade()?.inode().ino()`).
+
+### Batch B — parent pointer + CopyUpState + ProjectionBinding (one coupled pass)
+
+New shapes (types in `inode/copyup/mod.rs` / `inode/lookup.rs`):
+
+```rust
+// OverlayInode gains:
+parent: RwMutex<Weak<OverlayInode>>,   // mount root points to itself, no Option
+copyup: Mutex<CopyUpState>,            // replaces copyup_transition: Mutex<CopyUpTransition>
+enum CopyUpState { Done, Outstanding(CopyUpTarget) }
+struct CopyUpTarget { name: String, need_repair: bool }  // replaces CopyUpPhase
+enum ProjectionBinding<'a> { Root, Child { parent: &'a Arc<OverlayInode>, name: &'a str } }
+```
+
+1. `inode/copyup/mod.rs` — delete `CopyUpTransition`, `CopyUpPhase` (all 11 uses:
+   `:57,66,83,90,127,224,429,638` and docs); `mark_reconcile_pending` (`:637-643`)
+   becomes a `need_repair = true` write; `try_record_copyup_transition` (`:114-136`)
+   is deleted together with its internal `try_lock` use (`:119`);
+   `lock_copyup_transition` uses at `:159` (read coordinate in
+   `ensure_upper_authority_inner`) and `:185` (in `promote`) are replaced by
+   locking `copyup` and reading `self.parent` (upgrade to `Arc`; `None` -> clear
+   error); `promote`/`finish_promotion` take the upgraded `Arc<OverlayInode>` +
+   `&str` name; the copy-up carrier projection at `:598` passes its known
+   publication coordinate as `ProjectionBinding::Child`.
+2. `inode/lookup.rs` — reshape `project_inode(&self, facts, binding)` in place
+   (`:214`); the four positive-hit branches (`:113,118,150,179`) pass
+   `Child { parent, name }`; the create closure (`:273`) holds the single
+   binding match — `Root` builds via `Arc::new_cyclic` (self-parent `Weak`),
+   `Child` initializes `parent`/`copyup` per §5.4; delete the
+   `try_record_copyup_transition` call at `:192`.
+3. `inode/mod.rs` — add `parent`/`copyup` fields and accessors; delete
+   `lock_copyup_transition` (`:202`) and `try_lock_copyup_transition` (`:208`);
+   `new_root` (`:98-134`) delegates to `project_inode(facts, ProjectionBinding::Root)`.
+4. `inode/inode_cache.rs` — no structural change; only the create-closure
+   contract is exercised with the binding.
+5. `inode/dir/create.rs` — both projections (`:78`, `:138`) pass
+   `Child { parent: self_arc, name }`; upper-only facts yield `Done`.
+6. `inode/dir/rename.rs` — after the successful upper rename (holding the two
+   parent DIR locks), write the moved object's `parent` to the new parent;
+   reserve the future-redirect hook at the EXDEV gate (comment only).
+7. `inode/dir/link.rs` — unchanged.
+8. Lock-order invariants written into these files: `CUL -> DIR`, `DIR -> PARENT`,
+   `CUL -> PARENT`; no `DIR -> CUL`; InodeCache stays a leaf lock; the create
+   closure acquires no locks (pure field init allowed).
+
+### Batch C — readdir `..` via the parent pointer
+
+1. `inode/readdir.rs` — replace `resolve_parent_object_id` (`:314`, called at
+   `:103`) with a `DIR(child) -> PARENT(child).read()` read of `self.parent`,
+   returning the parent's `object_id()`; root self-parent gives `.. == .`
+   naturally; keep the existing self-parent fallback for parent-death; the
+   `identity_only` construction at `:366` disappears with the old resolver.
+   `readdir.rs:437` (root-key consumption) is unchanged.
+2. Optionally route the lone raw `lowers[0]` escape (`readdir.rs:277`) through
+   the existing accessor.
+
+### Batch D — finish (independent, low risk)
+
+1. Field ordering to the mixed scheme: `OverlayFs` =
+   `layer_stack, policy, identity, upper_workdir_pair, _anon_device_id,
+   whiteout_cache, inodes, fs_event_stats, self_weak`; `OverlayInode` =
+   `fs, lowers, upper, object_id, lock, parent, copyup, extension`.
+2. Q1-found redundancies fixed directly: double `upper.get()` per `read_at`
+   (`inode/data.rs:32` + `inode/mod.rs:143`); double authority select in the
+   mutating pipeline (`inode/permission.rs` ~`:130,187`). The triple check in
+   copy-up arbitration (`copyup/mod.rs:149,190,214`) is intentional — keep.
+
+### Explicitly out of scope
+
+Persistent facts enum / `Inode` variant (Q1 verdict); inode-cache internal
+semantics and `rekey` (code keeps `rekey_keep_old_alias`); whiteout / workdir /
+capabilities / options / identity projection internals (already match
+proposal-final); metacopy, redirect_dir, index (hooks only); no code changes
+are part of the 2026-08-27 documentation commit.
