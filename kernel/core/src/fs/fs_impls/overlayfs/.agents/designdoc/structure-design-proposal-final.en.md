@@ -1,39 +1,40 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
+<!-- This file is a faithful English translation of the Chinese original structure-design-proposal-final.md. -->
 
-# Introducing a structural reimplementation design for `overlayfs`
+# Introducing the Structural Reimplementation Design of `overlayfs`
 
 ## Motivation
 
-The legacy overlayfs is a single-file implementation with poor extensibility and maintainability, concurrency issues, and incomplete basic functionality. Starting from the domain concepts of overlayfs, this issue proposes a reimplementation design and clarifies the overlayfs ownership and reference model.
+overlayfs is a stackable union filesystem: it merges an **optional** writable directory (upper) with several read-only directories (lower) top-down into a single visible directory tree; on writes, it copies modified objects into upper and never modifies lower in place.
 
 ### Main Shortcomings of the Legacy Implementation
 
-- **Single-file monolith**: all functionality is packed into one `legacy_fs.rs` file, making it hard for readers to locate behavior by type and hard to extend.
-- **Unsafe identity and concurrency**: accessing the same underlying file multiple times produces multiple different overlay inodes, so state cannot be shared; concurrent writers may repeatedly perform the same operation.
-- **Work directory behavior does not match Linux**: copy-up does not use an isolated work directory for atomic replacement, so a crash may leave half-finished results; multiple overlays may share the same work directory and interfere with each other.
-- **Insufficient functionality and correctness**: capabilities such as read-only overlays, cross-directory rename, sync, superblock information, and permission checking are missing; directory enumeration is inefficient for large directories and its read position is unstable, and externally visible file identities (dev/ino) are also unstable.
+- **Single-file monolith**: all functionality is crammed into a single `legacy_fs.rs` file, making it hard for readers to locate behavior by type and hard to extend.
+- **Unsafe identity and concurrency**: when the same underlying file is accessed multiple times, multiple distinct overlay inodes are generated and state cannot be shared; concurrent writers may repeat the same operation.
+- **Work-directory behavior that does not match Linux**: copy-up does not use an isolated work directory for atomic replacement, so a crash may leave half-finished artifacts behind; multiple overlays may share the same work directory and interfere with each other.
+- **Insufficient functionality and correctness**: capabilities such as read-only overlays, cross-directory rename, sync, superblock information, and permission checks are missing; directory enumeration is inefficient on large directories with unstable resume positions, and the external file identity (dev/ino) is unstable as well.
 
 ### Goals of the Reimplementation
 
-This issue proposes reimplementing overlayfs so that the code is anchored by core types and organized around domain concepts, while fixing the legacy problems in identity reuse, concurrency, work directory handling, and enumeration stability. The design emphasizes a clear ownership and reference model so that every mechanism has an explicit home and a clear reading path.
+Most of the legacy shortcomings stem from a lack of model organization. This design reimplements overlayfs starting from its domain concepts, letting the code anchor on core types and be organized by domain concepts, and fixes the aforementioned problems such as identity reuse, concurrency, work directory, and enumeration stability; the ownership and reference model of each mechanism thereby becomes explicit as well.
 
 ## Design
 ### 1. Overall Structure
 
-The top level of the code consists of the following entries:
+The top level of the code consists of the following entry points:
 
-- `mod.rs`: module declaration and `init`.
+- `mod.rs`: module declarations and `init`.
 - `fs_type.rs`: `OverlayFsType`, the VFS registration type.
-- `fs/`: the mount module, representing the state owned by one mount and the construction flow.
-- `inode/`: the logical object module, representing the `OverlayInode` exposed by overlayfs to the VFS and its family of behaviors.
-- `real.rs`: the real object reference model.
-- `layer.rs`: the layer model and transient real object stack.
+- `fs/`: the mount module, representing the state owned by one mount and its construction flow.
+- `inode/`: the logical-object module, representing the `OverlayInode` that overlay exposes to VFS and its family of behaviors.
+- `real.rs`: the real-object reference model.
+- `layer.rs`: the layer model; each layer holds a private mount view of the underlying mount that belongs solely to itself, and the layer root is carried by the view.
 
-In terms of dependency direction, `fs/` and `inode/` both depend on `real.rs` and `layer.rs`; `fs/` also depends on the cache and whiteout types in `inode/`. These two foundational files are at the bottom.
+In terms of dependency direction, both `fs/` and `inode/` depend on `real.rs` and `layer.rs`; `fs/` additionally depends on the cache and whiteout types in `inode/`. These two foundational files sit at the very bottom.
 
-### 2. Mount Object `OverlayFs`
+### 2. The Mount Object `OverlayFs`
 
-`fs/mod.rs` defines `OverlayFs` as all the state owned by one mount:
+`fs/mod.rs` defines `OverlayFs`, which serves as all the state owned by one mount:
 
 ```rust
 pub struct OverlayFs {
@@ -45,97 +46,56 @@ pub struct OverlayFs {
     identity: IdentityPolicy,
     /// Exclusive ownership of upper/workdir; `Some` exists only for writable mounts.
     upper_workdir_pair: Option<UpperWorkdirInuse>,
-    /// Single-slot shared cache for whiteout.
+    /// Single-slot shared cache for whiteouts.
     whiteout_cache: Mutex<WhiteoutCache>,
-    /// inode identity reuse cache.
+    /// Inode identity reuse cache.
     inodes: InodeCache,
     /// VFS event statistics.
     fs_event_stats: FsEventSubscriberStats,
-    /// Weak self-reference used to construct the root inode.
-    self_weak: Weak<OverlayFs>,
     /// The overlay's `AnonDeviceId` RAII guard.
     _anon_device_id: AnonDeviceId,
+    /// Weak self-reference used to construct the root inode.
+    self_weak: Weak<OverlayFs>,
 }
 ```
 
-Here we briefly explain the corresponding overlay concepts for several fields:
+- `layer_stack`: at mount time, overlayfs assembles multiple underlying directories in order into a layer stack and maintains an upper-first merged view; see §4, the layer model, for details.
+- `policy`: holds the runtime mount policy, such as read-only mode and permission settings, and decides whether writes and copy-up are allowed.
+- `identity`: holds the dev/ino identity translation policy, used to compute the externally visible identity of each overlay object; see §10 for details.
+- `upper_workdir_pair`: holds the exclusive claim on upper/workdir of a writable mount together with the workdir staging resources. The workdir is a temporary directory on the filesystem that hosts upper; objects for copy-up and whiteout are staged in it first and then published to their final positions by atomic rename. The exclusive claim on and preparation of the workdir are covered in step 3 of the construction flow below, the publication of copy-up in §9, and the publication and cleanup of whiteouts in §12.
+- `whiteout_cache`: the mount-level shared cache associated with the whiteout mechanism that hides lower names; here we only state for now that it serves directory namespace changes, see §12 for details.
+- `inodes`: the inode identity reuse cache; see §8 for details.
 
-- `layer_stack`: at mount time, overlayfs assembles multiple underlying directories into a layer stack in order and maintains an upper-first merged view; see §5 for the layer model.
-- `policy`: stores runtime mount policies such as read-only mode and permission settings, and determines whether writes and copy-up are allowed.
-- `identity`: holds the dev/ino translation policy used to compute each overlay object's visible identity; see §10.
-- `upper_workdir_pair`: holds the exclusive upper/workdir claim and the workdir staging resources for writable mounts. The workdir is a temporary directory on the filesystem holding the upper layer, where copy-up and whiteout objects are staged before being atomically renamed into place; see §3, §9, and §12.
-- `whiteout_cache`: a mount-level shared cache related to the whiteout mechanism that hides lower names; here we only note that it serves directory namespace changes, see §12.
-- `inodes`: the inode identity reuse cache; see §8.
+### 3. The Mount Construction Flow `fs/mount/`
 
-The field order follows “core immutable state → synchronized state → cache/resource/weak reference”, making it easy to read the essence of the object from top to bottom.
-
-### 3. Mount Construction Flow `fs/mount/`
-
-`fs/mount/` is a one-time construction flow:
+`fs/mount/` is a one-shot construction flow:
 
 1. `options.rs`: parses `MountOptions`.
-2. `layer_parts.rs`: parses the upper/lower/workdir root paths, validates them, and assembles the `LayerStack`. Here it directly parses `Arc<Mount>` and `Arc<Dentry>` as inputs to `Layer`. Validation includes: layer roots must not be the same, must not be ancestors/descendants of one another, and must not cross mount boundaries; the workdir must not conflict with lower roots.
-3. `inuse.rs`: exclusively claims upper/workdir and prepares the workdir. Exclusiveness is necessary because when multiple overlays share the same upper/workdir, they overwrite each other's whiteouts, temporary objects, and directory state, corrupting each other's data.
-4. `capabilities.rs`: measures upper capabilities such as `d_type` support and overlay private xattr support, and accordingly decides whiteout representation and other mount policies.
-5. `mod.rs`: orchestrates the above steps.
+2. `layer_parts.rs`: parses the upper/lower/workdir root paths, validates them, and assembles the `LayerStack`. Validation covers: layer roots must not be identical, must not be ancestors/descendants of one another, and must not cross mount boundaries; the workdir must not conflict with the lower roots. During assembly, a private mount view rooted at its resolved path is also constructed for each layer and for the workdir, reusing VFS's existing mount-clone primitives.
+3. `inuse.rs`: exclusively claims upper/workdir and prepares the workdir, preventing multiple overlays that share the same upper/workdir from overwriting each other's whiteouts, temporary objects, and directory state and thereby corrupting each other's data.
+4. `capabilities.rs`: measures upper capabilities, such as `d_type` support and overlay private xattr support, and decides the whiteout representation and other mount policies accordingly.
+5. `mod.rs`: orchestrates the steps above.
 
-### 4. Logical Object `OverlayInode`
+### 4. The Layer Model `layer.rs`
 
-`OverlayInode` is the carrier of the logical object that overlayfs exposes to the VFS:
-
-```rust
-pub struct OverlayInode {
-    /// The overlay mount this inode belongs to.
-    fs: Weak<OverlayFs>,
-    /// Immutable lower real object stack, topmost first; lowers are real objects in read-only layers.
-    lowers: Vec<RealObject>,
-    /// Upper real object; upper is the real object in the writable layer, published at most once during copy-up.
-    upper: Once<RealObject>,
-    /// Precomputed externally visible `st_dev` / `st_ino`.
-    object_id: ObjectId,
-    /// Per-inode unique transaction lock; for directories it carries `ReaddirIndex` (the stable enumeration index of a merged directory).
-    lock: Mutex<Option<ReaddirIndex>>,
-    /// Logical overlay parent directory; it is also the publication parent directory of copy-up.
-    parent: RwMutex<Weak<OverlayInode>>,
-    /// Copy-up state: Done or Outstanding(CopyUpTarget).
-    copyup: Mutex<CopyUpState>,
-    /// Per-inode extension state provided by the VFS.
-    extension: Extension,
-}
-```
-
-Field explanations:
-
-- `lowers` / `upper`: lowers are real objects in read-only layers, and upper is the real object in the writable layer. When same-named directories exist in multiple layers, overlayfs forms a merged directory (see §11). `upper: Once<RealObject>` means copy-up is a one-way, at-most-once publication from lower to upper; the read path is lock-free, and publication writes it atomically.
-- `parent`: the logical overlay parent directory and the copy-up publication parent directory.
-- `copyup`: stores the copy-up state; detailed semantics are in §9.
-- `lock`: the directory transaction lock and readdir index domain; `ReaddirIndex` is the stable enumeration index of a merged directory, see §11. For non-directories it serves as a pure serialization token.
-- `object_id`: the precomputed external dev/ino, computed by `IdentityPolicy`, see §10.
-
-### 5. Layer Model `layer.rs`
-
-overlayfs stacks several underlying directories into one visible namespace: at most one writable directory acts as the **upper**, the remaining read-only directories act as **lower**, and lookup first checks upper, then searches downward in top-to-bottom order through the lowers. `Layer` represents one of these layers:
+overlayfs stacks several underlying directories into one visible namespace: at most one writable directory serves as **upper**, the remaining read-only directories serve as **lower**, and the layers are arranged in the fixed order given at mount time, with upper at the very front. `Layer` represents one of these layers:
 
 ```rust
 pub struct Layer {
-    /// Strongly holds the underlying mount; `Mount` owns `Arc<dyn FileSystem>` and the root dentry.
+    /// Strong hold on this layer's private mount view; the view's root dentry is the layer root.
     mount: Arc<Mount>,
-    /// Layer root dentry; upperdir/lowerdir may point to a subdirectory under a mount, so it must be stored explicitly.
-    root_dentry: Arc<Dentry>,
-    /// fs id dynamically assigned per mount according to the layer stack order.
+    /// The fs id dynamically assigned at each mount according to the layer stack order.
     fsid: u64,
-    /// Device id of the underlying fs.
+    /// The device id of the underlying fs.
     container_dev_id: DeviceId,
 }
 ```
 
-`Layer` is the overlay's **single strong owner** of an underlying mount/fs: only by strongly holding the mount can it guarantee that the underlying file system stays mounted while the overlay mount is alive. `RealPath` (see §6) uses a weak mount and is a transient, re-resolvable anchor, so it cannot bear the keep-alive responsibility.
+`Layer` is the sole strong holder of this layer's mount view, guaranteeing that the underlying filesystem and the layer root are not reclaimed prematurely while the overlay is alive. The layer root need not be the root of the underlying mount, so during assembly each layer obtains a private cloned view rooted at its resolved layer path; the private view registers with no mount namespace.
 
-`root_dentry` is not necessarily the same as `mount.root_dentry()`. `lowerdir` / `upperdir` may point to a subdirectory under a mount and need not equal that mount's root; therefore `Layer` must explicitly store the layer root dentry and cannot assume the layer root is always the mount root.
+overlay assumes that upper/lower will not be modified directly, bypassing the overlay, while the mount is up (directly modifying the underlying layer is undefined behavior; see `Documentation/filesystems/overlayfs.rst`: "directly modifying underlying filesystems could result in undefined behavior", and lower is expected to remain read-only).
 
-overlayfs assumes that upper/lower are not modified directly, bypassing the overlay, while it is mounted; directly modifying an underlying layer is undefined behavior.
-
-`LayerStack` represents the ordered collection of upper/lower layers, where `lowers` has at least one entry at mount time:
+`LayerStack` represents the ordered collection of upper/lower layers, in which `lowers` has at least one entry at mount time:
 
 ```rust
 pub struct LayerStack {
@@ -144,53 +104,69 @@ pub struct LayerStack {
 }
 ```
 
-The transient real object stack serves as the scanning carrier for lookup/readdir (see §7):
+### 5. The Logical Object `OverlayInode`
+
+`OverlayInode` is the carrier of the logical objects that overlay exposes to VFS:
 
 ```rust
-pub struct RealObjectStack {
-    upper: Option<RealObject>,
+pub struct OverlayInode {
+    /// The overlay mount this inode belongs to.
+    fs: Weak<OverlayFs>,
+    /// The immutable stack of lower real objects, topmost first; lower objects are real objects in the read-only layers.
     lowers: Vec<RealObject>,
+    /// The upper real object; upper is a real object in the writable layer, published at most once at copy-up.
+    upper: Once<RealObject>,
+    /// The precomputed external `st_dev` / `st_ino`.
+    object_id: ObjectId,
+    /// Per-inode unique transaction lock; for directories it carries `ReaddirIndex` (the stable enumeration index of a merged directory).
+    lock: Mutex<Option<ReaddirIndex>>,
+    /// The recorded parent: the logical overlay parent directory; also the publication parent of copy-up.
+    recorded_parent: RwMutex<Weak<OverlayInode>>,
+    /// The arbiter and publication name of copy-up; see §9 for details.
+    copyup: Mutex<Option<String>>,
+    /// The per-inode extended state provided by VFS.
+    extension: Extension,
 }
 ```
 
-### 6. Real Object Reference `real.rs`
+Field notes:
 
-`RealPath` is a weak-mount dentry-anchored carrier:
+- `lowers` / `upper`: lower objects are real objects in the read-only layers, and upper is a real object in the writable layer. When a same-named directory exists in multiple layers, overlay forms a merged directory (see §11). `upper: Once<RealObject>` means copy-up is a one-way, at-most-once lower→upper publication; the read path takes no lock, and publication writes atomically.
+- `object_id`: the precomputed external dev/ino, computed by `IdentityPolicy`, see §10.
+- `lock`: the directory transaction lock and the readdir index field; `ReaddirIndex` is the stable enumeration index of a merged directory, see §11. For non-directories it carries no additional state and is merely used to serialize concurrent access to this object.
+- `recorded_parent`: the logical overlay parent directory and the copy-up publication parent. The "recorded parent" — it is the record written down at first binding, not a fact re-derived at each access.
+  - **Binding rule**: the publication coordinates `(recorded_parent, name)` are established once and for all by the first forward resolution at construction time; later lookups that hit the cache never write back; a single update happens only when a cross-directory rename succeeds.
+  - **Multi-link trade-off**: multiple aliases of the same underlying object follow first-seen-wins, each converging to its own upper publication; alias relinking (the index family) is explicitly out of scope.
+  - **The publication coordinates record the name at first binding**, not the name traversed when some copy-up happens to be triggered; the two can differ. When they differ, the physical copy lands at the coordinate position, the canonical object turns upper-backed and keeps serving its existing handles, and the other aliases are judged stale-upper in their own subsequent resolutions and rebuilt as independent lower-backed instances — the source data they see stays at the moment before copy-up, and each catches up only after going through copy-up again.
+  - **Not derived from the underlying dentry**: the evolution of the overlay namespace can run ahead of the physical form (the redirect-style "change the logical name first, then decide whether to migrate", as well as transitional moments such as whiteout shadowing and identity-cache rekeying); what this field carries is "where overlay thinks it is", not "where it physically is at this moment".
+- `copyup`: the arbiter and publication name of copy-up; see §9 for the detailed semantics.
 
-```rust
-pub struct RealPath {
-    mount: Weak<Mount>,
-    dentry: Arc<Dentry>,
-}
+#### The Trade-offs Around `recorded_parent`
 
-impl RealPath {
-    /// Infallible: the stored `Arc<Dentry>` keeps the inode alive.
-    pub fn inode(&self) -> &Arc<dyn Inode> {
-        self.dentry.inode()
-    }
+**Use**: copy-up relies on it to copy up level by level along the parent chain, until the parent directory exists in upper; a prepared copy needs a definite landing place. readdir relies on it, so that `".."` must give the external identity of the parent directory, while the parent directory is another overlay object that the current interface does not pass in.
 
-    pub fn upgrade(&self) -> Result<Path> {
-        Path::new(self.mount.upgrade()?, self.dentry.clone())
-    }
-}
-```
+**Problem with the current formulation**: first-binding coordinates ≠ the triggering context — when a write goes through `/b/y` while the coordinates record `/a/x`, the physical copy lands at `/a/x`, and the triggering path then rebuilds its own instance according to the alias-splitting rule.
 
-All real objects come from already-resolved underlying paths, so `RealObject` is always path-backed:
+**Alternative on the VFS side**: following Linux's practice of letting the dcache carry the parent-child relationship, `&Dentry` (or its `NameAndParent`) is passed in as call-time context through the Inode trait, so that the publication coordinates of each operation are exactly "the parent traversed this time", and the persistent field is deleted.
+
+### 6. Real-Object References `real.rs`
+
+`RealObject` is a reference to a real object in one layer: `layer_index` identifies the layer it resides
+in, and the dentry anchors the concrete entry of that layer; the identity of the layer (fsid / container
+device id) is carried uniformly by the layer definition and is not copied per object.
 
 ```rust
 pub struct RealObject {
-    /// Index of the layer it belongs to.
+    /// The ordinal of the layer this object resides in.
     layer_index: usize,
-    /// Real path anchored by a dentry.
-    path: RealPath,
-    /// fs id of the layer it belongs to.
-    fsid: u64,
-    /// Device id of the underlying fs.
-    container_dev_id: DeviceId,
+    /// The real entry anchored by the dentry.
+    dentry: Arc<Dentry>,
 }
 ```
 
-`RealObjectKey` is a value type that identifies a real object's identity inside overlayfs, composed of `fsid` and the real inode number, and is used as the key of the inode cache:
+A complete `Path` can be rebuilt on demand via the mount view of the layer it resides in; the anchor's validity follows the overlay's lifetime — as long as the logical object is reachable, the view and dentry it references will not be reclaimed.
+
+`RealObjectKey` is the value type used inside overlay to identify the identity of a real object, composed of `fsid` and the real inode number, and serves as the key of the inode cache:
 
 ```rust
 pub struct RealObjectKey {
@@ -201,17 +177,9 @@ pub struct RealObjectKey {
 
 ### 7. Name Resolution `inode/lookup.rs`
 
-The lookup rule is:
+Name resolution scans in the fixed order of the layers: same-named objects merge into one logical object; same-named directory objects across the layers merge into one object, while for non-directories the topmost one prevails and is returned; a layer's whiteout and opaque markers truncate the contributions below them at their own level.
 
-- **upper-first**: first check upper, then search downward through lower layers in top-to-bottom order.
-- **first-wins**: the merged result keeps only the first occurrence of a name, with upper layers taking precedence.
-- **whiteout stops**: a whiteout in some layer hides the same-named object further down, and scanning for that name stops.
-- **opaque directory stops**: when a directory in some layer carries the opaque marker, same-named directories further down stop participating in merging.
-- **same-named non-directory stops**: when a name is a non-directory in a higher layer, it cannot merge with a lower-layer directory, and scanning stops.
-
-A whiteout is a hiding marker in some layer, used to hide a same-named object in lower layers; an opaque directory is a marker on a directory in some layer, used to prevent lower-layer directories from continuing to participate in merging. These markers are usually written by upper, but when they appear in any layer they affect lower layers. Detailed representation and publication are in §12.
-
-`Lookup` represents the result of one name resolution: `Positive` is the hit logical inode, and `Negative` is a miss or a name hidden by a marker.
+`Lookup` represents the result of one name resolution: `Positive` is the logical inode that was hit, and `Negative` is a miss or a shadowed name.
 
 ```rust
 pub enum Lookup {
@@ -226,187 +194,168 @@ pub enum NegativeLookup {
 }
 ```
 
-Flow:
+The three negative variants uniformly present `ENOENT` externally; the differences matter only on the fs-internal decision surface:
 
-1. `lookup_in_layers` scans each layer and constructs a `RealObjectStack`;
-2. on a positive hit, it constructs according to the hit source and initializes `OverlayInode` with `(parent, name)`: the new inode's `parent` and `CopyUpState` are initialized during construction; upper-backed objects are `Done`, lower-backed objects are `Outstanding`;
-3. on a miss or a hit on whiteout/opaque, it constructs a `NegativeLookup`;
-4. it returns `Lookup`.
+- **Absent**: the name exists in no layer; for upper it is just an ordinary miss, and creation takes upper's regular new-creation path.
+- **HiddenByWhiteout**: a whiteout is a **name-level shadow** — an independent hidden object in some layer (such as a char device `0:0` or a marked zero-length file) that blocks same-named entries in the layers below it. Example: upper has a whiteout named `foo` ⇒ the name is completely invisible, and enumeration skips it. For upper: creation must go through over-whiteout preparation and replacement, not bare creation; a deletion request issued against it only gets ENOENT — the shadow remains in place and is not touched; rename recognizes such targets as whiteout targets and flips the Replace/Exchange choice.
+- **HiddenByOpaque**: opaque is a **directory-level marker** stamped on a real directory of some layer — it qualifies the whole real directory rather than some name object; when a directory in the upper layer carries this marker, every same-named contribution from lower is cut off. Example: an upper directory marked opaque ⇒ the visible set is exactly its own entries. For upper: it merges with `Absent` into plain-create; during enumeration the lower directory exits the merge as a whole.
 
-The publication target `(parent, name)` is recorded during construction.
+These markers are usually written by upper, but their appearance in any layer affects the layers further down. See §12 for the detailed representation and publication.
 
 ### 8. Inode Identity Reuse `inode/inode_cache.rs`
 
 ```rust
-/// Weak keyed map from the current visible source identity to the shared
-/// logical overlay inode. The cache does not keep overlay inodes alive.
+/// A weak-reference map keyed by the identity of the currently visible source, pointing to the shared logical overlay inode. The cache never keeps an overlay inode alive.
 struct InodeCache {
     entries: HashMap<RealObjectKey, Weak<OverlayInode>>,
 }
 
 impl InodeCache {
-    /// Returns the existing live overlay inode for the same real object,
-    /// or constructs and publishes a new one.
+    /// Returns the already-live overlay inode of the same real object if one exists; otherwise constructs and publishes a new inode.
     fn get_or_create(
         &mut self,
         key: RealObjectKey,
         create: impl FnOnce() -> Arc<OverlayInode>,
     ) -> Arc<OverlayInode>;
 
-    /// Migrates a logical inode's cached identity from its pre-copy-up lower
-    /// key to the new upper key after copy-up publishes the upper object.
-    /// The `OverlayInode` object itself stays the same.
+    /// After copy-up publishes the upper object, migrates the cached identity of the logical inode from the pre-copy-up lower key
+    /// to the new upper key. The `OverlayInode` object itself stays unchanged.
     fn rekey(&mut self, old_lower: RealObjectKey, new_upper: RealObjectKey);
 }
 ```
 
-The same real object must yield the same `OverlayInode` through any name resolution; otherwise real-object composition, append write locks, and copy-up coordination would split. `RealObjectKey` is computed from the current visible source (the topmost hit real object). The complete lower stack of a merged directory is stored inside `OverlayInode`, so the key only identifies the current visible source.
+Resolving the same real object through any name resolution must yield the same `OverlayInode`, otherwise real-object composition, the append-write lock, and copy-up coordination would split apart. `RealObjectKey` is computed from the currently visible source (the topmost hit real object). The complete lower stack of a merged directory is kept inside `OverlayInode`, so the key only identifies the currently visible source.
 
-### 9. Write Path and Copy-up `inode/copyup/`
+### 9. The Write Path and copy-up `inode/copyup/`
 
-```rust
-/// Copy-up state of one overlay inode.
-enum CopyUpState {
-    /// Already upper-backed; copy-up has completed.
-    Done,
-    /// Still lower-backed; copy-up has not completed.
-    Outstanding(CopyUpTarget),
-}
+When the user issues a write-type operation on an object whose content is still provided by lower, overlay first produces a writable upper copy and then atomically places it at the position of that name — this process is called copy-up. Everything produced during preparation is privately staged in the workdir: a crash before publication exposes no half-finished artifacts to upper.
 
-struct CopyUpTarget {
-    /// The directory-entry name used for publication in the parent.
-    name: String,
-    /// True when the physical rename succeeded but the overlay's internal
-    /// state update failed, so the next copy-up must verify the upper target.
-    need_repair: bool,
-}
-```
+The arbitration and publication name of copy-up are carried by a mutex: an object that is still lower-backed holds `Some(name)`, meaning it is pending publication to `(recorded_parent, name)`; once publication succeeds it is set to `None` and retires permanently — from then on the object never has any copy-up transaction again. The single source of truth for "whether it has been published" is whether `upper` is set, and the two stay consistent by "converging together at the completion of publication".
 
-The state definitions describe where the object is published; the flow below shows how that target is read from the locked state and used to stage and publish the upper object.
+The action surface of copy-up falls on four methods of `impl OverlayInode`:
 
 ```rust
-/// Acquires the per-object copy-up mutex. The per-object mutex serializes
-/// concurrent copy-up attempts on the same object: after the winner completes,
-/// later callers see `upper` already set and return without repeating copy-up.
-/// Callers check `upper` first; the guard also exposes the recorded
-/// publication target.
-fn lock_copyup(inode: &Arc<OverlayInode>) -> Result<MutexGuard<CopyUpState>>;
+impl OverlayInode {
+    /// Acquires the per-object copy-up mutex; the guard exposes the name pending publication.
+    fn lock_copyup(&self) -> MutexGuard<'_, Option<String>>;
 
-/// Stage data/metadata/xattr in the workdir.
-fn stage_in_workdir(inode: &Arc<OverlayInode>, target: &CopyUpTarget) -> Result<WorkdirTemp>;
+    /// Stages data/metadata/xattr in the workdir.
+    fn stage_in_workdir(&self, name: &str) -> Result<WorkdirTemp>;
 
-/// Atomically rename a staged workdir object into the upper parent.
-fn publish_by_rename(
-    inode: &Arc<OverlayInode>,
-    target: &CopyUpTarget,
-    staged: WorkdirTemp,
-) -> Result<()>;
+    /// Atomically renames the object staged in the workdir into the `name` position of the upper parent directory.
+    fn publish_by_rename(&self, name: &str, staged: WorkdirTemp) -> Result<()>;
 
-fn copy_up(inode: &Arc<OverlayInode>) -> Result<()> {
-    if inode.upper.get().is_some() {
-        return Ok(());
+    fn copy_up(&self) -> Result<()> {
+        if self.upper.get().is_some() {
+            return Ok(());
+        }
+        let mut published = self.lock_copyup();
+        let Some(name) = &*published else {
+            return Ok(());            // no publication coordinates pending anymore
+        };
+        let staged = self.stage_in_workdir(name)?;
+        self.publish_by_rename(name, staged)?;
+        *published = None;            // the coordinates retire
+        Ok(())
     }
-
-    let guard = lock_copyup(inode)?;
-    let target = match &*guard {
-        CopyUpState::Done => return Ok(()),
-        CopyUpState::Outstanding(target) => target,
-    };
-
-    let staged = stage_in_workdir(inode, target)?;
-    publish_by_rename(inode, target, staged)
 }
 ```
 
-Copy-up proceeds level by level along the ancestor chain: before a child is published, its parent directory has already been copied up and exists in upper. Workdir staging prevents exposing half-finished objects: a crash before publication leaves only a private workdir object, not a visible upper entry.
+For lock ordering only two fixed orders are introduced: first acquire the object's own copy-up lock, then perform ancestor promotion and preparation; `publish_by_rename`, while holding the copy-up lock, briefly acquires the parent directory's transaction lock to complete the physical rename and the semantic commit, and then releases it. Apart from this single "copy-up → directory transaction" locking edge, no new ordering is introduced.
 
-When the physical rename has already succeeded but the overlay's internal state update fails, `need_repair` is set. The next copy-up first verifies whether the upper target is consistent with lower, and then either continues reusing it or reports an error.
+copy-up proceeds level by level along the ancestor directory chain: before a child is published, its parent directory has already completed copy-up and exists in upper. Staging in the workdir avoids exposing half-finished artifacts: a crash before publication leaves behind only a private workdir object, never a visible upper entry.
+
+The physical rename is the dividing line of copy-up. Any error before the rename is handled in exactly the same way: delete the temporary copy in the workdir and redo the whole process from the start, with the outside world seeing no trace.
+
+After the rename succeeds only one finishing task remains: register the new identity in the inode cache and mark the logical object as upper-backed. Concurrency obeys one simple rule — when two tasks register the same file at the same time, the later one waits for the former to finish registering and then directly reuses the same logical object.
 
 ### 10. User-Visible Identity `inode/identity.rs`
 
-overlayfs needs a separate identity module because after merging multiple underlying file systems, the underlying `st_dev` / `st_ino` cannot simply be exposed:
+overlayfs needs a separate identity module because after merging multiple underlying filesystems the underlying `st_dev` / `st_ino` cannot simply be exposed:
 
-- different underlying file systems may have conflicting `st_dev` / `st_ino`, and passing them through directly would make distinct objects look identical to user space;
-- overlayfs needs to choose among passthrough (directly passing through the underlying dev/ino), xino encoding (re-encoding the underlying ino to avoid conflicts), or fallback (falling back to identities allocated by overlayfs) based on underlying capabilities and mount configuration, in order to provide stable, non-conflicting external identities;
-- identity must remain stable before and after copy-up: copy-up changes the physical source, but the user still sees the same overlay object;
-- `ObjectId` and `LowerIdOrigin` are the core entities of this module.
+- Different underlying filesystems may have conflicting `st_dev` / `st_ino`, and passing them straight through would make user space mistake different objects for the same object;
+- overlay needs to choose passthrough (directly passing through the underlying dev/ino), xino encoding (re-encoding the underlying ino to avoid conflicts), or fallback (falling back to identities assigned by overlay) according to the underlying capabilities and the mount configuration, so as to provide a stable and conflict-free external identity;
+- the identity must remain stable across copy-up: copy-up changes the physical source, but what the user sees is still the same overlay object.
 
-`IdentityPolicy` maps a real object to the overlay's externally visible `st_dev` / `st_ino`:
+This module has two core entities:
 
-- `ObjectId`: the external dev/ino of an overlay object;
+- `ObjectId`: the external dev/ino of one overlay object;
 - `LowerIdOrigin`: the persisted identity record of the lower source before copy-up.
+
+The projection policy is carried by the mount-level `IdentityPolicy` and is fixed once and for all during assembly.
 
 ### 11. Directory Enumeration `inode/readdir.rs`
 
-When same-named directories exist in both upper and lower, overlayfs presents a **merged directory**: the visible names are the union of upper and the lowers, upper takes precedence, and metadata is based on upper.
+When a same-named directory exists in both upper and lower, overlay presents a **merged directory**: the visible names are the union of upper and each lower, upper takes precedence, and metadata follows upper.
 
-The goal of readdir is to provide a stable, resumable enumeration order and avoid a full rescan on every getdents (the system call that reads directory entries).
+The goal of readdir is to provide a stable, resumable enumeration order, avoiding a full rescan on every getdents (the system call that reads directory entries).
 
 Enumeration of a merged directory is divided into the following phases:
 
-1. **Index construction on demand**: when a directory is enumerated for the first time, each real layer is scanned in upper-first, lower top-to-bottom order; each name is kept only at its first occurrence; whiteouts, opaque directories, and same-named non-directories suppress or terminate lower names from continuing to merge.
-2. **Stable cookie sequence**: `.` and `..` use fixed cookies, and every other visible name obtains a cookie in order; all cookies are monotonically increasing and never reused; callers use a cookie as the offset (read position) to resume reading from the previous position.
-3. **Rebuild and invalidation**: after a namespace change, if it cannot be proven that the existing order still holds, the directory index is marked as needing rebuild and is rescanned on the next enumeration. create/link may insert a name whose true position cannot be proven without a full scan; rename reorders names; whiteout/opaque changes alter visibility; these cases may trigger a rebuild. Removing a name may retain its cookie position (tombstone), preventing already-exposed offsets (read positions) from being renumbered.
+1. **Build the index on demand**: the first time the directory is enumerated, scan the real layers in upper-first, lower top-to-bottom order; keep only the first occurrence of each name; whiteouts, opaque directories, and same-named non-directories suppress or terminate the continued merging of lower-layer names.
+2. **Stable cookie sequence**: `.` and `..` use fixed cookies, and every other visible name obtains a cookie in order; all cookies increase monotonically and are never reused; the caller uses the cookie as the offset (resume position) to continue reading from the last position.
+
+Rebuilding follows one criterion: a full rescan happens only when it cannot be proven that the existing cookie sequence still holds. The deletion of a single name falls to a tombstone and the resume positions are preserved; the appending of a new name is inserted in place if it can be proven to lie at the end of the existing sequence. Rename is the combination of a tombstone for the old name and an insertion for the new name: it merges in place when the insertion point can be proven to fall at the end of the sequence, and only otherwise degrades to a full rescan; offsets that have already been exposed are always guaranteed by tombstones not to be renumbered. Genuine rebuilds concentrate on sweeping visibility changes — the most typical case is the appearance or disappearance of the opaque marker, which adds or removes the lower contributions as a whole.
 
 ### 12. Namespace Changes `inode/dir/`
 
-`inode/dir/` contains all operations that change the namespace of a parent directory:
+`inode/dir/` contains all operations that make changes to the parent directory namespace:
 
 - `create.rs` / `link.rs` / `remove.rs` / `rename.rs`
-- `whiteout.rs`: representation, publication, and cleanup of whiteouts
+- `whiteout.rs`: the representation, publication, and sweeping of whiteouts
 
-When deleting a name visible from lower, lower cannot be modified; instead a whiteout hiding marker is published in upper. The physical representation of a whiteout is chosen according to upper capabilities: it can be a char device `0:0`, or a zero-size file with the `trusted.overlay.whiteout` xattr.
+Deleting a lower-visible name cannot modify lower; instead, a whiteout shadow is published in upper. The physical representation of a whiteout is chosen according to upper's capabilities: it can be a char device `0:0` or a zero-size file carrying the `trusted.overlay.whiteout` xattr.
 
-`WhiteoutCache` is a mount-level, single-slot reuse pool that caches private whiteout temporary objects located in workdir, for later publication as whiteouts in upper. Its principle is that the same workdir whiteout can be published to multiple upper directories/names via hard links, so remove/rename do not need to create a whiteout temporary object every time.
+`WhiteoutCache` is a mount-level, single-slot reuse pool that caches the private whiteout temporary objects located in the workdir for later publication as whiteouts in upper. Its principle is that the same workdir whiteout can be published via hard link under multiple upper directories/names, so remove/rename need not recreate the whiteout temporary object every time.
 
 Usage:
 
-- both the remove and rename lower-backed paths publish whiteouts through the same `publish_whiteout` entry.
-- only when the name does not yet exist in upper and the underlying layer supports hard-link sharing is the workdir whiteout stored back into the cache after successful publication.
-- if the target already has an upper object, publication needs rename-over, or hard-link sharing fails, the whiteout temporary object is consumed and not returned to the cache. Hard-link sharing may fail due to `EMLINK` (link count limit reached) or `EOPNOTSUPP` (backend does not support the operation).
-- once `can_share_by_link` is lowered to false due to a hard-link failure, it remains disabled; subsequent whiteouts are published by consuming new temporary objects.
+- When deleting an object — no matter whether via unlink/rmdir or rename — as long as a whiteout needs to be left in upper to shadow the same-named lower object, the same publication path is taken: take the private temporary object from the workdir and atomically place it at the target name.
+- Only when the name does not yet exist in upper and the underlying layer supports hard-link sharing is the workdir whiteout stored back into the cache after a successful publication.
+- If the target already has an upper object and a rename-over publication is required, or hard-link sharing fails, the whiteout temporary object is consumed and does not backfill the cache. Hard-link sharing can fail due to `EMLINK` (the link count limit is reached) or `EOPNOTSUPP` (the backend does not support the operation).
+- Once `can_share_by_link` has been downgraded to false by a hard-link failure it stays disabled; all subsequent whiteouts are published by consuming new temporary objects.
 
-Cached temporary objects always live in workdir and are private objects; leftover workdir entries are cleaned up the next time the workdir is prepared during mount.
+The cached temporary objects always reside in the workdir and are private; leftover workdir entries are cleaned up the next time a mount prepares the workdir.
 
-### 13. Permissions, Attributes, xattr, Data
+### 13. Permissions, Attributes, xattr, and Data
 
-- `inode/permission.rs`: two-stage permission checking—first perform overlay-local permission checks and, when needed, perform copy-up on demand, then check the underlying real object's permissions; copy-up is an action between the two stages, not a third permission check.
+- `inode/permission.rs`: two-phase permission checking — first the overlay-local permission check, then a copy-up when needed, then the permission check against the underlying real object; copy-up is the action between the two phases, not a third phase of permission checking.
 - `inode/metadata.rs`: attribute writes.
-- `inode/xattr.rs`: xattr operations and overlay private xattrs.
-- `inode/data.rs`: data read/write forwarding; reads of lower use `O_NOATIME`, and `O_APPEND` is serialized under the per-inode transaction lock.
+- `inode/xattr.rs`: xattr operations and the overlay private xattrs.
+- `inode/data.rs`: forwarding of data reads and writes, with `O_NOATIME` when reading lower, and `O_APPEND` serialized under the per-inode transaction lock.
 
 ### 14. File Structure
 
 ```text
 overlayfs/
-├── mod.rs                    — module declaration + init
-├── fs_type.rs                — OverlayFsType: VFS registration type
-├── layer.rs                  — Layer / LayerStack / RealObjectStack: underlying directory layer model
-├── real.rs                   — RealObject / RealPath / RealObjectKey
+├── mod.rs                    — module declarations + init
+├── fs_type.rs                — OverlayFsType: the VFS registration type
+├── layer.rs                  — Layer / LayerStack: the layer model of underlying directories
+├── real.rs                   — RealObject / RealObjectKey
 │
-├── fs/                       — mount module
-│   ├── mod.rs                — OverlayFs + FileSystem implementation
+├── fs/                       — the mount module
+│   ├── mod.rs                — OverlayFs + the FileSystem implementation
 │   ├── policy.rs             — MountPolicy
-│   └── mount/                — construction flow
+│   └── mount/                — the construction flow
 │       ├── mod.rs            — construction flow orchestration
 │       ├── options.rs        — MountOptions parsing
-│       ├── layer_parts.rs    — layer root parsing and overlap/workdir validation
-│       ├── inuse.rs          — exclusive claim of upper/workdir
+│       ├── layer_parts.rs    — layer root resolution and overlap/workdir validation
+│       ├── inuse.rs          — the exclusive claim on upper/workdir
 │       └── capabilities.rs   — upper capability measurement
 │
 └── inode/                    — logical objects
-    ├── mod.rs                — OverlayInode + Inode/FileOps implementation
-    ├── inode_cache.rs        — reuse of the same underlying object as the same OverlayInode
-    ├── lookup.rs             — layer-ordered name resolution
+    ├── mod.rs                — OverlayInode + the Inode/FileOps implementations
+    ├── inode_cache.rs        — reuse from the same underlying object to the same OverlayInode
+    ├── lookup.rs             — name resolution in layer order
     ├── identity.rs           — external dev/ino identity translation
     ├── readdir.rs            — stable enumeration of merged directories
     ├── copyup/
     │   ├── mod.rs            — copy-up arbitration/preparation/publication
     │   └── workdir.rs        — workdir temporary objects
     ├── dir/
-    │   ├── mod.rs            — shared namespace change flow
+    │   ├── mod.rs            — the shared namespace-change flow
     │   ├── create.rs / link.rs / remove.rs / rename.rs
-    │   └── whiteout.rs       — whiteout representation/publication/cleanup
+    │   └── whiteout.rs       — whiteout representation/publication/sweeping
     ├── data.rs
     ├── permission.rs
     ├── metadata.rs
