@@ -905,7 +905,7 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
       `matches_truth` / `is_same_negative`.
     - **Phase C — lookup_binding memo 化 + readdir 边界文档**.
       Write-set: `projection/mod.rs` (`lookup_binding` rewritten to always
-      scan `lookup_in_layers` then serve only on `matches_truth`), 
+      scan `lookup_in_layers` then serve only on `matches_truth`),
       `projection/binding_cache.rs` (remove the remaining
       `#[expect(dead_code)]` — now wired), `readdir_index.rs` (doc-only
       Change 5 paragraph on `ReaddirIndexValidity::Valid`).
@@ -1399,3 +1399,124 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     → `pub(super)`，1 行；run07 PASS，exit 0；当前 KEEP=120）；P2
     （workdir_workspace_path co-location）未执行，报告建议保守 KEEP，
     待 user 最终确认。
+
+- **`parent_copyup_batches_slicing_20260827`**
+  - **Kind**: Pass-slicing decision（user 授权调度 2026-08-27）：把 live handoff
+    `20260826-140940-parent-copyup-state-design` 的实现范围切为四个串行
+    Creator pass；supersedes 该 handoff 中 Batch A–D 的文件清单里与当前代码
+    不符的两点（见 Re-slices）。
+  - **Parent**: `N/A` — 跨 meso 内部结构重构（precedent pass_40/42/43/44）；
+    无新 feature claim、无 covered micro（现有已实现 micro 的行为面按设计
+    保持不变：copy-up 公开坐标内化、`..` 恒等改为父指针直读属语义等价或
+    更精确的替换，不新增 micro）。逐文件 meso 归属：layer/mount 树 = meso 01，
+    real/identity = meso 02，lookup/project = meso 02，copyup 协调 = meso 04，
+    dir/create+rename = meso 06，readdir = meso 03。
+  - **Authoritative design**: `designdoc/structure-design-proposal-final.md` +
+    live handoff（含 2026-08-27 study amendments Q1/Q2 verdicts，binding）。
+  - **Slicing / order（serial，每批一个 Creator）**:
+    - **pass_46_layer_strong_mount**（Risk High）：`Layer` 改为
+      `{ mount: Arc<Mount>, root_dentry: Arc<Dentry>, fsid, container_dev_id }`
+      强持有 Mount；删除 layer.rs:54,57,100,144 全部 `.upgrade()?/.expect(...)`；
+      `Dentry::inode()` 加宽 `pub(in crate::fs)`；`resolve_parts` 产
+      `(Arc<Mount>, Arc<Dentry>)` 输入；mount/mod.rs 四处 root 读、fs/mod.rs
+      `root_visible_key`/`selected_real_fs`、new_root 两段、collect_layer_devs
+      同步适配；real.rs 仅新增 `RealPath::inode()`。
+      Write-set: `layer.rs`, `real.rs`(仅此一处), `fs/mod.rs`,
+      `fs/mount/layer_parts.rs`, `fs/mount/mod.rs`, `inode/mod.rs`(new_root 段),
+      `inode/identity.rs`(collect_layer_devs 段),
+      `vfs/path/dentry.rs`(单可见性加宽)。
+    - **pass_47_parent_copyup_state**（Risk High，一个耦合 pass）：
+      `OverlayInode` 增 `parent: RwMutex<Weak<OverlayInode>>` +
+      `copyup: Mutex<CopyUpState>`；`CopyUpState = Done |
+      Outstanding(CopyUpTarget{name, need_repair})` 取代
+      `CopyUpTransition/CopyUpPhase`（11 处全删）；删
+      `try_record_copyup_transition` 与 lookup 后置记录；
+      `project_inode` 原地加两变体 `ProjectionBinding<'a>` 参数
+      （Root 自父 Weak 由 `Arc::new_cyclic` 建；四正向命中分支传 Child）；
+      create.rs 两个投影绑 Child；rename 跨父成功后 DIR 锁下写 parent、
+      EXDEV 门留 redirect 钩子注释；锁序不变式落文档：
+      `CUL->DIR`、`DIR->PARENT`、`CUL->PARENT`，InodeCache 叶锁、create
+      closure 纯字段初始化。Write-set: `inode/copyup/mod.rs`,
+      `inode/lookup.rs`, `inode/mod.rs`, `inode/dir/create.rs`,
+      `inode/dir/rename.rs`。
+    - **pass_48_readdir_parent_identity**（Risk High）：readdir `..` 改为
+      `DIR(child)->PARENT(child).read()` 直读 `self.parent` 的 `object_id()`
+      （根自父 ⇒ `.. == .`；死弱引用回落 self-parent fallback）；删旧
+      resolver 链（`project_parent_from_lower_record`/`is_mount_root`/
+      determinism 门）及随之孤儿化的 `root_visible_key`；同批收口路径化
+      `RealObject` 终态（`{layer_index, path: RealPath, fsid,
+      container_dev_id}`，删 cached inode/`Option<RealPath>`/`identity_only`，
+      `real_path()` 去 None 臂，`RealObjectKey::from_source` 改读 path.inode）。
+      Write-set: `inode/readdir.rs`, `real.rs`, `fs/mod.rs`(仅删
+      root_visible_key)。
+    - **pass_49_field_order_and_q1_redundancy**（Risk Normal）：混合方案字段
+      重排（`OverlayFs` = layer_stack, policy, identity, upper_workdir_pair,
+      _anon_device_id, whiteout_cache, inodes, fs_event_stats, self_weak；
+      `OverlayInode` = fs, lowers, upper, object_id, lock, parent, copyup,
+      extension）；修 Q1 冗余之一（read_at 双 `upper.get()` 合并为一次快照
+      选择）；permission.rs 双 authority select 仅在证明跨提升边界语义相同
+      时折叠，任何跨 promote 边界的两次解析是二阶段准入的有意行为——保留
+      并在收据中说明判定。Write-set: `fs/mod.rs`(排序),
+      `inode/mod.rs`(排序), `inode/data.rs`, `inode/permission.rs`(裁决后)。
+  - **Re-slices (code-grounded, 2026-08-27; code reality wins)**:
+    1. handoff Batch A 的 real.rs 重塑项移入 pass_48 —— `identity_only` 的
+       最后存活调用点是 readdir 旧 resolver（readdir.rs:366），该 resolver 又
+       依赖 pass_47 的 parent 字段；在 A 删除 `identity_only` 会令 A→B→C 序列
+       出现不可编译中间态。handoff §2.e 本身认可 "cached real_inode 的可接受
+       中间步骤"，故 A 仅交付 `RealPath::inode()` 新增。
+    2. handoff Batch B 的 `ProjectionBinding::Child { parent: &'a Arc<...> }`
+       父指针获取方式冻结为：`OverlayFs::lookup(&self, parent: &OverlayInode,
+       name)` 在投影前经 inode cache 解析父的 canonical Arc
+       （复用既有 "live parent always registered under visible-source key"
+       不变式，miss 时 fail-closed EIO 取代原 log-and-skip try_record 分支），
+       `lookup_in_layers` 改持 `&Arc<OverlayInode>`；create.rs 两站点经新增
+       私有 helper `OverlayInode::cached_self_arc()` 解析。六个
+       `fs.lookup(self,…)` 非 Arc 接收者调用站因此**无需改动**。
+  - **Execution boundary（user-directed 2026-08-27）**: 每批派发一个 Creator
+    （Direct Spawn Lane, PROTOCOL §1.3 preferred lane, command-free）；
+    compile_preflight **全部 withheld**（容器未开，本轮零编译）；验收 =
+    main-agent 手工 exact-diff 结构审查 + grep 断言；每批验收后将当批 diff
+    快照存档至 `components/parent-copyup-state-design/run_evidence/<pass>/`
+    以保证可归属性；工作树是否提交由 user 另行指令。
+  - **Comment policy (user-directed, applies to all four passes)**: 注释克制
+    且审慎——仅在代码无法自解释处写注释；优先删过期注释而非扩写；禁叙述性
+    "本次改动"注释；生产注释继续禁 micro-ID/内部工作区词汇与 snapshot 式
+    引用（WAVE6/W9 既定标准）。
+  - **Deferred gates**: 目标级编译（cargo check）、workspace lint、运行时
+    xfstests 一律延后到容器可用后另行 packeted Checker 执行；无 ktest 表面。
+  - **Result (2026-08-27, 四批全部 main-agent 结构验收 ACCEPTED)**：
+    - **pass_46_layer_strong_mount**：ACCEPTED。写集 8 文件精确命中；冻结面逐条符合；
+      `Layer{mount, root_dentry, fsid, container_dev_id}` + infallible
+      `root_path()`（4 调用方）+ `RealPath::inode()` 预置；全部 upgrade/expect 消亡。
+      快照 `run_evidence/pass_46/main_agent_accepted_diff_20260827.patch`。
+    - **pass_47_parent_copyup_state**：ACCEPTED。`CopyUpState/CopyUpTarget/
+      ProjectionBinding/parent/copyup/cached_self_arc` 落地，旧协调实体全删
+      （活代码 grep=0）；锁序自查与三许可边吻合；deviation D1–D8 主代理逐一核实
+      （D1 的 6 次只读 grep/find 记为非阻塞过程偏差，违反 dispatch 字面禁令但纯读取）。
+      快照 `run_evidence/pass_47/main_agent_accepted_diff_20260827.patch`。
+    - **pass_48_readdir_parent_identity**：ACCEPTED。readdir `..` 改为 parent 直读，
+      旧 resolver 链/root_visible_key/identity_only 整体删除且零残留；孤儿 import 清理
+      无遗漏；本轮 Creator 零命令。主代理机械修正 1 处（fs/mod.rs 尾逗号），已记入收据
+      acceptance note。快照 `run_evidence/pass_48/main_agent_accepted_diff_20260827.patch`。
+    - **pass_49_field_order_and_q1_redundancy**：ACCEPTED。两结构体字段序达成 packet 目标；
+      data.rs 双 Once 读合并等价交付；permission.rs §3 裁决为零改动合格分支；
+      本轮零命令零 deviation。快照
+      `run_evidence/pass_49/cumulative_working_tree_after_pass49.patch`
+      （含四批累计终态）。
+  - **Static gate closure (2026-08-27, container opened)**:
+    `task_checker_parent_copyup_compile_lint_20260827` 三轮（runs 01–03，
+    单命令形态 `docker exec -w /root/asterinas codex-asterinas-dev make check`）：
+    run01 FAIL 于前端文档门+rustfmt 门（主代理机械修复 4 行尾随空白
+    [PASS_SLICING.md/designdoc ×3] + 9 处 rustfmt hunk）；run02 推进到 clippy
+    报 4 errors——3 处 `inconsistent_struct_constructor`（pass_49 字段重排
+    直接后果）按建议重排，Checker 标 design 的 2 个 dead 方法经主代理 grep
+    复核零调用者、其唯一消费者已在已验收 pass_48 设计中删除，裁决为机械处置
+    删除（`IdentityPolicy::is_all_layers_same_fs`、
+    `is_directory_projection_deterministic`）并收紧 xino_fits 过期 doc 子句；
+    **run03 PASS（exit 0，21 s，完整流水线绿证，0 诊断）**。证据
+    `components/parent-copyup-state-design/run_evidence/checker_compile_lint_20260827/run{01,02,03}/`；
+    收据 `task_checker_parent_copyup_compile_lint_20260827_checker.md`。
+    非阻塞异常：run03 报 PROTOCOL.md 三候选路径不存在——实际存在于 overlayfs
+    工作区根 `.agents/PROTOCOL.md`（本轮此前多次读取验证），判为 subagent 端
+    路径解析问题，不影响证据效力。工作树未提交，提交时机与运行时 xfstests 回归
+    待 user 指令。

@@ -38,19 +38,16 @@ use device_id::DeviceId;
 
 use super::super::super::layer::{Layer, LayerStack};
 use crate::{
-    fs::{
-        fs_impls::overlayfs::real::RealPath,
-        vfs::{
-            file_system::{FileSystem, FsFlags},
-            inode::Inode,
-            path::{AT_FDCWD, EmptyPathStr, FsPath, Path},
-        },
+    fs::vfs::{
+        file_system::{FileSystem, FsFlags},
+        inode::Inode,
+        path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
     },
     prelude::*,
 };
 
 /// Two-phase assembly input: resolve-then-assign.
-type LayerParts = (RealPath, Arc<dyn FileSystem>, DeviceId);
+type LayerParts = (Arc<Mount>, Arc<Dentry>, DeviceId);
 
 /// Resolves `raw_path` through `lookup_no_follow` in the mounting task's
 /// filesystem context: intermediate symlink components are followed, the
@@ -93,8 +90,7 @@ pub(super) fn verify_inode_instance_stability(
 }
 
 impl Layer {
-    /// Resolves `raw_path` into pinned layer-root parts, downgrading the
-    /// `Path` into the layer-root anchor [`RealPath`].
+    /// Resolves `raw_path` into the strongly pinned layer-root parts.
     fn resolve_parts(raw_path: &str) -> Result<LayerParts> {
         // Missing paths surface the resolver's `ENOENT`; non-directory roots
         // fail with `ENOTDIR`.
@@ -103,8 +99,8 @@ impl Layer {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
         Ok((
-            RealPath::from_path(&path),
-            path.fs(),
+            path.mount_node().clone(),
+            path.dentry().clone(),
             path.metadata()?.container_dev_id,
         ))
     }
@@ -123,11 +119,11 @@ impl LayerStack {
     ) -> Result<Self> {
         let mut upper_parts = None;
         if let Some(raw_path) = upper_dir {
-            let (root_path, fs, container_dev_id) = Layer::resolve_parts(&raw_path)?;
-            if !is_forced_read_only && fs.flags().contains(FsFlags::RDONLY) {
+            let (mount, root_dentry, container_dev_id) = Layer::resolve_parts(&raw_path)?;
+            if !is_forced_read_only && mount.fs().flags().contains(FsFlags::RDONLY) {
                 return_errno_with_message!(Errno::EROFS, "the upper filesystem is read-only");
             }
-            upper_parts = Some((root_path, fs, container_dev_id));
+            upper_parts = Some((mount, root_dentry, container_dev_id));
         }
 
         if lower_dirs.is_empty() {
@@ -155,22 +151,22 @@ impl LayerStack {
             }
         };
 
-        let upper = upper_parts.map(|(root_path, fs, container_dev_id)| {
-            let fsid = fsid_of_fn(&fs);
+        let upper = upper_parts.map(|(mount, root_dentry, container_dev_id)| {
+            let fsid = fsid_of_fn(mount.fs());
             Layer {
-                root_path,
-                fs,
+                mount,
+                root_dentry,
                 fsid,
                 container_dev_id,
             }
         });
         let lowers = lower_parts
             .into_iter()
-            .map(|(root_path, fs, container_dev_id)| {
-                let fsid = fsid_of_fn(&fs);
+            .map(|(mount, root_dentry, container_dev_id)| {
+                let fsid = fsid_of_fn(mount.fs());
                 Layer {
-                    root_path,
-                    fs,
+                    mount,
+                    root_dentry,
                     fsid,
                     container_dev_id,
                 }

@@ -456,6 +456,40 @@ Record only active or recently changed passes here. Durable slicing rationale be
     `components/code-structure-cleanup/visibility_keep_relocation_20260818/
     task_reviewer_overlayfs_g10_keep_relocation_20260818_report.md`。
 
+- **`parent_copyup_state_batches_20260827`** — **ACCEPTED (main-agent structural
+  acceptance; runtime gates deferred)**
+  - **Kind**: user-directed four-batch internal-restructure implementation wave
+    (slicing: `PASS_SLICING.md` `parent_copyup_batches_slicing_20260827`;
+    one Creator per batch, serial, Direct Spawn Lane).
+  - **Basis**: live handoff `20260826-140940-parent-copyup-state-design` +
+    designdoc proposal-final + 2026-08-27 study Q1/Q2 verdicts.
+  - **Result**: pass_46 (Layer strong-mount), pass_47 (parent pointer +
+    CopyUpState + ProjectionBinding), pass_48 (readdir `..` via parent +
+    path-backed RealObject endpoint), pass_49 (field ordering + Q1 data-path
+    redundancy merge) all exact-diff accepted. Final state: `OverlayInode`
+    carries `parent: RwMutex<Weak<..>>` + `copyup: Mutex<CopyUpState>` with a
+    self-parent mount root; copy-up coordination is coordinate-at-projection
+    (`Done | Outstanding(CopyUpTarget{need_repair})`); readdir `..` reads the
+    parent pointer directly (`.. == .` at root); every `RealObject` is
+    path-backed with infallible `real_inode()`.
+  - **Artifacts**: receipts under
+    `components/parent-copyup-state-design/`; per-batch diff snapshots under
+    `components/parent-copyup-state-design/run_evidence/pass_{46,47,48,49}/`.
+  - **Deferred gates**: no compile/lint/xfstests run this session (user
+    directive; container closed). First compile belongs to a later Checker;
+    working tree left uncommitted pending user instruction.
+  - **Static gate CLOSED (2026-08-27, container opened)**: Checker task
+    `task_checker_parent_copyup_compile_lint_20260827` — three `make check`
+    rounds; run01 FAIL at doc/rustfmt front gates, run02 FAIL with 4 clippy
+    errors, run03 **PASS exit 0** (full pipeline green). All diagnostics were
+    mechanical; main-agent fixes: 4 markdown trailing-whitespace lines,
+    9 rustfmt hunks, 3 struct-constructor field reorderings, deletion of two
+    zero-caller orphan methods (`IdentityPolicy::is_all_layers_same_fs`,
+    `is_directory_projection_deterministic` — main-agent adjudication over the
+    Checker's conservative design tag, evidence in PASS_SLICING entry), one
+    stale doc clause. Runtime xfstests revalidation remains deferred pending
+    user instruction.
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

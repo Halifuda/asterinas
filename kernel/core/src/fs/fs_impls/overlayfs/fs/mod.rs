@@ -17,7 +17,6 @@ use crate::{
             fs_type::OVERLAY_FS_NAME,
             inode::{IdentityPolicy, InodeCache, OverlayInode, WhiteoutCache},
             layer::LayerStack,
-            real::{RealObject, RealObjectKey},
         },
         pseudofs::AnonDeviceId,
         vfs::{
@@ -34,6 +33,9 @@ use crate::{
 /// projection state.
 pub(super) struct OverlayFs {
     layer_stack: LayerStack,
+    policy: MountPolicy,
+    /// The dev/ino projection policy.
+    identity: IdentityPolicy,
     /// The claimed upper/workdir pair; `Some` only for writable mounts.
     ///
     /// Established single-threaded before publication,
@@ -41,15 +43,6 @@ pub(super) struct OverlayFs {
     /// The claim additionally pins the prepared workdir staging workspace inode
     /// (`<workdir>/work`) once `prepare_workdir` completes.
     upper_workdir_pair: Option<UpperWorkdirInuse>,
-    policy: MountPolicy,
-    fs_event_stats: FsEventSubscriberStats,
-    self_weak: Weak<OverlayFs>,
-    /// The mount-wide inode identity-reuse cache.
-    ///
-    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
-    inodes: InodeCache,
-    /// The dev/ino projection policy.
-    identity: IdentityPolicy,
     /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
     ///
     /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
@@ -63,43 +56,15 @@ pub(super) struct OverlayFs {
     ///
     /// Bounded to one workdir staging slot.
     whiteout_cache: Mutex<WhiteoutCache>,
+    /// The mount-wide inode identity-reuse cache.
+    ///
+    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
+    inodes: InodeCache,
+    fs_event_stats: FsEventSubscriberStats,
+    self_weak: Weak<OverlayFs>,
 }
 
 impl OverlayFs {
-    /// Returns the inode-cache key of the overlay mount root.
-    pub(super) fn root_visible_key(&self) -> RealObjectKey {
-        match self.layer_stack.upper_layer() {
-            Ok(upper) => RealObjectKey::from_source(&RealObject::identity_only(
-                0,
-                upper
-                    .root_path
-                    .upgrade()
-                    .expect("the pinned layer root path must stay alive for the mount lifetime")
-                    .inode()
-                    .clone(),
-                upper.fsid,
-                upper.container_dev_id,
-            )),
-            Err(_) => {
-                let top = self
-                    .layer_stack
-                    .lower_layers()
-                    .first()
-                    .expect("the layer stack always carries at least one lower layer");
-                RealObjectKey::from_source(&RealObject::identity_only(
-                    1,
-                    top.root_path
-                        .upgrade()
-                        .expect("the pinned layer root path must stay alive for the mount lifetime")
-                        .inode()
-                        .clone(),
-                    top.fsid,
-                    top.container_dev_id,
-                ))
-            }
-        }
-    }
-
     pub(super) fn layer_stack(&self) -> &LayerStack {
         &self.layer_stack
     }
@@ -136,7 +101,9 @@ impl OverlayFs {
         self.layer_stack
             .upper_layer()
             .ok()
-            .map_or(&self.layer_stack.lower_layers()[0].fs, |upper| &upper.fs)
+            .map_or(self.layer_stack.lower_layers()[0].mount.fs(), |upper| {
+                upper.mount.fs()
+            })
     }
 }
 

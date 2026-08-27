@@ -50,7 +50,7 @@ impl OverlayFs {
 
         let is_effective_read_only = match &layer_stack.upper {
             Some(upper) => {
-                options.is_forced_read_only || upper.fs.flags().contains(FsFlags::RDONLY)
+                options.is_forced_read_only || upper.mount.fs().flags().contains(FsFlags::RDONLY)
             }
             None => true,
         };
@@ -74,18 +74,18 @@ impl OverlayFs {
             // The workdir is not a layer, so `assemble`'s pairwise check
             // cannot cover it.
             layer_stack.validate_workdir_against_lowers(&workdir_path)?;
-            verify_inode_instance_stability(upper_dir, upper.root_path.upgrade()?.inode())?;
+            verify_inode_instance_stability(upper_dir, upper.root_dentry.inode())?;
             verify_inode_instance_stability(work_dir, workdir_path.inode())?;
 
             let uuid_mode = options.uuid_mode.unwrap_or(UuidMode::Auto);
             let identity = if is_effective_read_only {
                 Ok(Uuid::generate())
             } else {
-                UpperWorkdirInuse::determine_identity(upper.root_path.upgrade()?.inode(), uuid_mode)
+                UpperWorkdirInuse::determine_identity(upper.root_dentry.inode(), uuid_mode)
             }?;
 
             let mut claimed_pair = UpperWorkdirInuse::claim(
-                upper.root_path.upgrade()?.inode().clone(),
+                upper.root_dentry.inode().clone(),
                 workdir_path.inode().clone(),
                 identity,
             )?;
@@ -94,7 +94,7 @@ impl OverlayFs {
                 claimed_pair.prepare_workdir(&workdir_path)?;
 
                 let capabilities = UpperFilesystemCapabilities::probe(
-                    upper.root_path.upgrade()?.inode(),
+                    upper.root_dentry.inode(),
                     claimed_pair.workdir_workspace()?,
                 )?;
                 let is_uuid_effective = capabilities.validate_uuid_support(uuid_mode)?;
@@ -152,14 +152,14 @@ impl OverlayFs {
 
         let overlay_fs = Arc::new_cyclic(move |weak| OverlayFs {
             layer_stack,
-            upper_workdir_pair,
             policy,
-            fs_event_stats: FsEventSubscriberStats::new(),
-            self_weak: weak.clone(),
-            inodes,
             identity,
+            upper_workdir_pair,
             _anon_device_id: anon_device_id,
             whiteout_cache: Mutex::new(WhiteoutCache::new()),
+            inodes,
+            fs_event_stats: FsEventSubscriberStats::new(),
+            self_weak: weak.clone(),
         });
         Ok(overlay_fs)
     }

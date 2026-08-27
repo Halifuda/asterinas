@@ -270,7 +270,7 @@ Linux 源码中的关键事实：
 - copy-up 的 commit 段确实会在持有 `CUL(child)` 时 `start_renaming_dentry()` / `lock_rename()`，
   但它锁的是 **workdir 与 upper destdir 这两个 real dentry 的 inode**，不是 overlay 逻辑父目录的 `i_rwsem`。
 
-结论：Linux 没有 `CUL(child) → overlay 逻辑父目录 lock` 这条边。  
+结论：Linux 没有 `CUL(child) → overlay 逻辑父目录 lock` 这条边。
 proposal 的 `CUL → lock` 是 Asterinas 自己的倒置，不是 Linux 的锁序。
 
 ### E.2 Proposal 的 `CUL → lock` 为何“有条件正确”
@@ -288,7 +288,7 @@ proposal 的 `CUL → lock` 是 Asterinas 自己的倒置，不是 Linux 的锁�
    当前 `ensure_upper_authority_inner` 的“先递归父、再回来拿自己的 CUL”结构必须保持，
    否则会出现嵌套 CUL 或 CUL 跨多层祖先的锁序。
 
-在这些条件下，`remove /anc/par` 与 copy-up 并发时可由 A3 活性复查中止；  
+在这些条件下，`remove /anc/par` 与 copy-up 并发时可由 A3 活性复查中止；
 “直接 remove /anc”也受 rmdir 的 merged-view emptiness 前置条件保护——必须先删掉可见子项，
 而子项的删除/rename 又回到上述串行或活性复查的覆盖范围。
 

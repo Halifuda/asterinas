@@ -267,7 +267,7 @@ overlayfs/
 ├── fs_type.rs                — OverlayFsType：VFS 注册类型
 ├── layer.rs                  — Layer / LayerStack / RealObjectStack
 ├── real.rs                   — RealObject / RealPath / RealObjectKey
-│        
+│
 ├── fs/                       — 挂载模块（一次 mount 拥有的全部）
 │   ├── mod.rs                — OverlayFs + FileSystem 实现
 │   ├── policy.rs             — 挂载后运行时可读 MountPolicy

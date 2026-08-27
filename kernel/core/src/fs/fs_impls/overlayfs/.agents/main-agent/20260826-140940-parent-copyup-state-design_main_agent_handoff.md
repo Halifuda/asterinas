@@ -900,3 +900,207 @@ semantics and `rekey` (code keeps `rekey_keep_old_alias`); whiteout / workdir /
 capabilities / options / identity projection internals (already match
 proposal-final); metacopy, redirect_dir, index (hooks only); no code changes
 are part of the 2026-08-27 documentation commit.
+
+---
+
+## 2026-08-27 implementation record: Batches A–D executed and accepted
+
+User authorized scheduling this day. All four batches ran as serial
+command-free Creator passes (Direct Spawn Lane) with main-agent exact-diff
+structural acceptance; **no compile/lint/runtime command was run** (container
+closed). Slicing recorded in `PASS_SLICING.md`
+(`parent_copyup_batches_slicing_20260827`) with two code-grounded re-slices:
+
+1. **RealObject reshaping moved from Batch A to pass_48**: `identity_only`'s
+   last live caller is the old readdir resolver, which itself needs Batch B's
+   parent field; deleting it in A would have broken the intermediate tree.
+   §2.e's "acceptable intermediate step" covers the same carve-up. A ships
+   only `RealPath::inode()`.
+2. **Parent-Arc resolution frozen** (avoiding write-set growth): `OverlayFs::lookup`
+   resolves the parent's canonical `Arc<OverlayInode>` through the inode cache
+   before projecting (the pre-existing "live parent registered under its key"
+   invariant; miss now fails closed with EIO instead of log-and-skip), so the
+   six non-Arc `fs.lookup(self, …)` call sites needed zero edits;
+   `dir/create.rs` uses a new private `OverlayInode::cached_self_arc()` at its
+   two projection sites.
+
+Accepted outcomes per batch (receipts + snapshots under
+`components/parent-copyup-state-design/`):
+
+- **pass_46_layer_strong_mount**: `Layer{mount, root_dentry, fsid,
+  container_dev_id}` strong-mount redesign; all layer-root upgrade/expect
+  sites eliminated across layer.rs / layer_parts.rs / mount/mod.rs /
+  fs/mod.rs / new_root / collect_layer_devs; `Dentry::inode()` widened to
+  `pub(in crate::fs)`.
+- **pass_47_parent_copyup_state**: `CopyUpState/CopyUpTarget`,
+  `ProjectionBinding<'a>`, `OverlayInode.parent/copyup`, root self-parent via
+  `Arc::new_cyclic`; winner commits `Done` under the guard; commit-failure arm
+  sets `need_repair = true`; carrier projection binds Child; rename writes
+  parent under held DIR locks; EXDEV gate keeps the redirect hook comment.
+  Deviations D1–D8 verified; D1 (read-only grep/find usage against the letter
+  of the dispatch ban) recorded as non-blocking process deviation.
+- **pass_48_readdir_parent_identity**: `..` resolved by reading
+  `self.parent` (`.. == .` at root; dead weak → self fallback); old resolver
+  chain, `root_visible_key`, `identity_only`, cached `real_inode`, and
+  `Option<RealPath>` deleted with zero live remnants; RealObject endpoint
+  `{layer_index, path, fsid, container_dev_id}` reached. Main agent applied
+  one mechanical fix (trailing comma in fs/mod.rs import), recorded in the
+  receipt's acceptance note.
+- **pass_49_field_order_and_q1_redundancy**: mixed-scheme field ordering for
+  both structs; read_at double-Once merged into one snapshot select; the
+  permission.rs double authority select adjudicated as NOT collapsible
+  (two-stage admission spans promotion — intentional); zero-edit deliverable.
+
+Next-main-agent actions:
+1. When the container opens: packeted Checker compile gate first
+   (target-specific `cargo check -p asterinas --target x86_64-unknown-none`),
+   then workspace lint; fix path follows PROTOCOL rule 10.
+2. Runtime revalidation after green compile: the schedulable regression table
+   (`002 003 006 007 010 011 012 014 024 031 038 077`) — copy-up coordinate
+   internals and `..` identity sources changed, so run the full table once,
+   not only previously-failing cases.
+3. Commit decision for the four batches' working tree belongs to the user
+   (default proposed: one commit per accepted batch using the archived
+   snapshots as boundaries, or a single squashed implementation commit).
+4. Reviewer gate over the cumulative diff can run before or after the
+   compile gate (static lane, command-free); recommend after compile to keep
+   review deltas stable.
+
+## 2026-08-27 static gate closed: `make check` fully green
+
+User opened the container and directed the Checker lane. Three rounds of
+`task_checker_parent_copyup_compile_lint_20260827`
+(single gate: `docker exec -w /root/asterinas codex-asterinas-dev make check`):
+
+- **run01 FAIL** at the front gates before compilation: 4 trailing-whitespace
+  markdown lines (PASS_SLICING.md, structure-design-appendices.md ×2,
+  structure-design-proposal.md — all main-agent-owned `.agents` records) plus
+  9 rustfmt hunks in the four-batch code. Main agent applied all mechanically.
+- **run02 FAIL** with 4 clippy errors (first time compilation/clippy was
+  reached): 3× `inconsistent_struct_constructor` from pass_49's field
+  reordering (fixed by reordering constructor literals per clippy's own
+  suggestion), and dead-code on `IdentityPolicy::is_all_layers_same_fs` /
+  `is_directory_projection_deterministic`. The Checker tagged the latter as
+  design; the main agent adjudicated it mechanical with evidence — grep
+  proved zero live callers and their only consumers were already deleted in
+  the ACCEPTED pass_48 design (old readdir resolver chain), so deletion merely
+  completes pass_48's "no dead code" frozen rule one file beyond its
+  write-set. Both methods deleted; the stale doc clause on `xino_fits`
+  referencing the deleted determinism route was tightened too.
+- **run03 PASS** — exit 0 in ~21 s, full pipeline (rustfmt, clippy ×2 gates,
+  kernel member, non-default members, bzimage setup, regression-test format
+  gate) with zero diagnostics.
+
+Evidence:
+`components/parent-copyup-state-design/run_evidence/checker_compile_lint_20260827/run{01,02,03}/`;
+receipt: `components/parent-copyup-state-design/task_checker_parent_copyup_compile_lint_20260827_checker.md`.
+Checker never self-repaired across all rounds; every diagnostic preserved
+verbatim. Non-blocking anomaly recorded: run03 reported PROTOCOL.md missing
+at three candidate paths — the file exists at the overlayfs workspace root
+(read-verified this session); treated as subagent path-resolution noise.
+
+Remaining gates (pending user instruction): runtime xfstests revalidation
+(the schedulable 12-case table, full run since copy-up coordinates and `..`
+identity sources changed) and the commit decision for the uncommitted working
+tree.
+
+## 2026-08-27 proposal-review design notes (recorded ONLY; no code changes)
+
+Outcome of the peer-review explanation rounds and two user meetings, recorded
+as scheduling-menu input for later sessions. **Nothing below is implemented or
+dispatched; user explicitly froze code changes ("不要改代码").**
+
+### 1. Proposal revision plan (ready-to-write, awaiting green light)
+
+Full draft appendix was authored by the main agent and appended verbatim by a
+background subagent to
+`designdoc/structure-design-proposal-final-review.md`
+(注意：该文件此轮已被 user 改名——更早会话读到的是
+`structure-design-proposal-final-peer-review.md`；若改名非用户所为需回迁核实)。
+Ten planned items reduce to three blocks:
+
+- 新增：动机节 overlayfs 一句话定义；§7 规则区 whiteout/opaque 定义下放 +
+  三条一行 case；NegativeLookup 三态行为契约（对外统一 ENOENT、内部分支差异）。
+- 定约（规范源，实现将向其收敛）：`parent` 字段改名 +
+  rationale 三层事实（构造期一次性绑定与跨父 rename 唯一重写点；
+  多 alias first-seen-wins 与 accepted split 从实现注释升格为文档承诺；
+  不由物理 dentry 反查派生——逻辑命名空间演化快于物理形态，redirect 式
+  语义是根本理由）。字段名候选 `binding_anchor` / `publication_parent` /
+  `publish_parent`，**待用户最终拍板**。
+- 精简：§5 root_dentry 注释最简重写（clone-mount 可行性论证全部留在本节，
+  不进文档）；§6 RealPath 收敛至两三行；§2 字段块对齐 pass_49 终态并
+  删组序口号；L136 UB 句只挂 Linux overlayfs.rst reference（用户指示不引
+  自有工程文档）；章节顺序按评审建议调整为 层模型紧跟挂载流程。
+  en 版是否同步翻译待定。
+
+### 2. Copy-up 四操作的方法化定约（规范形状）
+
+§9 四个自由函数改为 `impl OverlayInode` 四方法（lock_copyup /
+stage_in_workdir / publish_by_rename / copy_up），类型闭合要点：
+`MutexGuard` 出借可变目标经 `CopyUpState::outstanding_mut()`（need_repair
+合法写入的最小闭环）；need_repair 置位归 publish_by_rename 内部、Done 提交
+归 copy_up 成功尾部；祖先逐级提升游离于四抽象之外由外层机制承担；workdir
+作为挂载级资源藏于 stage 抽象背后，不把 OverlayFs 引入伪代码。这是规范性
+目标形状，后续实现 wave 将把生产代码向它收敛——尚未调度。
+
+### 3. 瞬时事实栈：文档一句话 + 实现侧备忘
+
+- 文档侧已定稿单句（进 §7 流程第 1 步后）："合并扫描把各层命中项就地移动
+  收集为瞬时事实栈，热路径不做克隆、不引入额外分配。"——**不出现**容器
+  类型/move 关键字/机制解释（会议定调）。
+- 实现侧备忘（同属"stack 的 move 消费"，均未调度）：借用视图不可行
+  （child hit 是每次解析的新产物无处可借），根治形态为值内联：
+  ① `layer.rs` 三个构造器与 `lookup.rs:114` 的 `dir_hits` 换
+  `SmallVec<[RealObject; 4]>`（workspace 已有 smallvec 1.13.2，ext2 有
+  使用先例）；② 把 `lookup.rs:284-285` 的 eager
+  `facts.lowers/upper.clone()` 下移进 create closure，竞态命中路径零拷贝。
+
+### 4. Dentry 化转发 + 复用 clone_mount（本轮讨论的主设计项，全部未授权）
+
+实证基础：Mount 相等 EXDEV 门只存在于 `Path::rename`(vfs/path/mod.rs:708)
+与 `Path::link`(:676)；深层 `DirDentry::rename`(dentry.rs:762) 无凭证检查、
+无 mount 参与；`as_dir_dentry_or_err` 已 `pub(in crate::fs)` 且 overlay 今日
+已在用 `DirDentry::lookup_child`。非 dir 操作审计结论：数据/xattr/metadata/
+symlink 等一贯经 `select_real_inode()` 直发 `Arc<dyn Inode>`，不经过 Path，
+零受影响面；真实爆破半径恰为目录条目变更族 + workdir 工具带。
+
+既定两刀切法：
+
+1. **第一刀（纯机械）**：仅放宽 rename/mknod/new_fs_child/link/unlink/rmdir
+   至 `pub(in crate::fs)` 并换调 DirDentry 层。单一共享 Mount 下所有判定
+   逐位不变（门被绕过但本就不触发），可独立编译+回归验收。
+2. **第二刀**：**不新增任何 VFS API** —— 复用既有
+   `Mount::clone_mount(root_dentry, new_ns)`(mount.rs:454，共享 fs、根任指、
+   parent/mountpoint 天然空)，仅需一处可见性放宽到 `pub(in crate::fs)`；
+   以空 `Weak<MountNamespace>` 获得不对拓扑注册的孤儿视图（构造器注释的
+   pseudo-mount 先例即权威依据）。产三组视图（lower×n、upper、workdir 各一）
+   后：`Layer` 收缩为 `{mount, fsid, container_dev_id}`（root 由 clone 承载）、
+   `RealObject` 只存 `Arc<Dentry>` + 身份三元组、`RealPath` 类型整体删除，
+   锚点有效性不变式转为 "OverlayFs 活 ⇒ 视图活"，EIO-on-upgrade 分支族消亡。
+   被跳过的 `check_dir_entry_mutation`（mount-writable 标志 + 凭证复查）须在
+   packet 中显式签收为设计决策。
+
+遗留审计点（第二刀 packet 内完成）：空弱 ns 手法对照、20 处消费点的 C 类
+映射表（含 capabilities/inuse/workdir 工具带）、flags 对 lower 克隆只读语义
+的处理、workdir 第三视图的边界（可能不在 upper 子树内）。
+
+Next-main-agent actions（新增部分覆盖式并入上节的遗留清单）：
+1. proposal 十项修订落笔前的两个开放输入：parent 字段名拍板；en 版同步与否。
+2. 若授权实施上述任一项（方法化收敛 / stack 内联 / 两刀转发改造），走
+   bounded Designer packet 冻结面后切片派发；在此之前维持零代码改动状态。
+
+### 5. 导师反馈两则的处置记录（2026-08-27 晚）
+
+- **RealObject 收敛**：`fsid`/`container_dev_id` 从 `RealObject` 移出、经
+  `layer_stack[idx]` 取用的方向记录在案；"Arc<dyn FileSystem> 指针 + ino 做
+  cache key"实验**否决**（fsid 即该身份的最简编码）。后经用户确认按本方向
+  **落地到正文**：§6 的 `RealObject` 现为 `{layer_index, dentry}`，
+  层身份由层定义统一携带；实现侧收敛在后续 wave 跟随。
+- **need_repair 说明修正**：正文 §9 该段已按"窗口定义 + 两类真实失败源
+  （ENOSPC 写盘错误 / 并发查找抢先占缓存位）+ 复用协议"重写；overlay
+  inode_cache 的 displacement 分支语义与之相符。
+- **binding_anchor 的 trait/Dentry 替代方案**：导师提出的议题明确搁置
+  （波及 Inode trait 七口签名 + 全 fs 适配，工作量大）；此前评估中的关键
+  观察（overlay 逻辑树即 VFS namespace dentry 树、副本视图使层根/身份可从
+  单一判别信息推导）保留在本节供日后重启。相关补丁三冲突/四开放问题
+  维持在 `proposal_dentry_clone_view_patch_20260827.md`。
