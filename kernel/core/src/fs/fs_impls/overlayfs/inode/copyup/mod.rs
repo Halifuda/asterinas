@@ -5,9 +5,18 @@
 //! and object-kind promotion.
 //!
 //! [`OverlayInode::ensure_upper_authority`] is the single promotion entry.
-//! The per-object [`CopyUpTransition`] coordinate is recorded once at the
-//! first positive lookup; the trigger promotes ancestors before the child
-//! and serializes winners through `copyup_transition`.
+//! Each lower-backed object carries its [`CopyUpState`] from projection time;
+//! the trigger promotes ancestors before the child and serializes winners
+//! through the `copyup` mutex.
+//!
+//! ## Locking
+//!
+//! Only three overlay-internal orders exist: `CUL -> DIR`,
+//! `DIR -> PARENT`, and `CUL -> PARENT` (CUL is the per-object `copyup`
+//! mutex, PARENT the per-object `parent` lock). The coordinate read below
+//! releases PARENT together with CUL before the ancestor walk; the
+//! `InodeCache` stays a leaf lock, and the projection's create closure is
+//! pure field initialization that takes no lock.
 //!
 //! ## References
 //!
@@ -24,7 +33,7 @@ use crate::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
             inode::{
-                Lookup, OverlayInode,
+                Lookup, OverlayInode, ProjectionBinding,
                 xattr::{XattrCopyPolicy, copy_eligible_xattrs, set_impure_marker},
             },
             real::RealObject,
@@ -39,55 +48,23 @@ use crate::{
 
 pub(super) mod workdir;
 
-/// The copy-up publication coordinate and phase of one logical overlay object.
+/// The copy-up state of one logical overlay object.
 ///
-/// Recorded exactly once at the first positive lookup; its coordinate fields
-/// are fixed and only `phase` can transition thereafter;
-/// the upper authority in the real-object state is the durable outcome, so no
-/// copy-up-completed history marker exists. The publication-parent chain is
-/// acyclic and root-terminated, so the trigger's top-down ancestor walk
-/// terminates and never re-enters the same instance.
-pub(super) struct CopyUpTransition {
-    /// The logical parent overlay inode; `None` until the first positive
-    /// lookup records it. Its upper existence is resolved by the trigger's
-    /// ancestor walk, which checks the parent's upper existence and may
-    /// promote it first.
-    publication_parent: Option<Arc<OverlayInode>>,
-    name: Option<String>,
-    phase: CopyUpPhase,
+/// `Outstanding` covers a lower-backed object's whole non-terminal life —
+/// not-started, in-progress, or pending verification repair (`need_repair`);
+/// `Done` is the terminal state: upper-backed objects and the mount root.
+pub(super) enum CopyUpState {
+    Done,
+    Outstanding(CopyUpTarget),
 }
 
-impl CopyUpTransition {
-    /// Constructs an unrecorded transition coordinate.
-    pub(super) fn new() -> Self {
-        Self {
-            publication_parent: None,
-            name: None,
-            phase: CopyUpPhase::Idle,
-        }
-    }
-}
-
-/// The transition marker of one copy-up coordination.
-///
-/// Maps the copy-up phase values to their semantic states:
-/// - lower-authoritative: the real-object stack has no upper and
-///   [`CopyUpPhase::Idle`].
-/// - promotion-in-progress: the `copyup_transition` guard is held by
-///   the winner (observable only as mutex contention).
-/// - upper-authoritative: the real-object stack has an upper.
-/// - retryable failure: the error is returned to the caller (authority
-///   unchanged, no durable marker needed).
-/// - reconcile-required: [`CopyUpPhase::ReconcilePending`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopyUpPhase {
-    /// The coordinate carries no unfinished transition; a lower authority (if
-    /// any) is clean.
-    Idle,
-    /// Physical publication happened but semantic publication failed; the
-    /// upper object at `(publication_parent, name)` must be verified before
-    /// reuse.
-    ReconcilePending,
+/// The publication target of an outstanding copy-up.
+pub(super) struct CopyUpTarget {
+    /// The name under which the upper object is published in the parent.
+    pub(super) name: String,
+    /// Whether a physically published but semantically unfinished upper
+    /// object must be verified before reuse.
+    pub(super) need_repair: bool,
 }
 
 /// The maximum depth of the copy-up ancestor recursion.
@@ -105,36 +82,14 @@ const MAX_COPYUP_DEPTH: usize = 1024;
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
 impl OverlayInode {
-    /// Records the copy-up transition coordinate at the first positive
-    /// lookup.
-    ///
-    /// The coordinate is set once — the first positive lookup wins; the
-    /// non-blocking `try_lock` skips when contended because a transition
-    /// already running has already set it.
-    pub(super) fn try_record_copyup_transition(
-        &self,
-        publication_parent: Arc<OverlayInode>,
-        name: &str,
-    ) {
-        let Some(mut guard) = self.try_lock_copyup_transition() else {
-            return;
-        };
-        if guard.publication_parent.is_some() {
-            return;
-        }
-        guard.publication_parent = Some(publication_parent);
-        guard.name = Some(String::from(name));
-        guard.phase = CopyUpPhase::Idle;
-    }
-
     /// Promotes this logical object to upper authority, winning or waiting on
-    /// the per-object copy-up coordination guard (`copyup_transition`).
+    /// the per-object `copyup` mutex.
     ///
     /// Returns `Ok(())` once the object is upper-backed (idempotent fast
-    /// path, waiter leg, or this task's own completed promotion), `Err` when
-    /// no publication coordinate is recorded, and propagates any underlying
-    /// recipe failure unchanged. A deeper ancestor chain than
-    /// [`MAX_COPYUP_DEPTH`] fails closed with `Errno::ELOOP`.
+    /// path, waiter leg, or this task's own completed promotion), and
+    /// propagates failures unchanged: a dead publication parent or a broken
+    /// state/authority pair fails closed with `EIO`, and an ancestor chain
+    /// deeper than [`MAX_COPYUP_DEPTH`] fails closed with `Errno::ELOOP`.
     pub(super) fn ensure_upper_authority(&self) -> Result<()> {
         self.ensure_upper_authority_inner(0)
     }
@@ -150,26 +105,28 @@ impl OverlayInode {
             return Ok(());
         }
 
-        // Publication coordinate: the brief
-        // `copyup_transition` read clones the logical parent and name so the
-        // guard is released before the recursive ancestor walk; both are
-        // fixed once the coordinate is recorded, so the winner body reuses
-        // this single coordinate.
+        // Coordinate read (`CUL -> PARENT`): upgrade the publication parent
+        // to a strong reference under the `copyup` mutex, then release both
+        // guards before the recursive ancestor walk. A dead weak reference
+        // fails closed; the parent is never resurrected.
         let (publication_parent, name) = {
-            let transition = self.lock_copyup_transition();
-            let Some(publication_parent) = transition.publication_parent.as_ref().cloned() else {
+            let state = self.copyup.lock();
+            let target = match &*state {
+                CopyUpState::Done => {
+                    return Err(Error::with_message(
+                        Errno::EIO,
+                        "an upper-authoritative overlay object entered the copy-up trigger",
+                    ));
+                }
+                CopyUpState::Outstanding(target) => target,
+            };
+            let Some(parent) = self.parent.read().upgrade() else {
                 return Err(Error::with_message(
-                    Errno::ENOENT,
-                    "the overlay object has no recorded copy-up publication coordinate",
+                    Errno::EIO,
+                    "the copy-up publication parent no longer exists",
                 ));
             };
-            let Some(name) = transition.name.as_ref().cloned() else {
-                return Err(Error::with_message(
-                    Errno::ENOENT,
-                    "the overlay object has no recorded copy-up publication coordinate",
-                ));
-            };
-            (publication_parent, name)
+            (parent, target.name.clone())
         };
 
         if depth >= MAX_COPYUP_DEPTH {
@@ -180,9 +137,8 @@ impl OverlayInode {
         }
         publication_parent.ensure_upper_authority_inner(depth + 1)?;
 
-        // Winner/waiter serialization: the sleep-capable
-        // `copyup_transition` lock wait.
-        let mut transition = self.lock_copyup_transition();
+        // Winner/waiter serialization: the sleep-capable `copyup` lock wait.
+        let mut state = self.copyup.lock();
 
         // Re-check under the guard: another task won and promoted while this
         // task waited; re-observe upper authority and return the same
@@ -191,37 +147,45 @@ impl OverlayInode {
             return Ok(());
         }
 
-        // Winner body:
-        let coordinate = &mut *transition;
-        self.promote(&publication_parent, &name, coordinate)?;
+        // Winner body: the state was outstanding at the coordinate read, and
+        // a competing completion under this guard is indistinguishable from
+        // upper authority, caught by the recheck above.
+        let CopyUpState::Outstanding(target) = &mut *state else {
+            return Err(Error::with_message(
+                Errno::EIO,
+                "the overlay copy-up state turned inconsistent during arbitration",
+            ));
+        };
+        self.promote(&publication_parent, &name, target)?;
+        *state = CopyUpState::Done;
         Ok(())
     }
 
     /// Runs the winner promotion body for this object.
     ///
-    /// Called by the trigger with the `copyup_transition` arbitration guard
-    /// held. The object kind is dispatched internally; success commits the
-    /// phase to [`CopyUpPhase::Idle`], and recipe-arm failures classify as
-    /// cleanup-before-publication vs `ReconcilePending`.
+    /// Called by the trigger with the `copyup` arbitration guard held. The
+    /// object kind is dispatched internally; on success the caller commits
+    /// [`CopyUpState::Done`], and recipe-arm failures classify as
+    /// cleanup-before-publication vs `need_repair`.
     fn promote(
         &self,
         publication_parent: &Arc<OverlayInode>,
         name: &str,
-        coordinate: &mut CopyUpTransition,
+        target: &mut CopyUpTarget,
     ) -> Result<()> {
-        // 1) Idempotent upper fast path: a waiter may have completed the
-        //    transition while this task waited for the arbitration guard.
+        // Idempotent upper fast path: a waiter may have completed the
+        // promotion while this task waited for the arbitration guard.
         if self.upper.get().is_some() {
             return Ok(());
         }
 
         // The publication parent's upper directory path is computed once and
-        // shared by the ReconcilePending verification and the promotion body.
+        // shared by the `need_repair` verification and the promotion body.
         let upper_dir_path = publication_parent.upper_parent_path()?;
-        // 2) ReconcilePending verification (recovery): the parent was
-        //    promoted by the ancestor walk, so its real object is the upper
-        //    directory; the verify helper consumes the passed `name`.
-        if coordinate.phase == CopyUpPhase::ReconcilePending {
+        // Repair verification: the parent was promoted by the ancestor walk,
+        // so its real object is the upper directory; the verify helper
+        // consumes the passed `name`.
+        if target.need_repair {
             self.verify_upper_target(&upper_dir_path, name)?;
         }
 
@@ -263,7 +227,7 @@ impl OverlayInode {
                     return Err(err);
                 }
                 self.finish_promotion(
-                    coordinate,
+                    target,
                     publication_parent,
                     name,
                     &upper_dir_path,
@@ -300,7 +264,7 @@ impl OverlayInode {
                     return Err(err);
                 }
                 self.finish_promotion(
-                    coordinate,
+                    target,
                     publication_parent,
                     name,
                     &upper_dir_path,
@@ -337,7 +301,7 @@ impl OverlayInode {
                     return Err(err);
                 }
                 self.finish_promotion(
-                    coordinate,
+                    target,
                     publication_parent,
                     name,
                     &upper_dir_path,
@@ -412,7 +376,7 @@ impl OverlayInode {
                     return Err(err);
                 }
                 self.finish_promotion(
-                    coordinate,
+                    target,
                     publication_parent,
                     name,
                     &upper_dir_path,
@@ -426,7 +390,6 @@ impl OverlayInode {
             )),
         };
         result?;
-        coordinate.phase = CopyUpPhase::Idle;
         Ok(())
     }
 
@@ -434,9 +397,9 @@ impl OverlayInode {
     ///
     /// The caller has already run the preparation and cleaned up on failure;
     /// this tail performs the physical publication. Failures before commit
-    /// clean the workdir temp; failures after the physical rename mark the
-    /// coordinate `ReconcilePending` for the next winner. Success leaves the
-    /// caller to set the coordinate back to `Idle`.
+    /// clean the workdir temp; failures after the physical rename flag the
+    /// target `need_repair` for the next winner. Success leaves the caller
+    /// to commit `Done`.
     ///
     /// The physical rename and the semantic upper-authority commit run while
     /// holding `publication_parent.lock`. This is the single `CUL -> lock`
@@ -444,7 +407,7 @@ impl OverlayInode {
     /// promotion before taking any directory transaction lock.
     fn finish_promotion(
         &self,
-        coordinate: &mut CopyUpTransition,
+        target: &mut CopyUpTarget,
         publication_parent: &Arc<OverlayInode>,
         name: &str,
         upper_dir_path: &Path,
@@ -471,12 +434,12 @@ impl OverlayInode {
             committed = rename_result.is_ok();
             rename_result.and_then(|_| {
                 let upper_real = self.upper_real_object(upper_dir_path, name)?;
-                self.publish_upper_authority(upper_real, lower)
+                self.publish_upper_authority(upper_real, lower, publication_parent, name)
             })
         };
         if let Err(err) = publish_result {
             if committed {
-                Self::mark_reconcile_pending(coordinate);
+                target.need_repair = true;
             } else {
                 let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
             }
@@ -590,18 +553,26 @@ impl OverlayInode {
         &self,
         upper_real: RealObject,
         lower_real: RealObject,
+        publication_parent: &Arc<OverlayInode>,
+        name: &str,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
         fs.store_lower_id(upper_real.real_inode(), &lower_real)?;
         // `lowers` are immutable across copy-up, so the carrier only publishes
         // the newly created upper object.
-        let carrier = fs.project_inode(&self.real_object_stack());
+        let carrier = fs.project_inode(
+            &self.real_object_stack(),
+            ProjectionBinding::Child {
+                parent: publication_parent,
+                name,
+            },
+        );
         carrier.replace_facts(upper_real.clone(), &upper_real)?;
         Ok(())
     }
 
     /// Verifies the upper entry at the publication coordinate before reuse
-    /// (ReconcilePending path).
+    /// (`need_repair` recovery).
     ///
     /// Covers the upper entry's object type and basic mode metadata; a
     /// mismatch rejects the reconcile with `EIO`.
@@ -629,13 +600,6 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         let upper_layer = fs.layer_stack().upper_layer()?;
         Ok(upper_layer.child_real_object(&child_path))
-    }
-
-    /// Called on failure after physical publication: the upper object at the
-    /// publication coordinate is retained and the next winner entry must
-    /// verify it before reuse.
-    fn mark_reconcile_pending(coordinate: &mut CopyUpTransition) {
-        coordinate.phase = CopyUpPhase::ReconcilePending;
     }
 
     /// Returns the topmost lower real object of this object (`lowers[0]`).

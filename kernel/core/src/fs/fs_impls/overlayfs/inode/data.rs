@@ -20,17 +20,25 @@ use crate::{
 };
 
 impl OverlayInode {
-    // A lower-backed read passes `O_NOATIME` so a read never updates the lower
-    // atime; the `O_NOATIME` decision and the real-inode selection share the
-    // same `facts` snapshot below, so no double-snapshot window remains.
+    // One `Once` read picks both the authority and the flag class:
+    // lower-backed reads add `O_NOATIME` so reading never updates the lower
+    // atime; upper-backed reads delegate with the caller's flags unchanged.
     pub(super) fn read_at_impl(
         &self,
         offset: usize,
         writer: &mut VmWriter,
         status_flags: StatusFlags,
     ) -> Result<usize> {
-        let is_lower_backed = self.upper.get().is_none();
-        let real = self.select_real_inode();
+        let (real, is_lower_backed) = match self.upper.get() {
+            Some(upper) => (upper.real_inode(), false),
+            None => (
+                self.lowers
+                    .first()
+                    .expect("a real-object stack is never empty")
+                    .real_inode(),
+                true,
+            ),
+        };
         let status_flags = if is_lower_backed {
             status_flags | StatusFlags::O_NOATIME
         } else {

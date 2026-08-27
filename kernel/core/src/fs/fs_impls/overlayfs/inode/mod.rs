@@ -5,8 +5,8 @@
 //!
 //! [`OverlayInode`] is the published logical inode shared by every name bound
 //! to the same overlay object. It owns the per-object real-object facts, the
-//! per-directory transaction lock, the precomputed projected identity, and
-//! the copy-up coordination state.
+//! canonical parent pointer, the per-directory transaction lock, the
+//! precomputed projected identity, and the copy-up state.
 //!
 //! # Locking
 //!
@@ -38,7 +38,7 @@ pub(super) use self::{
 };
 use self::{
     identity::ObjectId,
-    lookup::{Lookup, NegativeLookup, is_opaque_directory, is_whiteout_inode},
+    lookup::{Lookup, NegativeLookup, ProjectionBinding, is_opaque_directory, is_whiteout_inode},
     permission::AccessType,
     readdir::ReaddirIndex,
 };
@@ -47,7 +47,7 @@ use crate::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
             fs::OverlayFs,
-            inode::copyup::CopyUpTransition,
+            inode::copyup::CopyUpState,
             layer::RealObjectStack,
             real::{RealObject, RealObjectKey},
         },
@@ -77,17 +77,21 @@ pub(super) struct OverlayInode {
     lowers: Vec<RealObject>,
     /// The upper real object; unset until copy-up publishes one.
     upper: Once<RealObject>,
+    /// The precomputed projected `st_dev`/`st_ino`.
+    object_id: ObjectId,
     /// The per-inode transaction lock. Directories carry their merged-readdir
     /// index in the payload; non-directories use the lock as a pure
     /// serialization token with `None`.
     lock: Mutex<Option<ReaddirIndex>>,
-    /// The precomputed projected `st_dev`/`st_ino`.
-    object_id: ObjectId,
+    /// The canonical overlay parent. The mount root points to itself through
+    /// a `Weak` self-reference; every other inode points to its logical
+    /// parent or copy-up publication parent. `Weak` avoids the parent-child
+    /// cycle with the readdir index.
+    parent: RwMutex<Weak<OverlayInode>>,
+    /// The per-object copy-up state (see [`CopyUpState`]).
+    copyup: Mutex<CopyUpState>,
     /// The VFS inode extension groups (fs event publisher / fs lock context).
     extension: Extension,
-    /// The copy-up transition coordinate; `publication_parent`/`name` are
-    /// `None` until the first positive-binding publication records them.
-    copyup_transition: Mutex<CopyUpTransition>,
 }
 
 impl OverlayInode {
@@ -107,10 +111,7 @@ impl OverlayInode {
         };
         let layer_stack = &fs.layer_stack();
         let upper = layer_stack.upper_layer().ok().map(|layer| {
-            let root_path = layer
-                .root_path
-                .upgrade()
-                .expect("the pinned layer root path must stay alive for the mount lifetime");
+            let root_path = layer.root_path();
             RealObject::from_layer_path(0, &root_path, layer.fsid, layer.container_dev_id)
         });
         let lowers: Vec<_> = layer_stack
@@ -118,10 +119,7 @@ impl OverlayInode {
             .iter()
             .enumerate()
             .map(|(layer_index, layer)| {
-                let root_path = layer
-                    .root_path
-                    .upgrade()
-                    .expect("the pinned layer root path must stay alive for the mount lifetime");
+                let root_path = layer.root_path();
                 RealObject::from_layer_path(
                     layer_index + 1,
                     &root_path,
@@ -130,7 +128,10 @@ impl OverlayInode {
                 )
             })
             .collect();
-        fs.project_inode(&RealObjectStack::new(upper, lowers))
+        fs.project_inode(
+            &RealObjectStack::new(upper, lowers),
+            ProjectionBinding::Root,
+        )
     }
 
     /// Returns the inode-cache key derived from the current visible source.
@@ -198,15 +199,15 @@ impl OverlayInode {
         })
     }
 
-    /// Locks the per-object copy-up coordination state.
-    fn lock_copyup_transition(&self) -> MutexGuard<'_, CopyUpTransition> {
-        self.copyup_transition.lock()
-    }
-
-    /// Attempts to lock the per-object copy-up coordination state without
-    /// blocking; `None` when another coordinator holds the lock.
-    fn try_lock_copyup_transition(&self) -> Option<MutexGuard<'_, CopyUpTransition>> {
-        self.copyup_transition.try_lock()
+    /// Returns this inode's canonical cached `Arc`, or `Err(EIO)` when absent.
+    fn cached_self_arc(&self) -> Result<Arc<OverlayInode>> {
+        let fs = self.fs_arc()?;
+        fs.inodes().get(self.key()).ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "this overlay inode is not registered under its visible-source key",
+            )
+        })
     }
 
     /// Serializes an `O_APPEND` write as one atomic size-read + write.

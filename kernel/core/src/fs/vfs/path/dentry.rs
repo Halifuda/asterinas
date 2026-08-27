@@ -294,7 +294,7 @@ impl Dentry {
     }
 
     /// Gets the inner inode.
-    pub(super) fn inode(&self) -> &Arc<dyn Inode> {
+    pub(in crate::fs) fn inode(&self) -> &Arc<dyn Inode> {
         &self.inode
     }
 

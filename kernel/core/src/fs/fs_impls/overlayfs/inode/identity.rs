@@ -90,12 +90,7 @@ pub(in overlayfs) fn collect_layer_devs(
         layer_devs.push(LowerLayerIdentity {
             fsid: upper.fsid,
             container_dev_id: upper.container_dev_id,
-            lower_layer_root_ino: upper
-                .root_path
-                .upgrade()
-                .expect("the pinned layer root path must stay alive for the mount lifetime")
-                .inode()
-                .ino(),
+            lower_layer_root_ino: upper.root_dentry.inode().ino(),
         });
         Some(index)
     } else {
@@ -105,12 +100,7 @@ pub(in overlayfs) fn collect_layer_devs(
         layer_devs.push(LowerLayerIdentity {
             fsid: lower.fsid,
             container_dev_id: lower.container_dev_id,
-            lower_layer_root_ino: lower
-                .root_path
-                .upgrade()
-                .expect("the pinned layer root path must stay alive for the mount lifetime")
-                .inode()
-                .ino(),
+            lower_layer_root_ino: lower.root_dentry.inode().ino(),
         });
     }
     (layer_devs, upper_layer_dev_index)
@@ -193,10 +183,6 @@ impl IdentityPolicy {
             return false;
         }
         matches!(self.xino_mode, XinoMode::Auto | XinoMode::On)
-    }
-
-    pub(super) fn is_all_layers_same_fs(&self) -> bool {
-        self.is_all_layers_same_fs
     }
 
     /// Projects the dev/ino identity of a real object from its own layer
@@ -291,30 +277,12 @@ impl IdentityPolicy {
     /// Returns whether the `(layer_id, real_ino)` pair fits the xino-encoded
     /// ino space.
     ///
-    /// The same fit predicate gates the xino encode and the directory
-    /// determinism check, so the readdir `..` route can decide before
-    /// projecting whether its published `d_ino("..")` stays stable across
-    /// calls. Checked arithmetic skips the degenerate `payload_bits == U64_BITS`
+    /// Checked arithmetic skips the degenerate `payload_bits == U64_BITS`
     /// (`xino_shift == 0`) case, so it never shifts by the full bit width.
     fn xino_fits(&self, layer_id: u64, real_ino: u64) -> bool {
         let payload_bits = U64_BITS - self.xino_shift;
         payload_bits == U64_BITS
             || (real_ino >> payload_bits == 0 && layer_id >> self.xino_shift == 0)
-    }
-
-    /// Returns whether projecting the `(layer_id, real_ino)` pair as a
-    /// directory is deterministic — same-fs passthrough or a fitting xino
-    /// encode — rather than the xino-off directory branch that allocates a
-    /// fresh fallback ino per call.
-    pub(super) fn is_directory_projection_deterministic(
-        &self,
-        layer_id: u64,
-        real_ino: u64,
-    ) -> bool {
-        if self.is_all_layers_same_fs {
-            return true;
-        }
-        self.is_xino_effective() && self.xino_fits(layer_id, real_ino)
     }
 
     /// Allocates a fallback ino for directories / anon objects when xino is

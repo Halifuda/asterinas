@@ -3,11 +3,12 @@
 #![short_vis_path::add(overlayfs)]
 //! Real (underlying) object references used by overlayfs.
 //!
-//! [`RealPath`] is a dentry-anchored path to a real filesystem object and
-//! deliberately does not cache its inode: the inode is obtained through
-//! [`Path::inode`] after upgrading the anchor. [`RealObject`] combines that
-//! optional path with the identity fields needed by overlayfs, and
-//! [`RealObjectKey`] is the identity pair used by the inode cache.
+//! [`RealPath`] is a dentry-anchored path to a real filesystem object;
+//! [`RealPath::inode`] reads the dentry-owned inode infallibly and
+//! [`RealPath::upgrade`] rebuilds the anchor-mount [`Path`]. Every
+//! [`RealObject`] carries such a path plus the identity fields needed by
+//! overlayfs, and [`RealObjectKey`] is the identity pair used by the inode
+//! cache.
 
 use device_id::DeviceId;
 
@@ -44,43 +45,24 @@ impl RealPath {
         })?;
         Ok(Path::new(mount, self.dentry.clone()))
     }
+
+    /// Returns the anchored dentry's inode; infallible because the dentry
+    /// strongly owns it.
+    pub(super) fn inode(&self) -> &Arc<dyn Inode> {
+        self.dentry.inode()
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct RealObject {
     layer_index: usize,
-    real_inode: Arc<dyn Inode>,
-    /// Dentry-anchored real-object [`RealPath`] value.
-    real_path: Option<RealPath>,
+    path: RealPath,
     fsid: u64,
     container_dev_id: DeviceId,
 }
 
 impl RealObject {
-    /// Builds a path-less, identity-only real object.
-    ///
-    /// The readdir `..` projection constructs one of these per visible
-    /// child when it only needs the child's identity (dev/ino) — and not a
-    /// dentry path — so the object carries no stored `real_path`.
-    pub(super) fn identity_only(
-        layer_index: usize,
-        real_inode: Arc<dyn Inode>,
-        fsid: u64,
-        container_dev_id: DeviceId,
-    ) -> Self {
-        Self {
-            layer_index,
-            real_inode,
-            real_path: None,
-            fsid,
-            container_dev_id,
-        }
-    }
-
     /// Builds the dentry-anchored real object for a resolved layer path.
-    ///
-    /// The inode is taken from `path` before it is pinned into a [`RealPath`],
-    /// so `RealPath` does not need to cache a redundant inode.
     pub(super) fn from_layer_path(
         layer_index: usize,
         path: &Path,
@@ -89,8 +71,7 @@ impl RealObject {
     ) -> Self {
         Self {
             layer_index,
-            real_inode: path.inode().clone(),
-            real_path: Some(RealPath::from_path(path)),
+            path: RealPath::from_path(path),
             fsid,
             container_dev_id,
         }
@@ -117,23 +98,13 @@ impl RealObject {
     }
 
     pub(super) fn real_inode(&self) -> &Arc<dyn Inode> {
-        &self.real_inode
+        self.path.inode()
     }
 
-    /// Returns the dentry-anchored real-object `Path`.
-    ///
-    /// `Err(EIO)` when no path is stored or the anchor mount is no longer
-    /// alive.
+    /// Returns the dentry-anchored real-object `Path`; `Err(EIO)` when the
+    /// anchor mount is no longer alive.
     pub(super) fn real_path(&self) -> Result<Path> {
-        self.real_path
-            .as_ref()
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EIO,
-                    "the real object carries no dentry-anchored path",
-                )
-            })?
-            .upgrade()
+        self.path.upgrade()
     }
 
     pub(super) fn fsid(&self) -> u64 {

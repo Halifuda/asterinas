@@ -10,17 +10,19 @@
 
 use device_id::DeviceId;
 
-use super::real::{RealObject, RealObjectKey, RealPath};
+use super::real::{RealObject, RealObjectKey};
 use crate::{
-    fs::vfs::{file_system::FileSystem, path::Path},
+    fs::vfs::path::{Dentry, Mount, Path},
     prelude::*,
 };
 
 /// One pinned real layer root of an overlay mount.
 #[derive(Debug)]
 pub(super) struct Layer {
-    pub(super) root_path: RealPath,
-    pub(super) fs: Arc<dyn FileSystem>,
+    /// The mount the layer root was resolved through.
+    pub(super) mount: Arc<Mount>,
+    /// The layer-root dentry; the dentry owns the root inode.
+    pub(super) root_dentry: Arc<Dentry>,
     /// Per-unique-underlying-superblock identifier assigned at assembly.
     pub(super) fsid: u64,
     /// `st_dev` of the layer root, used for same-filesystem comparisons.
@@ -31,6 +33,12 @@ impl Layer {
     /// Builds the upper-layer (index 0) real object for `child_path`.
     pub(super) fn child_real_object(&self, child_path: &Path) -> RealObject {
         RealObject::from_layer_path(0, child_path, self.fsid, self.container_dev_id)
+    }
+
+    /// Returns the layer root path rebuilt from the strongly held mount and
+    /// root dentry.
+    pub(super) fn root_path(&self) -> Path {
+        Path::new(self.mount.clone(), self.root_dentry.clone())
     }
 }
 
@@ -51,13 +59,11 @@ impl LayerStack {
     /// Only layer roots are compared, so legal nested subdirectories are never rejected;
     /// violations return `EINVAL`.
     pub(super) fn validate_layer_overlap(new: &Layer, others: &[&Layer]) -> Result<()> {
-        let new_path = new.root_path.upgrade()?;
-        let new_dentry = new_path.dentry();
+        let new_dentry = &new.root_dentry;
         for other in others {
-            let other_path = other.root_path.upgrade()?;
-            let other_dentry = other_path.dentry();
+            let other_dentry = &other.root_dentry;
             if Arc::ptr_eq(new_dentry, other_dentry)
-                || Arc::ptr_eq(new_path.inode(), other_path.inode())
+                || Arc::ptr_eq(new.root_dentry.inode(), other.root_dentry.inode())
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -97,10 +103,9 @@ impl LayerStack {
     pub(super) fn validate_workdir_against_lowers(&self, workdir_path: &Path) -> Result<()> {
         let workdir_dentry = workdir_path.dentry();
         for lower in &self.lowers {
-            let lower_path = lower.root_path.upgrade()?;
-            let lower_dentry = lower_path.dentry();
+            let lower_dentry = &lower.root_dentry;
             if Arc::ptr_eq(lower_dentry, workdir_dentry)
-                || Arc::ptr_eq(lower_path.inode(), workdir_path.inode())
+                || Arc::ptr_eq(lower.root_dentry.inode(), workdir_path.inode())
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -141,7 +146,7 @@ impl LayerStack {
                 "the origin source does not identify a configured lower layer",
             )
         })?;
-        Ok(lower_layer.root_path.upgrade()?.inode().ino())
+        Ok(lower_layer.root_dentry.inode().ino())
     }
 }
 

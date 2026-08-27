@@ -24,7 +24,8 @@ use crate::{
         fs_impls::overlayfs::{
             fs::OverlayFs,
             inode::{
-                OverlayInode,
+                OverlayInode, ReaddirIndex,
+                copyup::{CopyUpState, CopyUpTarget},
                 xattr::{
                     MarkerReadSemantics, has_marker, opaque_marker_name, whiteout_marker_name,
                 },
@@ -53,6 +54,18 @@ pub(super) enum NegativeLookup {
     HiddenByWhiteout,
     /// The name is hidden by an opaque-directory barrier.
     HiddenByOpaque,
+}
+
+/// How a projected [`OverlayInode`] binds into the namespace: the mount
+/// root (its self-parent `Weak` is built by `Arc::new_cyclic`) or a named
+/// child under its canonical parent.
+#[derive(Clone, Copy)]
+pub(super) enum ProjectionBinding<'a> {
+    Root,
+    Child {
+        parent: &'a Arc<OverlayInode>,
+        name: &'a str,
+    },
 }
 
 /// Returns whether `real_inode` is a whiteout.
@@ -97,7 +110,7 @@ pub(super) fn is_opaque_directory(real: &RealObject) -> Result<bool> {
 impl OverlayFs {
     /// Runs the upper-first layer lookup for `name` inside `parent`'s
     /// real layers, with overlayfs merge-stop semantics.
-    fn lookup_in_layers(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
+    fn lookup_in_layers(&self, parent: &Arc<OverlayInode>, name: &str) -> Result<Lookup> {
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
         if let Some(upper_real) = parent.upper.get() {
@@ -109,14 +122,16 @@ impl OverlayFs {
                         return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                     }
                     if !hit.real_inode().type_().is_directory() {
-                        return Ok(Lookup::Positive(
-                            self.project_inode(&RealObjectStack::upper_only(hit)),
-                        ));
+                        return Ok(Lookup::Positive(self.project_inode(
+                            &RealObjectStack::upper_only(hit),
+                            ProjectionBinding::Child { parent, name },
+                        )));
                     }
                     if is_opaque_directory(&hit)? {
-                        return Ok(Lookup::Positive(
-                            self.project_inode(&RealObjectStack::upper_only(hit)),
-                        ));
+                        return Ok(Lookup::Positive(self.project_inode(
+                            &RealObjectStack::upper_only(hit),
+                            ProjectionBinding::Child { parent, name },
+                        )));
                     }
                     dir_hits.push(hit);
                 }
@@ -146,9 +161,10 @@ impl OverlayFs {
                     }
                     if !hit.real_inode().type_().is_directory() {
                         if dir_hits.is_empty() {
-                            return Ok(Lookup::Positive(
-                                self.project_inode(&RealObjectStack::lower_only(hit)),
-                            ));
+                            return Ok(Lookup::Positive(self.project_inode(
+                                &RealObjectStack::lower_only(hit),
+                                ProjectionBinding::Child { parent, name },
+                            )));
                         }
                         // A non-directory below an accumulated directory hit
                         // stops the downward merge: every deeper layer stays
@@ -175,9 +191,10 @@ impl OverlayFs {
         } else {
             None
         };
-        Ok(Lookup::Positive(
-            self.project_inode(&RealObjectStack::new(upper, dir_hits)),
-        ))
+        Ok(Lookup::Positive(self.project_inode(
+            &RealObjectStack::new(upper, dir_hits),
+            ProjectionBinding::Child { parent, name },
+        )))
     }
 
     /// Resolves one `name` under `parent` into a [`Lookup`].
@@ -185,24 +202,13 @@ impl OverlayFs {
     /// The flow is pure resolve: the layer-ordered lookup re-observes fresh
     /// layer truth and projects it directly, with no verify-then-serve cache.
     pub(super) fn lookup(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
-        let parent_id = parent.key();
-        let lookup = self.lookup_in_layers(parent, name)?;
-        if let Lookup::Positive(inode) = &lookup {
-            if let Some(parent) = self.inodes().get(parent_id) {
-                inode.try_record_copyup_transition(parent, name);
-            } else {
-                debug_assert!(
-                    false,
-                    "a live overlay parent is always registered under its current visible-source key"
-                );
-                error!(
-                    "overlay parent identity inconsistency: no inode-cache entry for \
-                     visible-source key {:?}",
-                    parent_id
-                );
-            }
-        }
-        Ok(lookup)
+        let parent_arc = self.inodes().get(parent.key()).ok_or_else(|| {
+            Error::with_message(
+                Errno::EIO,
+                "the overlay parent is not registered under its visible-source key",
+            )
+        })?;
+        self.lookup_in_layers(&parent_arc, name)
     }
 
     /// Creates or reuses the shared [`OverlayInode`] for `facts`.
@@ -211,7 +217,14 @@ impl OverlayFs {
     /// without reading the upper's lower-id origin record. On a miss the
     /// lower-id read is still done before the inode-cache write path, so it
     /// never runs inside the cache's upgraded guard.
-    pub(super) fn project_inode(&self, facts: &RealObjectStack) -> Arc<OverlayInode> {
+    ///
+    /// A validated hit returns the existing inode unwritten; the binding
+    /// shapes only the miss-side construction.
+    pub(super) fn project_inode(
+        &self,
+        facts: &RealObjectStack,
+        binding: ProjectionBinding<'_>,
+    ) -> Arc<OverlayInode> {
         let source = facts.visible_source();
         let key = facts.key();
         let is_directory = facts.is_merged() || source.real_inode().type_().is_directory();
@@ -288,21 +301,40 @@ impl OverlayFs {
                     Some(upper) => Once::initialized(upper),
                     None => Once::new(),
                 };
-                Arc::new(OverlayInode {
-                    fs,
-                    lowers,
-                    upper,
-                    lock: Mutex::new(if is_directory {
-                        Some(crate::fs::fs_impls::overlayfs::inode::readdir::ReaddirIndex::new())
-                    } else {
-                        None
+                let lock = Mutex::new(if is_directory {
+                    Some(ReaddirIndex::new())
+                } else {
+                    None
+                });
+                match binding {
+                    ProjectionBinding::Root => Arc::new_cyclic(|weak| OverlayInode {
+                        fs,
+                        lowers,
+                        upper,
+                        object_id,
+                        lock,
+                        parent: RwMutex::new(weak.clone()),
+                        copyup: Mutex::new(CopyUpState::Done),
+                        extension: Extension::new(),
                     }),
-                    object_id,
-                    extension: Extension::new(),
-                    copyup_transition: Mutex::new(
-                        crate::fs::fs_impls::overlayfs::inode::copyup::CopyUpTransition::new(),
-                    ),
-                })
+                    ProjectionBinding::Child { parent, name } => Arc::new(OverlayInode {
+                        fs,
+                        lowers,
+                        upper,
+                        object_id,
+                        lock,
+                        parent: RwMutex::new(Arc::downgrade(parent)),
+                        copyup: Mutex::new(if facts.upper.is_some() {
+                            CopyUpState::Done
+                        } else {
+                            CopyUpState::Outstanding(CopyUpTarget {
+                                name: String::from(name),
+                                need_repair: false,
+                            })
+                        }),
+                        extension: Extension::new(),
+                    }),
+                }
             },
         )
     }

@@ -59,7 +59,9 @@ impl OverlayInode {
     /// authority for races after this point.
     // TODO(redirect_dir): replace this flat EXDEV default with a
     // redirect-policy probe bounded by the `redirect_max`-style length rule
-    // when redirect support is implemented.
+    // when redirect support is implemented. A redirect updating an
+    // outstanding copy-up coordinate must take CUL before the parent DIRs
+    // (`CUL -> DIR`).
     pub(super) fn cross_device_gate(&self, source_inode: &Arc<OverlayInode>) -> Result<()> {
         if !source_inode.type_().is_directory() {
             return Ok(());
@@ -257,6 +259,12 @@ impl OverlayInode {
                 }
                 return Err(err);
             }
+        }
+        // Repoint the moved object's canonical parent after a successful
+        // cross-parent move, while both parent DIR transaction locks are
+        // held (`DIR -> PARENT` write order).
+        if !same_parent {
+            *source_inode.parent.write() = Arc::downgrade(target);
         }
         // A cross-directory rename may have restored purity in the source or
         // target parent (the overwrite-of-origin-target case can clear the
