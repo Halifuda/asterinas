@@ -61,7 +61,7 @@ pub struct OverlayFs {
 - `layer_stack`：overlayfs 在挂载时把多个底层目录按顺序组装成层栈，并维持一个 upper-first 的合并视图；详见 §4 层模型。
 - `policy`：保存运行期挂载策略，例如只读模式和权限设置，并决定是否允许写入和 copy-up。
 - `identity`：持有 dev/ino 身份换算策略，用于计算每个 overlay 对象的对外可见身份；详见 §10。
-- `upper_workdir_pair`：持有可写挂载的 upper/workdir 排他认领与 workdir 暂存资源。workdir 是 upper 所在文件系统上的一个临时目录，copy-up 与 whiteout 的对象先在其中暂存，再原子改名发布到最终位置；workdir 的排他认领与准备见下方构造流程第 3 步，copy-up 的发布见 §9，whiteout 的发布与清理见 §12。
+- `upper_workdir_pair`：持有可写挂载的 upper/workdir 排他认领与 workdir 暂存资源。workdir 是 upper 所在文件系统上的一个临时目录，copy-up 与 whiteout 的对象先在其中暂存，再原子改名发布到最终位置；workdir 的排他认领与准备见 §3 构造流程第 3 步，copy-up 的发布见 §9，whiteout 的发布与清理见 §12。
 - `whiteout_cache`：与隐藏 lower 名字的 whiteout 机制相关的挂载级共享缓存；这里先只说明它服务于目录命名空间变更，详见 §12。
 - `inodes`：inode 身份复用缓存；详见 §8。
 
@@ -142,7 +142,7 @@ pub struct OverlayInode {
 
 #### 关于 `recorded_parent` 的取舍
 
-**用处**：copy-up 依赖它沿父链逐级copyup，直到父目录存在于 upper 中；制备好的副本要有确定的落点。readdir 依赖它，使 `".."` 必须给出父目录的对外身份，而父目录是另一个 overlay 对象，当前接口并不传入。
+**用处**：copy-up 依赖它沿父链逐级 copy-up，直到父目录存在于 upper 中；制备好的副本要有确定的落点。readdir 依赖它，使 `".."` 必须给出父目录的对外身份，而父目录是另一个 overlay 对象，当前接口并不传入。
 
 **现写法的问题**：首绑坐标 ≠ 触发语境——写入经由 `/b/y` 而坐标记录为 `/a/x` 时，物理副本落在 `/a/x`，触发路径随后按别名分裂规则重建自己的实例。
 
@@ -260,7 +260,7 @@ impl OverlayInode {
 }
 ```
 
-锁序上只引入两条固定次序：先取得对象自身的 copy-up 锁，再进行祖先提升与制备；`publish_by_rename` 在持有 copy-up 锁的同时短暂获取父目录的事务锁完成物理改名与语义提交，随后释放。除这条唯一的「copy-up → 目录事务」加锁边之外，不再引入任何新的次序。
+锁序上只引入两条固定次序：先取得对象自身的 copy-up 锁，再进行祖先提升与制备；`publish_by_rename` 在持有 copy-up 锁的同时短暂获取父目录的事务锁完成物理改名与语义提交，随后释放。除这条唯一的"copy-up → 目录事务"加锁边之外，不再引入任何新的次序。
 
 copy-up 会沿祖先目录链逐级进行：发布 child 之前，其 parent 目录已先完成 copy-up、存在于 upper 中。workdir 暂存避免暴露半成品：发布前崩溃只会留下一个私有 workdir 对象，而不会留下可见的 upper 条目。
 
@@ -281,7 +281,7 @@ overlayfs 需要单独的 identity 模块，因为合并多个底层文件系统
 - `ObjectId`：一个 overlay 对象的对外 dev/ino；
 - `LowerIdOrigin`：copy-up 前 lower source 的持久化身份记录。
 
-投影策略由挂载级的 `IdentityPolicy` 承载，并在装配期一次性固化。
+身份换算策略由挂载级的 `IdentityPolicy` 承载，并在装配期一次性固化。
 
 ### 11. 目录枚举 `inode/readdir.rs`
 
@@ -316,14 +316,79 @@ readdir 的目标是提供稳定、可续的枚举顺序，避免每次 getdents
 
 缓存的临时对象始终位于 workdir，属于私有对象；残留的 workdir 条目会在下次挂载准备 workdir 时清理。
 
-### 13. 权限、属性、xattr、数据
+### 13. 扩展属性 `inode/xattr.rs`
+
+overlay 需要在 upper 的真实对象上持久化一批内部记录，如 opaque 与 whiteout。这些名字若与用户空间共享同一通道就会被伪造或误读，因此统一收在 overlay 的**私有前缀**之下——trusted 模式为 `trusted.overlay.`，userxattr 模式为 `user.overlay.`。xattr 处理对名字只分两类，判定只看前缀：
+
+```rust
+enum XattrClass {
+    /// 以私有前缀开头。
+    Private,
+    /// 其余一切名字（`user.plain.any`、`security.selinux`、`trusted.backup.notes`…）：原样透传，overlay 不做任何解释。
+    Passthrough,
+}
+
+/// 默认前缀。写它需要 `CAP_SYS_ADMIN` 特权，从而阻止非 root 用户修改。
+const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
+
+/// userxattr 模式的前缀。挂载者没有 `CAP_SYS_ADMIN` 时，以此模式作为变通。无法防止用户改动。
+const USER_OVERLAY_PREFIX: &str = "user.overlay.";
+```
+
+一个 overlayfs 有两条处理 xattr 的路径：
+
+```rust
+
+impl OverlayInode {
+    /// 私有路径：overlayfs 为自身使用而本地设置一个 xattr，如 `trusted.overlay.whiteout`。
+    fn set_overlay_xattr(
+        &self,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
+    ) -> Result<()> {
+        // 把名字原样传给底层真实对象。
+        self.real_inode().set_xattr(name, value_reader, flags)
+    }
+
+    /// 透传路径：overlayfs 处理来自上层的系统调用。
+    /// 它会检查 `name` 的前缀是否匹配自己的私有前缀。
+    /// 若匹配，为避免冲突，它会在本地修改这个名字。
+    ///
+    /// `set` 是一个例子；`get` 与 `set` 都可能修改名字。
+    pub(super) fn set_xattr_impl(
+        &self,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
+    ) -> Result<()> {
+        let mut used_name = String::from(name.full_name());
+        if name.full_name().starts_with(selected_prefix) {
+            // 例："trusted.overlay.opaque" -> "trusted.overlay.overlay.opaque"；
+            // 中缀 "overlay." 紧跟在私有前缀之后，因此名字的其余部分（包括已有的段）整体右移。
+            used_name.insert_str(selected_prefix.len(), "overlay.");
+        }
+        let used = XattrName::try_from_full_name(&used_name).ok_or(Errno::EINVAL)?;
+        self.real_inode().set_xattr(used, value_reader, flags)
+    }
+}
+
+```
+
+就上述两条路径而言：只有透传路径会加段，每经过一层恰好加一段，私有路径始终用未加段名。同前缀的嵌套 overlay N 层叠加时，每层各加一段，因此盘上名字的加段数 = 标记主人与底层文件系统之间相隔的层数，各层标记按段数物理分层、互不可见。
+
+upper 缺少 xattr 能力时，挂载构造期的探针会实测这一能力而不是假设；缺能力并非只读——创建、数据读写、属性变更不依赖任何标记，照常可用。降级遵循**宁拒勿错**：正确性必须依赖标记的操作宁可拒绝，也绝不产生会被误读的状态。受影响的操作据此分成两族：
+
+- **被拒族**：over-whiteout 建目录、clear-empty 交换的替换物必须带 opaque，写不进去即 `EOPNOTSUPP`。
+- **降级族**：whiteout 退化为字符设备 `0:0` 形态；origin 记录静默 no-op，代价是 copy-up 前后 `st_ino` 稳定性退化；以标记为前提的挂载选项整体关闭。
+
+### 14. 权限、属性、数据
 
 - `inode/permission.rs`：两段式权限检查——先做 overlay 本地权限检查，需要时执行 copy-up，再检查底层真实对象权限；copy-up 是两段之间的动作，不是第三段权限检查。
 - `inode/metadata.rs`：属性写。
-- `inode/xattr.rs`：xattr 操作与 overlay 私有 xattr。
 - `inode/data.rs`：数据读写转发，读 lower 时带 `O_NOATIME`，`O_APPEND` 在每 inode 事务锁下串行。
 
-### 14. 文件结构
+### 15. 文件结构
 
 ```text
 overlayfs/
@@ -360,3 +425,157 @@ overlayfs/
     ├── metadata.rs
     └── xattr.rs
 ```
+
+### 16. Gaps and no-goals
+
+本章记录已识别、暂不实现的机制边界。它们**不属于本设计承诺的行为范围**——列出
+它们，是为了让后续取舍不必重新推导起点。一项机制进入本章的判定标准有三条，满足
+其一即"暂不实现"：
+
+- **出错波及范围**：机制出错时波及的不是单次操作，而是跨对象的可见状态（目录合并、
+  硬链接共享、数据来源归属），需要比当前更重的崩溃/一致性论证；
+- **信任前提**：机制要求"层内容或标记不可伪造"这类前提，而本设计尚未把不可信层
+  纳入威胁模型；
+- **平台依赖**：机制等待尚不存在的 VFS/内核能力（尚待合入的接口 PR、把 file
+  handle 反解回 inode 的句柄解析接口、区分调用者请求与 overlay 内部 IO 的权限
+  检查机制）。
+
+#### 1. credential 缺口（内部 IO 以挂载者凭据执行，而非调用者凭据）
+
+**机制简介**。overlay 的内部 IO——overlay 为自身机制而在后端文件系统上执行的
+操作——不能使用触发这次操作的调用者身份；它包括 copy-up 的制备与发布、whiteout
+发布，以及 xattr 的保真复制（即 copy-up 时把 lower 对象的 xattr 原样复制到 upper
+副本）。副本必须保真：有权执行 chown 与写 `trusted.*` xattr 的是挂载者，而不是
+调用者。Linux 的解法是 override creds：overlay 在挂载时捕获挂载者凭据，内部 IO
+在这个作用域内临时以挂载者凭据执行（`with_ovl_creds`，`fs/overlayfs/copy_up.c:1250`、
+`file.c:42`）；copy-up 前另有一次 LSM hook（`security_inode_copy_up`，
+`copy_up.c:732`），为新副本换取过渡用的 label；挂载时还刻意从挂载者的有效能力集
+中去掉 `CAP_SYS_RESOURCE`（`super.c:1513`），防止内部写绕过 upper 的配额。
+例：普通用户向 lower 中 root 属主的文件追加一行，copy-up 要把副本的 owner 恢复为
+root、再写 `trusted.overlay.origin`——这两步若用调用者凭据执行必然失败。
+
+**本设计针对的场景**。容器镜像层由 root 制作，而运行时容器以普通用户身份运行：
+普通用户对 lower 对象的第一次写入、copy-up 的属性保真复制、clear-empty 交换的
+属性搬运，都发生在普通用户的会话里。若内部 IO 不能以挂载者凭据运行，保真复制要么
+以 `EACCES` 中断整个操作、要么静默丢掉 `security.*`/`trusted.*` 属性——前者
+破坏可用性，后者破坏副本保真的承诺。
+
+**若实现的改点落点**。`inode/xattr.rs`：copy-up 复制 xattr 的路径需要明确凭据
+来源（当前实现中，这条路径以调用者凭据执行读写）；`inode/copyup/mod.rs`：promote 制备段的
+元数据/xattr/时间戳转移，整体应运行在挂载者凭据的作用域内；`inode/dir/remove.rs`：
+clear-empty 交换的 xattr 复制同样应运行在挂载者凭据的作用域内；挂载侧在构造流程
+（`fs/mount/mod.rs`）中捕获挂载者凭据快照；VFS 侧需要一条供 overlay 内部 IO 使用
+的调用路径，绕开的正是 `fs/vfs/path/mod.rs`（目录条目变更与 xattr 操作的权限检查
+内嵌其中、使用调用者凭据）与 `fs/vfs/path/dentry.rs`（sticky 检查）两处的调用者
+凭据依赖。
+
+**VFS/Kernel 级 gap**。需要一个不带调用者语境的后端调用变体——即 DirDentry 的
+内部调用变体，以及区分调用者请求与 overlay 内部 IO 的权限检查机制：让权限检查与
+后端执行分成两段，公共的 Path/DirDentry 方法继续以调用者身份完成权限检查、服务
+调用者请求，overlay 内部 IO 则走不经调用者权限检查的内部调用变体；还需要能保存
+挂载者凭据快照的数据结构，以及进入并恢复该凭据作用域的机制（本设计的两段式权限
+检查已把 Inode 级后端调用与任务凭据解耦，缺口集中在 Path/DirDentry 层与 copy-up
+制备段）；copy-up 前为新副本换取过渡 label 的 LSM hook，在本平台尚无对应接口。
+
+#### 2. redirect_dir（目录跨父改名）
+
+**机制简介**。把一个来自 lower 的目录改名到另一个父目录（跨父 rename）时，lower
+层不可写；若只在 upper 搬动该目录，会切断它与 lower 中同名目录的合并关系。开启
+redirect_dir 后，overlay 改为按以下步骤完成这次改名：
+
+1. 对该目录本身执行 copy-up，得到 upper 副本；
+2. 在 upper 副本上写 `trusted.overlay.redirect` 标记，值为该目录改名前的原始
+   overlay 路径；
+3. 把副本改名为新名字；
+4. 在旧名字处留下 whiteout。
+
+此后，新名字处的目录继续与 redirect 记录所指路径上的 lower 目录合并。例：lower
+中有目录 `/a/d`，用户把 `d` 改名到 `/b/d`——upper 的 `/b/d` 带 redirect 记录
+`/a/d`，读 `/b/d` 的内容时按记录回到 `/a/d` 处合并 lower 的贡献。
+
+**本设计针对的场景**。目录改名的完整性：没有 redirect_dir 时，跨父移动
+lower/merged 目录一律返回 `EXDEV`，"移动目录"这一基础操作对其中一半的目录（凡有
+lower 来源者）不可用；容器与构建系统大量做目录重组，`EXDEV` 迫使它们退回整体复制
+目录的做法。
+
+**若实现的改点落点**。`inode/dir/rename.rs`：`cross_device_gate` 的
+TODO(redirect_dir) 钩子（`:60-64`）即触发点——当源是 lower/merged 目录、改名跨父、
+redirect_dir=on 且 upper 支持 xattr 时，把默认直接返回 `EXDEV` 的行为替换为按
+redirect_dir 机制完成改名；锁序预研已有结论：改写尚未完成 copy-up 的对象的发布
+坐标时，必须先取该对象的 copy-up 互斥锁，再取父目录的事务锁。`inode/xattr.rs`：
+redirect 记录的标记名已在已知后缀表（`:51-54`）中。`inode/lookup.rs`：查找/合并侧
+是纯 overlay 内部实现——投影目录时读取 redirect 记录，按记录的路径解析出 lower
+目录，再把它纳入合并。创建侧计算 redirect 值需要源目录的完整 overlay 路径；本
+设计中记录目录坐标的权威依据是 `recorded_parent` 链。
+
+**VFS/Kernel 级 gap**。创建侧"完整 overlay 路径"的权威来源依赖把 dentry 代入
+inode 的接口（§5 所述的替代方案）：该接口在本平台规划为独立的 PR，合入之前
+overlayfs 不从 dentry 推导完整 overlay 路径，`recorded_parent` 继续作为记录父
+目录坐标的规范字段。Linux 从 `d_parent`
+链拼出该路径，本平台没有等价的、可逐级读取父目录的权威接口。redirect 值自身的
+长度上限（类似 Linux `redirect_max` 的规则）与转义机制如何交互，也需要一条显式的
+校验规则。
+
+#### 3. index（硬链接共享与身份对应）
+
+**机制简介**。upper 所在文件系统里维护一个 index 目录，每个索引项是一个真实
+inode，以 lower 对象的句柄（file handle）为键。硬链接数大于 1（nlink>1）的非
+目录首次 copy-up 时，overlay 把副本直接发布为 index 中的索引项，再在 upper 的
+真实位置创建指向它的硬链接；此后，来自同一 lower 对象的其余硬链接名在 lookup 时
+以各自的 lower 句柄查询 index，命中即采纳既有 upper inode 作为自己的 upper
+alias——零拷贝共享。全部 alias 都删除后，index 中对应的索引项转为 whiteout。
+崩溃安全的依据是索引项本身就是真实 inode：任何时刻索引项要么完整存在、要么不
+存在，不存在半成品形态。`st_nlink` 借助 `trusted.overlay.nlink` 标记按下式修正：
+物理 nlink − upper 基线 + lower 基线。
+
+**本设计针对的场景**。镜像层里大量硬链接文件（构建工具的产物）：没有 index 时，
+每个名字各自 copy-up，空间成倍膨胀，且同一 lower 对象的各个硬链接名从此彼此独立
+——修改其中一个，其余 alias 看不到；`st_nlink` 也不正确。index 使同一 lower
+对象的各硬链接名收敛到同一 upper inode，nlink 语义与空间占用同时保真。
+
+**若实现的改点落点**。`inode/identity.rs`：承载键的数据结构已有——`LowerIdOrigin`
+（`container_dev_id` + `lower_layer_root_ino` + `real_ino` 的 32 字节序列化记录，
+`:367-392`）替代 Linux 的 exportfs file handle；`origin_real_ino_resolves` 的
+TODO(origin-verify)（`:337-338`）标注了句柄解析能力（从记录反解出 inode）的升级
+方向。`inode/copyup/mod.rs`：nlink>1 的非目录在 copy-up 时发布进 index 的分支。
+`inode/lookup.rs` / `inode/inode_cache.rs`：lookup 侧查询 index，命中时采纳既有
+upper inode 作为 alias。`inode/dir/link.rs` / `inode/dir/remove.rs`：alias（硬
+链接名）的发布，以及最后一个 alias 删除后索引项转为 whiteout。`inode/xattr.rs`：
+nlink 修正所用的标记名已在已知后缀表（`:51-54`）中。
+
+**VFS/Kernel 级 gap**。index 依赖一套"标识 lower 对象的句柄"基础设施，用哪个
+替代方案需要先做决策：Linux 用 exportfs file handle（可以从句柄反解出 inode），
+本设计的 origin 记录是 32 字节三元组，只支持身份比对、不支持反解——对 index 命中
+来说已经足够，但要完全对齐 Linux 的 export 语义，需要另行决策。上述 nlink 修正
+要求 link/unlink/copy-up 多个操作之间同步物理计数与语义计数（本设计当前明确不
+维护 merged nlink，见 `inode/dir/rename.rs` 模块注释），这套计数同步协议本身需要
+独立设计。
+
+#### 4. metacopy（元数据先行、数据后补的 copy-up）
+
+**机制简介**。开启 metacopy 后，copy-up 只搬元数据：upper 发布一个不含数据的文件
+条目，打上 `trusted.overlay.metacopy` 标记，数据仍留在 lower；该对象首次以可写
+方式打开时，overlay 再把数据补写进已存在的 upper inode，并删除该标记。一次 copy-up
+从此分成两段：元数据来自 upper，数据仍来自 lower。收益场景是容器镜像层中"只改
+元数据"的负载（chown/chmod/时间戳调整）：copy-up 的成本从 O(数据) 降到 O(元数据)。
+代价有三：读数据时要跨层解析 lower 中的数据；信任前提变宽——不可信层可以伪造
+redirect/metacopy 标记，把数据访问指向任意 lower 对象（Linux 文档明确警告勿在
+不可信层开启）；metacopy 依赖 redirect_dir=on，并与 nfs_export 冲突，Linux 因此
+默认关闭 metacopy、把它做成显式挂载选项（`fs/overlayfs/params.c:913-922` 的依赖
+检查；`overlayfs.rst` 的 metacopy 章）。
+
+**本设计针对的场景**。镜像分层去重与启动延迟：镜像里大量只做文件复制或权限调整
+的层并不改写数据，metacopy 让这类层的挂载成本与首次写入成本都与文件大小无关。
+
+**若实现的改点落点**。`inode/copyup/mod.rs`：promote 增加只发布元数据的分支
+（跳过数据流、写 metacopy 标记），以及首次以可写方式打开时"补写数据 + 删除标记"
+的收敛步骤；`inode/data.rs`：读路径需要区分元数据与数据的来源——upper 侧没有
+数据时，解析并读取 lower 中的数据；`inode/xattr.rs`：metacopy 标记名已在已知
+后缀表（`:51-54`）中。
+
+**VFS/Kernel 级 gap**。metacopy 依赖对本设计"一次发布"契约的修订：本设计承诺
+copy-up 是"lower→upper 的单向、至多一次发布"（§5 的
+`upper: Once<RealObject>`），而 metacopy 把一次发布拆成"元数据先行、数据后补"
+两段，需要对 copy-up 的发布语义做修订设计；信任前提的修订（接受"标记可能被伪造、
+把数据访问指向任意 lower 对象"）与 redirect_dir 硬依赖（先实现本章第 2 条）同为
+前置条件。

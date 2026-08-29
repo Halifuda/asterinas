@@ -1,5 +1,4 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
-<!-- This file is a faithful English translation of the Chinese original structure-design-proposal-final.md. -->
 
 # Introducing the Structural Reimplementation Design of `overlayfs`
 
@@ -59,12 +58,12 @@ pub struct OverlayFs {
 }
 ```
 
-- `layer_stack`: at mount time, overlayfs assembles multiple underlying directories in order into a layer stack and maintains an upper-first merged view; see §4, the layer model, for details.
+- `layer_stack`: at mount time, overlayfs assembles multiple underlying directories in order into a layer stack and maintains an upper-first merged view; see #4, the layer model, for details.
 - `policy`: holds the runtime mount policy, such as read-only mode and permission settings, and decides whether writes and copy-up are allowed.
-- `identity`: holds the dev/ino identity translation policy, used to compute the externally visible identity of each overlay object; see §10 for details.
-- `upper_workdir_pair`: holds the exclusive claim on upper/workdir of a writable mount together with the workdir staging resources. The workdir is a temporary directory on the filesystem that hosts upper; objects for copy-up and whiteout are staged in it first and then published to their final positions by atomic rename. The exclusive claim on and preparation of the workdir are covered in step 3 of the construction flow below, the publication of copy-up in §9, and the publication and cleanup of whiteouts in §12.
-- `whiteout_cache`: the mount-level shared cache associated with the whiteout mechanism that hides lower names; here we only state for now that it serves directory namespace changes, see §12 for details.
-- `inodes`: the inode identity reuse cache; see §8 for details.
+- `identity`: holds the dev/ino identity translation policy, used to compute the externally visible identity of each overlay object; see #10 for details.
+- `upper_workdir_pair`: holds the exclusive claim on upper/workdir of a writable mount together with the workdir staging resources. The workdir is a temporary directory on the filesystem that hosts upper; objects for copy-up and whiteout are staged in it first and then published to their final positions by atomic rename. The exclusive claim on and preparation of the workdir are covered in #3 (construction flow step 3), the publication of copy-up in #9, and the publication and cleanup of whiteouts in #12.
+- `whiteout_cache`: the mount-level shared cache associated with the whiteout mechanism that hides lower names; here we only state for now that it serves directory namespace changes, see #12 for details.
+- `inodes`: the inode identity reuse cache; see #8 for details.
 
 ### 3. The Mount Construction Flow `fs/mount/`
 
@@ -122,7 +121,7 @@ pub struct OverlayInode {
     lock: Mutex<Option<ReaddirIndex>>,
     /// The recorded parent: the logical overlay parent directory; also the publication parent of copy-up.
     recorded_parent: RwMutex<Weak<OverlayInode>>,
-    /// The arbiter and publication name of copy-up; see §9 for details.
+    /// The arbiter and publication name of copy-up; see #9 for details.
     copyup: Mutex<Option<String>>,
     /// The per-inode extended state provided by VFS.
     extension: Extension,
@@ -131,15 +130,15 @@ pub struct OverlayInode {
 
 Field notes:
 
-- `lowers` / `upper`: lower objects are real objects in the read-only layers, and upper is a real object in the writable layer. When a same-named directory exists in multiple layers, overlay forms a merged directory (see §11). `upper: Once<RealObject>` means copy-up is a one-way, at-most-once lower→upper publication; the read path takes no lock, and publication writes atomically.
-- `object_id`: the precomputed external dev/ino, computed by `IdentityPolicy`, see §10.
-- `lock`: the directory transaction lock and the readdir index field; `ReaddirIndex` is the stable enumeration index of a merged directory, see §11. For non-directories it carries no additional state and is merely used to serialize concurrent access to this object.
+- `lowers` / `upper`: lower objects are real objects in the read-only layers, and upper is a real object in the writable layer. When a same-named directory exists in multiple layers, overlay forms a merged directory (see #11). `upper: Once<RealObject>` means copy-up is a one-way, at-most-once lower→upper publication; the read path takes no lock, and publication writes atomically.
+- `object_id`: the precomputed external dev/ino, computed by `IdentityPolicy`, see #10.
+- `lock`: the directory transaction lock and the readdir index field; `ReaddirIndex` is the stable enumeration index of a merged directory, see #11. For non-directories it carries no additional state and is merely used to serialize concurrent access to this object.
 - `recorded_parent`: the logical overlay parent directory and the copy-up publication parent. The "recorded parent" — it is the record written down at first binding, not a fact re-derived at each access.
   - **Binding rule**: the publication coordinates `(recorded_parent, name)` are established once and for all by the first forward resolution at construction time; later lookups that hit the cache never write back; a single update happens only when a cross-directory rename succeeds.
   - **Multi-link trade-off**: multiple aliases of the same underlying object follow first-seen-wins, each converging to its own upper publication; alias relinking (the index family) is explicitly out of scope.
   - **The publication coordinates record the name at first binding**, not the name traversed when some copy-up happens to be triggered; the two can differ. When they differ, the physical copy lands at the coordinate position, the canonical object turns upper-backed and keeps serving its existing handles, and the other aliases are judged stale-upper in their own subsequent resolutions and rebuilt as independent lower-backed instances — the source data they see stays at the moment before copy-up, and each catches up only after going through copy-up again.
   - **Not derived from the underlying dentry**: the evolution of the overlay namespace can run ahead of the physical form (the redirect-style "change the logical name first, then decide whether to migrate", as well as transitional moments such as whiteout shadowing and identity-cache rekeying); what this field carries is "where overlay thinks it is", not "where it physically is at this moment".
-- `copyup`: the arbiter and publication name of copy-up; see §9 for the detailed semantics.
+- `copyup`: the arbiter and publication name of copy-up; see #9 for the detailed semantics.
 
 #### The Trade-offs Around `recorded_parent`
 
@@ -200,7 +199,7 @@ The three negative variants uniformly present `ENOENT` externally; the differenc
 - **HiddenByWhiteout**: a whiteout is a **name-level shadow** — an independent hidden object in some layer (such as a char device `0:0` or a marked zero-length file) that blocks same-named entries in the layers below it. Example: upper has a whiteout named `foo` ⇒ the name is completely invisible, and enumeration skips it. For upper: creation must go through over-whiteout preparation and replacement, not bare creation; a deletion request issued against it only gets ENOENT — the shadow remains in place and is not touched; rename recognizes such targets as whiteout targets and flips the Replace/Exchange choice.
 - **HiddenByOpaque**: opaque is a **directory-level marker** stamped on a real directory of some layer — it qualifies the whole real directory rather than some name object; when a directory in the upper layer carries this marker, every same-named contribution from lower is cut off. Example: an upper directory marked opaque ⇒ the visible set is exactly its own entries. For upper: it merges with `Absent` into plain-create; during enumeration the lower directory exits the merge as a whole.
 
-These markers are usually written by upper, but their appearance in any layer affects the layers further down. See §12 for the detailed representation and publication.
+These markers are usually written by upper, but their appearance in any layer affects the layers further down. See #12 for the detailed representation and publication.
 
 ### 8. Inode Identity Reuse `inode/inode_cache.rs`
 
@@ -282,7 +281,7 @@ This module has two core entities:
 - `ObjectId`: the external dev/ino of one overlay object;
 - `LowerIdOrigin`: the persisted identity record of the lower source before copy-up.
 
-The projection policy is carried by the mount-level `IdentityPolicy` and is fixed once and for all during assembly.
+The identity translation policy is carried by the mount-level `IdentityPolicy` and is fixed once and for all during assembly.
 
 ### 11. Directory Enumeration `inode/readdir.rs`
 
@@ -317,14 +316,86 @@ Usage:
 
 The cached temporary objects always reside in the workdir and are private; leftover workdir entries are cleaned up the next time a mount prepares the workdir.
 
-### 13. Permissions, Attributes, xattr, and Data
+### 13. Extended Attributes `inode/xattr.rs`
+
+overlay needs to persist a batch of internal records on the real objects in upper like opaque and whiteout. If these names shared the same channel with user space, they could be forged or misread, so they are uniformly kept under overlay's **private prefix** — `trusted.overlay.` in trusted mode, `user.overlay.` in _userxattr_ mode. xattr handling splits names into only two classes, and the decision looks only at the prefix:
+
+```rust
+enum XattrClass {
+    /// Begins with the private prefix.
+    Private,
+    /// Every other name (`user.plain.any`, `security.selinux`,
+    /// `trusted.backup.notes`…): passed through as-is, overlay applies
+    /// no interpretation of its own.
+    Passthrough,
+}
+
+/// The default prefix. `CAP_SYS_ADMIN` privilege
+/// is required, thus preventing non-root users from modifying.
+const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
+
+/// The prefix in userxattr mode. When the mounter doesn't have
+/// `CAP_SYS_ADMIN`, use this mode to workaround. Cannot prevent
+/// user-modification.
+const USER_OVERLAY_PREFIX: &str = "user.overlay.";
+```
+
+An overlayfs has two paths to handle xattr:
+
+```rust
+
+impl OverlayInode {
+    /// Private path: Overlayfs locally sets a xattr for its use,
+    /// like `trusted.overlay.whiteout`.
+    fn set_overlay_xattr(
+        &self,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
+    ) -> Result<()> {
+        // Pass the name to the underlying real object as-is.
+        self.real_inode().set_xattr(name, value_reader, flags)
+    }
+
+    /// Passthrough path: Overlayfs handles syscalls from upper layers.
+    /// It will check if the prefix of `name` matches its private prefix.
+    /// If so, to avoid conflicts, it locally modifies the name.
+    ///
+    /// `set` is an example; both `get` and `set` may modify the name.
+    pub(super) fn set_xattr_impl(
+        &self,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
+    ) -> Result<()> {
+        let mut used_name = String::from(name.full_name());
+        if name.full_name().starts_with(selected_prefix) {
+            // Example: "trusted.overlay.opaque" -> "trusted.overlay.overlay.opaque";
+            // the midfix "overlay." goes right after the private prefix, so the rest
+            // of the name (including any segments already present) shifts right.
+            used_name.insert_str(selected_prefix.len(), "overlay.");
+        }
+        let used = XattrName::try_from_full_name(&used_name).ok_or(Errno::EINVAL)?;
+        self.real_inode().set_xattr(used, value_reader, flags)
+    }
+}
+
+```
+
+In terms of the two paths above: only the passthrough path ever adds a segment, exactly one per layer it descends through, while the private path always uses unsegmented names. When N layers of nested overlay with the same prefix are stacked, each layer adds one segment, so the number of added segments in an on-disk name = the number of layers lying between the marker's owner and the underlying filesystem, and the markers of the separate layers are physically differentiated by segment count and invisible to one another.
+
+When upper lacks xattr capability, the probe during mount construction measures this capability for real instead of assuming it; lacking capability does not mean read-only — creation, data reads and writes, and attribute changes depend on no marker and remain available as usual. Degradation follows **rather reject than err**: an operation whose correctness must depend on markers is refused outright, and a state that could be misread is never produced. The affected operations are accordingly divided into two families:
+
+- **The rejected family**: creating a directory over a whiteout, and the replacement in a clear-empty exchange, must carry opaque; if it cannot be written in, `EOPNOTSUPP`.
+- **The degraded family**: whiteout falls back to the char device `0:0` form; the origin record becomes a silent no-op, at the cost of degraded `st_ino` stability across copy-up; mount options that presuppose markers are switched off as a whole.
+
+### 14. Permissions, Attributes, and Data
 
 - `inode/permission.rs`: two-phase permission checking — first the overlay-local permission check, then a copy-up when needed, then the permission check against the underlying real object; copy-up is the action between the two phases, not a third phase of permission checking.
 - `inode/metadata.rs`: attribute writes.
-- `inode/xattr.rs`: xattr operations and the overlay private xattrs.
 - `inode/data.rs`: forwarding of data reads and writes, with `O_NOATIME` when reading lower, and `O_APPEND` serialized under the per-inode transaction lock.
 
-### 14. File Structure
+### 15. File Structure
 
 ```text
 overlayfs/
@@ -361,3 +432,58 @@ overlayfs/
     ├── metadata.rs
     └── xattr.rs
 ```
+
+### 16. Gaps and no-goals
+
+This chapter records the mechanism boundaries that have been identified but are not implemented for now. They **do not belong to the behavior scope this design commits to** — they are listed so that later trade-offs need not re-derive the starting point. There are three criteria for a mechanism to enter this chapter, and satisfying any one of them means "not implemented for now":
+
+- **Blast radius of failures**: when the mechanism fails, what is affected is not a single operation but cross-object visible state (directory merging, hard-link sharing, data-source attribution), which would require crash/consistency arguments heavier than the current ones;
+- **Trust prerequisites**: the mechanism requires premises such as "layer contents or markers cannot be forged", and this design has not yet brought untrusted layers into its threat model;
+- **Platform dependence**: the mechanism waits for VFS/kernel capabilities that do not yet exist (the interface PR still pending merge, a handle-resolution interface that resolves a file handle back to an inode, and a permission-check mechanism that distinguishes caller requests from overlay-internal IO).
+
+#### 1. The credential gap (internal IO executes with the mounter's credentials, not the caller's)
+
+**Mechanism sketch**. overlay's internal IO — the operations overlay executes on the backend filesystem for the sake of its own mechanisms — cannot use the identity of the caller who triggered the operation; it includes the preparation and publication of copy-up, whiteout publication, and the faithful copying of xattrs (that is, copying the lower object's xattrs verbatim onto the upper copy at copy-up). The copy must be faithful: the party entitled to perform chown and to write `trusted.*` xattrs is the mounter, not the caller. Linux's solution is override creds: overlay captures the mounter's credentials at mount time, and internal IO executes temporarily with the mounter's credentials within that scope (`with_ovl_creds`, `fs/overlayfs/copy_up.c:1250`, `file.c:42`); before copy-up there is an additional LSM hook (`security_inode_copy_up`, `copy_up.c:732`) that obtains a transitional label for the new copy; at mount time `CAP_SYS_RESOURCE` is also deliberately dropped from the mounter's effective capability set (`super.c:1513`) to prevent internal writes from bypassing upper's quota. Example: an ordinary user appends one line to a root-owned file in lower; copy-up must restore the copy's owner to root and then write `trusted.overlay.origin` — executed with the caller's credentials, these two steps would inevitably fail.
+
+**The scenario this design targets**. Container image layers are built by root, while the running container executes as an ordinary user: an ordinary user's first write to a lower object, the faithful attribute copying of copy-up, and the attribute carrying of a clear-empty exchange all happen inside the ordinary user's session. If internal IO cannot run with the mounter's credentials, faithful copying either interrupts the whole operation with `EACCES` or silently drops the `security.*`/`trusted.*` attributes — the former breaks usability, the latter breaks the commitment to copy fidelity.
+
+**Where the change points would land if implemented**. `inode/xattr.rs`: the path that copies xattrs at copy-up needs an explicit credential source (in the current implementation this path performs its reads and writes with the caller's credentials); `inode/copyup/mod.rs`: the metadata/xattr/timestamp transfer of the promote preparation stage should run as a whole within the scope of the mounter's credentials; `inode/dir/remove.rs`: the xattr copying of the clear-empty exchange should likewise run within the scope of the mounter's credentials; on the mount side, the construction flow (`fs/mount/mod.rs`) captures a snapshot of the mounter's credentials; on the VFS side, a call path for overlay-internal IO is needed, bypassing precisely the caller-credential dependencies at `fs/vfs/path/mod.rs` (the permission checks for directory-entry changes and xattr operations are embedded there and use the caller's credentials) and `fs/vfs/path/dentry.rs` (the sticky check).
+
+**The VFS/Kernel-level gap**. A backend-call variant without caller context is needed — that is, an internal-call variant of DirDentry — together with a permission-check mechanism that distinguishes caller requests from overlay-internal IO: let permission checking and backend execution be split into two phases, in which the public Path/DirDentry methods keep completing the permission check as the caller and serving caller requests, while overlay-internal IO takes the internal-call variant that skips the caller permission check; also needed are a data structure that can hold the mounter's credential snapshot and a mechanism for entering and restoring that credential scope (this design's two-phase permission check has already decoupled Inode-level backend calls from task credentials; the gap is concentrated at the Path/DirDentry layer and in the copy-up preparation stage); as for the LSM hook that obtains a transitional label for the new copy before copy-up, this platform has no corresponding interface yet.
+
+#### 2. redirect_dir (renaming a directory across parents)
+
+**Mechanism sketch**. When a directory coming from lower is renamed to a different parent directory (a cross-parent rename), the lower layer is not writable; if the directory were merely moved within upper, its merge relationship with the same-named directory in lower would be severed. With redirect_dir enabled, overlay instead completes the rename in the following steps:
+
+1. copy-up the directory itself to obtain an upper copy;
+2. write the `trusted.overlay.redirect` marker on the upper copy, its value being the directory's original overlay path before the rename;
+3. rename the copy to the new name;
+4. leave a whiteout at the old name.
+
+From then on, the directory at the new name keeps merging with the lower directory at the path the redirect record points to. Example: lower has the directory `/a/d`, and the user renames `d` to `/b/d` — upper's `/b/d` carries the redirect record `/a/d`, and reading the contents of `/b/d` follows the record back to `/a/d` to merge the lower contributions.
+
+**The scenario this design targets**. The integrity of directory renaming: without redirect_dir, moving a lower/merged directory across parents always returns `EXDEV`, so the basic operation "move a directory" is unavailable for half of the directories (all those with a lower source); containers and build systems reorganize directories heavily, and `EXDEV` forces them back to copying whole directories.
+
+**Where the change points would land if implemented**. `inode/dir/rename.rs`: the TODO(redirect_dir) hook (`:60-64`) in `cross_device_gate` is the trigger point — when the source is a lower/merged directory, the rename crosses parents, redirect_dir=on, and upper supports xattr, the default behavior of returning `EXDEV` directly is replaced with completing the rename via the redirect_dir mechanism; the lock-ordering pre-study has already reached a conclusion: when rewriting the publication coordinates of an object that has not yet completed copy-up, one must first take that object's copy-up mutex and then the parent directory's transaction lock. `inode/xattr.rs`: the marker name of the redirect record is already in the known-suffix table (`:51-54`). `inode/lookup.rs`: the lookup/merge side is purely overlay-internal implementation — when projecting a directory, read the redirect record, resolve the lower directory from the recorded path, and bring it into the merge. The creation side needs the full overlay path of the source directory to compute the redirect value; in this design the authoritative basis for recording directory coordinates is the `recorded_parent` chain.
+
+**The VFS/Kernel-level gap**. The authoritative source of the "full overlay path" on the creation side depends on the interface that substitutes a dentry for an inode (the alternative described in #5): this interface is planned on this platform as an independent PR, and until it merges, overlayfs does not derive the full overlay path from the dentry, with `recorded_parent` remaining the canonical field for recording parent-directory coordinates. Linux assembles this path from the `d_parent` chain; this platform has no equivalent authoritative interface for reading parent directories level by level. How the length limit of the redirect value itself (a rule akin to Linux's `redirect_max`) interacts with the escaping mechanism also needs an explicit validation rule.
+
+#### 3. index (hard-link sharing and identity correspondence)
+
+**Mechanism sketch**. The filesystem hosting upper maintains an index directory; each index entry is a real inode keyed by the lower object's handle (file handle). When a non-directory whose hard-link count is greater than 1 (nlink>1) undergoes its first copy-up, overlay publishes the copy directly as an index entry in index and then creates, at the real position in upper, a hard link pointing to it; from then on, the remaining hard-link names of the same lower object query index with their respective lower handles at lookup, and on a hit the existing upper inode is adopted as their upper alias — zero-copy sharing. After all aliases have been deleted, the corresponding index entry in index turns into a whiteout. The basis of crash safety is that an index entry is itself a real inode: at any moment an index entry either exists completely or does not exist at all; no half-finished form exists. `st_nlink` is corrected by way of the `trusted.overlay.nlink` marker according to the formula: physical nlink − upper baseline + lower baseline.
+
+**The scenario this design targets**. The many hard-linked files in image layers (artifacts of build tools): without index, each name copy-ups on its own, space inflates multiplicatively, and the hard-link names of the same lower object become independent of one another from then on — modify one of them, and the other aliases do not see it; `st_nlink` is incorrect as well. index converges the hard-link names of the same lower object onto the same upper inode, keeping nlink semantics and space usage faithful at the same time.
+
+**Where the change points would land if implemented**. `inode/identity.rs`: the data structure carrying the key already exists — `LowerIdOrigin` (a 32-byte serialized record of `container_dev_id` + `lower_layer_root_ino` + `real_ino`, `:367-392`) takes the place of Linux's exportfs file handle; the TODO(origin-verify) (`:337-338`) on `origin_real_ino_resolves` marks the upgrade direction of the handle-resolution capability (resolving an inode back out of a record). `inode/copyup/mod.rs`: the branch that publishes nlink>1 non-directories into index at copy-up. `inode/lookup.rs` / `inode/inode_cache.rs`: the lookup side queries index and, on a hit, adopts the existing upper inode as the alias. `inode/dir/link.rs` / `inode/dir/remove.rs`: the publication of aliases (hard-link names), and the turning of the index entry into a whiteout once the last alias has been deleted. `inode/xattr.rs`: the marker name used for the nlink correction is already in the known-suffix table (`:51-54`).
+
+**The VFS/Kernel-level gap**. index depends on an infrastructure of "handles that identify lower objects", and which alternative to use requires a decision first: Linux uses the exportfs file handle (an inode can be resolved back out of the handle), whereas this design's origin record is a 32-byte triple that supports only identity comparison and not resolution — enough for index hits, but fully aligning with Linux's export semantics requires a separate decision. The nlink correction above requires synchronizing the physical count and the semantic count across the several operations link/unlink/copy-up (this design currently explicitly does not maintain merged nlink, see the module comment of `inode/dir/rename.rs`); this count-synchronization protocol itself needs an independent design.
+
+#### 4. metacopy (copy-up with metadata first and data backfilled later)
+
+**Mechanism sketch**. With metacopy enabled, copy-up moves only metadata: upper publishes a file entry without data, stamped with the `trusted.overlay.metacopy` marker, while the data stays in lower; the first time the object is opened in a writable fashion, overlay backfills the data into the already-existing upper inode and removes the marker. A single copy-up is thereby split into two stages: metadata comes from upper, and the data still comes from lower. The benefiting scenario is the "metadata-only change" workloads in container image layers (chown/chmod/timestamp adjustments): the cost of copy-up drops from O(data) to O(metadata). There are three costs: reading data requires resolving the data in lower across layers; the trust premise widens — an untrusted layer can forge redirect/metacopy markers and point data access at an arbitrary lower object (the Linux documentation explicitly warns against enabling this with untrusted layers); and metacopy depends on redirect_dir=on and conflicts with nfs_export, so Linux disables metacopy by default and makes it an explicit mount option (the dependency check in `fs/overlayfs/params.c:913-922`; the metacopy chapter of `overlayfs.rst`).
+
+**The scenario this design targets**. Image-layering deduplication and startup latency: many layers in an image only copy files or adjust permissions and never rewrite data; metacopy makes both the mount cost and the first-write cost of such layers independent of file size.
+
+**Where the change points would land if implemented**. `inode/copyup/mod.rs`: promote gains a branch that publishes only metadata (skipping the data stream and writing the metacopy marker), together with the convergence step of "backfill the data + remove the marker" the first time the object is opened in a writable fashion; `inode/data.rs`: the read path needs to tell the source of metadata from the source of data — when the upper side has no data, resolve and read the data in lower; `inode/xattr.rs`: the metacopy marker name is already in the known-suffix table (`:51-54`).
+
+**The VFS/Kernel-level gap**. metacopy depends on revising this design's "single publication" contract: this design commits to copy-up being "a one-way, at-most-once lower→upper publication" (the `upper: Once<RealObject>` of #5), whereas metacopy splits a single publication into the two stages of "metadata first, data backfilled later", so the publication semantics of copy-up need a revised design; the revision of the trust premise (accepting that "markers may be forged and point data access at an arbitrary lower object") and the hard dependency on redirect_dir (implement item 2 of this chapter first) stand together as prerequisites.

@@ -4,7 +4,9 @@
 
 > **Status (consolidated 2026-08-27). This is the live main handoff** for all
 > subsequent overlayfs implementation rounds. The authoritative target design
-> is `designdoc/structure-design-proposal-final.md`; this record supplies the
+> is `designdoc/structure-design-proposal-final.md`（round4 终态，含 en 译本；
+> 需注意 proposal 的 recorded_parent/copyup/dotdot 表述已领先于代码，差距
+> 清单见文末「proposal 终态 vs 代码现状」节）; this record supplies the
 > details the proposal summarizes (parent pointer, copy-up state,
 > path-backed `RealObject`). Where the older
 > `20260825-143236-final-code-design-decision_main_agent_handoff.md`
@@ -16,7 +18,9 @@
 > assembly) only. Working rule for this record: where the prose abbreviates
 > or drifts from current code behavior, code reality wins for describing the
 > present (e.g. the cache keeps `rekey_keep_old_alias`, not the docs' plain
-> `rekey`).
+> `rekey`); 本文件的章节按时间分层——文末各节（implementation record /
+> static gate / design notes / 终态 vs 代码现状 / 2026-08-28 决策记录）为最新权威，
+> 覆盖前文与终态冲突之处。
 >
 > Provenance: converged design of the 2026-08-26 parent/copy-up round;
 > Designer 7's analysis is absorbed into this document, and the surviving
@@ -951,20 +955,18 @@ Accepted outcomes per batch (receipts + snapshots under
   permission.rs double authority select adjudicated as NOT collapsible
   (two-stage admission spans promotion — intentional); zero-edit deliverable.
 
-Next-main-agent actions:
-1. When the container opens: packeted Checker compile gate first
-   (target-specific `cargo check -p asterinas --target x86_64-unknown-none`),
-   then workspace lint; fix path follows PROTOCOL rule 10.
+Next-main-agent actions（2026-08-27 晚更新：1/3 已完成，见下节 static gate
+记录与本日晚间提交；2/4 仍有效）：
+1. ~~compile/lint gate~~ ✅ 已完成（见下节 static gate closed）。
 2. Runtime revalidation after green compile: the schedulable regression table
    (`002 003 006 007 010 011 012 014 024 031 038 077`) — copy-up coordinate
    internals and `..` identity sources changed, so run the full table once,
-   not only previously-failing cases.
-3. Commit decision for the four batches' working tree belongs to the user
-   (default proposed: one commit per accepted batch using the archived
-   snapshots as boundaries, or a single squashed implementation commit).
-4. Reviewer gate over the cumulative diff can run before or after the
-   compile gate (static lane, command-free); recommend after compile to keep
-   review deltas stable.
+   not only previously-failing cases. ⚠️ 注意：下文 §6 的实现 backlog 落地后
+   需再跑一轮，届时以终态代码为准合并执行。
+3. ~~Commit decision~~ ✅ 已完成：`2f868281e`（round1–4 代码主体）＋
+   `37bf37676`（proposal/review 记录与本轮 doc 修订，含评审文件入档）。
+4. Reviewer gate over the cumulative diff 仍待运行（static lane，
+   command-free）——建议与 backlog 实施合并后一次性执行。
 
 ## 2026-08-27 static gate closed: `make check` fully green
 
@@ -999,10 +1001,10 @@ verbatim. Non-blocking anomaly recorded: run03 reported PROTOCOL.md missing
 at three candidate paths — the file exists at the overlayfs workspace root
 (read-verified this session); treated as subagent path-resolution noise.
 
-Remaining gates (pending user instruction): runtime xfstests revalidation
-(the schedulable 12-case table, full run since copy-up coordinates and `..`
-identity sources changed) and the commit decision for the uncommitted working
-tree.
+Remaining gates（2026-08-27 晚更新）: ~~commit decision~~ ✅ 已提交
+（`2f868281e` 代码主体、`37bf37676` 记录/文档与评审文件入档）；runtime
+xfstests revalidation 仍待用户指令，且应与 §6 backlog 的实现合并后统一
+执行一轮。
 
 ## 2026-08-27 proposal-review design notes (recorded ONLY; no code changes)
 
@@ -1010,14 +1012,15 @@ Outcome of the peer-review explanation rounds and two user meetings, recorded
 as scheduling-menu input for later sessions. **Nothing below is implemented or
 dispatched; user explicitly froze code changes ("不要改代码").**
 
-### 1. Proposal revision plan (ready-to-write, awaiting green light)
+### 1. Proposal revision plan（✅ 已全部执行完毕，本节仅存档）
 
-Full draft appendix was authored by the main agent and appended verbatim by a
-background subagent to
-`designdoc/structure-design-proposal-final-review.md`
-(注意：该文件此轮已被 user 改名——更早会话读到的是
-`structure-design-proposal-final-peer-review.md`；若改名非用户所为需回迁核实)。
-Ten planned items reduce to three blocks:
+本节所述十项计划及后续追加轮次（round2 R1–R20、round3 批注修正与终态并入、
+round4 need_repair 退场 + `recorded_parent` 更名与探讨节）**全部落地正文**，
+收据与 manifest 见
+`components/parent-copyup-state-design/proposal_pending_changes_manifest_20260827.md`。
+两处开放输入均已关闭：字段名终定为 **`recorded_parent`**（用户裁定，
+`binding_anchor`/`publication_parent`/`publish_parent` 候选作废）；en 版已
+删除旧译并按中文版忠实重译（commit `0e18923b2`）。本节以下原文仅作历史存档：
 
 - 新增：动机节 overlayfs 一句话定义；§7 规则区 whiteout/opaque 定义下放 +
   三条一行 case；NegativeLookup 三态行为契约（对外统一 ENOENT、内部分支差异）。
@@ -1026,22 +1029,27 @@ Ten planned items reduce to three blocks:
   多 alias first-seen-wins 与 accepted split 从实现注释升格为文档承诺；
   不由物理 dentry 反查派生——逻辑命名空间演化快于物理形态，redirect 式
   语义是根本理由）。字段名候选 `binding_anchor` / `publication_parent` /
-  `publish_parent`，**待用户最终拍板**。
+  `publish_parent`，~~待用户最终拍板~~。
 - 精简：§5 root_dentry 注释最简重写（clone-mount 可行性论证全部留在本节，
   不进文档）；§6 RealPath 收敛至两三行；§2 字段块对齐 pass_49 终态并
   删组序口号；L136 UB 句只挂 Linux overlayfs.rst reference（用户指示不引
   自有工程文档）；章节顺序按评审建议调整为 层模型紧跟挂载流程。
   en 版是否同步翻译待定。
 
-### 2. Copy-up 四操作的方法化定约（规范形状）
+### 2. Copy-up 四操作的方法化定约（⚠️ 已被终态取代，仅存档）
 
-§9 四个自由函数改为 `impl OverlayInode` 四方法（lock_copyup /
+本节定约描述的是中间形态（CopyUpState/CopyUpTarget 仍存在、含 need_repair
+闭环）。最终形态已再进一步：`need_repair` 整体删除后，`CopyUpState`/
+`CopyUpTarget` 一并退场，坐标并入不可变载体，仲裁锁不再携带状态——
+权威表述以正文 §9 与下文「proposal 终态 vs 代码现状」节为准。
+
+~~§9 四个自由函数改为 `impl OverlayInode` 四方法（lock_copyup /
 stage_in_workdir / publish_by_rename / copy_up），类型闭合要点：
 `MutexGuard` 出借可变目标经 `CopyUpState::outstanding_mut()`（need_repair
 合法写入的最小闭环）；need_repair 置位归 publish_by_rename 内部、Done 提交
 归 copy_up 成功尾部；祖先逐级提升游离于四抽象之外由外层机制承担；workdir
 作为挂载级资源藏于 stage 抽象背后，不把 OverlayFs 引入伪代码。这是规范性
-目标形状，后续实现 wave 将把生产代码向它收敛——尚未调度。
+目标形状，后续实现 wave 将把生产代码向它收敛——尚未调度。~~
 
 ### 3. 瞬时事实栈：文档一句话 + 实现侧备忘
 
@@ -1084,10 +1092,43 @@ symlink 等一贯经 `select_real_inode()` 直发 `Arc<dyn Inode>`，不经过 P
 映射表（含 capabilities/inuse/workdir 工具带）、flags 对 lower 克隆只读语义
 的处理、workdir 第三视图的边界（可能不在 upper 子树内）。
 
-Next-main-agent actions（新增部分覆盖式并入上节的遗留清单）：
-1. proposal 十项修订落笔前的两个开放输入：parent 字段名拍板；en 版同步与否。
-2. 若授权实施上述任一项（方法化收敛 / stack 内联 / 两刀转发改造），走
-   bounded Designer packet 冻结面后切片派发；在此之前维持零代码改动状态。
+### 6. proposal 终态 vs 代码现状（implementation backlog，下一轮代码 wave 的既定范围）
+
+正文（round4 后）已是规范终态；代码停留在 batches 46–49。差距逐项如下，
+全部**未调度**，实施前按惯例出 bounded Designer packet 冻结面：
+
+- **a) copyup 机制收敛**：代码现状为 `CopyUpState{Done,
+  Outstanding(CopyUpTarget{name, need_repair})}` ＋ `binding_anchor:
+  RwMutex<Weak>`；终态为 `recorded_parent: RwMutex<Weak>`（更名）＋
+  `copyup: Mutex<Option<String>>`（仅发布名，发布完成置 None 退役），
+  `CopyUpState`/`CopyUpTarget`/`need_repair`/repair 核验链整体删除，
+  四方法改共享借用签名（正文 §9 冻结文本为准）。
+- **b) RealObject 收敛**：代码现状 `{layer_index, path: RealPath,
+  fsid, container_dev_id}` ＋ RealPath 类型；终态 `{layer_index,
+  dentry: Arc<Dentry>}`，路径经 `LayerStack[idx]` 重建，RealPath 删除；
+  `identity.rs` 对 `real.fsid()/real.container_dev_id()` 的消费点改走层取用。
+- **c) dotdot**：代码的一行式 resolver 已读锚点并回落自身，语义与正文一致；
+  仅需跟随 a) 完成更名，无独立工作。
+- **d) 来源记录前移**：代码 `store_lower_id` 仍位于发布之后
+  （`publish_upper_authority` 内）；按正文语义移入制备段（写于 workdir
+  临时体），失败即普通清理路径——与 a) 同批实施。
+- **e) 登记接纳式汇合**：代码 `rekey_keep_old_alias` 遇同物活体占位仍
+  报错；按正文契约改为接纳（等待复用／接替完成），并把正主活性判定同步
+  放宽（避免"名字上的对象不是我"造成的重试死结）。与 a) 同批。
+- **f) 事实栈内联备忘**（SmallVec 值内联＋eager clone 下移）照旧挂起。
+
+已知继承性局限（正文已背书，实现无需动作）：别名分裂行为面（含读侧
+过时与二次全量复制）、未发布目录的 EXDEV 拒绝。
+
+Next-main-agent actions：
+1. a)–e) 打包为一轮 bounded Designer packet（冻结 need_repair 删除面、
+   RealObject 收敛面、来源记录前移与接纳汇合的精确条件），随后切片派发；
+   f) 可并入或延后。
+2. §4 的两刀转发改造维持冻结，待接口面决策；dotdot 的 per-open 视图路线
+   已并入该议题族。
+3. en 版已完成（`0e18923b2`）；文档侧无遗留。
+4. 若实现期间需要重新核对设计依据，以正文（round4 版）为准，本 handoff
+   的早期章节（Decision note/§1–§5/Implementation scope）仅作历史存档。
 
 ### 5. 导师反馈两则的处置记录（2026-08-27 晚）
 
@@ -1096,11 +1137,214 @@ Next-main-agent actions（新增部分覆盖式并入上节的遗留清单）：
   cache key"实验**否决**（fsid 即该身份的最简编码）。后经用户确认按本方向
   **落地到正文**：§6 的 `RealObject` 现为 `{layer_index, dentry}`，
   层身份由层定义统一携带；实现侧收敛在后续 wave 跟随。
-- **need_repair 说明修正**：正文 §9 该段已按"窗口定义 + 两类真实失败源
-  （ENOSPC 写盘错误 / 并发查找抢先占缓存位）+ 复用协议"重写；overlay
-  inode_cache 的 displacement 分支语义与之相符。
+- **need_repair 终局（覆盖本节下方早期记录）**：经两轮推演（触发模型修正 +
+  别名分裂反例），最终裁定 `need_repair` **从设计中整体删除**——来源记录
+  写入前移至制备阶段、登记处对同物占位采取接纳式汇合之后，物理改名后的
+  收尾不存在失败类。正文已按此重写完毕（round4，收据
+  `task_doc_creator_proposal_final_apply_round4_20260827_report.md`）；
+  早期"窗口定义 + 两类失败源"版本已废弃，实现侧历史记录不构成回退依据。
 - **binding_anchor 的 trait/Dentry 替代方案**：导师提出的议题明确搁置
   （波及 Inode trait 七口签名 + 全 fs 适配，工作量大）；此前评估中的关键
   观察（overlay 逻辑树即 VFS namespace dentry 树、副本视图使层根/身份可从
   单一判别信息推导）保留在本节供日后重启。相关补丁三冲突/四开放问题
   维持在 `proposal_dentry_clone_view_patch_20260827.md`。
+
+## 2026-08-28 user scheduling decisions（dentry 接口 PR 拆分、struct 约束边界；仅记录，未执行）
+
+背景：本日会话完成「proposal 终态 vs 代码现状」的逐行 gap 复核（handoff §6 backlog
+(a)–(f) 全部经代码验证仍成立；新增两处核对发现——`OverlayFs` 字段序 drift、
+`get_or_create` 谓词正文未覆盖，见下），并确认 copy-up 顺序缺陷：`store_lower_id`
+在 `publish_upper_authority` 内、位于物理 rename **之后**写 origin xattr
+（`inode/copyup/mod.rs:560`，失败即 `need_repair`），与 Linux 在 rename 前
+于 workdir temp 上写 origin（`copy_up.c:689`）相悖——(d) 前移 + (e) 接纳汇合
+即 need_repair 全链消除的完整证据链已入档本会话。同日用户会议裁定如下，
+**全部为调度约束，不改任何代码、不派发任何 packet**：
+
+1. **dentry 代入 inode 接口 = 独立 PR；合入前 overlayfs 事实上不做此事。**
+   proposal §5「VFS 侧替代方案」（dentry 承载发布坐标、删 `recorded_parent`）与
+   §4 的第一刀转发（DirDentry 进 rename/link/unlink 等 fs 方法签名）整体冻结，
+   等待该平台 PR 合入；在此之前 `recorded_parent` 保持规范坐标载体，任何切片
+   不得假设 dentry 携带型调用。§6 Next-actions 第 2 条的「待接口面决策」即此
+   决策本身，维持冻结不变。
+2. **mount（clone-view）与接口 PR 是两件事。** 第二刀的私有挂载视图装配
+   （proposal §3 构造流程第 2 步、§4 `Layer{mount, fsid, container_dev_id}`
+   三字段、§6 `RealObject{layer_index, dentry}` 收敛）不依赖该 PR，与转发改造
+   解耦，可独立调度——即 backlog (b) 不受决策 1 阻塞；但其遗留审计点
+   （空弱 ns 手法、20 处消费点 C 类映射、flags 只读语义、workdir 第三视图
+   边界、`check_dir_entry_mutation` 跳过签收）仍在 packet 内完成。
+3. **proposal 的 struct 严格遵循；impl 视为讲解简化，不必贴合。** §2/§4/§5/§6/§7/§8
+   的类型块（含 `recorded_parent: RwMutex<Weak<OverlayInode>>`、
+   `copyup: Mutex<Option<String>>`、`RealObject`/`Layer`/`OverlayFs` 字段块与
+   字段序、`Lookup`/`NegativeLookup`）为硬约束。此裁定同时：① 使 §2 字段序
+   drift 成为代码侧待修项（`_anon_device_id` 移至 `fs_event_stats` 之后）；
+   ② **修订 §6(a) 原文「四方法改共享借用签名（正文 §9 冻结文本为准）」的力度**——
+   §9 的 `copy_up()` 等代码体降为示意，方法分解/签名/锁持有细节由未来
+   Designer packet 自行冻结（`copyup: Mutex<Option<String>>` 的 struct 形态
+   仍为硬约束）。
+4. **`get_or_create` 的 `is_same_object` 谓词必要性存疑**（proposal §8 无此
+   参数）：ino 复用陈旧占位驱逐能否在无谓词契约下由其他机制覆盖，列为未来
+   Designer packet 的裁决项。配套澄清：`rekey_keep_old_alias` 的旧 key 别名
+   保留按 §5 别名分裂规则推定为必要（fresh lower-only lookup 依赖其判
+   stale-upper 重建），正文 §8 `rekey`「迁移」表述需在 packet 中澄清为
+   「新 key 挂接 + 旧 key 别名保留」。
+5. 本节与「proposal 终态 vs 代码现状」节共同构成下一轮 wave 的既定范围基线；
+   实施前仍按惯例出 bounded Designer packet（决策 3/4 为其新增输入）。运行时
+   xfstests 全表回归与 Reviewer gate 继续押后至 wave 收尾一次执行。
+
+## 2026-08-29 xattr 小节压缩定案与交付物一重写（已验收，纯文档）
+
+用户复核 `xattr-design-and-gaps_20260828.md` 交付物一（原 X.1–X.6 约 240 行）后裁定：
+proposal `## 设计` 的容纳单元是**小节**（各节 10–42 行），xattr 定案为新开
+`### 13. 扩展属性 inode/xattr.rs`（插于现 §12 之后；现 §13 去掉 xattr 行改题
+「权限、属性、数据」顺延为 §14，现 §14 顺延为 §15；proposal 内部无 §13/§14 交叉
+引用，改号零成本）。写作笔法硬要求：**以类型/接口叙述、必要时伪代码**（锚点
+§5/§7/§9），不得通篇散文。已派 `task_doc_creator_xattr_chapter_condense_20260829`
+（packet：
+`subagent-tasks/doc-xattr-condense-20260829/task_doc_creator_xattr_chapter_condense_20260829_dispatch.md`）
+完成重写并验收通过：proposal-ready 正文 40 行（enum `XattrName`/`XattrPrefix` +
+text 伪代码块承载两条写路径与转义管线，散文仅承担动机/推论/宁拒勿错）；原讲解
+材料无损移入交付物一内「附：机制详解与例子」annex（附 A–E，Linux file:line 全部
+收容于此）；交付物二/三正文未动。主代理补一处越界面遗留（header 交付物三条目
+§14→§15）。修订轮 2（同日，用户六点反馈，packet 已追加修订轮 2 节，同一 doc
+creator 续做，验收通过）：opaque/whiteout/origin 括注删除（impure 保留极简括注），
+no-goals 机制与互斥段移出正文（素材留附 C），trusted 展开移至前缀参数段，
+userxattr 前置括注，加段机制配单层最小例与嵌套结论，降级段改为直陈；
+`XattrName::Plain` 更名 `Passthrough`（与术语 plain 名撞词）；正文仍 40 行。
+「转义管线」一词按用户措辞偏好全文件清除（annex 标题与交付物二/三标签由主代理
+机械替换为转义规则/转义缺失/转义机制）。修订轮 3（同日，用户四点反馈，packet 已
+追加修订轮 3 节，同一 doc creator 续做，验收通过）：删「与 Linux 同构」句、正文
+不再挂外部引用；「私有命名空间」改述为「overlay 私有前缀」；两条路径改用两个
+简洁伪代码块承载（读写不分类、例子进注释、list 隐藏/剥段收进路径二注释、嵌套
+结论保留为一句散文、中缀细则留附 B）；`XattrPrefix` 前加类型引入句、变体裸列；
+降级两族清除 no-goals 字眼（被拒族删 redirect/EXDEV 项，降级族改「以标记为前提
+的增强能力整体关闭」）。正文仍 40 行。修订轮 3 补（同日，用户三点小改，主代理
+直改未派 subagent）：路径二定义为「经 mount 进来的一切请求」（嵌套时上层 overlay
+的请求也在其中）；trusted 句简化为「写它需要 CAP_SYS_ADMIN 特权」；userxattr
+改「有两种用处」并补全句子成分。同日新任务
+`task_doc_creator_xattr_gaps_language_20260829`（packet:
+`subagent-tasks/doc-xattr-gaps-language-20260829/…_dispatch.md`，fresh spawn）
+对交付物三做全面语言修订并验收通过：发明术语正常化（正确性半径→出错波及范围、
+内部 IO 权威/写权威/作用域覆盖/平面 EXDEV/redirect 配方/CUL/DIR/仿射记账/
+兄弟名字/灌数据/元数据权威等逐条处置，CUL/DIR 展开为 copy-up 互斥锁/父目录
+事务锁，两段式准入对齐 proposal 的两段式权限检查）；成分省略全面补全（redirect
+流程改编号步骤、CUL/DIR 缩写展开、谓语与指代补全）；机制事实、全部 file:line、
+四段式结构未变；主代理验收另清「写意图」→「以可写方式打开」（2 处）。遗留观察：
+原稿 4 条 Linux 事实（CAP_SYS_RESOURCE 配额动机、index 项转 whiteout、先发布
+index 后硬链次序、params.c metacopy 依赖）未做源码级复核，与 dentry PR 相关的
+recorded_parent 双表述经 2026-08-28 决策 1 已自洽，均无需动作。Next：下一轮文档
+修订把 `### 13.` 正文
+并入 proposal final 并执行顺延；交付物二 gap 清单并入 live handoff 的范围基线。
+
+## xattr 现状 vs 设计 gap 清单（2026-08-29 并入）
+
+> 本节并入自 `xattr-design-and-gaps_20260828.md` 交付物二（当前 xattr 代码 vs 正确设计的 gap 清单，2026-08-28）；与「proposal 终态 vs 代码现状」节同为下一轮 wave 的范围基线输入。技术语言；行号以 2026-08-28 当前工作树复核为准。
+
+### 现状基线（结构性事实，非缺口）
+
+- 内部标记写走直连真身的专用路径：`set_impure_marker` 文档明示不经过用户面拒绝面
+  （`inode/xattr.rs:354-370`）；`set_opaque_marker` 能力门 fail-closed 返回
+  `EOPNOTSUPP`（`inode/xattr.rs:387-407`）；whiteout 的两形态由两个独立探针门控
+  （`fs/mount/capabilities.rs:43-45,90-107,120-122`）。
+- syscall 层 Trusted 门的读写不对称已复刻：set/remove 无能力返回 `EPERM`
+  （`syscall/setxattr.rs:229-251`、`syscall/removexattr.rs:66`），get 把同一拒绝
+  映射为 `ENODATA`（`syscall/getxattr.rs:98`）。
+- 来源记录存储/读取的编解码与能力门已就位（`inode/identity.rs:487-543`）。
+
+### 规则缺口
+
+- **R1** `syscall/setxattr.rs:229-251`：`check_xattr_namespace` 只对 `Trusted`
+  设门，`user.*` 的"仅普通文件与目录、sticky 目录仅属主/特权者可写"两条规则整链
+  缺失（Linux `fs/xattr.c:158-176`）；ext2 的 `set_xattr` 是纯存储实现、无命名
+  空间规则可依赖；tmpfs 无 xattr 面（trait 默认 `EOPNOTSUPP`，
+  `fs/vfs/fs_apis/inode.rs:554-573`）。规则必须在 syscall/VFS 层补齐而不是依赖
+  具体后端。
+
+### 转义缺失
+
+- **E1** `inode/xattr.rs:463-531`：get/set 的拒绝面直接拦下 own 前缀名；没有
+  "own 前缀 + `overlay.` + 后缀" 的下行拼接转义（Linux `xattrs.c:148-171,173-209`），
+  经 mount 的 own 前缀写读不能穿透到 backing。
+- **E2** `inode/xattr.rs:159-185`：`filter_private_names` 只隐藏、不剥段——转义名
+  应剥前缀后第一段再上行展示，本实现一律按私有名剔除或保留原名。
+- **E3**（E1/E2 的嵌套后果）：内部标记写虽走直连真身路径（`xattr.rs:354-370`），
+  但嵌套时"真身"是下层 overlay 的逻辑 inode，其用户面 `set_xattr_impl` 会对
+  plain 名按 Private 拒绝——同前缀叠加的"按段数分层、各自命中"隔离在当前实现中
+  无法建立。
+
+### userxattr 缺失
+
+- **U1** `inode/xattr.rs:61,73,79,86`：写侧四个标记全名常量硬编码
+  `trusted.overlay.*`（origin/opaque/whiteout/impure），前缀未参数化。
+- **U2** `inode/xattr.rs:58,132`：`USER_OVERLAY_PREFIX` 只活在分类器里，不参与任何
+  写路径；`fs/mount/options.rs` 无 `userxattr` 选项。
+- **U3** `fs/mount/capabilities.rs:36-51`：能力探针固定用 trusted 前缀名
+  （经 `uuid_xattr_name`，`xattr.rs:61`），不随命名空间选择探针；亦无
+  userxattr 与 redirect/metacopy 的互斥校验（后者目前本就未实现，校验规则需随
+  选项一并预留）。
+
+### 策略分歧（Linux 对照）
+
+- **P1** `inode/xattr.rs:129-144`：classify 的实现态 quirk——Linux 形态转义名
+  （`trusted.overlay.overlay.X`）先命中 `trusted.overlay.` 分支，后缀 `overlay.X`
+  不在已知表（`:51-54`）中，落 **Reserved** 而非 Escaped；Escaped 臂
+  （`:70,139`）只接字面 `overlay.overlay.` 开头的名字，对 Linux 形态名基本不可达
+  （此类名也过不了 VFS 的命名空间解析，永远不会到达 classify）。
+- **P2** `inode/xattr.rs:463-531` 与 `:159-185`：Linux 对 own 前缀名**无拒绝类**——
+  已知/未知/已转义一律转义透传，保护靠命名空间错位而非拒绝；本实现对
+  Private/Reserved/Escaped 全部拒绝并隐藏，Reserved 类比 Linux 严，属兼容性差异。
+- **P3** `inode/xattr.rs:475-481`：get 拒绝码 `EOPNOTSUPP` 与 Linux 可观察行为
+  （ENODATA，读侧隐藏）不符；set/remove 的 `EPERM` 作拒绝码惯用，分歧在"拒绝"
+  行为本身而非错误码。`has_marker` 对 `ENODATA`/`EOPNOTSUPP` 都映射"无标记"
+  （`xattr.rs:322-340`），改码无内部破坏。
+
+### 杂项
+
+- **M1** `inode/xattr.rs:503-512`：`list_xattr_impl` 的 `MAY_ACCESS` 权限需求是
+  占位（DAC 块尚未评估 `MAY_ACCESS`），list 的读类权限未真正生效。
+- **M2** `syscall/setxattr.rs:234-238`：Trusted 门取 `permitted_capset()`，而
+  能力计值基线（`process/credentials` 的 capable 语义，packet 引
+  `capability.rs:34-38`）按 effective 集计——两处 capset 口径不一致；Linux
+  `capable()` 查 effective（`kernel/capability.c:414`）。
+
+### 凭据缺口
+
+- **G1** `inode/xattr.rs:191-194`：`copy_eligible_xattrs` 文档自认无 creator
+  credential 作用域，源读与 temp 写都运行在调用者凭据下（Strict 策略因此会把
+  EACCES/EPERM 升级为整次操作失败）。同一根因波及 copy-up 的元数据/时间戳转移
+  （`inode/copyup/mod.rs` 的 promote 制备段）与 clear-empty 的 xattr 复制
+  （`inode/dir/remove.rs:249-252` 注释已绕开其中一处时序问题）。Path 层
+  （`fs/vfs/path/mod.rs:279-283` 的 `check_dir_entry_mutation`、`:763-795` 的
+  xattr 准入）与 DirDentry 层（`fs/vfs/path/dentry.rs:471-489` 的 sticky 检查）
+  残留调用者凭据依赖，是 overlay 内部 IO 无法以"挂载者权威"运行的 VFS 侧面。
+  机制、场景与改点见交付物三第 1 条（credential 缺口）。
+
+## 2026-08-29 晚：proposal 合并/审阅/en 同步与 xattr §13 用户重写（纯文档，均验收）
+
+1. `task_doc_creator_xattr_merge_20260829`：三交付物逐字并入——交付物一→proposal 新
+   §13（旧 §13 删 xattr 行改题「权限、属性、数据」顺延 §14，§14 顺延 §15），交付物三→
+   §16 Gaps and no-goals，交付物二→handoff 文末「xattr 现状 vs 设计 gap 清单」节；
+   0828 加归档记号。主代理随修 gap 清单内 `##`→`###` 标题层级。
+2. `task_reviewer_proposal_readability_20260829`：proposal 全文可读性直改 16 处（协议
+   指称自洽化、Strict/BestEffort 未定义标签删除、体例统一）；主代理回退其把 §13 两路径
+   伪代码改散文的一处（用户轮 3 明令伪代码承载）。
+3. `task_doc_creator_proposal_en_sync_20260829`：en 重建至与 zh 逐句一致（362→457 行）；
+   en 节引用全部改 GitHub issue compatible `#N`（17 处与 zh `§N` 一一对应）；zh 无需微调。
+4. 用户大幅重写 en §13（两路径改为 `impl OverlayInode` 伪代码：私有路径
+   `set_overlay_xattr` 直传、透传路径 `set_xattr_impl` 加段）。主代理对照真实代码修正：
+   分类枚举定名 `XattrClass{Private,Passthrough}`（对齐 inode/xattr.rs，避免与 VFS struct
+   `XattrName` 撞名）；两方法签名保持 `name: XattrName`（与 VFS `Inode::set_xattr` 接口
+   一致，真实类型为 struct{namespace, full_name}）；`mul→mut`、`start_with→starts_with`、
+   `value/flag→value_reader/flags`；中缀插入用真实 String 接口
+   `insert_str(selected_prefix.len(), "overlay.")`（注释带前后对照例）；
+   `into()` 证伪——`String`→`XattrName` 无 `From` 实现（类型借用 `&str`），改真实构造器
+   `XattrName::try_from_full_name(&used_name).ok_or(Errno::EINVAL)?`。
+5. `task_doc_creator_xattr_en_backport_20260829`（后台）：en §13 回填 zh §13 并使 0828
+   交付物一正文与之逐字一致（含 insert_str / try_from_full_name 两条中途增量）；验收：
+   diff 为空、无 stale 代码形态、镜像删除清单确认。
+观察项：handoff gap 清单与 0828 annex/交付物二仍用「own 前缀」旧措辞，与正文新「私有前缀」
+并存，未统一，待用户定夺；当前 proposal/designdoc/handoff 改动均未提交，待用户指示后
+amend 进 WIP `1d5bbd53d`。
+收尾（同日晚）：经用户裁定删除三份过时 designdoc——`structure-design-proposal.md`、
+`structure-design-proposal-revised.md`、`xattr-design-and-gaps_20260828.md`（xattr 三交付物
+内容已全部并入 proposal §13/§16 与本 handoff，annex 背景材料随之退役）；amend 时
+commit message 去除 WIP 前缀。
