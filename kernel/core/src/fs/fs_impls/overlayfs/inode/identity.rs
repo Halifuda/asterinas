@@ -33,7 +33,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use device_id::DeviceId;
 
-use super::{OverlayInode, xattr::{OverlayRecordName, overlay_record_name}};
+use super::{
+    OverlayInode,
+    xattr::{OverlayRecordName, overlay_record_name},
+};
 use crate::{
     fs::{
         fs_impls::overlayfs::{

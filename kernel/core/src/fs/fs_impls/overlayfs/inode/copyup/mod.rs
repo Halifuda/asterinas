@@ -468,28 +468,23 @@ impl OverlayInode {
     ///
     /// An absent record (`Ok(None)`) and a genuine origin-record read error
     /// both fail closed to `false` — a pre-rename clean abort.
-    fn is_same_publication_target(
-        &self,
-        current: &Arc<OverlayInode>,
-        fs: &Arc<OverlayFs>,
-    ) -> bool {
+    fn is_same_publication_target(&self, current: &Arc<OverlayInode>, fs: &Arc<OverlayFs>) -> bool {
         if core::ptr::addr_eq(Arc::as_ptr(current), self) {
             return true;
         }
-        if current.upper.get().is_none() && self.upper.get().is_none() {
-            if let (Some(current_lower), Some(self_lower)) =
+        if current.upper.get().is_none()
+            && self.upper.get().is_none()
+            && let (Some(current_lower), Some(self_lower)) =
                 (current.lowers.first(), self.lowers.first())
-                && Arc::ptr_eq(current_lower.real_inode(), self_lower.real_inode())
-            {
-                return true;
-            }
+            && Arc::ptr_eq(current_lower.real_inode(), self_lower.real_inode())
+        {
+            return true;
         }
         if current.upper.get().is_some() {
             let Ok(Some(record)) = fs.read_lower_id(current.visible_source().real_inode()) else {
                 return false;
             };
-            return fs
-                .origin_real_ino_resolves(&record, &self.real_object_stack());
+            return fs.origin_real_ino_resolves(&record, &self.real_object_stack());
         }
         false
     }

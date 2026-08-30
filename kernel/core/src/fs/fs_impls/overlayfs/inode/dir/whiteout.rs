@@ -30,7 +30,7 @@ use crate::{
                 copyup::workdir::WorkdirTempRequest,
                 is_whiteout_inode,
                 xattr::{
-                    WHITEOUT_MARKER_VALUE, OverlayRecordName, OverlayXattrPrefix,
+                    OverlayRecordName, OverlayXattrPrefix, WHITEOUT_MARKER_VALUE,
                     overlay_record_name,
                 },
             },
@@ -177,10 +177,8 @@ impl OverlayFs {
                         mode: InodeMode::empty(),
                     },
                 )?;
-                let marker_name = overlay_record_name(
-                    OverlayRecordName::Whiteout,
-                    self.policy().xattr_prefix(),
-                )?;
+                let marker_name =
+                    overlay_record_name(OverlayRecordName::Whiteout, self.policy().xattr_prefix())?;
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
                 if let Err(err) = OverlayInode::set_overlay_xattr(
                     temp.inode(),
@@ -230,10 +228,9 @@ impl OverlayFs {
         // marker is refreshed before the physical publish. The marker is a
         // cache hint whose consumer refreshes it best-effort, so a marker
         // failure must not abort the physical publish: warn and continue.
-        if let Err(err) = OverlayInode::set_impure_marker(
-            upper_parent_path.inode(),
-            self.policy().xattr_prefix(),
-        ) {
+        if let Err(err) =
+            OverlayInode::set_impure_marker(upper_parent_path.inode(), self.policy().xattr_prefix())
+        {
             warn!(
                 "overlay whiteout publish: failed to set the impure marker on {:?} \
                  (best-effort cache hint; continuing with the physical publish): {:?}",

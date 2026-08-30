@@ -108,9 +108,7 @@ impl Layer {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
         let container_dev_id = path.metadata()?.container_dev_id;
-        let view = path
-            .mount_node()
-            .clone_mount(path.dentry(), &Weak::new())?;
+        let view = path.mount_node().clone_mount(path.dentry(), &Weak::new())?;
         Ok((view, container_dev_id))
     }
 }

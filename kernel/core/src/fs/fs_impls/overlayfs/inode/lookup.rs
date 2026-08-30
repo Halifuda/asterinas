@@ -257,7 +257,10 @@ impl OverlayFs {
             }
         }
         let layer = self.layer(source.layer_index());
-        let fallback_fn = || self.identity().project_object_id(layer, source, is_directory);
+        let fallback_fn = || {
+            self.identity()
+                .project_object_id(layer, source, is_directory)
+        };
         let object_id = if source.layer_index() == 0 {
             match self.read_lower_id(source.real_inode()) {
                 // Defensive: the record was device-validated at the read boundary,

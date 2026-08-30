@@ -186,7 +186,7 @@ impl OverlayInode {
         let upper = self.upper.get().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
-        Ok(fs.real_object_path(&upper))
+        Ok(fs.real_object_path(upper))
     }
 
     /// Returns `Err` when the inode does not belong to an overlay filesystem.
@@ -246,7 +246,8 @@ impl OverlayInode {
         let old_key = fs.real_object_key(self.visible_source());
         let old_real_inode = self.visible_source().real_inode().clone();
         self.upper.call_once(|| new_upper);
-        fs.inodes().publish_rekey(old_key, new_key, old_real_inode, pin);
+        fs.inodes()
+            .publish_rekey(old_key, new_key, old_real_inode, pin);
         debug_assert!(
             fs.inodes()
                 .get(new_key)

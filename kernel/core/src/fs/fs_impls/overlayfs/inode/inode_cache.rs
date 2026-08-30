@@ -99,38 +99,33 @@ impl InodeCache {
         // Diagnostic classification of a live different-instance occupant at
         // the new key. The unconditional publication below supersedes every
         // class; the log only records which convergence happened.
-        if let Some(existing) = guard.get(&new_key) {
-            if existing.carrier.strong_count() > 0
-                && !Weak::ptr_eq(&existing.carrier, &Arc::downgrade(pin))
-            {
-                match existing.carrier.upgrade() {
-                    Some(occupant) => {
-                        if occupant.contains_real_inode(pin.visible_source().real_inode()) {
-                            // The same real object was projected early under
-                            // the new key by a concurrent lookup; the
-                            // committing copy-up inode supersedes it.
-                            notice!(
-                                "overlay inode-cache convergence at the post-transition key \
-                                 {:?}: an early projection of the same real object is \
-                                 superseded by the committing inode",
-                                new_key
-                            );
-                        } else {
-                            // A different object (ino reuse) stale-occupies
-                            // the new key; its registration is replaced.
-                            error!(
-                                "overlay inode-cache stale identity at the post-transition key \
-                                 {:?}: replacing the occupant with the committing inode \
-                                 (ino reuse)",
-                                new_key
-                            );
-                        }
-                    }
-                    // The occupant died racing this check: superseded as a
-                    // dead pin by the publication below.
-                    None => {}
-                }
+        if let Some(existing) = guard.get(&new_key)
+            && existing.carrier.strong_count() > 0
+            && !Weak::ptr_eq(&existing.carrier, &Arc::downgrade(pin))
+            && let Some(occupant) = existing.carrier.upgrade()
+        {
+            if occupant.contains_real_inode(pin.visible_source().real_inode()) {
+                // The same real object was projected early under
+                // the new key by a concurrent lookup; the
+                // committing copy-up inode supersedes it.
+                notice!(
+                    "overlay inode-cache convergence at the post-transition key \
+                     {:?}: an early projection of the same real object is \
+                     superseded by the committing inode",
+                    new_key
+                );
+            } else {
+                // A different object (ino reuse) stale-occupies
+                // the new key; its registration is replaced.
+                error!(
+                    "overlay inode-cache stale identity at the post-transition key \
+                     {:?}: replacing the occupant with the committing inode \
+                     (ino reuse)",
+                    new_key
+                );
             }
+            // The occupant died racing this check: superseded as a
+            // dead pin by the publication below.
         }
         guard.insert(
             new_key,

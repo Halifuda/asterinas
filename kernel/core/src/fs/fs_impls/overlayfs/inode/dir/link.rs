@@ -44,7 +44,7 @@ impl OverlayInode {
                 "the link source has no upper real object after promotion",
             )
         })?;
-        Ok(fs.real_object_path(&upper))
+        Ok(fs.real_object_path(upper))
     }
 
     /// Atomically replaces the published whiteout at `name` with a hard link
