@@ -278,19 +278,39 @@ impl OverlayFs {
         )?;
         Ok(())
     }
-}
 
-/// Sweeps physical whiteout residue out of an upper directory before the
-/// physical rmdir/rename.
-///
-/// Non-atomic and pre-commit: a failure aborts the removal and a retry
-/// converges; it never recurses into directories and propagates errors
-/// unchanged.
-pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
-    let names = crate::fs::fs_impls::overlayfs::read_child_names(upper_dir_path.inode())?;
-    validate_whiteout_children(upper_dir_path, &names)?;
-    unlink_rechecked_whiteouts(upper_dir_path, &names)?;
-    Ok(())
+    /// Sweeps physical whiteout residue out of an upper directory before the
+    /// physical rmdir/rename.
+    ///
+    /// Non-atomic and pre-commit: a failure aborts the removal and a retry
+    /// converges; it never recurses into directories and propagates errors
+    /// unchanged.
+    pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
+        let names = crate::fs::fs_impls::overlayfs::read_child_names(upper_dir_path.inode())?;
+        validate_whiteout_children(upper_dir_path, &names)?;
+        Self::unlink_rechecked_whiteouts(upper_dir_path, &names)?;
+        Ok(())
+    }
+
+    /// Re-observes and unlinks every named whiteout child of `upper_dir_path`.
+    ///
+    /// The removal pass of the sweep: each child is re-classified immediately
+    /// before its `unlink`, so an entry swapped in since the validation pass is
+    /// refused (`ENOTEMPTY`) instead of deleted. The re-check narrows but cannot
+    /// close the residual check-to-use window, so the upper directory must not be
+    /// modified concurrently.
+    fn unlink_rechecked_whiteouts(upper_dir_path: &Path, names: &[String]) -> Result<()> {
+        for name in names {
+            if !is_whiteout_child(upper_dir_path, name)? {
+                return Err(Error::with_message(
+                    Errno::ENOTEMPTY,
+                    "a hidden non-whiteout entry prevents the overlay directory removal",
+                ));
+            }
+            upper_dir_path.unlink(name)?;
+        }
+        Ok(())
+    }
 }
 
 /// Returns whether the named physical child of `upper_dir_path` is a whiteout.
@@ -317,26 +337,6 @@ fn validate_whiteout_children(upper_dir_path: &Path, names: &[String]) -> Result
                 "a hidden non-whiteout entry prevents the overlay directory removal",
             ));
         }
-    }
-    Ok(())
-}
-
-/// Re-observes and unlinks every named whiteout child of `upper_dir_path`.
-///
-/// The removal pass of the sweep: each child is re-classified immediately
-/// before its `unlink`, so an entry swapped in since the validation pass is
-/// refused (`ENOTEMPTY`) instead of deleted. The re-check narrows but cannot
-/// close the residual check-to-use window, so the upper directory must not be
-/// modified concurrently.
-fn unlink_rechecked_whiteouts(upper_dir_path: &Path, names: &[String]) -> Result<()> {
-    for name in names {
-        if !is_whiteout_child(upper_dir_path, name)? {
-            return Err(Error::with_message(
-                Errno::ENOTEMPTY,
-                "a hidden non-whiteout entry prevents the overlay directory removal",
-            ));
-        }
-        upper_dir_path.unlink(name)?;
     }
     Ok(())
 }

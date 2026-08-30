@@ -32,11 +32,11 @@
 //! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/dir.c#L361-L430>
 //!   (Linux `ovl_clear_empty` whiteout-residue sweep)
 
-use super::whiteout;
 use crate::{
     fs::{
-        fs_impls::overlayfs::inode::{
-            Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker,
+        fs_impls::overlayfs::{
+            fs::OverlayFs,
+            inode::{Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker},
         },
         vfs::inode::{Inode, RenameMode},
     },
@@ -192,7 +192,7 @@ impl OverlayInode {
             .as_ref()
             .and_then(|target_facts| target_facts.upper.as_ref())
         {
-            whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
+            OverlayFs::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
         }
 
         // A cross-directory move of a source with lower fallback makes the

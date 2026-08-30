@@ -21,7 +21,6 @@
 //! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/dir.c#L758>
 //!   (Linux `ovl_matches_upper` stale-upper check)
 
-use super::whiteout;
 use crate::{
     fs::{
         file::InodeType,
@@ -126,7 +125,7 @@ impl OverlayInode {
                         "the pure-upper rmdir target has no upper real directory",
                     )
                 })?;
-                whiteout::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
+                OverlayFs::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
             }
             // A physical-upper `ENOENT` means the asserted upper object
             // became stale and maps to `ESTALE`; other upper errors
@@ -257,7 +256,7 @@ impl OverlayInode {
             .map_err(translate_stale_upper_enoent)?;
         match super::super::super::lookup_child_path(&workdir_path, temp.name()) {
             Ok(displaced_path) => {
-                if let Err(cleanup_err) = whiteout::cleanup_upper_whiteouts(&displaced_path) {
+                if let Err(cleanup_err) = OverlayFs::cleanup_upper_whiteouts(&displaced_path) {
                     warn!(
                         "overlay clear-empty: the displaced-directory whiteout \
                          cleanup failed (residue, never a visible source): {:?}",
