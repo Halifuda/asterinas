@@ -113,22 +113,16 @@ impl OverlayInode {
             ),
         };
         let layer_stack = &fs.layer_stack();
-        let upper = layer_stack.upper_layer().ok().map(|layer| {
-            let root_path = layer.root_path();
-            RealObject::from_layer_path(0, &root_path, layer.fsid, layer.container_dev_id)
-        });
+        let upper = layer_stack
+            .upper_layer()
+            .ok()
+            .map(|layer| RealObject::new(0, layer.root_dentry().clone()));
         let lowers: Vec<_> = layer_stack
             .lower_layers()
             .iter()
             .enumerate()
             .map(|(layer_index, layer)| {
-                let root_path = layer.root_path();
-                RealObject::from_layer_path(
-                    layer_index + 1,
-                    &root_path,
-                    layer.fsid,
-                    layer.container_dev_id,
-                )
+                RealObject::new(layer_index + 1, layer.root_dentry().clone())
             })
             .collect();
         fs.project_inode(
@@ -138,8 +132,11 @@ impl OverlayInode {
     }
 
     /// Returns the inode-cache key derived from the current visible source.
-    fn key(&self) -> RealObjectKey {
-        RealObjectKey::from_source(self.visible_source())
+    ///
+    /// The owning layer's fsid is read through the mount's layer stack, so
+    /// the caller supplies the live mount.
+    fn key(&self, fs: &OverlayFs) -> RealObjectKey {
+        fs.real_object_key(self.visible_source())
     }
 
     /// Returns the current visible real-object source.
@@ -179,16 +176,16 @@ impl OverlayInode {
     }
 
     /// Returns the dentry-anchored path of the promoted upper real parent
-    /// directory.
+    /// directory, rebuilt through the upper layer's clone view.
     ///
-    /// After promotion the object is guaranteed to have an upper object that
-    /// is always dentry-anchored, so the checked `real_path()` accessor
-    /// succeeds; `EROFS`/`EIO` propagate when that guarantee does not hold.
+    /// After promotion the object is guaranteed to have an upper real parent;
+    /// `EROFS` propagates when that guarantee does not hold.
     fn upper_parent_path(&self) -> Result<Path> {
+        let fs = self.fs_arc()?;
         let upper = self.upper.get().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay object has no upper real parent")
         })?;
-        upper.real_path()
+        Ok(fs.real_object_path(&upper))
     }
 
     /// Returns `Err` when the inode does not belong to an overlay filesystem.
@@ -205,7 +202,7 @@ impl OverlayInode {
     /// Returns this inode's canonical cached `Arc`, or `Err(EIO)` when absent.
     fn cached_self_arc(&self) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
-        fs.inodes().get(self.key()).ok_or_else(|| {
+        fs.inodes().get(self.key(&fs)).ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,
                 "this overlay inode is not registered under its visible-source key",
@@ -235,18 +232,18 @@ impl OverlayInode {
     /// registration is the infallible `publish_rekey`. `lowers` are immutable
     /// across copy-up.
     fn replace_facts(&self, new_upper: RealObject, pin: &Arc<OverlayInode>) {
-        // The cache identity is derived from the pre-publication facts: once
-        // the `Once` flips, `visible_source`/`key` denote the new upper
-        // object.
-        let new_key = RealObjectKey::from_source(&new_upper);
-        let old_key = self.key();
-        let old_real_inode = self.visible_source().real_inode().clone();
         let Some(fs) = self.fs.upgrade() else {
             // Teardown arm: no live lookup can observe this inode, so only
             // publish the local upper object.
             self.upper.call_once(|| new_upper);
             return;
         };
+        // The cache identities are derived from the pre-publication facts:
+        // once the `Once` flips, `visible_source`/`key` denote the new upper
+        // object.
+        let new_key = fs.real_object_key(&new_upper);
+        let old_key = fs.real_object_key(self.visible_source());
+        let old_real_inode = self.visible_source().real_inode().clone();
         self.upper.call_once(|| new_upper);
         fs.inodes().publish_rekey(old_key, new_key, old_real_inode, pin);
         debug_assert!(

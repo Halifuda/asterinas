@@ -31,6 +31,7 @@ use crate::{
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FsEventSubscriberStats, FsFlags},
+            path::Path,
             registry::FsCreationCtx,
         },
     },
@@ -68,24 +69,31 @@ impl OverlayFs {
                 Error::with_message(Errno::EINVAL, "internal error: missing workdir option")
             })?;
 
-            let upper_path = resolve_root_path(upper_dir)?;
-            let workdir_path = resolve_root_path(work_dir)?;
+            // The upper path rides the upper layer's clone view. The workdir
+            // is not a layer and gets no view of its own: its workspace pins
+            // the resolved workdir dentry on the upper view's mount, keeping
+            // every workdir↔upper rename/link on one mount.
+            let upper_path = upper.root_path();
+            let workdir_path = {
+                let workdir_dentry = resolve_root_path(work_dir)?.dentry().clone();
+                Path::new(upper_path.mount_node().clone(), workdir_dentry)
+            };
             UpperWorkdirInuse::validate_pair(&upper_path, &workdir_path)?;
             // The workdir is not a layer, so `assemble`'s pairwise check
             // cannot cover it.
             layer_stack.validate_workdir_against_lowers(&workdir_path)?;
-            verify_inode_instance_stability(upper_dir, upper.root_dentry.inode())?;
+            verify_inode_instance_stability(upper_dir, upper.root_dentry().inode())?;
             verify_inode_instance_stability(work_dir, workdir_path.inode())?;
 
             let uuid_mode = options.uuid_mode.unwrap_or(UuidMode::Auto);
             let identity = if is_effective_read_only {
                 Ok(Uuid::generate())
             } else {
-                UpperWorkdirInuse::determine_identity(upper.root_dentry.inode(), uuid_mode)
+                UpperWorkdirInuse::determine_identity(upper.root_dentry().inode(), uuid_mode)
             }?;
 
             let mut claimed_pair = UpperWorkdirInuse::claim(
-                upper.root_dentry.inode().clone(),
+                upper.root_dentry().inode().clone(),
                 workdir_path.inode().clone(),
                 identity,
             )?;
@@ -94,7 +102,7 @@ impl OverlayFs {
                 claimed_pair.prepare_workdir(&workdir_path)?;
 
                 let capabilities = UpperFilesystemCapabilities::probe(
-                    upper.root_dentry.inode(),
+                    upper.root_dentry().inode(),
                     claimed_pair.workdir_workspace()?,
                 )?;
                 let is_uuid_effective = capabilities.validate_uuid_support(uuid_mode)?;

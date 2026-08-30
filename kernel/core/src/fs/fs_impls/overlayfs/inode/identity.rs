@@ -38,7 +38,7 @@ use crate::{
     fs::{
         fs_impls::overlayfs::{
             fs::{OverlayFs, policy::XinoMode},
-            layer::{LayerStack, RealObjectStack},
+            layer::{Layer, LayerStack, RealObjectStack},
             real::RealObject,
         },
         vfs::{inode::Inode, xattr::XattrSetFlags},
@@ -90,7 +90,7 @@ pub(in overlayfs) fn collect_layer_devs(
         layer_devs.push(LowerLayerIdentity {
             fsid: upper.fsid,
             container_dev_id: upper.container_dev_id,
-            lower_layer_root_ino: upper.root_dentry.inode().ino(),
+            lower_layer_root_ino: upper.root_dentry().inode().ino(),
         });
         Some(index)
     } else {
@@ -100,7 +100,7 @@ pub(in overlayfs) fn collect_layer_devs(
         layer_devs.push(LowerLayerIdentity {
             fsid: lower.fsid,
             container_dev_id: lower.container_dev_id,
-            lower_layer_root_ino: lower.root_dentry.inode().ino(),
+            lower_layer_root_ino: lower.root_dentry().inode().ino(),
         });
     }
     (layer_devs, upper_layer_dev_index)
@@ -185,19 +185,24 @@ impl IdentityPolicy {
         matches!(self.xino_mode, XinoMode::Auto | XinoMode::On)
     }
 
-    /// Projects the dev/ino identity of a real object from its own layer
-    /// evidence.
+    /// Projects the dev/ino identity of a real object from its owning
+    /// layer's evidence.
     ///
-    /// This is the entry for callers that already hold a [`RealObject`]
-    /// (its `fsid`, real ino, and container dev are read directly from the
-    /// object), as opposed to the lower-id entry that starts from a durable
-    /// record, so callers need not unpack the three `RealObject` fields into
-    /// `project` themselves.
-    pub(super) fn project_object_id(&self, real: &RealObject, is_directory: bool) -> ObjectId {
+    /// This is the entry for callers that already hold a [`RealObject`] (the
+    /// real ino is read from the object, while the layer fsid and container
+    /// dev come from the owning [`Layer`]), as opposed to the lower-id entry
+    /// that starts from a durable record, so callers need not unpack the
+    /// layer evidence into `project` themselves.
+    pub(super) fn project_object_id(
+        &self,
+        layer: &Layer,
+        real: &RealObject,
+        is_directory: bool,
+    ) -> ObjectId {
         self.project(
-            real.fsid(),
+            layer.fsid,
             real.real_inode().ino(),
-            real.container_dev_id(),
+            layer.container_dev_id,
             is_directory,
         )
     }
@@ -327,37 +332,6 @@ impl IdentityPolicy {
         }
         matched_fsid
     }
-
-    /// Returns whether the persisted lower-source record is consistent with
-    /// the retained same-layer lower of `facts`: the record's real inode must
-    /// equal the retained lower's, so a forged or stale record falls back to
-    /// the visible-source projection (identity authenticity wins).
-    ///
-    // TODO(origin-verify): once the VFS gains an ino-to-inode / file-handle
-    // resolution surface, upgrade this cross-check to a full origin
-    // verification and drop the retained-lower approximation.
-    pub(super) fn origin_real_ino_resolves(
-        &self,
-        record: &LowerIdOrigin,
-        facts: &RealObjectStack,
-    ) -> bool {
-        // The record's layer is the unique current lower fsid matching its
-        // device/root pair; the retained lower at that layer is the
-        // same-layer evidence in the fresh facts.
-        let Some(layer_fsid) = self
-            .resolve_layer_id_for_record(record.container_dev_id(), record.lower_layer_root_ino())
-        else {
-            return false;
-        };
-        match facts.lowers.iter().find(|lower| lower.fsid() == layer_fsid) {
-            // Accepted only when the record's real inode equals the retained
-            // same-layer lower; a mismatch (the lower was replaced since
-            // copy-up) or an absent retained lower (the lower no longer
-            // participates in the name) rejects the record.
-            Some(retained_lower) => record.real_ino() == retained_lower.real_inode().ino(),
-            None => false,
-        }
-    }
 }
 
 /// The durable lower-source identity record: a stateless value type carrying
@@ -396,13 +370,18 @@ const ORIGIN_WIRE_TOTAL_LEN: usize = ORIGIN_WIRE_HEADER_LEN + ORIGIN_WIRE_PAYLOA
 const ORIGIN_WIRE_FLAGS_KNOWN: u8 = 0;
 
 impl LowerIdOrigin {
-    /// Constructs the record from a lower [`RealObject`].
+    /// Constructs the record from a lower [`RealObject`] and its owning
+    /// layer.
     ///
     /// The per-mount `fsid` is deliberately not persisted — it is derived at
     /// read time from the device/root pair.
-    fn try_from_lower(lower: &RealObject, lower_layer_root_ino: u64) -> Result<Self> {
+    fn try_from_lower(
+        layer: &Layer,
+        lower: &RealObject,
+        lower_layer_root_ino: u64,
+    ) -> Result<Self> {
         Ok(Self {
-            container_dev_id: lower.container_dev_id(),
+            container_dev_id: layer.container_dev_id,
             lower_layer_root_ino,
             real_ino: lower.real_inode().ino(),
         })
@@ -485,10 +464,47 @@ impl LowerIdOrigin {
 }
 
 impl OverlayFs {
+    /// Returns whether the persisted lower-source record is consistent with
+    /// the retained same-layer lower of `facts`: the record's real inode must
+    /// equal the retained lower's, so a forged or stale record falls back to
+    /// the visible-source projection (identity authenticity wins).
+    ///
+    // TODO(origin-verify): once the VFS gains an ino-to-inode / file-handle
+    // resolution surface, upgrade this cross-check to a full origin
+    // verification and drop the retained-lower approximation.
+    pub(super) fn origin_real_ino_resolves(
+        &self,
+        record: &LowerIdOrigin,
+        facts: &RealObjectStack,
+    ) -> bool {
+        // The record's layer is the unique current lower fsid matching its
+        // device/root pair; the retained lower at that layer is the
+        // same-layer evidence in the fresh facts.
+        let Some(layer_fsid) = self
+            .identity()
+            .resolve_layer_id_for_record(record.container_dev_id(), record.lower_layer_root_ino())
+        else {
+            return false;
+        };
+        match facts
+            .lowers
+            .iter()
+            .find(|lower| self.layer(lower.layer_index()).fsid == layer_fsid)
+        {
+            // Accepted only when the record's real inode equals the retained
+            // same-layer lower; a mismatch (the lower was replaced since
+            // copy-up) or an absent retained lower (the lower no longer
+            // participates in the name) rejects the record.
+            Some(retained_lower) => record.real_ino() == retained_lower.real_inode().ino(),
+            None => false,
+        }
+    }
+
     /// Persists the lower-source identity record on the upper inode with a
     /// single `set_xattr(..., CREATE_OR_REPLACE)` call; a missing
     /// capability or `EOPNOTSUPP` is a gated no-op.
     pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
+        let layer = self.layer(lower.layer_index());
         let lower_layer_root_ino = self
             .layer_stack()
             .lower_layer_root_ino_for_origin(lower.layer_index())?;
@@ -498,7 +514,7 @@ impl OverlayFs {
         if !capabilities.can_store_private_xattr() {
             return Ok(());
         }
-        let record = LowerIdOrigin::try_from_lower(lower, lower_layer_root_ino)?;
+        let record = LowerIdOrigin::try_from_lower(layer, lower, lower_layer_root_ino)?;
         let name = origin_xattr_name()?;
         let value = record.serialize();
         let mut reader = VmReader::from(value.as_slice()).to_fallible();

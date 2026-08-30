@@ -36,6 +36,7 @@ impl OverlayInode {
     /// upper real object's dentry-anchored [`Path`] that the new target hard
     /// link shares with the source; promotion errors propagate unchanged.
     pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
+        let fs = self.fs_arc()?;
         old.copy_up()?;
         let upper = old.upper.get().ok_or_else(|| {
             Error::with_message(
@@ -43,7 +44,7 @@ impl OverlayInode {
                 "the link source has no upper real object after promotion",
             )
         })?;
-        upper.real_path()
+        Ok(fs.real_object_path(&upper))
     }
 
     /// Atomically replaces the published whiteout at `name` with a hard link

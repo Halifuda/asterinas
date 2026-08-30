@@ -113,10 +113,10 @@ impl OverlayFs {
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
         if let Some(upper_real) = parent.upper.get() {
-            let upper_path = upper_real.real_path()?;
+            let upper_path = self.real_object_path(upper_real);
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&upper_path, name) {
                 Ok(child_path) => {
-                    let hit = RealObject::child_hit(0, &child_path, upper_real);
+                    let hit = RealObject::new(0, child_path.dentry().clone());
                     if is_whiteout_inode(hit.real_inode())? {
                         return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                     }
@@ -145,10 +145,10 @@ impl OverlayFs {
 
         for lower_real in &parent.lowers {
             let layer_index = lower_real.layer_index();
-            let lower_path = lower_real.real_path()?;
+            let lower_path = self.real_object_path(lower_real);
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&lower_path, name) {
                 Ok(child_path) => {
-                    let hit = RealObject::child_hit(layer_index, &child_path, lower_real);
+                    let hit = RealObject::new(layer_index, child_path.dentry().clone());
                     if is_whiteout_inode(hit.real_inode())? {
                         // A whiteout is the topmost occurrence of the name:
                         // the name is hidden. Below an already-visible
@@ -201,7 +201,7 @@ impl OverlayFs {
     /// The flow is pure resolve: the layer-ordered lookup re-observes fresh
     /// layer truth and projects it directly, with no verify-then-serve cache.
     pub(super) fn lookup(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
-        let parent_arc = self.inodes().get(parent.key()).ok_or_else(|| {
+        let parent_arc = self.inodes().get(parent.key(self)).ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,
                 "the overlay parent is not registered under its visible-source key",
@@ -225,7 +225,7 @@ impl OverlayFs {
         binding: ProjectionBinding<'_>,
     ) -> Arc<OverlayInode> {
         let source = facts.visible_source();
-        let key = facts.key();
+        let key = self.real_object_key(source);
         let is_directory = facts.is_merged() || source.real_inode().type_().is_directory();
         // Clone the visible source before the closures move `facts`: the
         // get-or-create predicate validates a cached hit against this real
@@ -249,7 +249,8 @@ impl OverlayFs {
                 return inode;
             }
         }
-        let fallback_fn = || self.identity().project_object_id(source, is_directory);
+        let layer = self.layer(source.layer_index());
+        let fallback_fn = || self.identity().project_object_id(layer, source, is_directory);
         let object_id = if source.layer_index() == 0 {
             match self.read_lower_id(source.real_inode()) {
                 // Defensive: the record was device-validated at the read boundary,
@@ -258,7 +259,7 @@ impl OverlayFs {
                     // The record is accepted only when its real inode is
                     // consistent with the retained same-layer lower of the
                     // fresh facts.
-                    if self.identity().origin_real_ino_resolves(&record, facts) {
+                    if self.origin_real_ino_resolves(&record, facts) {
                         self.identity()
                             .project_object_id_from_lower_id(&record, is_directory)
                             .unwrap_or_else(fallback_fn)

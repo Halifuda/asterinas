@@ -16,12 +16,14 @@ use crate::{
         fs_impls::overlayfs::{
             fs_type::OVERLAY_FS_NAME,
             inode::{IdentityPolicy, InodeCache, OverlayInode, WhiteoutCache},
-            layer::LayerStack,
+            layer::{Layer, LayerStack},
+            real::{RealObject, RealObjectKey},
         },
         pseudofs::AnonDeviceId,
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
             inode::Inode,
+            path::Path,
         },
     },
     prelude::*,
@@ -67,6 +69,44 @@ pub(super) struct OverlayFs {
 impl OverlayFs {
     pub(super) fn layer_stack(&self) -> &LayerStack {
         &self.layer_stack
+    }
+
+    /// Resolves the layer of a real object by the uniform layer-index rule:
+    /// index `0` is the upper when present, `n >= 1` addresses
+    /// `lowers[n-1]` — the same rule the root and lookup construction use.
+    ///
+    /// Real objects are minted only from this stack's layers, so the lookup
+    /// cannot fail for a live overlay; a violation is a structural bug.
+    pub(super) fn layer(&self, layer_index: usize) -> &Layer {
+        if layer_index == 0 {
+            return self
+                .layer_stack
+                .upper
+                .as_ref()
+                .expect("a real object with layer index 0 references the upper layer");
+        }
+        self.layer_stack
+            .lowers
+            .get(layer_index - 1)
+            .expect("a real object references a configured lower layer")
+    }
+
+    /// Rebuilds the dentry-anchored path of a real object through its
+    /// owning layer's private clone view.
+    ///
+    /// The view strongly holds the layer root and the layer stack outlives
+    /// every reachable real object, so the rebuild is infallible.
+    pub(super) fn real_object_path(&self, real: &RealObject) -> Path {
+        Path::new(
+            self.layer(real.layer_index()).mount.clone(),
+            real.dentry().clone(),
+        )
+    }
+
+    /// Builds the inode-cache key of a real object: the owning layer's fsid
+    /// plus the real inode number.
+    pub(super) fn real_object_key(&self, real: &RealObject) -> RealObjectKey {
+        RealObjectKey::from_source(self.layer(real.layer_index()).fsid, real)
     }
 
     pub(super) fn upper_workdir_pair(&self) -> &Option<UpperWorkdirInuse> {

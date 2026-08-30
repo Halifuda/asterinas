@@ -484,7 +484,6 @@ impl OverlayInode {
                 return false;
             };
             return fs
-                .identity()
                 .origin_real_ino_resolves(&record, &self.real_object_stack());
         }
         false

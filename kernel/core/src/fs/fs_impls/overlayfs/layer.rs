@@ -10,19 +10,28 @@
 
 use device_id::DeviceId;
 
-use super::real::{RealObject, RealObjectKey};
+use super::real::RealObject;
 use crate::{
     fs::vfs::path::{Dentry, Mount, Path},
     prelude::*,
 };
 
 /// One pinned real layer root of an overlay mount.
+///
+/// The layer is the sole strong holder of its private clone view; the view
+/// is unregistered from every mount namespace (an empty
+/// `Weak<MountNamespace>` was passed to `Mount::clone_mount`), so it is
+/// reachable only through this layer and its root dentry is the resolved
+/// layer root. The view inherits the flags of the mount the layer root was
+/// resolved through; lower layers stay read-only by overlay
+/// self-discipline — the overlay never issues mutations through a lower
+/// view (directly modifying underlying layers is undefined behavior;
+/// see `Documentation/filesystems/overlayfs.rst`).
 #[derive(Debug)]
 pub(super) struct Layer {
-    /// The mount the layer root was resolved through.
+    /// The layer's private, unregistered clone view; its root dentry is the
+    /// layer root.
     pub(super) mount: Arc<Mount>,
-    /// The layer-root dentry; the dentry owns the root inode.
-    pub(super) root_dentry: Arc<Dentry>,
     /// Per-unique-underlying-superblock identifier assigned at assembly.
     pub(super) fsid: u64,
     /// `st_dev` of the layer root, used for same-filesystem comparisons.
@@ -30,15 +39,20 @@ pub(super) struct Layer {
 }
 
 impl Layer {
-    /// Builds the upper-layer (index 0) real object for `child_path`.
-    pub(super) fn child_real_object(&self, child_path: &Path) -> RealObject {
-        RealObject::from_layer_path(0, child_path, self.fsid, self.container_dev_id)
+    /// Returns the layer-root dentry; the dentry owns the root inode and is
+    /// carried by the clone view.
+    pub(super) fn root_dentry(&self) -> &Arc<Dentry> {
+        self.mount.root_dentry()
     }
 
-    /// Returns the layer root path rebuilt from the strongly held mount and
-    /// root dentry.
+    /// Builds the upper-layer (index 0) real object for `child_path`.
+    pub(super) fn child_real_object(&self, child_path: &Path) -> RealObject {
+        RealObject::new(0, child_path.dentry().clone())
+    }
+
+    /// Returns the layer root path rebuilt from the clone view.
     pub(super) fn root_path(&self) -> Path {
-        Path::new(self.mount.clone(), self.root_dentry.clone())
+        Path::new(self.mount.clone(), self.root_dentry().clone())
     }
 }
 
@@ -59,11 +73,11 @@ impl LayerStack {
     /// Only layer roots are compared, so legal nested subdirectories are never rejected;
     /// violations return `EINVAL`.
     pub(super) fn validate_layer_overlap(new: &Layer, others: &[&Layer]) -> Result<()> {
-        let new_dentry = &new.root_dentry;
+        let new_dentry = new.root_dentry();
         for other in others {
-            let other_dentry = &other.root_dentry;
+            let other_dentry = other.root_dentry();
             if Arc::ptr_eq(new_dentry, other_dentry)
-                || Arc::ptr_eq(new.root_dentry.inode(), other.root_dentry.inode())
+                || Arc::ptr_eq(new.root_dentry().inode(), other.root_dentry().inode())
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -103,9 +117,9 @@ impl LayerStack {
     pub(super) fn validate_workdir_against_lowers(&self, workdir_path: &Path) -> Result<()> {
         let workdir_dentry = workdir_path.dentry();
         for lower in &self.lowers {
-            let lower_dentry = &lower.root_dentry;
+            let lower_dentry = lower.root_dentry();
             if Arc::ptr_eq(lower_dentry, workdir_dentry)
-                || Arc::ptr_eq(lower.root_dentry.inode(), workdir_path.inode())
+                || Arc::ptr_eq(lower.root_dentry().inode(), workdir_path.inode())
             {
                 return_errno_with_message!(
                     Errno::EINVAL,
@@ -124,29 +138,24 @@ impl LayerStack {
         Ok(())
     }
 
-    /// Converts a copy-up origin layer index to the configured lower index.
+    /// Converts a copy-up origin layer index to the configured lower index
+    /// under the uniform layer-index rule: index `0` is the upper when
+    /// present, `n >= 1` addresses `lowers[n-1]` — the same rule the root
+    /// and lookup construction use.
     ///
-    /// `layer_index()` counts the upper as position 0, so when the stack has
-    /// an upper the origin's own lower position is `layer_index - 1`; both
-    /// out-of-range forms fail with `EINVAL`.
+    /// Out-of-range forms (an index that is not a configured lower) fail
+    /// with `EINVAL`.
     pub(super) fn lower_layer_root_ino_for_origin(&self, layer_index: usize) -> Result<u64> {
-        let lower_index = if self.upper.is_some() {
-            layer_index.checked_sub(1).ok_or_else(|| {
+        let lower_layer = layer_index
+            .checked_sub(1)
+            .and_then(|index| self.lowers.get(index))
+            .ok_or_else(|| {
                 Error::with_message(
                     Errno::EINVAL,
                     "the origin source does not identify a configured lower layer",
                 )
-            })?
-        } else {
-            layer_index
-        };
-        let lower_layer = self.lowers.get(lower_index).ok_or_else(|| {
-            Error::with_message(
-                Errno::EINVAL,
-                "the origin source does not identify a configured lower layer",
-            )
-        })?;
-        Ok(lower_layer.root_dentry.inode().ino())
+            })?;
+        Ok(lower_layer.root_dentry().inode().ino())
     }
 }
 
@@ -207,10 +216,5 @@ impl RealObjectStack {
             Some(upper) => upper,
             None => &self.lowers[0],
         }
-    }
-
-    /// Returns the cache key derived from the visible-metadata source.
-    pub(super) fn key(&self) -> RealObjectKey {
-        RealObjectKey::from_source(self.visible_source())
     }
 }

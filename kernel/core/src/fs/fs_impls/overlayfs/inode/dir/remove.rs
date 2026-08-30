@@ -125,7 +125,7 @@ impl OverlayInode {
                         "the pure-upper rmdir target has no upper real directory",
                     )
                 })?;
-                OverlayFs::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
+                OverlayFs::cleanup_upper_whiteouts(&fs.real_object_path(target_upper_dir))?;
             }
             // A physical-upper `ENOENT` means the asserted upper object
             // became stale and maps to `ESTALE`; other upper errors

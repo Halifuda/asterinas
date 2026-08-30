@@ -192,13 +192,13 @@ impl OverlayInode {
             .as_ref()
             .and_then(|target_facts| target_facts.upper.as_ref())
         {
-            OverlayFs::cleanup_upper_whiteouts(&target_upper_dir.real_path()?)?;
+            OverlayFs::cleanup_upper_whiteouts(&fs.real_object_path(target_upper_dir))?;
         }
 
         // A cross-directory move of a source with lower fallback makes the
         // target parent impure: persist the impure marker before the
         // physical rename (before committing the rename).
-        let same_parent = self.key() == target.key();
+        let same_parent = self.key(&fs) == target.key(&fs);
         if !same_parent && source_has_lower {
             set_impure_marker(target_upper_parent_path.inode())?;
         }

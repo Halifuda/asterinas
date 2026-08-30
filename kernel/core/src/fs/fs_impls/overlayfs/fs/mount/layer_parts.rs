@@ -9,6 +9,10 @@
 //! type definitions themselves live in `overlayfs::layer`, while this module
 //! only provides the construction logic that runs during `OverlayFs::new`.
 //!
+//! Every layer (and, riding the upper view, the workdir) is assembled with a
+//! private unregistered clone view rooted at its resolved path, reusing the
+//! existing VFS mount-clone primitive.
+//!
 //! Lower layers are read-only: the overlay never writes the lower layers.
 //!
 //! - Non-`default_permissions` mounts promote mutating paths to the upper
@@ -41,13 +45,14 @@ use crate::{
     fs::vfs::{
         file_system::{FileSystem, FsFlags},
         inode::Inode,
-        path::{AT_FDCWD, Dentry, EmptyPathStr, FsPath, Mount, Path},
+        path::{AT_FDCWD, EmptyPathStr, FsPath, Mount, Path},
     },
     prelude::*,
 };
 
-/// Two-phase assembly input: resolve-then-assign.
-type LayerParts = (Arc<Mount>, Arc<Dentry>, DeviceId);
+/// Two-phase assembly input: resolve-then-clone. The mount is the layer's
+/// private unregistered clone view.
+type LayerParts = (Arc<Mount>, DeviceId);
 
 /// Resolves `raw_path` through `lookup_no_follow` in the mounting task's
 /// filesystem context: intermediate symlink components are followed, the
@@ -90,7 +95,11 @@ pub(super) fn verify_inode_instance_stability(
 }
 
 impl Layer {
-    /// Resolves `raw_path` into the strongly pinned layer-root parts.
+    /// Resolves `raw_path` into the layer's private clone view.
+    ///
+    /// The resolved layer-root dentry becomes the root of a private mount
+    /// clone (an empty mount namespace yields an unregistered view), so the
+    /// layer root need not be the underlying mount's root.
     fn resolve_parts(raw_path: &str) -> Result<LayerParts> {
         // Missing paths surface the resolver's `ENOENT`; non-directory roots
         // fail with `ENOTDIR`.
@@ -98,11 +107,11 @@ impl Layer {
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
         }
-        Ok((
-            path.mount_node().clone(),
-            path.dentry().clone(),
-            path.metadata()?.container_dev_id,
-        ))
+        let container_dev_id = path.metadata()?.container_dev_id;
+        let view = path
+            .mount_node()
+            .clone_mount(path.dentry(), &Weak::new())?;
+        Ok((view, container_dev_id))
     }
 }
 
@@ -119,11 +128,11 @@ impl LayerStack {
     ) -> Result<Self> {
         let mut upper_parts = None;
         if let Some(raw_path) = upper_dir {
-            let (mount, root_dentry, container_dev_id) = Layer::resolve_parts(&raw_path)?;
+            let (mount, container_dev_id) = Layer::resolve_parts(&raw_path)?;
             if !is_forced_read_only && mount.fs().flags().contains(FsFlags::RDONLY) {
                 return_errno_with_message!(Errno::EROFS, "the upper filesystem is read-only");
             }
-            upper_parts = Some((mount, root_dentry, container_dev_id));
+            upper_parts = Some((mount, container_dev_id));
         }
 
         if lower_dirs.is_empty() {
@@ -151,22 +160,20 @@ impl LayerStack {
             }
         };
 
-        let upper = upper_parts.map(|(mount, root_dentry, container_dev_id)| {
+        let upper = upper_parts.map(|(mount, container_dev_id)| {
             let fsid = fsid_of_fn(mount.fs());
             Layer {
                 mount,
-                root_dentry,
                 fsid,
                 container_dev_id,
             }
         });
         let lowers = lower_parts
             .into_iter()
-            .map(|(mount, root_dentry, container_dev_id)| {
+            .map(|(mount, container_dev_id)| {
                 let fsid = fsid_of_fn(mount.fs());
                 Layer {
                     mount,
-                    root_dentry,
                     fsid,
                     container_dev_id,
                 }

@@ -1607,3 +1607,22 @@ wave 直接引用。PASS_SLICING 已记 Deferred 注记与最终脊柱：
 支线，全部生产改动限于 overlayfs 目录内（与 Wave7 O3 的 VFS 回退决定
 同一保守方向）。xattr 四项 open questions 仍待 user 裁决后随派发解冻
 一并放行。
+
+### 2026-08-30 执行模型裁定（user /goal，五点；脊柱解冻执行）
+
+1. **每 pass 单独 Creator**；2. **Creator 允许容器内 `cargo check`**
+   （`docker exec -w /root/asterinas codex-asterinas-dev cargo check -p
+   aster-kernel --target x86_64-unknown-none`；scope 内编译错误当场修，
+   scope 外搁置并上报、不阻塞后续 pass）；3. **主代理不再亲验**——每
+   pass 由一名 Reviewer 验收，不通过则发回**同一 Creator** 复工、同一
+   Reviewer 复验（一 pass 一对；平台以 SendMessage resume 实现"已有"）；
+   主代理上下文最小化，只派发、转达、提交；4. 全部 pass 后**一次
+   `make check` 解决 lint**，功能测试（xfstests）本轮不做；5. **每 pass
+   验收通过后主代理 commit 该 pass 写集**（细粒度回退点）。PROTOCOL §1.5
+   的 wave 级 Reviewer 门由此改为 per-pass Reviewer 门（user 指令优先）。
+
+**xattr 四项 open questions 一并裁定（采纳主代理建议）**：①
+`set_overlay_xattr` 用 Self-free 关联函数形态；② overlay/026 观察基准切
+modern-Linux（含主代理 get 半段修正附录）；③ U3 取 document 处置；
+④ divergence 1 不复刻、divergence 2 改挂 G1 轮。已随 xattr dispatch
+packet 一并生效。
