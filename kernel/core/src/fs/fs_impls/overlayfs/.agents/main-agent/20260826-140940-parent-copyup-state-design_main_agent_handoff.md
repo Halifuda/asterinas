@@ -1694,3 +1694,33 @@ packet 一并生效。
   本轮也未触碰——**无翻绿候选**。唯一因本轮修改而获得"可测资格"的族是
   083/084（userxattr/转义，功能现已实现），但打包套件不含它们，仍不可
   调度。
+
+### 2026-08-30 022 修复裁决：暂不修（祖先链能力缺失 + 机制未定位）
+
+- **Linux 语义（已确证）**：inuse = 内存 inode 位 `I_OVL_INUSE`
+  （`util.c:1013`，与我们的 `OverlayInuseSlot` 同构）；**打标只打两根**
+  （upper/work，`super.c:548/823`）；**检查 = `ovl_check_layer`
+  祖先链向上走**（`super.c:1236-1265`，upper/workbasedir/各 lower 三处
+  调用），任一祖先带标 → EINVAL（lower 另有 trap → ELOOP）；**无向下
+  扫描**（`ovl_is_inuse` 为单 inode 标志读；"新根包住已标记根"的方向
+  上游同样存在顺序窗口）。
+- **user 条件判定：暂不修**。条件 = "VFS/Mount 接口处有祖先链访问能力才修"
+  → **能力缺失**：`Dentry::parent()` 为 `pub(super)`（dentry.rs:283，仅
+  vfs::path 内可见）、`this()` 私有——overlayfs 拿不到祖先 dentry；
+  `path_name()` 虽 `pub(in crate::fs)` 但只返回拼串，无法逐祖先探针；
+  `OverlayInuseSlot` 仅有 try_claim/release、无 claimed 探针（补两者皆是
+  VFS 改动）。Mount 侧 `parent()/mountpoint()/root_dentry()` 虽为
+  `pub(in crate::fs)`，但挂载内祖先在 dentry 层，mount 级父链不够用。
+- **追加开放发现（诚实记录）**：读遍上游挂载路径（ovl_get_upper/
+  get_workdir/make_workdir/check_layer/get_fsid/get_trap_inode/
+  inode_test）后，**022 在上游被拒的确切代码点尚未定位**——按 dentry
+  拓扑推演，check_layer 的祖先走查（B 的 merged-upper → A 根 → 根自环）
+  不经过 A 打标的 backing 根；`ovl_get_upper/get_workdir` 无 overlay
+  显式检查；76bc8e2843b6 的 commit 对象不在本地浅仓库。在定位清楚之前，
+  "祖先链修法能否覆盖 022"本身存疑——暂不修因此也是技术上稳妥的选择。
+  后续修复前置：(a) VFS 祖先访问能力 PR + (b) 上游拒绝机制定位（或以
+  overlayfs 局部的 fs 判别式——`Arc::downcast::<OverlayFs>`（`fs_arc()`
+  同款先例）——先行实验验证是否足以拒绝 022 场景）。
+- **当前处置**：026 已入 block.list（重新基线）；022 登记为已知缺口
+  （同 013/041 模式，挂载流缺 overlay-as-upperdir 检查，触发路径 =
+  认领/身份写经另一 overlay 用户面）；023 维持排除（ACL 未支持）。
