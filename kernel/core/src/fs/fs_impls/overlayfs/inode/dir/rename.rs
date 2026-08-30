@@ -264,7 +264,7 @@ impl OverlayInode {
         // cross-parent move, while both parent DIR transaction locks are
         // held (`DIR -> PARENT` write order).
         if !same_parent {
-            *source_inode.parent.write() = Arc::downgrade(target);
+            *source_inode.recorded_parent.write() = Arc::downgrade(target);
         }
         // A cross-directory rename may have restored purity in the source or
         // target parent (the overwrite-of-origin-target case can clear the

@@ -36,7 +36,7 @@ impl OverlayInode {
     /// upper real object's dentry-anchored [`Path`] that the new target hard
     /// link shares with the source; promotion errors propagate unchanged.
     pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
-        old.ensure_upper_authority()?;
+        old.copy_up()?;
         let upper = old.upper.get().ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,

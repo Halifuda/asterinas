@@ -99,7 +99,7 @@ impl OverlayInode {
         // `AccessType::ReadOnly`.
         self.check_local_permission(access, perm)?;
         if access == AccessType::Mutating {
-            self.ensure_upper_authority()?;
+            self.copy_up()?;
         }
         if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(perm)?;

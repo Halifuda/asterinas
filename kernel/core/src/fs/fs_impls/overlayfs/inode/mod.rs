@@ -5,8 +5,8 @@
 //!
 //! [`OverlayInode`] is the published logical inode shared by every name bound
 //! to the same overlay object. It owns the per-object real-object facts, the
-//! canonical parent pointer, the per-directory transaction lock, the
-//! precomputed projected identity, and the copy-up state.
+//! recorded parent pointer, the per-directory transaction lock, the
+//! precomputed projected identity, and the copy-up coordinate.
 //!
 //! # Locking
 //!
@@ -47,7 +47,6 @@ use crate::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
         fs_impls::overlayfs::{
             fs::OverlayFs,
-            inode::copyup::CopyUpState,
             layer::RealObjectStack,
             real::{RealObject, RealObjectKey},
         },
@@ -83,13 +82,17 @@ pub(super) struct OverlayInode {
     /// index in the payload; non-directories use the lock as a pure
     /// serialization token with `None`.
     lock: Mutex<Option<ReaddirIndex>>,
-    /// The canonical overlay parent. The mount root points to itself through
-    /// a `Weak` self-reference; every other inode points to its logical
-    /// parent or copy-up publication parent. `Weak` avoids the parent-child
-    /// cycle with the readdir index.
-    parent: RwMutex<Weak<OverlayInode>>,
-    /// The per-object copy-up state (see [`CopyUpState`]).
-    copyup: Mutex<CopyUpState>,
+    /// The recorded overlay parent: the logical parent written at first
+    /// binding, which is also the copy-up publication parent. The mount root
+    /// points to itself through a `Weak` self-reference; every other inode
+    /// points to its logical parent. `Weak` avoids the parent-child cycle
+    /// with the readdir index.
+    recorded_parent: RwMutex<Weak<OverlayInode>>,
+    /// The copy-up arbitration coordinate and pending publication name:
+    /// `Some(name)` while the object is lower-backed (to be published at
+    /// `(recorded_parent, name)`), `None` once retired. The sole
+    /// published-facts source is `upper`.
+    copyup: Mutex<Option<String>>,
     /// The VFS inode extension groups (fs event publisher / fs lock context).
     extension: Extension,
 }
@@ -222,38 +225,36 @@ impl OverlayInode {
         real.write_at(offset, reader, status_flags)
     }
 
-    /// Publishes the upper real object of this inode — the copy-up
+    /// Publishes the upper real object of this inode — the copy-up facts
     /// transition.
     ///
-    /// The fallible inode-cache alias runs before the `Once` publication, so
-    /// a displacement fails rather than silently orphaning the inode. `lowers`
-    /// are immutable across copy-up.
-    fn replace_facts(
-        self: &Arc<Self>,
-        new_upper: RealObject,
-        new_visible_source: &RealObject,
-    ) -> Result<()> {
-        let new_key = RealObjectKey::from_source(new_visible_source);
+    /// The `Once` publication runs before the cache registration: between the
+    /// two, the instance is upper-backed but registered at the stale old key —
+    /// the legitimate stale-upper state that fresh lower-only scans rebuild
+    /// from. `pin` is the committing instance's own strong `Arc`; the
+    /// registration is the infallible `publish_rekey`. `lowers` are immutable
+    /// across copy-up.
+    fn replace_facts(&self, new_upper: RealObject, pin: &Arc<OverlayInode>) {
+        // The cache identity is derived from the pre-publication facts: once
+        // the `Once` flips, `visible_source`/`key` denote the new upper
+        // object.
+        let new_key = RealObjectKey::from_source(&new_upper);
         let old_key = self.key();
         let old_real_inode = self.visible_source().real_inode().clone();
         let Some(fs) = self.fs.upgrade() else {
             // Teardown arm: no live lookup can observe this inode, so only
             // publish the local upper object.
             self.upper.call_once(|| new_upper);
-            return Ok(());
+            return;
         };
-        // The fallible alias runs first; only after it succeeds is the
-        // upper object published.
-        fs.inodes()
-            .rekey_keep_old_alias(old_key, new_key, old_real_inode, new_visible_source)?;
         self.upper.call_once(|| new_upper);
+        fs.inodes().publish_rekey(old_key, new_key, old_real_inode, pin);
         debug_assert!(
             fs.inodes()
                 .get(new_key)
-                .is_some_and(|probe| Arc::ptr_eq(&probe, self)),
+                .is_some_and(|probe| Arc::ptr_eq(&probe, pin)),
             "after replace_facts the inode cache maps the new visible-source key to THIS inode"
         );
-        Ok(())
     }
 
     /// Runs `operation_fn` directly against the current real authority.

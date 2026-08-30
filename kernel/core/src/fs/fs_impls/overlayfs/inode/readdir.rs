@@ -308,7 +308,7 @@ impl OverlayInode {
     /// Serves the overlay-parent identity for the `..` entry by reading the
     /// stored weak parent; a dead parent falls back to the self identity.
     fn resolve_parent_object_id(&self) -> ObjectId {
-        let Some(parent) = self.parent.read().upgrade() else {
+        let Some(parent) = self.recorded_parent.read().upgrade() else {
             return self.object_id();
         };
         parent.object_id()

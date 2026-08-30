@@ -155,10 +155,10 @@ impl OverlayFs {
             policy,
             identity,
             upper_workdir_pair,
-            _anon_device_id: anon_device_id,
             whiteout_cache: Mutex::new(WhiteoutCache::new()),
             inodes,
             fs_event_stats: FsEventSubscriberStats::new(),
+            _anon_device_id: anon_device_id,
             self_weak: weak.clone(),
         });
         Ok(overlay_fs)

@@ -18,10 +18,7 @@ use hashbrown::HashMap;
 
 use crate::{
     fs::{
-        fs_impls::overlayfs::{
-            inode::OverlayInode,
-            real::{RealObject, RealObjectKey},
-        },
+        fs_impls::overlayfs::{inode::OverlayInode, real::RealObjectKey},
         vfs::inode::Inode,
     },
     prelude::*,
@@ -82,106 +79,74 @@ impl InodeCache {
             .and_then(|entry| entry.carrier.upgrade())
     }
 
-    /// Aliases an inode's cache registration under `new_key` while retaining
-    /// the `old_key` mapping.
+    /// Publishes the committing instance under its post-copy-up key and
+    /// re-takes the old key as its stale alias.
     ///
-    /// Both keys resolve to the same inode pin, so a concurrent in-flight
-    /// projection cannot mint or orphan a second inode. A live occupant at
-    /// `new_key` for a different inode is either a displaced concurrent
-    /// projection (`Err`, never silently clobbered) or an ino-reuse stale
-    /// occupant that is replaced.
-    pub(super) fn rekey_keep_old_alias(
+    /// Infallible by construction: the committing pin is a parameter (never
+    /// derived from the old-key slot, which a sibling's mint may transiently
+    /// hold), both inserts are unconditional, and a same-object or ino-reuse
+    /// occupant at the new key is superseded, not failed. Leaf lock: runs
+    /// under `entries.write()` alone, waits for nothing, calls nothing that
+    /// locks.
+    pub(super) fn publish_rekey(
         &self,
         old_key: RealObjectKey,
         new_key: RealObjectKey,
         old_real_inode: Arc<dyn Inode>,
-        new_visible_source: &RealObject,
-    ) -> Result<()> {
+        pin: &Arc<OverlayInode>,
+    ) {
         let mut guard = self.entries.write();
-        let Some(old_entry) = guard.get(&old_key).cloned() else {
-            // Nothing registered under the pre-transition key (already
-            // aliased or never registered): no-op.
-            return Ok(());
-        };
-        if old_entry.carrier.strong_count() == 0 {
-            // Dead pre-transition pin: retire it; there is nothing to alias.
-            guard.remove(&old_key);
-            return Ok(());
-        }
-        match guard.get(&new_key) {
-            // `new_key` already maps to a live pin of a DIFFERENT inode:
-            // clobbering it would silently orphan that inode.
-            Some(existing)
-                if existing.carrier.strong_count() > 0
-                    && !Weak::ptr_eq(&existing.carrier, &old_entry.carrier) =>
+        // Diagnostic classification of a live different-instance occupant at
+        // the new key. The unconditional publication below supersedes every
+        // class; the log only records which convergence happened.
+        if let Some(existing) = guard.get(&new_key) {
+            if existing.carrier.strong_count() > 0
+                && !Weak::ptr_eq(&existing.carrier, &Arc::downgrade(pin))
             {
-                let Some(existing_carrier) = existing.carrier.upgrade() else {
-                    return Err(Error::with_message(
-                        Errno::EIO,
-                        "the overlay inode-cache occupant disappeared during the alias transition",
-                    ));
-                };
-                if existing_carrier.contains_real_inode(new_visible_source.real_inode()) {
-                    // The same real object was projected early under the new key by
-                    // a concurrent lookup; keep the displacement error instead of
-                    // silently reusing it.
-                    error!(
-                        "overlay inode-cache displacement: a live inode for the SAME real \
-                         object is already registered at the post-transition key {:?}; the \
-                         copy-up transition must fail",
-                        new_key
-                    );
-                    Err(Error::with_message(
-                        Errno::EIO,
-                        "the overlay inode cache already maps the new visible-source key to the same real object",
-                    ))
-                } else {
-                    // A different object (ino reuse) stale-occupies the new key; replace
-                    // that entry with this inode and keep the old-key alias.
-                    error!(
-                        "overlay inode-cache stale identity at the post-transition key {:?}: \
-                         replacing the occupant with the transitioning inode (ino reuse)",
-                        new_key
-                    );
-                    guard.insert(
-                        old_key,
-                        InodeCacheEntry {
-                            carrier: old_entry.carrier.clone(),
-                            keep_alive: Some(old_real_inode),
-                        },
-                    );
-                    guard.insert(
-                        new_key,
-                        InodeCacheEntry {
-                            carrier: old_entry.carrier,
-                            keep_alive: None,
-                        },
-                    );
-                    Ok(())
+                match existing.carrier.upgrade() {
+                    Some(occupant) => {
+                        if occupant.contains_real_inode(pin.visible_source().real_inode()) {
+                            // The same real object was projected early under
+                            // the new key by a concurrent lookup; the
+                            // committing copy-up inode supersedes it.
+                            notice!(
+                                "overlay inode-cache convergence at the post-transition key \
+                                 {:?}: an early projection of the same real object is \
+                                 superseded by the committing inode",
+                                new_key
+                            );
+                        } else {
+                            // A different object (ino reuse) stale-occupies
+                            // the new key; its registration is replaced.
+                            error!(
+                                "overlay inode-cache stale identity at the post-transition key \
+                                 {:?}: replacing the occupant with the committing inode \
+                                 (ino reuse)",
+                                new_key
+                            );
+                        }
+                    }
+                    // The occupant died racing this check: superseded as a
+                    // dead pin by the publication below.
+                    None => {}
                 }
             }
-            // `new_key` is empty, holds a dead pin, or already aliases the
-            // same inode (idempotent re-alias): publish the alias.
-            _ => {
-                let carrier = old_entry.carrier;
-                guard.insert(
-                    old_key,
-                    InodeCacheEntry {
-                        carrier: carrier.clone(),
-                        keep_alive: Some(old_real_inode),
-                    },
-                );
-                if new_key != old_key {
-                    guard.insert(
-                        new_key,
-                        InodeCacheEntry {
-                            carrier,
-                            keep_alive: None,
-                        },
-                    );
-                }
-                Ok(())
-            }
+        }
+        guard.insert(
+            new_key,
+            InodeCacheEntry {
+                carrier: Arc::downgrade(pin),
+                keep_alive: None,
+            },
+        );
+        if new_key != old_key {
+            guard.insert(
+                old_key,
+                InodeCacheEntry {
+                    carrier: Arc::downgrade(pin),
+                    keep_alive: Some(old_real_inode),
+                },
+            );
         }
     }
 

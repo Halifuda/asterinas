@@ -43,15 +43,6 @@ pub(super) struct OverlayFs {
     /// The claim additionally pins the prepared workdir staging workspace inode
     /// (`<workdir>/work`) once `prepare_workdir` completes.
     upper_workdir_pair: Option<UpperWorkdirInuse>,
-    /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
-    ///
-    /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
-    /// must live on the published `OverlayFs` (the substrate-idiomatic owner —
-    /// every Asterinas pseudo-fs and the legacy overlayfs hold `AnonDeviceId`
-    /// on the fs struct) or the minor number could be recycled under a live
-    /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
-    /// and suppresses the unused-field lint.
-    _anon_device_id: AnonDeviceId,
     /// The mount-scoped reusable whiteout cache.
     ///
     /// Bounded to one workdir staging slot.
@@ -61,6 +52,15 @@ pub(super) struct OverlayFs {
     /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
     inodes: InodeCache,
     fs_event_stats: FsEventSubscriberStats,
+    /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
+    ///
+    /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
+    /// must live on the published `OverlayFs` (the substrate-idiomatic owner —
+    /// every Asterinas pseudo-fs and the legacy overlayfs hold `AnonDeviceId`
+    /// on the fs struct) or the minor number could be recycled under a live
+    /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
+    /// and suppresses the unused-field lint.
+    _anon_device_id: AnonDeviceId,
     self_weak: Weak<OverlayFs>,
 }
 

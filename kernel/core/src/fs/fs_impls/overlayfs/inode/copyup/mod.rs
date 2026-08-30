@@ -4,19 +4,26 @@
 //! The copy-up authority: per-object coordination, winner/waiter trigger,
 //! and object-kind promotion.
 //!
-//! [`OverlayInode::ensure_upper_authority`] is the single promotion entry.
-//! Each lower-backed object carries its [`CopyUpState`] from projection time;
-//! the trigger promotes ancestors before the child and serializes winners
+//! [`OverlayInode::copy_up`] is the single promotion entry. Each lower-backed
+//! object carries its pending publication coordinate from projection time;
+//! the entry promotes ancestors before the child and serializes winners
 //! through the `copyup` mutex.
 //!
 //! ## Locking
 //!
-//! Only three overlay-internal orders exist: `CUL -> DIR`,
-//! `DIR -> PARENT`, and `CUL -> PARENT` (CUL is the per-object `copyup`
-//! mutex, PARENT the per-object `parent` lock). The coordinate read below
-//! releases PARENT together with CUL before the ancestor walk; the
-//! `InodeCache` stays a leaf lock, and the projection's create closure is
-//! pure field initialization that takes no lock.
+//! `InodeCache` is a leaf lock. `publish_rekey` runs under `entries.write()`
+//! alone: it never waits, never acquires another overlay lock, and never
+//! calls back into projection or copy-up. Within one copy-up frame the locks
+//! nest strictly as `CUL(self) -> DIR(publication parent) ->
+//! InodeCache.entries.write()`: the coordinate read acquires and releases
+//! `CUL` together with the `PARENT` read guard before the ancestor walk (no
+//! `CUL(child) -> CUL(parent)` edge exists), the winner then holds `CUL`
+//! continuously from re-acquisition through the commit tail and the
+//! coordinate retirement, `publish_by_rename` takes the parent `DIR` lock
+//! inside that `CUL` hold, and the cache write is the innermost leaf. No
+//! lock is released and reacquired inside the cache guard, and no new lock
+//! domain or lock edge is introduced. The pre-existing orders `CUL -> DIR`,
+//! `DIR -> PARENT`, and `CUL -> PARENT` are unchanged.
 //!
 //! ## References
 //!
@@ -32,40 +39,19 @@ use crate::{
     fs::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
+            fs::OverlayFs,
             inode::{
-                Lookup, OverlayInode, ProjectionBinding,
+                Lookup, OverlayInode,
                 xattr::{XattrCopyPolicy, copy_eligible_xattrs, set_impure_marker},
             },
             real::RealObject,
         },
-        vfs::{
-            inode::{Inode, MknodType, RenameMode, SymbolicLink},
-            path::Path,
-        },
+        vfs::inode::{Inode, MknodType, RenameMode, SymbolicLink},
     },
     prelude::*,
 };
 
 pub(super) mod workdir;
-
-/// The copy-up state of one logical overlay object.
-///
-/// `Outstanding` covers a lower-backed object's whole non-terminal life —
-/// not-started, in-progress, or pending verification repair (`need_repair`);
-/// `Done` is the terminal state: upper-backed objects and the mount root.
-pub(super) enum CopyUpState {
-    Done,
-    Outstanding(CopyUpTarget),
-}
-
-/// The publication target of an outstanding copy-up.
-pub(super) struct CopyUpTarget {
-    /// The name under which the upper object is published in the parent.
-    pub(super) name: String,
-    /// Whether a physically published but semantically unfinished upper
-    /// object must be verified before reuse.
-    pub(super) need_repair: bool,
-}
 
 /// The maximum depth of the copy-up ancestor recursion.
 ///
@@ -85,48 +71,52 @@ impl OverlayInode {
     /// Promotes this logical object to upper authority, winning or waiting on
     /// the per-object `copyup` mutex.
     ///
-    /// Returns `Ok(())` once the object is upper-backed (idempotent fast
-    /// path, waiter leg, or this task's own completed promotion), and
-    /// propagates failures unchanged: a dead publication parent or a broken
-    /// state/authority pair fails closed with `EIO`, and an ancestor chain
-    /// deeper than [`MAX_COPYUP_DEPTH`] fails closed with `Errno::ELOOP`.
-    pub(super) fn ensure_upper_authority(&self) -> Result<()> {
-        self.ensure_upper_authority_inner(0)
+    /// Returns `Ok(())` once the object is upper-backed (idempotent fast path,
+    /// waiter leg, this task's own completed promotion, or no pending
+    /// coordinate), and propagates failures unchanged: a dead publication parent
+    /// fails closed with `EIO`, an inconsistent retired coordinate under the
+    /// winner guard with `EIO`, and an ancestor chain deeper than
+    /// [`MAX_COPYUP_DEPTH`] with `Errno::ELOOP`. Every failure is pre-rename.
+    pub(super) fn copy_up(&self) -> Result<()> {
+        self.copy_up_inner(0)
     }
 
-    /// The recursive body of [`OverlayInode::ensure_upper_authority`]; `depth`
-    /// is the number of ancestor recursions already performed (0 at the entry,
-    /// incremented once per consecutive lower-backed publication parent).
-    fn ensure_upper_authority_inner(&self, depth: usize) -> Result<()> {
+    /// The recursive body of [`Self::copy_up`].
+    ///
+    /// `depth` counts the ancestor recursions already performed and carries
+    /// the inherited stack-safety invariant: a publication-parent chain
+    /// deeper than [`MAX_COPYUP_DEPTH`] fails closed with `ELOOP`. Each frame
+    /// keeps only the coordinate-read parent alive across the recursion; no
+    /// lock guard is carried in or out.
+    fn copy_up_inner(&self, depth: usize) -> Result<()> {
         // Pins the owning mount for the trigger's duration.
         let _fs = self.fs_arc()?;
 
+        // Idempotent fast path: the object is already upper-backed.
         if self.upper.get().is_some() {
             return Ok(());
         }
 
         // Coordinate read (`CUL -> PARENT`): upgrade the publication parent
         // to a strong reference under the `copyup` mutex, then release both
-        // guards before the recursive ancestor walk. A dead weak reference
+        // guards before the recursive ancestor walk — no
+        // `CUL(child) -> CUL(parent)` edge exists. A dead weak reference
         // fails closed; the parent is never resurrected.
         let (publication_parent, name) = {
-            let state = self.copyup.lock();
-            let target = match &*state {
-                CopyUpState::Done => {
-                    return Err(Error::with_message(
-                        Errno::EIO,
-                        "an upper-authoritative overlay object entered the copy-up trigger",
-                    ));
-                }
-                CopyUpState::Outstanding(target) => target,
+            let published = self.lock_copyup();
+            let Some(name) = published.as_ref() else {
+                // No pending coordinate: the object was already published (or
+                // the mount root never carries one). Every mutating entry is
+                // EROFS-gated upstream, so this read-only exit is sound.
+                return Ok(());
             };
-            let Some(parent) = self.parent.read().upgrade() else {
+            let Some(parent) = self.recorded_parent.read().upgrade() else {
                 return Err(Error::with_message(
                     Errno::EIO,
                     "the copy-up publication parent no longer exists",
                 ));
             };
-            (parent, target.name.clone())
+            (parent, name.clone())
         };
 
         if depth >= MAX_COPYUP_DEPTH {
@@ -135,75 +125,71 @@ impl OverlayInode {
                 "the copy-up ancestor chain exceeds the depth limit"
             );
         }
-        publication_parent.ensure_upper_authority_inner(depth + 1)?;
+        publication_parent.copy_up_inner(depth + 1)?;
 
         // Winner/waiter serialization: the sleep-capable `copyup` lock wait.
-        let mut state = self.copyup.lock();
+        let mut published = self.lock_copyup();
 
-        // Re-check under the guard: another task won and promoted while this
-        // task waited; re-observe upper authority and return the same
-        // `Ok(())` success value (waiter path).
+        // Waiter leg: another task completed the promotion while this task
+        // waited; re-observe upper authority and return the same `Ok(())`.
         if self.upper.get().is_some() {
             return Ok(());
         }
 
-        // Winner body: the state was outstanding at the coordinate read, and
-        // a competing completion under this guard is indistinguishable from
-        // upper authority, caught by the recheck above.
-        let CopyUpState::Outstanding(target) = &mut *state else {
+        // Defensive fail-closed: a retired coordinate with `upper` unset is
+        // structurally unreachable — retirement only follows publication,
+        // under this same guard.
+        if published.is_none() {
             return Err(Error::with_message(
                 Errno::EIO,
-                "the overlay copy-up state turned inconsistent during arbitration",
+                "the overlay copy-up coordinate turned inconsistent during arbitration",
             ));
-        };
-        self.promote(&publication_parent, &name, target)?;
-        *state = CopyUpState::Done;
+        }
+
+        // Impurity marker: every promoted object makes its publication parent
+        // impure — persist the marker before the object-kind dispatch and the
+        // physical upper commit (strict, pre-commit; read-first idempotence
+        // makes an already-marked parent a no-op).
+        set_impure_marker(&publication_parent.select_real_inode())?;
+
+        let staged = self.stage_in_workdir(&name)?;
+        self.publish_by_rename(&publication_parent, &name, staged)?;
+        // Coordinate retirement through the still-held winner guard. The
+        // upper-set/coordinate-pending window is unobservable to other
+        // `copyup` observers because every observer holds the guard here.
+        *published = None;
         Ok(())
     }
 
-    /// Runs the winner promotion body for this object.
+    /// Acquires the per-object copy-up mutex; the guard exposes the pending
+    /// publication name (`Some`) or the retired coordinate (`None`).
+    fn lock_copyup(&self) -> MutexGuard<'_, Option<String>> {
+        self.copyup.lock()
+    }
+
+    /// Stages a fully prepared private workdir temp for the pending
+    /// publication name.
     ///
-    /// Called by the trigger with the `copyup` arbitration guard held. The
-    /// object kind is dispatched internally; on success the caller commits
-    /// [`CopyUpState::Done`], and recipe-arm failures classify as
-    /// cleanup-before-publication vs `need_repair`.
-    fn promote(
-        &self,
-        publication_parent: &Arc<OverlayInode>,
-        name: &str,
-        target: &mut CopyUpTarget,
-    ) -> Result<()> {
-        // Idempotent upper fast path: a waiter may have completed the
-        // promotion while this task waited for the arbitration guard.
-        if self.upper.get().is_some() {
-            return Ok(());
-        }
-
-        // The publication parent's upper directory path is computed once and
-        // shared by the `need_repair` verification and the promotion body.
-        let upper_dir_path = publication_parent.upper_parent_path()?;
-        // Repair verification: the parent was promoted by the ancestor walk,
-        // so its real object is the upper directory; the verify helper
-        // consumes the passed `name`.
-        if target.need_repair {
-            self.verify_upper_target(&upper_dir_path, name)?;
-        }
-
-        let upper_dir = publication_parent.select_real_inode();
+    /// Called by the winner with the `copyup` guard held; the object is
+    /// lower-backed, so [`Self::lower_source`] succeeds. The staging performs
+    /// no namespace change: the workdir lives outside every layer root. Per
+    /// kind, the lower metadata, the eligible xattrs, and the lower-id origin
+    /// record (capability-gated) are written on the temp body before the
+    /// timestamp replay (the origin write may refresh `ctime`), and a
+    /// regular-file temp is synced before publication, so the record and the
+    /// data are durable when the rename publishes the object. On any staging
+    /// failure the temp is cleaned up and the error propagates — a failed
+    /// staging leaves no residue, and the whole copy-up retries from scratch.
+    fn stage_in_workdir(&self, name: &str) -> Result<WorkdirTemp> {
         let fs = self.fs_arc()?;
-        // Impurity marker: every promoted object makes its publication
-        // parent impure — persist the marker before the object-kind dispatch
-        // and the physical upper commit (strict, pre-commit; read-first
-        // idempotence makes an already-marked parent a no-op).
-        set_impure_marker(&upper_dir)?;
         let lower = self.lower_source()?;
-        let result = match lower.real_inode().type_() {
+        match lower.real_inode().type_() {
             InodeType::Dir => {
                 // Directory copy-up: private workdir temp, metadata/xattr
                 // transfer, then atomic `RenameMode::Replace` publication so
                 // a stale upper entry is replaced instead of failing `create`
-                // with `EEXIST`. Only the directory object itself is copied; its
-                // children remain lower-backed.
+                // with `EEXIST`. Only the directory object itself is copied;
+                // its children remain lower-backed.
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
                     name,
@@ -221,19 +207,13 @@ impl OverlayInode {
                             XattrCopyPolicy::Strict,
                         )
                     })
+                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
                     .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
-                self.finish_promotion(
-                    target,
-                    publication_parent,
-                    name,
-                    &upper_dir_path,
-                    lower.clone(),
-                    &temp,
-                )
+                Ok(temp)
             }
             InodeType::File => {
                 // File copy-up: data is streamed into the workdir temp and
@@ -257,20 +237,14 @@ impl OverlayInode {
                         )
                     })
                     .and_then(|_| self.promote_regular_file(temp.inode()))
+                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
                     .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                     .and_then(|_| temp.inode().sync_all())
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
-                self.finish_promotion(
-                    target,
-                    publication_parent,
-                    name,
-                    &upper_dir_path,
-                    lower.clone(),
-                    &temp,
-                )
+                Ok(temp)
             }
             InodeType::SymLink => {
                 // Symlink promotion side: a workdir symlink temp recreated
@@ -295,19 +269,13 @@ impl OverlayInode {
                             XattrCopyPolicy::Strict,
                         )
                     })
+                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
                     .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
-                self.finish_promotion(
-                    target,
-                    publication_parent,
-                    name,
-                    &upper_dir_path,
-                    lower.clone(),
-                    &temp,
-                )
+                Ok(temp)
             }
             InodeType::CharDevice
             | InodeType::BlockDevice
@@ -370,82 +338,156 @@ impl OverlayInode {
                             XattrCopyPolicy::Strict,
                         )
                     })
+                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
                     .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
-                self.finish_promotion(
-                    target,
-                    publication_parent,
-                    name,
-                    &upper_dir_path,
-                    lower.clone(),
-                    &temp,
-                )
+                Ok(temp)
             }
             InodeType::Unknown => Err(Error::with_message(
                 Errno::EINVAL,
                 "cannot promote an overlay object of unknown type",
             )),
-        };
-        result?;
-        Ok(())
+        }
     }
 
-    /// Completes a staged promotion after the per-kind preparation ran.
+    /// Commits the staged promotion: the physical rename and the semantic
+    /// facts publication.
     ///
-    /// The caller has already run the preparation and cleaned up on failure;
-    /// this tail performs the physical publication. Failures before commit
-    /// clean the workdir temp; failures after the physical rename flag the
-    /// target `need_repair` for the next winner. Success leaves the caller
-    /// to commit `Done`.
+    /// Called by the winner with the `copyup` guard held and no other overlay
+    /// lock. `publication_parent` is the coordinate-read parent — upper-backed
+    /// after the ancestor walk — passed explicitly rather than re-derived from
+    /// `recorded_parent`: a concurrent cross-parent rename may repoint
+    /// `recorded_parent` before the DIR lock is taken, and the commit must
+    /// target the parent the ancestor walk promoted and the temp was staged
+    /// for (the first-bound coordinate rule).
     ///
-    /// The physical rename and the semantic upper-authority commit run while
-    /// holding `publication_parent.lock`. This is the single `CUL -> lock`
-    /// edge in the overlayfs lock graph: every entry must finish copy-up
-    /// promotion before taking any directory transaction lock.
-    fn finish_promotion(
+    /// The body acquires `publication_parent.lock` (the sole `CUL -> DIR`
+    /// edge in the overlayfs lock graph; every entry must finish copy-up
+    /// promotion before taking any directory transaction lock), runs the
+    /// widened liveness recheck, pins the committing instance, performs the
+    /// physical rename, and closes with the infallible facts publication; the
+    /// DIR guard is released on scope exit. Failures are pre-rename only: the
+    /// staged temp is cleaned up and the whole copy-up retries from scratch.
+    fn publish_by_rename(
         &self,
-        target: &mut CopyUpTarget,
         publication_parent: &Arc<OverlayInode>,
         name: &str,
-        upper_dir_path: &Path,
-        lower: RealObject,
-        temp: &WorkdirTemp,
+        staged: WorkdirTemp,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
-        let committed;
-        let publish_result = {
+        // Pre-rename resolution: computed once before the DIR scope so the
+        // post-rename segment contains no fallible step.
+        let upper_dir_path = publication_parent.upper_parent_path()?;
+        let upper_layer = fs.layer_stack().upper_layer()?;
+        let result: Result<()> = (|| {
             let _publication_guard = publication_parent.lock.lock();
-            // Liveness recheck under `publication_parent.lock`: if the name
-            // was removed (or replaced) while this copy-up was being prepared,
-            // abort before the rename would resurrect it.
-            match fs.lookup(publication_parent, name)? {
-                Lookup::Positive(current) if core::ptr::addr_eq(Arc::as_ptr(&current), self) => {}
+            // Liveness recheck under `publication_parent.lock`: the freshly
+            // looked-up child must still denote the same logical publication
+            // target. Negative lookups and positive-but-unrelated objects (a
+            // fresh recreate after unlink) abort before the rename would
+            // resurrect the name.
+            let current = match fs.lookup(publication_parent, name)? {
+                Lookup::Positive(current) if self.is_same_publication_target(&current, &fs) => {
+                    current
+                }
                 _ => {
                     return Err(Error::with_message(
                         Errno::ENOENT,
                         "the copy-up target name is no longer visible",
                     ));
                 }
-            }
-            let rename_result = fs.publish_temp(temp, upper_dir_path, name, RenameMode::Replace);
-            committed = rename_result.is_ok();
-            rename_result.and_then(|_| {
-                let upper_real = self.upper_real_object(upper_dir_path, name)?;
-                self.publish_upper_authority(upper_real, lower, publication_parent, name)
-            })
-        };
-        if let Err(err) = publish_result {
-            if committed {
-                target.need_repair = true;
-            } else {
-                let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
-            }
+            };
+            // Strong pin of the committing instance, taken before the rename.
+            let pin = self.commit_pin(&current)?;
+            // The physical rename — the copy-up boundary. `publish_temp`
+            // returns the published object's own dentry-anchored path.
+            let published_path =
+                fs.publish_temp(&staged, &upper_dir_path, name, RenameMode::Replace)?;
+            // The upper real object is derived from the published path — no
+            // re-resolution, no failure class after the rename. The origin
+            // record ran on the temp in staging, so it travels with the
+            // published object.
+            let upper_real = upper_layer.child_real_object(&published_path);
+            self.replace_facts(upper_real, &pin);
+            Ok(())
+        })();
+        if let Err(err) = result {
+            // Pre-rename failure: delete the temp; a retry starts from
+            // scratch. Best-effort, kind-aware.
+            let _ = fs.cleanup_workdir_temp(staged.name(), staged.kind());
             return Err(err);
         }
         Ok(())
+    }
+
+    /// Pins the committing instance for the registration step.
+    ///
+    /// When the recheck hit is this instance's canonical `Arc`, the hit is
+    /// the pin. On the sibling arms (the coordinate resolves to another
+    /// instance of the same logical object) the pin is resolved through this
+    /// instance's visible-source cache key and verified to denote `self`
+    /// before it is returned, so the narrow double-mint window where the
+    /// cache slot holds a sibling fails closed instead of misregistering.
+    /// Pre-rename clean-fallible: both `EIO` arms are the sanctioned
+    /// retry-from-scratch class.
+    fn commit_pin(&self, current: &Arc<OverlayInode>) -> Result<Arc<OverlayInode>> {
+        if core::ptr::addr_eq(Arc::as_ptr(current), self) {
+            return Ok(current.clone());
+        }
+        let pin = self.cached_self_arc()?;
+        if !core::ptr::addr_eq(Arc::as_ptr(&pin), self) {
+            return Err(Error::with_message(
+                Errno::EIO,
+                "this instance is no longer the cache-resident identity for its key",
+            ));
+        }
+        Ok(pin)
+    }
+
+    /// Judges whether the freshly looked-up child at the publication
+    /// coordinate denotes the same logical publication target as this
+    /// committing instance.
+    ///
+    /// Three arms:
+    /// 1. the coordinate resolves to this instance;
+    /// 2. both instances are lower-backed aliases of the same topmost lower
+    ///    real object (an alias split of one logical object);
+    /// 3. the looked-up instance is upper-backed and its persisted origin
+    ///    record resolves against this instance's retained lower stack — the
+    ///    coordinate holds a sibling's upper copy of the same lower object.
+    ///    Mounts without the private-xattr capability carry no record, so
+    ///    this arm is undetectable there (documented gap).
+    ///
+    /// An absent record (`Ok(None)`) and a genuine origin-record read error
+    /// both fail closed to `false` — a pre-rename clean abort.
+    fn is_same_publication_target(
+        &self,
+        current: &Arc<OverlayInode>,
+        fs: &Arc<OverlayFs>,
+    ) -> bool {
+        if core::ptr::addr_eq(Arc::as_ptr(current), self) {
+            return true;
+        }
+        if current.upper.get().is_none() && self.upper.get().is_none() {
+            if let (Some(current_lower), Some(self_lower)) =
+                (current.lowers.first(), self.lowers.first())
+                && Arc::ptr_eq(current_lower.real_inode(), self_lower.real_inode())
+            {
+                return true;
+            }
+        }
+        if current.upper.get().is_some() {
+            let Ok(Some(record)) = fs.read_lower_id(current.visible_source().real_inode()) else {
+                return false;
+            };
+            return fs
+                .identity()
+                .origin_real_ino_resolves(&record, &self.real_object_stack());
+        }
+        false
     }
 
     /// Streams the lower regular file's data into the workdir temp.
@@ -527,7 +569,7 @@ impl OverlayInode {
     /// Replays the lower timestamps (`atime`/`mtime`/`ctime`) onto the upper
     /// object.
     ///
-    /// Split out of [`OverlayInode::transfer_metadata`] so the copy-up
+    /// Split out of [`Self::transfer_metadata`] so the copy-up
     /// preserves the lower timestamps instead of publishing the copy-up
     /// instant; it runs last, after every data/metadata/xattr step that
     /// could refresh `mtime`/`ctime`.
@@ -540,66 +582,6 @@ impl OverlayInode {
         temp.set_mtime(source.mtime());
         temp.set_ctime(source.ctime());
         Ok(())
-    }
-
-    /// Publishes the upper authority semantically.
-    ///
-    /// After publication the visible source of this object is the upper real
-    /// object, with the lower-derived `object_id` kept (constant `st_ino`).
-    /// Recording the lower id is capability-gated: `store_lower_id` returns
-    /// `Ok(())` with no record when the mount has no `upper_capabilities` or
-    /// when `can_store_private_xattr()` is false.
-    fn publish_upper_authority(
-        &self,
-        upper_real: RealObject,
-        lower_real: RealObject,
-        publication_parent: &Arc<OverlayInode>,
-        name: &str,
-    ) -> Result<()> {
-        let fs = self.fs_arc()?;
-        fs.store_lower_id(upper_real.real_inode(), &lower_real)?;
-        // `lowers` are immutable across copy-up, so the carrier only publishes
-        // the newly created upper object.
-        let carrier = fs.project_inode(
-            &self.real_object_stack(),
-            ProjectionBinding::Child {
-                parent: publication_parent,
-                name,
-            },
-        );
-        carrier.replace_facts(upper_real.clone(), &upper_real)?;
-        Ok(())
-    }
-
-    /// Verifies the upper entry at the publication coordinate before reuse
-    /// (`need_repair` recovery).
-    ///
-    /// Covers the upper entry's object type and basic mode metadata; a
-    /// mismatch rejects the reconcile with `EIO`.
-    fn verify_upper_target(&self, upper_dir_path: &Path, name: &str) -> Result<()> {
-        let upper_real = self.upper_real_object(upper_dir_path, name)?;
-        let lower = self.lower_source()?;
-        if upper_real.real_inode().type_() != lower.real_inode().type_() {
-            return_errno_with_message!(
-                Errno::EIO,
-                "the upper target type does not match the lower source"
-            );
-        }
-        if upper_real.real_inode().mode()? != lower.real_inode().mode()? {
-            return_errno_with_message!(
-                Errno::EIO,
-                "the upper target mode does not match the lower source"
-            );
-        }
-        Ok(())
-    }
-
-    /// Resolves the real object now published at the upper target name.
-    fn upper_real_object(&self, upper_dir_path: &Path, name: &str) -> Result<RealObject> {
-        let child_path = super::super::lookup_child_path(upper_dir_path, name)?;
-        let fs = self.fs_arc()?;
-        let upper_layer = fs.layer_stack().upper_layer()?;
-        Ok(upper_layer.child_real_object(&child_path))
     }
 
     /// Returns the topmost lower real object of this object (`lowers[0]`).

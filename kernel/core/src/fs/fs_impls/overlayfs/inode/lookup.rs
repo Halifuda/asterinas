@@ -25,7 +25,6 @@ use crate::{
             fs::OverlayFs,
             inode::{
                 OverlayInode, ReaddirIndex,
-                copyup::{CopyUpState, CopyUpTarget},
                 xattr::{
                     MarkerReadSemantics, has_marker, opaque_marker_name, whiteout_marker_name,
                 },
@@ -313,8 +312,8 @@ impl OverlayFs {
                         upper,
                         object_id,
                         lock,
-                        parent: RwMutex::new(weak.clone()),
-                        copyup: Mutex::new(CopyUpState::Done),
+                        recorded_parent: RwMutex::new(weak.clone()),
+                        copyup: Mutex::new(None),
                         extension: Extension::new(),
                     }),
                     ProjectionBinding::Child { parent, name } => Arc::new(OverlayInode {
@@ -323,14 +322,11 @@ impl OverlayFs {
                         upper,
                         object_id,
                         lock,
-                        parent: RwMutex::new(Arc::downgrade(parent)),
+                        recorded_parent: RwMutex::new(Arc::downgrade(parent)),
                         copyup: Mutex::new(if facts.upper.is_some() {
-                            CopyUpState::Done
+                            None
                         } else {
-                            CopyUpState::Outstanding(CopyUpTarget {
-                                name: String::from(name),
-                                need_repair: false,
-                            })
+                            Some(String::from(name))
                         }),
                         extension: Extension::new(),
                     }),

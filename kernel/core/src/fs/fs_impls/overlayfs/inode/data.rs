@@ -88,7 +88,7 @@ impl OverlayInode {
                 "the overlay mount is read-only",
             )));
         }
-        match self.ensure_upper_authority() {
+        match self.copy_up() {
             Ok(()) => None,
             Err(err) => Some(Err(err)),
         }
@@ -103,7 +103,7 @@ impl OverlayInode {
     // before any side effect, including the copy-up promotion.
     pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.ensure_upper_authority()?;
+        self.copy_up()?;
         self.select_real_inode().resize(new_size)
     }
 
@@ -112,7 +112,7 @@ impl OverlayInode {
     // runs here rather than relying on the fd path alone.
     pub(super) fn fallocate_impl(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.ensure_upper_authority()?;
+        self.copy_up()?;
         self.select_real_inode().fallocate(mode, offset, len)
     }
 

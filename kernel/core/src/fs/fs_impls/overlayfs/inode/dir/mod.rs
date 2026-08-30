@@ -251,7 +251,7 @@ impl OverlayInode {
         // The VFS-provided source inode is used for the pre-lock source
         // promotion and the EXDEV gate; `rename_upper` performs a fresh
         // liveness recheck after the parent locks are taken.
-        source_overlay.ensure_upper_authority()?;
+        source_overlay.copy_up()?;
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
             self.cross_device_gate(&source_overlay)?;
         }
