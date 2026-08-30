@@ -11,6 +11,9 @@ overlay/020
 overlay/021
 overlay/023
 overlay/025
+# overlay/026: intentionally diverges from the packaged golden (modern
+# escape semantics per proposal §13; re-baselining adjudicated 2026-08-30).
+overlay/026
 overlay/027
 overlay/030
 overlay/032

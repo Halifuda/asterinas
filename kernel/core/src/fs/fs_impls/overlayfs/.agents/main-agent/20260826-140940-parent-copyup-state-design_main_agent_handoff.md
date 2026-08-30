@@ -1659,3 +1659,38 @@ packet 一并生效。
 - **运行时验收（xfstests）按 user 指令本轮未做**，归后续独立
   meso-integration Checker；延后池现状：G1（含 divergence-2 trusted.*
   列表过滤）、R1/M2（syscall）、f（事实栈内联）、dentry-PR 冻结项。
+
+### 2026-08-30 xfstests 单次运行（22 例）+ 三例研判（user-directed；只读）
+
+**运行结果（单次纪律：0 重测；测完即停）**：19 PASS / 2 FAIL / 1 NOTRUN /
+0 HANG。证据
+`components/parent-copyup-wave-20260830/run_evidence/xfstests_single_run_20260830/`
++ 收据 `task_checker_wave_xfstests_single_run_20260830_checker.md`。
+非 PASS 三例：
+- **022 FAIL（真实缺口暴露）**：用另一 overlay 的 upperdir/workdir 挂第二
+  个 overlay，上游 `76bc8e2843b6` 起必须拒绝；我们的挂载流**无此检查**
+  （grep 证实），第二次挂载成功。wave8 曾 PASS 系旧 xattr 拒绝面意外挡住
+  认领/身份写（对 overlay 内 inode 的 own-prefix 写被 EPERM）——pass_55
+  P2 移除拒绝类后挡板退场、缺口显形。**修复方向（待指示）**：挂载流补
+  "解析出的 upper/workdir 所在超级块为 overlayfs → EINVAL"，overlayfs 局部。
+  inuse 机制本身已启用且运行正常，但其职责是"同一 upper/workdir inode 的
+  排他复用"（内存 `OverlayInuseSlot` 令牌 + validate_pair 结构校验），022
+  的 B 用的是 A 视图里的新目录、与 A 正占用的 upper/workdir 不是同一
+  inode，故不碰撞——机制无失职。
+- **026 对打包 golden FAIL = 已文档化的重新基线**（现代转义行为：
+  静默加段 set + 往返 get + 列表剥段呈现，均按修复后实现）。**user 裁定：
+  026 移入 block.list**（已落地，附重新基线注释）。
+- **023 NOTRUN = 套件排除**（repo block.list 列入"从未进确认通过清单"）；
+  测的是 workdir 的 `work` 目录不得继承 workdir 上的 default POSIX ACL
+  （上游 c11b9fdd6a61/e1ff3dd1ae52）。user 确认星绽现不支持 ACL（grep 证实
+  VFS 无 posix_acl 面），大概率过不了；要跑需改 block.list，等指示。
+- **029 基础设施中止披露**：首次尝试 nix out-link 冲突 1 秒失败、QEMU 未
+  引导、用例未执行（归档 attempt1_infra）；真实单次测试 = 后续 PASS。
+- wave7 handoff 研究结论（user 问"非 NOTRUN 且不在 21 例、本轮修改后可能
+  通过的 case"）：32 例矩阵中不在 21 例的 11 例（035/013/004/008/015/020/
+  025/040/027/078/041）在旧实现基线为 10 NOTRUN + 013 FAIL + 041 HANG，
+  NOTRUN 门全在 lane 能力侧（user/chattr/ACL/tmpfs/unshare/大镜像），
+  本轮修改均未新增这些能力，013 的 VFS 接口缺口与 041 的 xino 选项缺口
+  本轮也未触碰——**无翻绿候选**。唯一因本轮修改而获得"可测资格"的族是
+  083/084（userxattr/转义，功能现已实现），但打包套件不含它们，仍不可
+  调度。
