@@ -2,7 +2,12 @@
 
 # 2026-08-26 Parent Pointer and CopyUpState Design Handoff
 
-> **Status (consolidated 2026-08-27). This is the live main handoff** for all
+> **Status: CLOSED (2026-08-30)** — tenure 完成，本 handoff 关闭归档。接续
+> handoff：`20260830-203000-unit-and-new-regression-tests_main_agent_handoff.md`
+> （单测与新回归测试规划，仅开题未动工）。tenure 全程回顾与**遗留 gap 清单
+> （等其它 PR）**见文末「HANDOFF CLOSED」节。以下 Status 为历史记录。
+>
+> **Status (consolidated 2026-08-27). This was the live main handoff** for all
 > subsequent overlayfs implementation rounds. The authoritative target design
 > is `designdoc/structure-design-proposal-final.md`（round4 终态，含 en 译本；
 > 需注意 proposal 的 recorded_parent/copyup/dotdot 表述已领先于代码，差距
@@ -1724,3 +1729,43 @@ packet 一并生效。
 - **当前处置**：026 已入 block.list（重新基线）；022 登记为已知缺口
   （同 013/041 模式，挂载流缺 overlay-as-upperdir 检查，触发路径 =
   认领/身份写经另一 overlay 用户面）；023 维持排除（ACL 未支持）。
+
+---
+
+# HANDOFF CLOSED (2026-08-30)
+
+**tenure 全程回顾**：parent/copyup 设计轮与 batches 46–49 → proposal round4
+终态 → wave 执行（pass_50a/50/51/55，每 pass 一 Creator + 一 Reviewer，
+一轮复工闭环，全部 PASS）→ `make check` GREEN → xfstests 单次运行
+（22 例：19 PASS / 2 FAIL / 1 NOTRUN / 0 重测）→ 022/026/023 研判与处置 →
+regression 两 overlayfs 例单测（2/2 PASS）。收官提交链：
+`d05b1bea1 → 462da89ad → 47edb8d4e → ff0cdc1fe → 14c404b45 → c1ce0fcd8 →
+4cb9a7845 → 9146633e4`（+ 本 closure）。
+
+**遗留 gap 清单（等其它 PR / 后续 wave；本 tenure 不再处理）**：
+
+1. **022 overlay-as-upperdir 挂载检查缺失**（挂载流不拒"upperdir/workdir
+   位于另一 overlay"）。前置：(a) VFS 祖先访问能力 PR（`Dentry::parent`
+   加宽 + inuse slot 探针）或 (b) overlayfs 局部 downcast 判别实验；
+   另需上游拒绝机制定位（`76bc8e2843b6` 的具体机制未在本地源码定位到，
+   祖先走查按拓扑推演罩不住该场景）。
+2. **041 xino=on 的 /proc/mounts 回显**——挂载选项回显属 VFS/procfs
+   接口决策（单独 PR）；xino 解析与编码逻辑本 tenure 已备
+   （`XinoMode::On` 已解析、non-samefs 装配 lane 已具备）。
+3. **G1 凭据轮**——copy-up 内部 IO 的挂载者权威（`with_ovl_creds` 对应
+   机制），含 divergence-2（overlay 侧 `trusted.*` 列表能力过滤）、
+   POSIX-ACL 缝隙（`copy_eligible_xattrs` 无 ACL 特殊处理）。
+4. **R1/M2 syscall xattr 规则**（`user.*` 命名空间规则链 + capset
+   effective 口径；"尽量不动 VFS"延后，Linux 锚点已留案）。
+5. **f 事实栈内联**（SmallVec 值内联 + eager clone 下移 create closure）。
+6. **dentry-PR 冻结项**（proposal §5 VFS 侧替代方案 + §4 第一刀转发，
+   等平台 dentry 接口 PR 合入）。
+7. **023/ACL**（星绽 POSIX ACL 能力落地后，需将其移出 block.list）。
+8. **metacopy / redirect_dir / index**（P3 deferred 钩子，含 userxattr
+   与二者的互斥校验落地）。
+9. **运行时全表 meso-integration Checker**（本轮 22 例单次运行之外的
+   全量 xfstests 验收，含 026 重新基线后的正式裁定记录）。
+
+**接续**：单测与新回归测试规划见
+`20260830-203000-unit-and-new-regression-tests_main_agent_handoff.md`
+（仅开题，未动工）。
