@@ -490,6 +490,76 @@ Record only active or recently changed passes here. Durable slicing rationale be
     stale doc clause. Runtime xfstests revalidation remains deferred pending
     user instruction.
 
+- **`parent_copyup_wave_slicing_20260830`** — **Slicing recorded; D1 + D2 +
+  xattr-refactor Designer ACCEPTED 2026-08-30; all dispatches FROZEN
+  awaiting user instruction (4 xattr open questions adjudication pending)**
+  - **Kind**: user-directed wave opening for handoff backlog (a)–(e) + xattr
+    gap list; slicing in `PASS_SLICING.md` (`parent_copyup_wave_slicing_20260830`).
+  - **D1 `task_designer_rekey_convergence_20260830` — ACCEPTED** (structural
+    acceptance + code spot-checks of four load-bearing claims). Verdicts:
+    same-object live-different-instance displacement is unreachable in
+    audited code (rename→rekey fully under the publication-parent DIR lock;
+    all 7 fresh-truth scan entries hold the scanned parent's DIR lock) —
+    backlog (e) is contract-driven robustness, not a reachable-bug fix;
+    the real fragility is the post-rename failure classes (upgrade-race Err,
+    `upper_real_object` re-resolution, post-rename `store_lower_id` +
+    `need_repair`). Convergence semantics: (B) occupant yields, winner holds
+    the key; rekey displacement predicate → diagnostic classification;
+    commit liveness recheck → three-arm same-object predicate (capability-
+    less arm-3 gap recorded). Algorithm frozen: infallible `publish_rekey`
+    (pin-parameterized, unconditional publication) + reorder
+    (`upper.call_once` before registration) + upper_real derived from the
+    published path; `is_same_object` KEEP; lock nest
+    `CUL -> DIR -> InodeCache.entries.write()`, zero new edges. D2 takes the
+    report as input-of-record.
+  - **xattr route change (user 2026-08-30)**: incremental gap-fix passes
+    pass_52/53 superseded by a whole-module refactor per proposal §13
+    (`task_designer_xattr_refactor_20260830`, dispatched; closes E1–E3/
+    U1–U3/P1–P3/M1 by design and resolves all 15 xattr.rs orphans).
+    pass_54 (R1/M2, syscall layer) unchanged. pass_50a (whiteout orphan
+    moves, user-approved) added before pass_50.
+  - **Order (amended 2)**: pass_50a → pass_50 → pass_51 → xattr_refactor
+    → wave-close gates (`make check` + full xfstests table + Reviewer over
+    cumulative diff). No parallel branch: pass_54 (R1/M2 syscall rules)
+    withdrawn from the wave per user decision 2026-08-30 ("尽量不动 VFS";
+    R1/M2 deferred alongside G1 and f, design anchors retained). All
+    production changes confined to the overlayfs directory. The xattr
+    refactor's 4 open questions await user adjudication before its packet
+    dispatch.
+
+- **`orphan_helper_audit_20260830`** — **ACCEPTED 2026-08-30 (structural +
+  independent recount; execution pending user disposition)**
+  - **Kind**: bounded read-only Reviewer audit (user-directed, run in
+    parallel with D1): full-tree census of orphan helpers (top-level free
+    fns outside impl blocks) with per-fn verdicts — KEEP (pure util) /
+    MOVE INTO impl (same module) / CROSS-MODULE PROPOSAL (adjudication
+    only). User criterion of record in the packet; structure frozen, so
+    within-module relocation is the default prescription.
+  - **Result**: 35 orphan fns across 8 of 28 live files (xattr.rs 15 worst;
+    mod.rs 7; whiteout.rs 4; permission.rs 3; layer_parts/lookup 2 each;
+    identity/remove 1 each). Verdicts: **KEEP 29 / MOVE 5 / CROSS 1**.
+    MOVE: `copy_eligible_xattrs`/`set_impure_marker`/`clear_impure_marker`
+    → `impl OverlayInode` (xattr.rs); `cleanup_upper_whiteouts`/
+    `unlink_rechecked_whiteouts` → `impl OverlayFs` (whiteout.rs) — all
+    Self-free associated fns, pure relocations. CROSS: `init` (mod.rs:123,
+    global registry side effect) → `impl OverlayFsType` proposal, with the
+    "lifecycle entry hook" framing recorded as the counter-consideration.
+    Main-agent verification: independent column-0 recount matched 35/35
+    per-file counts; MOVE target impl blocks confirmed at cited lines;
+    call-site counts reconciled (extra greps were import lines).
+  - **Disposition (user-adjudicated 2026-08-30)**: whiteout MOVE 4/5
+    (`cleanup_upper_whiteouts`, `unlink_rechecked_whiteouts` → `impl
+    OverlayFs`) approved — executing as `pass_50a_whiteout_orphan_moves`
+    (recorded in PASS_SLICING). `init` CROSS proposal REJECTED — stays in
+    place under the lifecycle-entry-hook framing. The three xattr.rs MOVEs
+    (`copy_eligible_xattrs`/`set_impure_marker`/`clear_impure_marker`) are
+    superseded into the xattr whole-module refactor (not executed
+    piecemeal); the refactor resolves all 15 xattr.rs orphans by design.
+    Cohesion predicates do not relocate.
+  - **Artifacts**: packet `subagent-tasks/orphan-helper-audit-20260830/`;
+    report `components/orphan-helper-audit-20260830/
+    orphan_helper_audit_20260830.md`.
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

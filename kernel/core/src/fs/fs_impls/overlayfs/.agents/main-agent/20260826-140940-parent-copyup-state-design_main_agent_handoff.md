@@ -1348,3 +1348,262 @@ amend 进 WIP `1d5bbd53d`。
 `structure-design-proposal-revised.md`、`xattr-design-and-gaps_20260828.md`（xattr 三交付物
 内容已全部并入 proposal §13/§16 与本 handoff，annex 背景材料随之退役）；amend 时
 commit message 去除 WIP 前缀。
+
+## 2026-08-30 下一轮 wave 启动：D1 派出 + a–e/xattr 切片（user-directed）
+
+用户裁定：f)（事实栈内联）延后出 wave；先派单独 Designer 研判 (e) 的算法问题，
+并行由主代理完成 a–e + xattr 的 pass slicing。两项均已完成：
+
+1. **D1 `task_designer_rekey_convergence_20260830` 已派**（Direct Spawn Lane，
+   后台运行，只读设计研判）：研判 (e) rekey 同物活体占位的遭遇条件 census
+   （`inode/mod.rs:231` `replace_facts` → `inode/inode_cache.rs:93`
+   `rekey_keep_old_alias` 现报 EIO 分支）、接纳式汇合语义（adopt/keep/wait
+   三案裁决，对齐 §9 复用契约与 §5 正主/别名分裂）、无失败类算法、
+   `is_same_object` 谓词裁决（决策 4）。Packet:
+   `subagent-tasks/parent-copyup-wave-20260830/dispatch_20260830_rekey-convergence-design.md`；
+   产物目标：`components/parent-copyup-wave-20260830/rekey_convergence_designer_report_20260830.md`。
+2. **切片已记录**：`PASS_SLICING.md` `parent_copyup_wave_slicing_20260830` ——
+   Designer 序列 D1 → D2（copyup 收敛实现面冻结，吸收 D1）∥ D3（xattr 实现面
+   冻结）；Creator 序列 pass_50_copyup_convergence（a+c+d+e+OverlayFs 字段序）
+   → pass_51_real_object_layer_view（b，两阶段含五项遗留审计点 census）→
+   {pass_52_xattr_escape_classify ∥ pass_54_xattr_syscall_rules} →
+   pass_53_xattr_userxattr_option。G1（凭据缺口）不在本 wave，待独立
+   Designer+Creator 轮；dentry 携带坐标维持决策 1 冻结。Wave 收尾合并跑：
+   `make check` 一轮 + 可调度全表 xfstests 回归 + Reviewer gate over 累计 diff。
+
+Next-main-agent actions：
+1. 验收 D1 报告（结构验收：三问齐备、census 带引证、无失败类论证成立）；
+   验收后派 D2 与 D3（并行，Direct Spawn Lane）。
+2. D2/D3 验收后按切片序派 pass_50 起 Creator（command-free，exact-diff 验收）。
+3. G1 的独立 Designer packet 起草时机待 user 指令。
+
+### 同日追加：orphan helper 全树审查（user-directed，D1 运行期间并行）
+
+用户判据（记录标准）：orphan helper = 模块顶层不属于任何 impl 块的自由 fn；
+可作为 orphan 存在的理由仅是纯 utils（无副作用、无状态语义）；承载任何
+语义（如对 Inode 或其它子类型状态的副作用操作）就应归入 impl 块。
+审查前提：结构已定型——预设模块内收编；跨模块移动仅作显式标注的
+CROSS-MODULE PROPOSAL 供裁决；不提议新建/拆分模块。已知 xattr.rs 重灾，
+其余模块普查。已派 `task_reviewer_orphan_helpers_20260830`（只读 Reviewer，
+Direct Spawn Lane，后台；packet
+`subagent-tasks/orphan-helper-audit-20260830/dispatch_20260830_orphan-helper-audit.md`，
+产物
+`components/orphan-helper-audit-20260830/orphan_helper_audit_20260830.md`）。
+本任务为 audit-only，不执行任何移动；处置（含与 D2/D3 冻结面、pass_52/53
+xattr 写集的合并方式）待报告验收后与 user 对齐。
+
+**验收（同日，主代理结构验收 ACCEPTED）**：报告
+`components/orphan-helper-audit-20260830/orphan_helper_audit_20260830.md`
+四节齐备；主代理独立 column-0 普查复核 35/35 逐文件计数一致（mod 7 /
+layer_parts 2 / lookup 2 / identity 1 / permission 3 / xattr 15 / remove 1 /
+whiteout 4，其余 20 文件 0）；MOVE 目标 impl 块行号抽查命中
+（xattr.rs:409 `impl OverlayInode`、whiteout.rs:125 `impl OverlayFs`）；
+`init` 全局注册副作用与调用点计数核实（copyup/remove 多出的 grep 命中均为
+import 行）。结论：**35 orphan fn = KEEP 29 / MOVE INTO impl 5 /
+CROSS-MODULE PROPOSAL 1**。MOVE：`copy_eligible_xattrs`、
+`set_impure_marker`、`clear_impure_marker` → `impl OverlayInode`
+（xattr.rs 同文件，Self-free 关联函数，纯搬迁）；`cleanup_upper_whiteouts`、
+`unlink_rechecked_whiteouts` → `impl OverlayFs`（whiteout.rs 同文件）；
+聚族附注：`is_whiteout_child`/`validate_whiteout_children`（纯谓词，可随迁
+可留守）。CROSS：`init`（mod.rs:123）→ `impl OverlayFsType` 提案，附
+"生命周期入口"替代解读，待 user 裁决。执行方式待 user 定夺（候选：独立
+小型 Creator pass，或并入 D3/xattr pass 写集；xattr.rs 与 pass_51 清扫面
+共享，需排在其前）。
+
+### 2026-08-30 orphan 处置裁定 + xattr 路线变更（user-directed）
+
+1. **whiteout 两 MOVE 批准执行**：`cleanup_upper_whiteouts`、
+   `unlink_rechecked_whiteouts` → `impl OverlayFs`（dir/whiteout.rs 同文件，
+   Self-free 关联函数，纯搬迁，含 remove.rs×2 / rename.rs×1 调用点机械跟随）。
+   以小型 Creator pass `pass_50a_whiteout_orphan_moves` 执行（pass_50 前，
+   rename.rs 写集串行）。聚族谓词 `is_whiteout_child`/
+   `validate_whiteout_children` 不随迁，维持 orphan 纯工具原位。
+2. **`init` 裁决：不动**——维持"模块生命周期注册入口"惯例框架，
+   CROSS-MODULE PROPOSAL 否决；audit 报告相应条目闭环。
+3. **xattr 路线变更（supersedes 增量 gap 修复路线）**：放弃对
+   `inode/xattr.rs` 的逐项增量修补（原 D3/pass_52_xattr_escape_classify/
+   pass_53_xattr_userxattr_option 切片作废），整个模块按 proposal §13 的
+   正确设计重构。重构须以设计闭合 E1–E3/U1–U3/P1–P3/M1 十项模块内 gap，
+   并按 orphan 判据解决 xattr.rs 全部 15 个 orphan 的归属（含已批准方向的
+   三个 MOVE 吸收进重构面）。`R1`/`M2`（syscall 层，xattr 模块之外）维持
+   pass_54 不变。D3 更名换义为 `task_designer_xattr_refactor_20260830`：
+   设计该重构（新模块蓝图 + 消费点迁移 census + gap 覆盖表 + 校验契约 +
+   pass 切分建议），已派出。重构 Creator pass 的排程（取代 52/53 槽位）
+   待该 Designer 验收后再切。
+
+### 2026-08-30 D1 验收 + 三 lane 并行（续）
+
+**D1 `task_designer_rekey_convergence_20260830` 主代理验收 ACCEPTED**（报告
+四节齐备；四处承重论断代码抽查命中：`copyup/mod.rs:419-439` 窗口全程持
+`publication_parent.lock`、`inode/mod.rs:341` lookup 持 DIR 锁扫描、
+`workdir.rs` `into_parts` 文档明确发布路径复用、`finish_promotion` recheck/
+need_repair 位置精确）。要点：同物活体异实例位移在受审代码中**不可达**（
+rename→rekey 全程父 DIR 锁屏蔽全部 7 个扫描入口；唯一理论入口=根重铸，被
+VFS 钉住否证、记 out-of-scope）⇒ (e) 重定性为 contract-driven robustness；
+真正要害为改名后失败类（upgrade 竞态 Err `inode_cache.rs:118-122`、
+`upper_real_object` 重解析 `copyup/mod.rs:436,598-603`、`store_lower_id`
+rename 后写 `:560`）。冻结：语义 (B) 占位者让位赢家持钥（(C) 归约 (B)、
+(A) 否决）；`publish_rekey`（pin 参数、无 Result、无条件发布、位移谓词降级
+诊断分类）；commit 尾改序 `pin → rename → 发布路径派生 upper_real →
+upper.call_once → 坐标退役 → 注册`；活性 recheck 三臂同物判定
+（capability-less 臂 3 不可测记缺口）；`is_same_object` KEEP；锁序
+`CUL -> DIR -> InodeCache.entries.write()` 零新边；G.5 六项分歧上报。
+D2 以该报告为 input-of-record。
+
+同日按修订顺序派出三 lane：**D2**（copyup 收敛冻结，packet
+`subagent-tasks/parent-copyup-wave-20260830/dispatch_20260830_copyup-convergence-design.md`）、
+**xattr 重构 Designer**（packet
+`subagent-tasks/xattr-refactor-design-20260830/dispatch_20260830_xattr-refactor-design.md`）、
+**pass_50a Creator**（packet
+`.../dispatch_20260830_pass_50a_whiteout_orphan_moves.md`）。
+**pass_50a 首派失败**：user 并发额度已满（两个 Designer 占满名额，
+1.9 秒即拒）；已核实零半成品（工作树仅 `.agents` 记录改动）；
+待任一 Designer 完成、名额释放后原 packet 重派（PROTOCOL §1.11
+repair-and-redelegate，不吸收进主代理）。
+
+### 2026-08-30 并发额度二次冲突（user 指示：暂停一切派发）
+
+- **xattr 重构 Designer 运行 29.5 分钟后被并发额度终止**（user concurrency
+  limit exceeded）；核实**零产物**（`components/xattr-refactor-design-20260830/`
+  目录未建出，时间全花在只读勘察上）。packet 原样保留。按 user 指示
+  **不重派**，重派时机待 user 指令。
+- **D2（copyup 收敛冻结）仍在运行**（未见产物，未见完成通知）。
+- **user 指令（本轮生效）**：不派任何 subagent；在途 Designer 回来后仅做
+  验收、不派发后续，一切听 user 指示。pass_50a 重派同此冻结。
+
+### 2026-08-30 D2 验收 ACCEPTED（派发仍冻结，待 user 指令）
+
+**D2 `task_designer_copyup_convergence_20260830` 主代理验收 ACCEPTED**
+（spec + validation contract 双产物齐备；四处承重论断独立抽查命中：
+`mark_reconcile_pending` 活代码 grep=0（packet 原表述系 stale 引用，D2
+重验正确）、`ensure_upper_authority()` 恰 6 调用点（G4 census 精确）、
+`parent` 消费者恰 5 处（G3 精确）、`publish_temp` 返回
+`temp.path().clone()`、文件制备顺序与 (d) 落点吻合）。冻结面要点：
+
+1. **类型收敛**：`CopyUpState/CopyUpTarget/need_repair/verify_upper_target/
+   upper_real_object/promote/finish_promotion/publish_upper_authority/
+   ensure_upper_authority{,_inner}/rekey_keep_old_alias/committed 标志`
+   全删（净减 10 协调方法）；`parent`→`recorded_parent`（5 消费点）；
+   `copyup: Mutex<Option<String>>`；`OverlayFs` 字段序修正
+   （`_anon_device_id` 移 `fs_event_stats` 后）；create closure 目标形态
+   （Root `None`；Child upper-backed `None` / lower-backed `Some(name)`）；
+   谓词闭包与 fast path 不变（D1 Q3.4）。
+2. **四方法分解**（全 `&self`，无 `&Arc<Self>`）：`copy_up`(pub(super) 入口)
+   → 私有 `copy_up_inner(depth)`（继承 ELOOP 深度守卫）、`lock_copyup`、
+   `stage_in_workdir(name)`（制备段自含清理，temp 失败不逃逸）、
+   `publish_by_rename(&publication_parent, name, staged)`——parent 为显式
+   参数（不得从 `recorded_parent` 重取：跨父 rename 竞态会错位发布坐标）。
+   D1 六步落位：recheck(三臂)+commit_pin 在 DIR 锁内 rename 前；
+   `upper_layer()` 提升到 rename 前（C-2，实现 INV-7 rename 后零 `?`）；
+   `upper.call_once` 与 `publish_rekey` 均入 `replace_facts(&self,
+   new_upper, &pin)`（无 Result，pin 参数化）；坐标退役 `*published = None`
+   经 copy_up 已持有的 CUL guard 完成（C-3：D1 字面再 lock 会自死锁；
+   §9 正文即如此；窗口不可观测 INV-4）。
+3. **(d) 落位冻结**：`store_lower_id` 签名不变，调用移入
+   `stage_in_workdir` 各 kind 臂——copy_eligible_xattrs 之后、
+   transfer_timestamps 之前（文件类再在 sync_all 之前），目标
+   `temp.inode()`；失败 = rename 前干净类。
+4. **锁序原文冻结**：`CUL(self) -> DIR(publication parent) ->
+   InodeCache.entries.write()` 严格嵌套，坐标读 CUL+PARENT 同取同放
+   （无 `CUL(child)->CUL(parent)` 边），零新域零新边；指定文本入模块 doc。
+5. **写集 14 文件**：基线 8（create.rs 预计零 diff 仍授予）+ workdir.rs
+   明确不需要 + 机械加宽 5（data.rs×3/link.rs/dir/mod.rs/permission.rs 的
+   `ensure_upper_authority`→`copy_up` 调用点跟随；fs/mount/mod.rs 构造式
+   跟随字段序——理由均已记录）。
+6. **切片建议**：单耦合 pass（pass_47 先例）；唯一可编译不相交切分 =
+   字段序对（fs/mod.rs + fs/mount/mod.rs）可作机械前序 pass。
+7. **澄清 C-1..C-3**（D1 内部张力，非偏离冻结语义）：C-1 分类取
+   `pin.visible_source()`（依赖改序成立）；C-2 upper_layer 提升；C-3
+   退役经持有 guard。Open questions：无。
+8. **校验契约**：xfstests-only，12 案表 many-to-many（014/024/038 direct，
+   余 combined）；三显式缺口（并发取代臂、崩溃残留恢复、capability-less
+   臂3 = 无上游覆盖，不得以内部 lane 补）；runtime 明确不由本契约排程，
+   归 wave 收尾门。
+
+**状态**：pass_50 可随时按此 spec 派发（单耦合 pass + 可选字段序前序），
+但按 user 指令**派发冻结**；pass_50a（whiteout 搬迁）、xattr 重构
+Designer 重派同样冻结，一律待 user 指令。
+
+### 2026-08-30 commit_pin 加固裁决（方案 a，user-approved）+ xattr Designer 续作
+
+1. **commit_pin 兄弟臂自证（方案 a）裁决通过**：D2 冻结的 `commit_pin` 在
+   兄弟臂（recheck 臂②③）经 `cached_self_arc()` 取 pin，而该 helper
+   （`inode/mod.rs:203-211`）不校验槽位占者是否为提交者本人；同 key 双铸
+   （同一 lower 对象的两个别名并发首查，经 `get_or_create` 无锁 create
+   窗口双铸，后写者占槽）时未注册实例 commit 会把注册在案的兄弟 pin 走，
+   `publish_rekey` 注册错位（有界、靠 stale 判定自愈，但违背 INV-5 本意）。
+   处置：`commit_pin` 取 pin 后以
+   `ptr::eq(Arc::as_ptr(&pin), self as *const Self)` 自证，不匹配即返回
+   EIO（rename 前干净类，INV-9；双铸情形由"静默错注册"改为 fail-closed）。
+   修订文本已作为 **Main-agent adjudication addendum (2026-08-30)** 追加进
+   D2 spec（`copyup_convergence_designer_spec_20260830.md`），对 pass_50
+   binding；INV-10 相应增加该验证步。无其它冻结元素变更。
+2. **xattr 重构 Designer 续作（user-directed）**：上次运行 29.5 分钟被并发
+   额度外部终止、零产物；user 判断其曾试图访问网页触发限制。已按 user
+   指示以 SendMessage 唤醒续作，附指引：**禁用一切网页访问**；Linux 源码
+   用宿主机 `/home/ayd/linux`（7.2.0-rc3）；xfstests 上游用例源码在
+   codex-asterinas-dev 容器内自行查找（user 已开启容器）。授予窄能力：
+   允许 `docker exec` 只读查看容器内文件（仅限 xfstests 源码勘察，
+   ls/cat/grep 类只读检查）；仍禁止任何 build/compile/test/run 执行。
+   write-set 与报告契约不变（仅两个产物）。
+3. **容器已开启**（user 确认）：后续派发解冻时 compile/lint 与
+   `$ovfs-checker` lane 可用。当前仍冻结的派发：pass_50a 重派、pass_50
+   派发、xattr 线后续 Creator——均待 user 指令；本轮仅 xattr Designer
+   续作经 user 明示授权。
+
+### 2026-08-30 xattr 重构 Designer 验收（ACCEPTED + 主代理修正一处预期）
+
+**D3' `task_designer_xattr_refactor_20260830` 主代理验收 ACCEPTED**（续作
+成功，spec 720 行 + validation 144 行；本地 Linux v7.2.0-rc3 与容器内打包
+套件两处证据源按 user 指引使用）。主代理独立抽查全部命中：
+`ovl_xattr_escape_name` 加段位置与 `insert_str` 设计逐字对应、
+`ovl_is_escaped_xattr` trusted 臂 len-1 quirk（记为 divergence 1）、
+params.c:988-1003 userxattr 互斥规则（document 处置依据）、
+`uuid_xattr_name` 消费点 3 处与 `is_opaque_directory` 2 处普查精确、
+容器套件 083/084 确实缺席而 109 在（grep 计数 156）、overlay/026 头部
+注释自证"errno 随内核版本变化"。
+
+**主代理修正一处（已追加 adjudication addendum 至 validation contract，
+binding）**：designer 对 overlay/026 get 半段的现代预期（ENODATA）写错——
+I3 与 Linux `ovl_own_xattr_get/set`（xattrs.c:173-208）均为对称加段，set
+之后再 get 应**取回值**（round-trip 成功），旧 golden 的两行
+`Operation not supported` 都消失；ENODATA 仅适用于从未 set 的名。026 为
+golden-output 测试，重构后整案 golden diff 是**设计内**变化，Checker 按
+modern-Linux 基准裁 raw log、整案记为"已文档化的重新基线"，非回归；
+"`trusted.overlay.fsz` set 残留拒绝行 = FAIL 信号"判据保留。
+
+**四项 open questions 待 user 裁决**（附主代理建议）：
+1. `set_overlay_xattr` 接收器形态：designer 选 Self-free 关联函数
+   `(real, name, ...)`（内部写全部指向 parent/temp 取来的真身，§13 硬
+   约束未钉接收器）——**建议接受**（与 audit MOVE 模式、决策 3 类比一致）。
+2. overlay/026 观察基准切换：**建议确认**（026 头部自证版本差异；主代理
+   已修正 get 半段预期，见上）。
+3. U3 document-vs-reject：designer 选 document（运行期检查今天是死代码，
+   Linux params.c 规则记录备用）——**建议接受**。
+4. 两处分歧确认：divergence 1（trusted 臂 len-1 quirk 不复刻）**建议
+   确认**；divergence 2（overlay 侧 trusted.* 列表能力过滤）**建议改记
+   归属**——Linux 把它放在 ovl_can_list（overlay 自己的列表过滤），且它
+   依赖调用者凭据（ns_capable_noaudit），本质是 G1 凭据轮的活，不属
+   pass_54（后者是命名空间写规则）；已在裁决记录中改挂 G1 轮。
+
+**冻结面摘要**：单文件 `inode/xattr.rs` 重写（6 内部分区）+
+`XattrClass{Private,Passthrough}`（硬约束名）+ 新
+`OverlayXattrPrefix{Trusted,User}` + `OverlayRecordName` 5 值闭集 +
+`overlay_record_name(record, prefix)`（吸收 5 个解析 fn 含 mod.rs 的
+uuid）；机制核心 `used_full_name`（E1）+ `present_xattr_names`（E2 两半）
++ `set_overlay_xattr` 唯一私有路径强制点（E3/I1-I5）；U2 经
+`MountPolicy.xattr_prefix` 全线贯通；orphan 15/15 落位；Creator write-set
+**16 文件**；切片 = 单 pass 三相位（A 前缀管线 → B 模块核心 → C 消费
+迁移，copyup/mod.rs 为 D2 机械跟随）；与 pass_54 写集完全不相交可并行。
+派发仍冻结待 user 指令。
+
+### 2026-08-30 pass_54 撤出（user："尽量不动 VFS"）
+
+user 裁定：**不设 pass_54、撤出本 wave**——"我们尽量不动 VFS"。R1/M2
+（syscall 层 `user.*` 命名空间规则链、capset 口径）移入延后池，与 G1、f
+同池；设计依据（gap 清单 file:line + Linux 锚点）保留在案，未来另立
+wave 直接引用。PASS_SLICING 已记 Deferred 注记与最终脊柱：
+**pass_50a → pass_50 → pass_51 → xattr_refactor → wave 收尾门**，无并行
+支线，全部生产改动限于 overlayfs 目录内（与 Wave7 O3 的 VFS 回退决定
+同一保守方向）。xattr 四项 open questions 仍待 user 裁决后随派发解冻
+一并放行。

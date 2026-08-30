@@ -1520,3 +1520,147 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     工作区根 `.agents/PROTOCOL.md`（本轮此前多次读取验证），判为 subagent 端
     路径解析问题，不影响证据效力。工作树未提交，提交时机与运行时 xfstests 回归
     待 user 指令。
+
+- **`parent_copyup_wave_slicing_20260830`**
+  - **Kind**: Pass-slicing decision（user-directed 2026-08-30）：把 live handoff
+    「proposal 终态 vs 代码现状」backlog (a)–(e) + 「xattr 现状 vs 设计 gap
+    清单」切为 Designer 前置 + 两轨 Creator 序列；f)（事实栈内联）按 user
+    指令延后出 wave。行号基线经 2026-08-30 主代理 grep 复核仍成立。
+  - **Parent**: `N/A` — 跨 meso 有界 wave（precedent pass_40/42/43/46–49）；
+    无新 micro claim。逐文件 meso 归属同 `parent_copyup_batches_slicing_20260827`；
+    xattr = meso 05，syscall 层 = overlayfs 之外的生产 VFS/syscall 面
+    （显式 packeted 的生产改动，非测试设施）。
+  - **Authoritative design**: `designdoc/structure-design-proposal-final.md`
+    （§2/§4/§5/§6/§8/§9 struct 块为硬约束＝决策 3；§9 方法体降级为示意）
+    + handoff backlog (a)–(e) 与 2026-08-28 决策 1–4 + handoff
+    「xattr 现状 vs 设计 gap 清单」与 proposal §13/§16。
+  - **Designer 序列（command-free，先于实现；PROTOCOL rule 4）**:
+    - **D1 `task_designer_rekey_convergence_20260830`**（2026-08-30 已派，
+      Direct Spawn Lane）：单独研判 (e) —— 同物活体占位的遭遇条件 census
+      （`replace_facts` `inode/mod.rs:231` → `rekey_keep_old_alias`
+      `inode/inode_cache.rs:93` 现报 EIO 的分支）、接纳式汇合语义裁决
+      （adopt-occupant / keep-winner / wait-then-reuse，对齐 §9「后来者等
+      前者登完复用同一逻辑对象」与 §5 正主/别名分裂规则）、无失败类算法
+      （need_repair 全链删除后 commit 路径不得再依赖 fail-and-mark）、
+      `is_same_object` 谓词必要性裁决（决策 4）。产物：
+      `components/parent-copyup-wave-20260830/rekey_convergence_designer_report_20260830.md`。
+      **Result（2026-08-30，主代理结构验收 + 四处承重论断代码抽查，ACCEPTED）**：
+      Q1 裁定同物活体异实例位移在受审代码中不可达（rename→rekey 全程在
+      `publication_parent.lock` 内，全部 7 个 fresh-truth 扫描入口持被扫父
+      DIR 锁；唯一理论入口 = 根重铸，被 VFS 钉住否证、记为 out-of-scope），
+      故 (e) 定性为 contract-driven robustness；真正要害是改名后失败类
+      （upgrade 竞态 Err、`upper_real_object` 重解析、`store_lower_id`+
+      need_repair）。Q2 选 (B) 占位者让位、赢家持钥（(C) 归约为 (B)，
+      (A) 否决）；正主活性判定冻结：rekey 位移谓词降级为诊断分类 +
+      commit 活性 recheck 改三臂同物判定（capability-less 配置下臂 3
+      不可测记为缺口）。Q3 冻结 `publish_rekey`（带 pin 参数、无 Result、
+      无条件发布）+ 改序（`upper.call_once` 先于注册）+ 发布路径直接派生
+      upper_real；`is_same_object` 裁定 KEEP；锁序
+      `CUL -> DIR -> InodeCache.entries.write()` 严格嵌套零新边；G.5 六项
+      文档-代码分歧上报。D2 以该报告为 input-of-record。
+    - **D2 `task_designer_copyup_convergence_20260830`**（D1 验收后派）：
+      冻结 (a)(c)(d)(e) 实现面 —— `parent`→`recorded_parent` 更名、
+      `copyup: Mutex<Option<String>>` 终态、§9 四方法分解/签名/锁持有细节
+      （决策 3 授权 Designer 自行冻结）、`store_lower_id` 前移制备段精确
+      落点（workdir 临时体上写 origin，rename 前完成）、rekey 接纳汇合吸收
+      D1 结论、`OverlayFs` 字段序修正、create closure 初始化形态。
+      产物：designer spec + validation contract。
+    - **D3 `task_designer_xattr_surface_20260830`**（与 D2 并行，关注面
+      不相交）：冻结 xattr 代码面 —— E1/E2/E3 转义 helper 落位与分类重塑
+      （`XattrClass{Private,Passthrough}` 形态）、P1/P2/P3 对齐裁决、
+      U1–U3 选项/探针/预留互斥规则、M1 list 权限计值、R1/M2 syscall 层
+      落位。消费 proposal §13 + handoff gap 清单。产物：designer spec +
+      validation contract。
+      **Superseded 2026-08-30（user decision）：xattr 不再走增量 gap 修复，
+      改为按 proposal §13 正确设计整体重构；本项由
+      `task_designer_xattr_refactor_20260830` 取代**（重构设计范围见下
+      pass_52/53 supersede 注记；R1/M2 syscall 项不属重构，仍归 pass_54）。
+  - **Creator passes（串行为主，写集不相交处并行；command-free，
+    compile_preflight withheld）**:
+    - **pass_50_copyup_convergence**（Risk High；D2 验收后）：目标逐条——
+      (a) 删 `CopyUpState/CopyUpTarget/need_repair`/repair 核验链全链 →
+      `copyup: Mutex<Option<String>>`（Some=待发布名，发布成功置 None 退役；
+      已发布唯一事实源 = `upper` Once）+ `parent`→`recorded_parent` 更名 +
+      §9 四方法重塑；(c) readdir `..` resolver 跟随更名（无独立语义工作）；
+      (d) `store_lower_id` 前移制备段；(e) rekey 接纳式汇合按 D1/D2 冻结面；
+      `OverlayFs` 字段序修正（`_anon_device_id` 移至 `fs_event_stats` 之后、
+      `self_weak` 之前，proposal §2 硬约束）。Write-set: `inode/copyup/mod.rs`
+      （`inode/copyup/workdir.rs` 仅当 D2 冻结要求）、`inode/mod.rs`,
+      `inode/lookup.rs`, `inode/inode_cache.rs`, `inode/readdir.rs`,
+      `inode/dir/create.rs`, `inode/dir/rename.rs`, `fs/mod.rs`（仅字段序）。
+    - **pass_51_real_object_layer_view**（Risk High；pass_50 验收后；两阶段）：
+      (b) `RealObject` 收敛 `{layer_index, dentry: Arc<Dentry>}`、`RealPath`
+      类型删除、路径经所在层挂载视图按需重建、`Layer` 收缩
+      `{mount, fsid, container_dev_id}`（root 由 clone 视图承载，§4 硬约束）、
+      `identity.rs` 的 `real.fsid()/container_dev_id()` 消费改层取用。
+      Phase A = 决策 2 五项遗留审计点只读 census 交付（空弱 ns 手法对照、
+      消费点 C 类映射、flags 对 lower 克隆只读语义、workdir 第三视图边界、
+      `check_dir_entry_mutation` 跳过签收），main agent 裁决后方可进
+      Phase B；Phase B 写集由 census 固定（基线：`real.rs`, `layer.rs`,
+      `fs/mount/layer_parts.rs`, `fs/mount/mod.rs`, `fs/mod.rs`,
+      `inode/identity.rs` + `real_path()`/`real_inode()` 消费清扫面：
+      lookup/mod/copyup/readdir/data/permission/xattr/inode_cache/dir/*）。
+      复用既有 `Mount::clone_mount`，不新增 VFS API。
+    - **pass_50a_whiteout_orphan_moves**（Risk Normal；mechanical，无 micro
+      claim；pass_50 前，rename.rs 写集串行）：执行 orphan audit 的 MOVE 4/5
+      —— `cleanup_upper_whiteouts`（whiteout.rs:289）、
+      `unlink_rechecked_whiteouts`（:331）收入同文件既有 `impl OverlayFs`
+      块（whiteout.rs:125），Self-free 关联函数、可见性不变、纯搬迁零行为
+      变化；调用点机械跟随（remove.rs:129,260、rename.rs:195）。聚族谓词
+      `is_whiteout_child`/`validate_whiteout_children` 不随迁（user 裁定
+      仅两 fn）。Write-set: `inode/dir/whiteout.rs`, `inode/dir/remove.rs`,
+      `inode/dir/rename.rs`。依据：`components/orphan-helper-audit-20260830/`
+      Verdicts §MOVE 4/5。
+    - **pass_52_xattr_escape_classify**（Risk High；pass_51 后，xattr.rs
+      写集串行；与 54 并行）：E1（own 前缀 + `overlay.` 下行拼接转义）、
+      E2（list 剥段而非仅隐藏）、E3（嵌套下内部标记写穿透分层）、
+      P1（Linux 形态转义名分类修正）、P2（own 前缀无拒绝类、一律转义
+      透传）、P3（get 拒绝码对齐 ENODATA）、M1（list 权限真实生效）。
+      Write-set: `inode/xattr.rs`。
+      **Superseded 2026-08-30（user decision）**：与 pass_53 一并由 xattr
+      模块整体重构取代——重构按 proposal §13 设计闭合 E1–E3/U1–U3/P1–P3/M1
+      十项模块内 gap，并按 orphan 判据解决 xattr.rs 全部 15 个 orphan 归属；
+      pass 编号与切分待 `task_designer_xattr_refactor_20260830` 验收后冻结，
+      排程仍为 pass_51 之后、pass_54 之外（syscall 项不属重构）。
+    - **pass_54_xattr_syscall_rules**（Risk High；pass_51 后；与 52 并行，
+      写集不相交）：R1（`user.*`「仅普通文件与目录、sticky 目录仅属主/
+      特权者可写」规则链在 syscall/VFS 层补齐）、M2（Trusted 门
+      `permitted_capset()` → effective 集口径）。Write-set:
+      `kernel/core/src/syscall/setxattr.rs`,
+      `kernel/core/src/syscall/removexattr.rs`。
+      **Deferred 2026-08-30（user decision："尽量不动 VFS"）**：撤出本
+      wave、不设 pass；R1/M2 移入延后池（与 G1、f 同池）。设计依据
+      （gap 清单 file:line + Linux `fs/xattr.c:158-176`、
+      `kernel/capability.c:414` 锚点）保留在案，未来另立 wave 时直接
+      引用，不需重做研判。本 wave 由此收敛为**纯 overlayfs 目录内**的
+      生产改动。
+    - **pass_53_xattr_userxattr_option**（Risk High；pass_52 后）：U1（四个
+      内部标记全名常量前缀参数化）、U2（`fs/mount/options.rs` 增
+      `userxattr` 选项并接通写路径）、U3（能力探针随命名空间选择 +
+      userxattr 与 redirect/metacopy 预留互斥校验）。Write-set:
+      `inode/xattr.rs`, `fs/mount/options.rs`, `fs/mount/capabilities.rs`。
+      **Superseded 2026-08-30（user decision）**：并入 xattr 模块整体重构
+      （见 pass_52 supersede 注记）。
+  - **顺序**: D1 → D2 → pass_50 → pass_51 → {pass_52 ∥ pass_54} → pass_53
+    → wave 收尾门；D3 与 D2 并行派发。
+    **Amended 2026-08-30**：pass_50a（whiteout 两 MOVE）插于 pass_50 前
+    （rename.rs 写集串行）；pass_52/53 槽位由 xattr 模块整体重构取代
+    （`task_designer_xattr_refactor_20260830` 设计中，验收后冻结切分与
+    编号，排程仍为 pass_51 后、与 pass_54 的串并行关系随写集 census 定）。
+    即：**pass_50a → D2 ∥ xattr-refactor-Designer → pass_50 → pass_51 →
+    {xattr_refactor pass ∥ pass_54} → wave 收尾门**。
+    **Amended 2026-08-30 (2)**：pass_54 撤出本 wave（user："尽量不动
+    VFS"；R1/M2 延后不设 pass，见该条 Deferred 注记）。最终脊柱：
+    **pass_50a → pass_50 → pass_51 → xattr_refactor → wave 收尾门**，
+    无并行支线；全部生产改动限于 overlayfs 目录内。
+  - **Explicit boundary / deferrals**: f) 事实栈内联（SmallVec 值内联 +
+    eager clone 下移 create closure）user 指令延后出本 wave；G1（凭据缺口，
+    copy-up 制备/clear-empty/copy_eligible_xattrs 的挂载者权威）不在本
+    wave 切片——跨切 VFS 凭据面，待独立 Designer + Creator 轮另行调度；
+    dentry 携带坐标（§5 VFS 替代方案 + §4 第一刀转发）按决策 1 冻结等
+    平台 PR；metacopy/redirect_dir/index 仅钩子；无 ktest 表面。
+  - **Wave-close gates（合并一次执行，2026-08-27 既有约定）**: 全部 Creator
+    验收后一轮 compile/lint Checker（`make check`）、可调度全表 xfstests
+    回归（002 003 006 007 010 011 012 014 024 031 038 077——copy-up 坐标
+    内部、`..` 恒等、xattr 行为面均变更，须全表）、Reviewer gate over
+    累计 wave diff。
