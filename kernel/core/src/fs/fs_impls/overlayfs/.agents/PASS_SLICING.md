@@ -1664,3 +1664,12 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     回归（002 003 006 007 010 011 012 014 024 031 038 077——copy-up 坐标
     内部、`..` 恒等、xattr 行为面均变更，须全表）、Reviewer gate over
     累计 wave diff。
+  - **Result (2026-08-30, user-directed execution model: per-pass
+    Creator+Reviewer, cargo check granted, per-pass commits)**: 五 pass
+    全闭环——pass_50a（Reviewer PASS，`d05b1bea1`）、pass_50（PASS，
+    `462da89ad`）、pass_51（Phase A census + 主代理七项裁决 D-51-1..5 →
+    Phase B → PASS，`47edb8d4e`）、pass_55（一轮 FAIL→同 Creator 复工→
+    同 Reviewer 复验 PASS，`ff0cdc1fe`）、wave 收尾 make check（4 轮
+    16 处机械修复，零语义发现，`14c404b45`，**GREEN run04 exit 0**）。
+    xfstests 运行时验收按 user 指令未做，归后续独立 meso-integration
+    Checker。执行细节与偏差见 live handoff 2026-08-30 wave 执行节。

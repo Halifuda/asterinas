@@ -490,9 +490,16 @@ Record only active or recently changed passes here. Durable slicing rationale be
     stale doc clause. Runtime xfstests revalidation remains deferred pending
     user instruction.
 
-- **`parent_copyup_wave_slicing_20260830`** — **Slicing recorded; D1 + D2 +
-  xattr-refactor Designer ACCEPTED 2026-08-30; all dispatches FROZEN
-  awaiting user instruction (4 xattr open questions adjudication pending)**
+- **`parent_copyup_wave_slicing_20260830`** — **EXECUTED & CLOSED 2026-08-30**:
+  five passes (50a/50/51/55 + wave-close make check) all Creator→Reviewer
+  closed and committed (d05b1bea1, 462da89ad, 47edb8d4e, ff0cdc1fe,
+  14c404b45); `make check` GREEN (run04 exit 0, 16 mechanical fixes, zero
+  semantic findings); runtime xfstests NOT run (user directive) — deferred
+  to a future meso-integration Checker. One Creator-rework round on pass_55
+  (present_xattr_names strip branch; same-Creator fix, same-Reviewer
+  re-verify PASS). pass_51 carried the user-adjudicated deviation: workdir
+  rides the upper clone view (proposal §3 literal amended); layer.rs origin
+  arithmetic aligned to the uniform index rule.
   - **Kind**: user-directed wave opening for handoff backlog (a)–(e) + xattr
     gap list; slicing in `PASS_SLICING.md` (`parent_copyup_wave_slicing_20260830`).
   - **D1 `task_designer_rekey_convergence_20260830` — ACCEPTED** (structural

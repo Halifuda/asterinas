@@ -1626,3 +1626,36 @@ wave 直接引用。PASS_SLICING 已记 Deferred 注记与最终脊柱：
 modern-Linux（含主代理 get 半段修正附录）；③ U3 取 document 处置；
 ④ divergence 1 不复刻、divergence 2 改挂 G1 轮。已随 xattr dispatch
 packet 一并生效。
+
+### 2026-08-30 wave 执行完毕（五 pass 全闭环 + make check GREEN）
+
+执行模型落地结果（脊柱 pass_50a → pass_50 → pass_51 → pass_55，无并行
+支线；每 pass 一 Creator + 一 Reviewer，主代理只派发/转达/提交）：
+
+| pass | 内容 | 验收 | commit |
+|---|---|---|---|
+| pass_50a | whiteout 两 orphan 收编 impl OverlayFs（3 文件） | Reviewer PASS | `d05b1bea1` |
+| pass_50 | copyup 收敛 proposal 终态（12 文件，净删减） | Reviewer PASS | `462da89ad` |
+| pass_51 | RealObject/Layer 克隆视图（Phase A census + 主代理七项裁决 D-51-1..5 → Phase B，12 overlayfs 文件 + mount.rs 单行加宽） | Reviewer PASS | `47edb8d4e` |
+| pass_55 | xattr 整体重构（16 文件，三轮，一轮 FAIL→同 Creator 复工→同 Reviewer 复验 PASS） | Reviewer PASS | `ff0cdc1fe` |
+| lint | wave 收尾 make check（4 轮，16 处机械修复/9 文件，零语义发现） | Checker GREEN | `14c404b45` |
+
+要点与偏差记录：
+- pass_51 裁决七项全部 binding 落地（census 文末裁决节）；**workdir 搭
+  upper 克隆视图便车 = 对 proposal §3 字面的已裁决偏离**；`layer.rs`
+  origin 算术对齐统一层序规则（no-upper 行为增量已记录：唯一调用方
+  store_lower_id 需 upper，实际不可达）。
+- pass_55 复工一轮：`present_xattr_names` 剥段分支曾把私有前缀一并剥掉
+  （Reviewer 阻塞项），修复为保留前缀仅去中缀（Linux ovl_listxattr 对齐），
+  复验 PASS；收据 Continuation C1。三笔 deviation（claim 无前缀参数、
+  set_overlay_xattr 关联函数省略 use 重导出、warn! 空白规范化）均核实可接受。
+- pass_51 提交（47edb8d4e）因对整个 overlayfs 目录 git add 而连带包含了
+  当时的 handoff 记录——无害（记录本需入库），如实记录。
+- cargo check 各 pass 全零错误零警告（命令 `-p aster-core`——packet 原字
+  `-p aster-kernel` 在 workspace 无此包，经 pass_50a 发现后全线改用并记档）。
+- **make check GREEN（run04 exit=0）**：16 处机械修复全部在 wave 触碰文件，
+  零语义/设计发现；收据
+  `components/parent-copyup-wave-20260830/task_checker_wave_make_check_20260830_checker.md`。
+- **运行时验收（xfstests）按 user 指令本轮未做**，归后续独立
+  meso-integration Checker；延后池现状：G1（含 divergence-2 trusted.*
+  列表过滤）、R1/M2（syscall）、f（事实栈内联）、dentry-PR 冻结项。
