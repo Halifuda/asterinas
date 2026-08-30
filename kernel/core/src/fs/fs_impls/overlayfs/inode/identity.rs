@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use device_id::DeviceId;
 
-use super::xattr::origin_xattr_name;
+use super::{OverlayInode, xattr::{OverlayRecordName, overlay_record_name}};
 use crate::{
     fs::{
         fs_impls::overlayfs::{
@@ -503,6 +503,10 @@ impl OverlayFs {
     /// Persists the lower-source identity record on the upper inode with a
     /// single `set_xattr(..., CREATE_OR_REPLACE)` call; a missing
     /// capability or `EOPNOTSUPP` is a gated no-op.
+    ///
+    /// The write routes through the xattr private path
+    /// ([`OverlayInode::set_overlay_xattr`]), so the origin record name is
+    /// never escaped.
     pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
         let layer = self.layer(lower.layer_index());
         let lower_layer_root_ino = self
@@ -515,10 +519,15 @@ impl OverlayFs {
             return Ok(());
         }
         let record = LowerIdOrigin::try_from_lower(layer, lower, lower_layer_root_ino)?;
-        let name = origin_xattr_name()?;
+        let name = overlay_record_name(OverlayRecordName::Origin, self.policy().xattr_prefix())?;
         let value = record.serialize();
         let mut reader = VmReader::from(value.as_slice()).to_fallible();
-        match upper.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
+        match OverlayInode::set_overlay_xattr(
+            upper,
+            name,
+            &mut reader,
+            XattrSetFlags::CREATE_OR_REPLACE,
+        ) {
             // `EOPNOTSUPP` is a gated no-op: `Ok(())` with no record.
             Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(()),
             result => result,
@@ -531,7 +540,7 @@ impl OverlayFs {
     /// evidence, preserving the visible-source fallback; genuine xattr-read
     /// errors propagate.
     pub(super) fn read_lower_id(&self, upper: &Arc<dyn Inode>) -> Result<Option<LowerIdOrigin>> {
-        let name = origin_xattr_name()?;
+        let name = overlay_record_name(OverlayRecordName::Origin, self.policy().xattr_prefix())?;
         let mut value = [0u8; ORIGIN_WIRE_TOTAL_LEN];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper.get_xattr(name, &mut writer) {

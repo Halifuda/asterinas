@@ -34,9 +34,7 @@
 //! | `whiteout` | shared whiteout cache and whiteout-publish mechanics |
 
 use self::remove::RemoveKind;
-use super::{
-    AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker,
-};
+use super::{AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex};
 use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
@@ -196,7 +194,10 @@ impl OverlayInode {
         // impure marker to the upper parent before either physical-link
         // branch (before committing the link).
         if !old_overlay.lowers.is_empty() {
-            set_impure_marker(self.upper_parent_path()?.inode())?;
+            OverlayInode::set_impure_marker(
+                self.upper_parent_path()?.inode(),
+                fs.policy().xattr_prefix(),
+            )?;
         }
         if target_is_whiteout {
             self.link_over_whiteout(name, &source_path)?;

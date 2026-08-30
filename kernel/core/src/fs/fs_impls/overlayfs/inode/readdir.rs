@@ -278,10 +278,11 @@ impl OverlayInode {
             };
             vec![source]
         } else {
+            let prefix = fs.policy().xattr_prefix();
             let mut layers = Vec::new();
             for layer in facts.upper.iter().chain(facts.lowers.iter()) {
                 layers.push(layer);
-                if is_opaque_directory(layer)? {
+                if is_opaque_directory(layer, prefix)? {
                     break;
                 }
             }

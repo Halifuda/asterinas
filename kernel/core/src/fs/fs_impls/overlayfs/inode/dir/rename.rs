@@ -36,7 +36,7 @@ use crate::{
     fs::{
         fs_impls::overlayfs::{
             fs::OverlayFs,
-            inode::{Lookup, NegativeLookup, OverlayInode, ReaddirIndex, xattr::set_impure_marker},
+            inode::{Lookup, NegativeLookup, OverlayInode, ReaddirIndex},
         },
         vfs::inode::{Inode, RenameMode},
     },
@@ -192,7 +192,10 @@ impl OverlayInode {
             .as_ref()
             .and_then(|target_facts| target_facts.upper.as_ref())
         {
-            OverlayFs::cleanup_upper_whiteouts(&fs.real_object_path(target_upper_dir))?;
+            OverlayFs::cleanup_upper_whiteouts(
+                &fs.real_object_path(target_upper_dir),
+                fs.policy().xattr_prefix(),
+            )?;
         }
 
         // A cross-directory move of a source with lower fallback makes the
@@ -200,7 +203,10 @@ impl OverlayInode {
         // physical rename (before committing the rename).
         let same_parent = self.key(&fs) == target.key(&fs);
         if !same_parent && source_has_lower {
-            set_impure_marker(target_upper_parent_path.inode())?;
+            OverlayInode::set_impure_marker(
+                target_upper_parent_path.inode(),
+                fs.policy().xattr_prefix(),
+            )?;
         }
 
         let mut committed = false;

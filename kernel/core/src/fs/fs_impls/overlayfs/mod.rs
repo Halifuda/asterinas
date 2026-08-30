@@ -32,7 +32,6 @@ use crate::{
         vfs::{
             inode::{Inode, MknodType},
             path::{self, Path},
-            xattr::XattrName,
         },
     },
     prelude::*,
@@ -111,14 +110,10 @@ pub(in overlayfs) fn workdir_temp_name(target_name: &str) -> String {
     )
 }
 
-/// The persisted overlay UUID record name.
-const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
-
-/// Returns the parsed [`XattrName`] for the overlay UUID record.
-pub(in overlayfs) fn uuid_xattr_name() -> Result<XattrName<'static>> {
-    XattrName::try_from_full_name(TRUSTED_OVERLAY_UUID)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay uuid xattr name"))
-}
+// The persisted overlay UUID record lives in the xattr module's record
+// table (`inode/xattr.rs`): `overlay_record_name(OverlayRecordName::Uuid,
+// prefix)` replaces the former `TRUSTED_OVERLAY_UUID`/`uuid_xattr_name`
+// root items.
 
 pub(super) fn init() {
     crate::fs::vfs::registry::register(&fs_type::OverlayFsType).unwrap();

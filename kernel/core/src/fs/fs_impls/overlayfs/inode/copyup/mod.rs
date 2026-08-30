@@ -40,10 +40,7 @@ use crate::{
         file::{InodeType, StatusFlags},
         fs_impls::overlayfs::{
             fs::OverlayFs,
-            inode::{
-                Lookup, OverlayInode,
-                xattr::{XattrCopyPolicy, copy_eligible_xattrs, set_impure_marker},
-            },
+            inode::{Lookup, OverlayInode, xattr::XattrCopyPolicy},
             real::RealObject,
         },
         vfs::inode::{Inode, MknodType, RenameMode, SymbolicLink},
@@ -90,7 +87,7 @@ impl OverlayInode {
     /// lock guard is carried in or out.
     fn copy_up_inner(&self, depth: usize) -> Result<()> {
         // Pins the owning mount for the trigger's duration.
-        let _fs = self.fs_arc()?;
+        let fs = self.fs_arc()?;
 
         // Idempotent fast path: the object is already upper-backed.
         if self.upper.get().is_some() {
@@ -150,7 +147,10 @@ impl OverlayInode {
         // impure — persist the marker before the object-kind dispatch and the
         // physical upper commit (strict, pre-commit; read-first idempotence
         // makes an already-marked parent a no-op).
-        set_impure_marker(&publication_parent.select_real_inode())?;
+        OverlayInode::set_impure_marker(
+            &publication_parent.select_real_inode(),
+            fs.policy().xattr_prefix(),
+        )?;
 
         let staged = self.stage_in_workdir(&name)?;
         self.publish_by_rename(&publication_parent, &name, staged)?;
@@ -182,6 +182,7 @@ impl OverlayInode {
     /// staging leaves no residue, and the whole copy-up retries from scratch.
     fn stage_in_workdir(&self, name: &str) -> Result<WorkdirTemp> {
         let fs = self.fs_arc()?;
+        let prefix = fs.policy().xattr_prefix();
         let lower = self.lower_source()?;
         match lower.real_inode().type_() {
             InodeType::Dir => {
@@ -201,10 +202,11 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        copy_eligible_xattrs(
+                        OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
+                            prefix,
                         )
                     })
                     .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
@@ -230,10 +232,11 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        copy_eligible_xattrs(
+                        OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
+                            prefix,
                         )
                     })
                     .and_then(|_| self.promote_regular_file(temp.inode()))
@@ -263,10 +266,11 @@ impl OverlayInode {
                     .promote_symlink(temp.inode())
                     .and_then(|_| self.transfer_metadata(lower.real_inode(), temp.inode()))
                     .and_then(|_| {
-                        copy_eligible_xattrs(
+                        OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
+                            prefix,
                         )
                     })
                     .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
@@ -332,10 +336,11 @@ impl OverlayInode {
                 if let Err(err) = self
                     .transfer_metadata(lower.real_inode(), temp.inode())
                     .and_then(|_| {
-                        copy_eligible_xattrs(
+                        OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
                             temp.inode(),
                             XattrCopyPolicy::Strict,
+                            prefix,
                         )
                     })
                     .and_then(|_| fs.store_lower_id(temp.inode(), &lower))

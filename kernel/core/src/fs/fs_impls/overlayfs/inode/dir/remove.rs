@@ -29,7 +29,7 @@ use crate::{
             inode::{
                 Lookup, OverlayInode, ReaddirIndex,
                 copyup::workdir::{WorkdirTemp, WorkdirTempRequest},
-                xattr::{XattrCopyPolicy, copy_eligible_xattrs},
+                xattr::XattrCopyPolicy,
             },
             layer::RealObjectStack,
         },
@@ -62,6 +62,7 @@ impl OverlayInode {
         index: &mut Option<ReaddirIndex>,
     ) -> Result<()> {
         let fs = self.fs_arc()?;
+        let prefix = fs.policy().xattr_prefix();
         let lookup = fs.lookup(self, name)?;
         if self.is_stale_upper(name, &lookup, index) {
             return Err(translate_stale_upper_enoent(Error::with_message(
@@ -105,7 +106,8 @@ impl OverlayInode {
 
         let is_pure_upper = match target_facts.upper.as_ref() {
             Some(upper_obj) => {
-                target_facts.lowers.is_empty() && !super::super::is_opaque_directory(upper_obj)?
+                target_facts.lowers.is_empty()
+                    && !super::super::is_opaque_directory(upper_obj, prefix)?
             }
             None => false,
         };
@@ -125,7 +127,10 @@ impl OverlayInode {
                         "the pure-upper rmdir target has no upper real directory",
                     )
                 })?;
-                OverlayFs::cleanup_upper_whiteouts(&fs.real_object_path(target_upper_dir))?;
+                OverlayFs::cleanup_upper_whiteouts(
+                    &fs.real_object_path(target_upper_dir),
+                    prefix,
+                )?;
             }
             // A physical-upper `ENOENT` means the asserted upper object
             // became stale and maps to `ESTALE`; other upper errors
@@ -235,6 +240,7 @@ impl OverlayInode {
             ));
         };
         let old_upper_dir = upper_obj.real_inode().clone();
+        let prefix = fs.policy().xattr_prefix();
         // The opaque marker is part of the replacement directory's complete
         // preparation: it keeps the name a lower-search barrier at every
         // instant of the swap (crash window included), gated by the
@@ -248,7 +254,12 @@ impl OverlayInode {
         // while the temp is still owned by the caller (the creating task), so
         // a non-owner rmdir of a directory carrying xattrs does not fail
         // `EACCES` on the temp `set_xattr`.
-        copy_eligible_xattrs(&old_upper_dir, temp.inode(), XattrCopyPolicy::BestEffort)?;
+        OverlayInode::copy_eligible_xattrs(
+            &old_upper_dir,
+            temp.inode(),
+            XattrCopyPolicy::BestEffort,
+            prefix,
+        )?;
         self.transfer_metadata(&old_upper_dir, temp.inode())?;
         self.transfer_timestamps(&old_upper_dir, temp.inode())?;
         let workdir_path = self.workdir_root_path()?;
@@ -256,7 +267,9 @@ impl OverlayInode {
             .map_err(translate_stale_upper_enoent)?;
         match super::super::super::lookup_child_path(&workdir_path, temp.name()) {
             Ok(displaced_path) => {
-                if let Err(cleanup_err) = OverlayFs::cleanup_upper_whiteouts(&displaced_path) {
+                if let Err(cleanup_err) =
+                    OverlayFs::cleanup_upper_whiteouts(&displaced_path, prefix)
+                {
                     warn!(
                         "overlay clear-empty: the displaced-directory whiteout \
                          cleanup failed (residue, never a visible source): {:?}",

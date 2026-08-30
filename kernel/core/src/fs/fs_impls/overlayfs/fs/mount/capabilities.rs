@@ -10,7 +10,10 @@ use super::{super::policy::UuidMode, inuse::OVERLAY_UUID_SIZE};
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::{uuid_xattr_name, workdir_temp_name},
+        fs_impls::overlayfs::{
+            inode::{OverlayRecordName, OverlayXattrPrefix, overlay_record_name},
+            workdir_temp_name,
+        },
         utils::DirentVisitor,
         vfs::{
             inode::{Inode, MknodType},
@@ -33,14 +36,19 @@ pub(in overlayfs) struct UpperFilesystemCapabilities {
 impl UpperFilesystemCapabilities {
     /// Probes the upper/workspace capabilities post-claim (writable mounts
     /// only, sleep-capable construction context).
+    ///
+    /// The private-xattr probe measures the mount's **selected** prefix
+    /// namespace (`trusted.overlay.` by default, `user.overlay.` in
+    /// `userxattr` mode), threaded from `OverlayFs::new`.
     pub(super) fn probe(
         upper_inode: &Arc<dyn Inode>,
         workspace_inode: &Arc<dyn Inode>,
+        prefix: OverlayXattrPrefix,
     ) -> Result<Self> {
         // The d_type and char-device probes create uniquely-named temp
         // entries in the workdir staging workspace and remove them on
         // success/failure.
-        let can_store_private_xattr = Self::probe_private_xattr(upper_inode)?;
+        let can_store_private_xattr = Self::probe_private_xattr(upper_inode, prefix)?;
         let can_report_directory_type = Self::probe_d_type(workspace_inode)?;
         let can_mknod_char = Self::probe_mknod_char(workspace_inode)?;
         Ok(Self {
@@ -50,8 +58,11 @@ impl UpperFilesystemCapabilities {
         })
     }
 
-    fn probe_private_xattr(upper_inode: &Arc<dyn Inode>) -> Result<bool> {
-        let name = uuid_xattr_name()?;
+    fn probe_private_xattr(
+        upper_inode: &Arc<dyn Inode>,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<bool> {
+        let name = overlay_record_name(OverlayRecordName::Uuid, prefix)?;
         let mut value = [0u8; OVERLAY_UUID_SIZE];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper_inode.get_xattr(name, &mut writer) {

@@ -9,14 +9,18 @@
 //!
 //! - claim token: the per-slot compare-and-swap (CAS) on the slot's owner
 //!   token guards this value so only one overlay can hold the claim;
-//! - persisted overlay UUID: when effective, the value is stored as
-//!   `trusted.overlay.uuid` on the upper root.
+//! - persisted overlay UUID: when effective, the value is stored under the
+//!   mount's selected private-prefix uuid record (`trusted.overlay.uuid` by
+//!   default, `user.overlay.uuid` in `userxattr` mode) on the upper root.
 
 use super::super::policy::UuidMode;
 use crate::{
     fs::{
         file::{InodeMode, InodeType},
-        fs_impls::overlayfs::{read_child_names, uuid_xattr_name},
+        fs_impls::overlayfs::{
+            inode::{OverlayInode, OverlayRecordName, OverlayXattrPrefix, overlay_record_name},
+            read_child_names,
+        },
         vfs::{inode::Inode, inode_ext::InodeExt, path::Path, xattr::XattrSetFlags},
     },
     prelude::*,
@@ -146,16 +150,20 @@ impl UpperWorkdirInuse {
     }
 
     /// Determines the overlay identity for the given `uuid_mode`.
+    ///
+    /// The existing-identity read measures the mount's selected private
+    /// prefix (`prefix`, threaded from `OverlayFs::new`).
     pub(super) fn determine_identity(
         upper_inode: &Arc<dyn Inode>,
         uuid_mode: UuidMode,
+        prefix: OverlayXattrPrefix,
     ) -> Result<Uuid> {
         match uuid_mode {
-            UuidMode::On => match Self::read_identity_from_upper(upper_inode)? {
+            UuidMode::On => match Self::read_identity_from_upper(upper_inode, prefix)? {
                 Some(existing) => Ok(existing),
                 None => Ok(Uuid::generate()),
             },
-            UuidMode::Auto => match Self::read_identity_from_upper(upper_inode) {
+            UuidMode::Auto => match Self::read_identity_from_upper(upper_inode, prefix) {
                 Ok(Some(existing)) => Ok(existing),
                 Ok(None) | Err(_) => Ok(Uuid::generate()),
             },
@@ -221,13 +229,21 @@ impl UpperWorkdirInuse {
         Ok(())
     }
 
-    pub(super) fn persist_identity(&self) -> Result<()> {
-        let name = uuid_xattr_name()?;
+    /// Persists the overlay identity under the mount's selected private
+    /// prefix (`prefix`, threaded from `OverlayFs::new`). The write routes
+    /// through the xattr private path
+    /// ([`OverlayInode::set_overlay_xattr`]), so the record name is never
+    /// escaped.
+    pub(super) fn persist_identity(&self, prefix: OverlayXattrPrefix) -> Result<()> {
+        let name = overlay_record_name(OverlayRecordName::Uuid, prefix)?;
         let value = self.identity.value().to_le_bytes();
         let mut reader = VmReader::from(value.as_slice()).to_fallible();
-        self.upper
-            .inode
-            .set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE)
+        OverlayInode::set_overlay_xattr(
+            &self.upper.inode,
+            name,
+            &mut reader,
+            XattrSetFlags::CREATE_OR_REPLACE,
+        )
     }
 
     /// Returns the pinned `<workdir>/work` staging workspace inode.
@@ -255,10 +271,13 @@ impl UpperWorkdirInuse {
 
     /// Reads an existing persisted identity from the upper root.
     ///
-    /// Returns `Ok(None)` when no `trusted.overlay.uuid` xattr exists
+    /// Returns `Ok(None)` when no selected-prefix uuid record exists
     /// (`ENODATA`); a malformed value fails with `EINVAL`.
-    fn read_identity_from_upper(upper_inode: &Arc<dyn Inode>) -> Result<Option<Uuid>> {
-        let name = uuid_xattr_name()?;
+    fn read_identity_from_upper(
+        upper_inode: &Arc<dyn Inode>,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<Option<Uuid>> {
+        let name = overlay_record_name(OverlayRecordName::Uuid, prefix)?;
         let mut value = [0u8; OVERLAY_UUID_SIZE];
         let mut writer = VmWriter::from(value.as_mut_slice()).to_fallible();
         match upper_inode.get_xattr(name, &mut writer) {

@@ -25,7 +25,9 @@ use super::{
 use crate::{
     fs::{
         fs_impls::overlayfs::{
-            inode::{IdentityPolicy, InodeCache, WhiteoutCache, collect_layer_devs},
+            inode::{
+                IdentityPolicy, InodeCache, OverlayXattrPrefix, WhiteoutCache, collect_layer_devs,
+            },
             layer::LayerStack,
         },
         pseudofs::AnonDeviceId,
@@ -86,10 +88,21 @@ impl OverlayFs {
             verify_inode_instance_stability(work_dir, workdir_path.inode())?;
 
             let uuid_mode = options.uuid_mode.unwrap_or(UuidMode::Auto);
+            // The selected private-xattr prefix (option parse precedes every
+            // probe/identity call, so the selection is available here).
+            let xattr_prefix = if options.is_userxattr {
+                OverlayXattrPrefix::User
+            } else {
+                OverlayXattrPrefix::Trusted
+            };
             let identity = if is_effective_read_only {
                 Ok(Uuid::generate())
             } else {
-                UpperWorkdirInuse::determine_identity(upper.root_dentry().inode(), uuid_mode)
+                UpperWorkdirInuse::determine_identity(
+                    upper.root_dentry().inode(),
+                    uuid_mode,
+                    xattr_prefix,
+                )
             }?;
 
             let mut claimed_pair = UpperWorkdirInuse::claim(
@@ -104,11 +117,12 @@ impl OverlayFs {
                 let capabilities = UpperFilesystemCapabilities::probe(
                     upper.root_dentry().inode(),
                     claimed_pair.workdir_workspace()?,
+                    xattr_prefix,
                 )?;
                 let is_uuid_effective = capabilities.validate_uuid_support(uuid_mode)?;
 
                 if is_uuid_effective {
-                    match claimed_pair.persist_identity() {
+                    match claimed_pair.persist_identity(xattr_prefix) {
                         Ok(()) => {
                             uuid = Some(identity);
                         }

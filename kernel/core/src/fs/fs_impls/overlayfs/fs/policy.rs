@@ -4,12 +4,13 @@
 //! Published mount policy state.
 //!
 //! A mount policy is the fixed per-mount decision state: whether the mount is
-//! effectively read-only or `default_permissions`, the `xino`/UUID modes, and
-//! the effective overlay UUID. The upper-filesystem capabilities are measured
-//! during mount construction and stored separately in
-//! `fs::mount::capabilities`.
+//! effectively read-only or `default_permissions`, the `xino`/UUID modes, the
+//! selected private-xattr prefix, and the effective overlay UUID. The
+//! upper-filesystem capabilities are measured during mount construction and
+//! stored separately in `fs::mount::capabilities`.
 
 use super::mount::{capabilities::UpperFilesystemCapabilities, inuse::Uuid, options::MountOptions};
+use crate::fs::fs_impls::overlayfs::inode::OverlayXattrPrefix;
 
 /// The UUID/`fsid` policy of an overlay mount.
 ///
@@ -20,7 +21,9 @@ pub(super) enum UuidMode {
     Off,
     /// Same as [`UuidMode::Off`], plus underlying-layer UUIDs are ignored.
     Null,
-    /// The overlay UUID is generated and persisted as `trusted.overlay.uuid`.
+    /// The overlay UUID is generated and persisted as the selected
+    /// private-prefix uuid record (`trusted.overlay.uuid` by default,
+    /// `user.overlay.uuid` in `userxattr` mode).
     On,
     /// Reuse an existing persisted UUID or upgrade to `On`; degrade to `Null`.
     Auto,
@@ -45,6 +48,7 @@ pub(in overlayfs) struct MountPolicy {
     upper_capabilities: Option<UpperFilesystemCapabilities>,
     is_default_permissions: bool,
     xino_mode: XinoMode,
+    xattr_prefix: OverlayXattrPrefix,
 }
 
 // TODO: Reintroduce a scoped creator-credential switch once the VFS provides a credentials API.
@@ -62,6 +66,14 @@ impl MountPolicy {
             upper_capabilities,
             is_default_permissions: options.is_default_permissions,
             xino_mode: options.xino_mode.unwrap_or(XinoMode::Auto),
+            // Stored for every mount — read-only mounts included — because
+            // the passthrough get/list paths need the selected prefix even
+            // without an upper.
+            xattr_prefix: if options.is_userxattr {
+                OverlayXattrPrefix::User
+            } else {
+                OverlayXattrPrefix::Trusted
+            },
         }
     }
 
@@ -77,6 +89,12 @@ impl MountPolicy {
 
     pub(super) fn xino_mode(&self) -> XinoMode {
         self.xino_mode
+    }
+
+    /// Returns the mount's selected private-xattr prefix (`user.overlay.`
+    /// in `userxattr` mode, `trusted.overlay.` by default).
+    pub(in overlayfs) fn xattr_prefix(&self) -> OverlayXattrPrefix {
+        self.xattr_prefix
     }
 
     /// Returns the overlay UUID when effective.

@@ -26,11 +26,12 @@ use crate::{
         fs_impls::overlayfs::{
             fs::OverlayFs,
             inode::{
+                OverlayInode,
                 copyup::workdir::WorkdirTempRequest,
                 is_whiteout_inode,
                 xattr::{
-                    WHITEOUT_MARKER_VALUE, WHITEOUT_XATTR_FULL_NAME, is_private, set_impure_marker,
-                    whiteout_marker_name,
+                    WHITEOUT_MARKER_VALUE, OverlayRecordName, OverlayXattrPrefix,
+                    overlay_record_name,
                 },
             },
         },
@@ -169,10 +170,6 @@ impl OverlayFs {
             WhiteoutRepresentation::Xattr => {
                 // The representation derivation already gated this branch on
                 // `can_store_private_xattr`.
-                debug_assert!(
-                    is_private(WHITEOUT_XATTR_FULL_NAME),
-                    "the whiteout marker name must classify as an overlay-private record"
-                );
                 let temp = self.create_workdir_temp(
                     WHITEOUT_TEMP_NAME_COMPONENT,
                     WorkdirTempRequest::Create {
@@ -180,9 +177,13 @@ impl OverlayFs {
                         mode: InodeMode::empty(),
                     },
                 )?;
-                let marker_name = whiteout_marker_name()?;
+                let marker_name = overlay_record_name(
+                    OverlayRecordName::Whiteout,
+                    self.policy().xattr_prefix(),
+                )?;
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
-                if let Err(err) = temp.inode().set_xattr(
+                if let Err(err) = OverlayInode::set_overlay_xattr(
+                    temp.inode(),
                     marker_name,
                     &mut marker_reader,
                     XattrSetFlags::CREATE_OR_REPLACE,
@@ -229,7 +230,10 @@ impl OverlayFs {
         // marker is refreshed before the physical publish. The marker is a
         // cache hint whose consumer refreshes it best-effort, so a marker
         // failure must not abort the physical publish: warn and continue.
-        if let Err(err) = set_impure_marker(upper_parent_path.inode()) {
+        if let Err(err) = OverlayInode::set_impure_marker(
+            upper_parent_path.inode(),
+            self.policy().xattr_prefix(),
+        ) {
             warn!(
                 "overlay whiteout publish: failed to set the impure marker on {:?} \
                  (best-effort cache hint; continuing with the physical publish): {:?}",
@@ -284,11 +288,15 @@ impl OverlayFs {
     ///
     /// Non-atomic and pre-commit: a failure aborts the removal and a retry
     /// converges; it never recurses into directories and propagates errors
-    /// unchanged.
-    pub(super) fn cleanup_upper_whiteouts(upper_dir_path: &Path) -> Result<()> {
+    /// unchanged. `prefix` is the mount's selected private-xattr prefix,
+    /// threaded from the callers for the whiteout classification.
+    pub(super) fn cleanup_upper_whiteouts(
+        upper_dir_path: &Path,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<()> {
         let names = crate::fs::fs_impls::overlayfs::read_child_names(upper_dir_path.inode())?;
-        validate_whiteout_children(upper_dir_path, &names)?;
-        Self::unlink_rechecked_whiteouts(upper_dir_path, &names)?;
+        validate_whiteout_children(upper_dir_path, &names, prefix)?;
+        Self::unlink_rechecked_whiteouts(upper_dir_path, &names, prefix)?;
         Ok(())
     }
 
@@ -299,9 +307,13 @@ impl OverlayFs {
     /// refused (`ENOTEMPTY`) instead of deleted. The re-check narrows but cannot
     /// close the residual check-to-use window, so the upper directory must not be
     /// modified concurrently.
-    fn unlink_rechecked_whiteouts(upper_dir_path: &Path, names: &[String]) -> Result<()> {
+    fn unlink_rechecked_whiteouts(
+        upper_dir_path: &Path,
+        names: &[String],
+        prefix: OverlayXattrPrefix,
+    ) -> Result<()> {
         for name in names {
-            if !is_whiteout_child(upper_dir_path, name)? {
+            if !is_whiteout_child(upper_dir_path, name, prefix)? {
                 return Err(Error::with_message(
                     Errno::ENOTEMPTY,
                     "a hidden non-whiteout entry prevents the overlay directory removal",
@@ -319,9 +331,13 @@ impl OverlayFs {
 /// and classified with the shared [`is_whiteout_inode`] predicate, keeping
 /// the base view's `DentryChildren` coherent. Underlying lookup errors
 /// propagate unchanged.
-fn is_whiteout_child(upper_dir_path: &Path, name: &str) -> Result<bool> {
+fn is_whiteout_child(
+    upper_dir_path: &Path,
+    name: &str,
+    prefix: OverlayXattrPrefix,
+) -> Result<bool> {
     let child_path = super::super::super::lookup_child_path(upper_dir_path, name)?;
-    is_whiteout_inode(child_path.inode())
+    is_whiteout_inode(child_path.inode(), prefix)
 }
 
 /// Validates that every named physical child of `upper_dir_path` is a
@@ -329,9 +345,13 @@ fn is_whiteout_child(upper_dir_path: &Path, name: &str) -> Result<bool> {
 ///
 /// The full-validation pass of the sweep: any non-whiteout child returns
 /// `ENOTEMPTY`, so the sweep refuses the removal before any entry is deleted.
-fn validate_whiteout_children(upper_dir_path: &Path, names: &[String]) -> Result<()> {
+fn validate_whiteout_children(
+    upper_dir_path: &Path,
+    names: &[String],
+    prefix: OverlayXattrPrefix,
+) -> Result<()> {
     for name in names {
-        if !is_whiteout_child(upper_dir_path, name)? {
+        if !is_whiteout_child(upper_dir_path, name, prefix)? {
             return Err(Error::with_message(
                 Errno::ENOTEMPTY,
                 "a hidden non-whiteout entry prevents the overlay directory removal",

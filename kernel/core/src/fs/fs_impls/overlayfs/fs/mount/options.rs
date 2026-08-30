@@ -5,9 +5,9 @@
 //!
 //! This module validates the mount option string into an
 //! [`MountOptions`] construction input. The recognized keys are the
-//! string keys `lowerdir`, `upperdir`, `workdir`, `uuid`, `xino`, and
-//! `default_permissions`; unknown keys fail with `EINVAL` before any layer
-//! state is created.
+//! string keys `lowerdir`, `upperdir`, `workdir`, `uuid`, `xino`, and the
+//! valueless keys `default_permissions` and `userxattr`; unknown keys fail
+//! with `EINVAL` before any layer state is created.
 //!
 //! ## References
 //!
@@ -31,6 +31,9 @@ pub(in super::super) struct MountOptions {
     pub(super) work_dir: Option<String>,
     pub(super) is_forced_read_only: bool,
     pub(in super::super) is_default_permissions: bool,
+    /// The `userxattr` mode: the selected private-xattr prefix is
+    /// `user.overlay.` instead of the default `trusted.overlay.`.
+    pub(in super::super) is_userxattr: bool,
     /// The UUID persistence mode; `None` means [`UuidMode::Auto`].
     pub(super) uuid_mode: Option<UuidMode>,
     /// The `xino=` mode; `None` means [`XinoMode::Auto`].
@@ -45,14 +48,15 @@ impl MountOptions {
     ///
     /// * Key/value and splitting: the string is split on `,`, empty entries are
     ///   skipped, and `key=value` sets the key's value; a bare `key` is a
-    ///   valueless option accepted only for `default_permissions`.
+    ///   valueless option accepted only for `default_permissions` and
+    ///   `userxattr`.
     /// * Key domains and repetition: `lowerdir` is required and is a
     ///   non-empty, colon-separated layer list (first path topmost) with no
     ///   empty layer; `upperdir`/`workdir` each take a single non-empty path
     ///   and must both be present or both be absent; `uuid` accepts only
     ///   `off`/`null`/`on`/`auto`, `xino` accepts only `off`/`auto`/`on`,
-    ///   and `default_permissions` takes no value; every key may appear at
-    ///   most once.
+    ///   and `default_permissions`/`userxattr` take no value; every key may
+    ///   appear at most once.
     /// * Required-value constraint: `None` (no option string) fails like a
     ///   missing `lowerdir`.
     pub(super) fn parse(args: Option<&str>, fs_flags: FsFlags) -> Result<Self> {
@@ -60,6 +64,7 @@ impl MountOptions {
         let mut upper_dir = None;
         let mut work_dir = None;
         let mut is_default_permissions = false;
+        let mut is_userxattr = false;
         let mut uuid_mode = None;
         let mut xino_mode = None;
 
@@ -194,6 +199,30 @@ impl MountOptions {
                     }
                     is_default_permissions = true;
                 }
+                "userxattr" => {
+                    // This option takes no value. It selects `user.overlay.`
+                    // as the private-xattr prefix (the unprivileged
+                    // workaround). Reserved-mutex rule (documented, no
+                    // runtime check yet — Linux `fs/overlayfs/params.c:988-1003`):
+                    // when `redirect_dir`/`metacopy` are designed, a
+                    // `userxattr` mount must reject the explicit combination
+                    // (`userxattr` + `redirect_dir`≠nofollow → `EINVAL`;
+                    // `userxattr` + `metacopy=on` → `EINVAL`; the feature
+                    // defaults are silently disabled in `userxattr` mode).
+                    if is_userxattr {
+                        return_errno_with_message!(
+                            Errno::EINVAL,
+                            "duplicate overlay mount option `userxattr`"
+                        );
+                    }
+                    if value.is_some() {
+                        return_errno_with_message!(
+                            Errno::EINVAL,
+                            "the `userxattr` mount option does not take a value"
+                        );
+                    }
+                    is_userxattr = true;
+                }
                 _ => {
                     return_errno_with_message!(Errno::EINVAL, "unknown overlay mount option");
                 }
@@ -219,6 +248,7 @@ impl MountOptions {
             work_dir,
             is_forced_read_only: fs_flags.contains(FsFlags::RDONLY),
             is_default_permissions,
+            is_userxattr,
             uuid_mode,
             xino_mode,
         })

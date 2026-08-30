@@ -26,7 +26,8 @@ use crate::{
             inode::{
                 OverlayInode, ReaddirIndex,
                 xattr::{
-                    MarkerReadSemantics, has_marker, opaque_marker_name, whiteout_marker_name,
+                    MarkerReadSemantics, OverlayRecordName, OverlayXattrPrefix, has_marker,
+                    overlay_record_name,
                 },
             },
             layer::RealObjectStack,
@@ -71,11 +72,15 @@ pub(super) enum ProjectionBinding<'a> {
 ///
 /// `true` when either: the object is a character device with device
 /// number `0:0` (backends report it as `Some(DeviceId::null())`, or as
-/// `None` for a zero device number such as ramfs); or the
-/// `trusted.overlay.whiteout` xattr value is exactly `'y'`. An `ERANGE`,
-/// `ENODATA`, or `EOPNOTSUPP` marker read is not a whiteout (`false`);
-/// any other error propagates.
-pub(super) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
+/// `None` for a zero device number such as ramfs); or the mount's selected
+/// private-prefix whiteout record (`trusted.overlay.whiteout` by default,
+/// `user.overlay.whiteout` in `userxattr` mode) has the value exactly
+/// `'y'`. An `ERANGE`, `ENODATA`, or `EOPNOTSUPP` marker read is not a
+/// whiteout (`false`); any other error propagates.
+pub(super) fn is_whiteout_inode(
+    real_inode: &Arc<dyn Inode>,
+    prefix: OverlayXattrPrefix,
+) -> Result<bool> {
     let metadata = real_inode.metadata()?;
     if metadata.type_ == InodeType::CharDevice
         && metadata.self_dev_id.is_none_or(|dev_id| dev_id.is_null())
@@ -84,7 +89,7 @@ pub(super) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
     }
     has_marker(
         real_inode,
-        whiteout_marker_name()?,
+        overlay_record_name(OverlayRecordName::Whiteout, prefix)?,
         MarkerReadSemantics::ValueY,
     )
 }
@@ -92,16 +97,17 @@ pub(super) fn is_whiteout_inode(real_inode: &Arc<dyn Inode>) -> Result<bool> {
 /// Returns whether `real` is an opaque directory (a lower-search barrier).
 ///
 /// A non-directory is never opaque (`false`). A directory is opaque exactly
-/// when the `trusted.overlay.opaque` xattr value is `'y'`; an `ENODATA`,
-/// `EOPNOTSUPP`, or `ERANGE` read is not opaque (`false`), and any other
-/// error propagates.
-pub(super) fn is_opaque_directory(real: &RealObject) -> Result<bool> {
+/// when the mount's selected private-prefix opaque record
+/// (`trusted.overlay.opaque` by default, `user.overlay.opaque` in
+/// `userxattr` mode) has the value `'y'`; an `ENODATA`, `EOPNOTSUPP`, or
+/// `ERANGE` read is not opaque (`false`), and any other error propagates.
+pub(super) fn is_opaque_directory(real: &RealObject, prefix: OverlayXattrPrefix) -> Result<bool> {
     if !real.real_inode().type_().is_directory() {
         return Ok(false);
     }
     has_marker(
         real.real_inode(),
-        opaque_marker_name()?,
+        overlay_record_name(OverlayRecordName::Opaque, prefix)?,
         MarkerReadSemantics::ValueY,
     )
 }
@@ -110,6 +116,7 @@ impl OverlayFs {
     /// Runs the upper-first layer lookup for `name` inside `parent`'s
     /// real layers, with overlayfs merge-stop semantics.
     fn lookup_in_layers(&self, parent: &Arc<OverlayInode>, name: &str) -> Result<Lookup> {
+        let prefix = self.policy().xattr_prefix();
         let mut dir_hits: Vec<RealObject> = Vec::new();
 
         if let Some(upper_real) = parent.upper.get() {
@@ -117,7 +124,7 @@ impl OverlayFs {
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&upper_path, name) {
                 Ok(child_path) => {
                     let hit = RealObject::new(0, child_path.dentry().clone());
-                    if is_whiteout_inode(hit.real_inode())? {
+                    if is_whiteout_inode(hit.real_inode(), prefix)? {
                         return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                     }
                     if !hit.real_inode().type_().is_directory() {
@@ -126,7 +133,7 @@ impl OverlayFs {
                             ProjectionBinding::Child { parent, name },
                         )));
                     }
-                    if is_opaque_directory(&hit)? {
+                    if is_opaque_directory(&hit, prefix)? {
                         return Ok(Lookup::Positive(self.project_inode(
                             &RealObjectStack::upper_only(hit),
                             ProjectionBinding::Child { parent, name },
@@ -135,7 +142,7 @@ impl OverlayFs {
                     dir_hits.push(hit);
                 }
                 Err(err) if err.error() == Errno::ENOENT => {
-                    if is_opaque_directory(upper_real)? {
+                    if is_opaque_directory(upper_real, prefix)? {
                         return Ok(Lookup::Negative(NegativeLookup::HiddenByOpaque));
                     }
                 }
@@ -149,7 +156,7 @@ impl OverlayFs {
             match crate::fs::fs_impls::overlayfs::lookup_child_path(&lower_path, name) {
                 Ok(child_path) => {
                     let hit = RealObject::new(layer_index, child_path.dentry().clone());
-                    if is_whiteout_inode(hit.real_inode())? {
+                    if is_whiteout_inode(hit.real_inode(), prefix)? {
                         // A whiteout is the topmost occurrence of the name:
                         // the name is hidden. Below an already-visible
                         // directory it only ends the downward merge scan.
@@ -170,7 +177,7 @@ impl OverlayFs {
                         // hidden.
                         break;
                     }
-                    let is_opaque = is_opaque_directory(&hit)?;
+                    let is_opaque = is_opaque_directory(&hit, prefix)?;
                     dir_hits.push(hit);
                     if is_opaque {
                         break;

@@ -35,6 +35,7 @@ pub(super) use self::{
     dir::whiteout::WhiteoutCache,
     identity::{IdentityPolicy, collect_layer_devs},
     inode_cache::InodeCache,
+    xattr::{OverlayRecordName, OverlayXattrPrefix, overlay_record_name},
 };
 use self::{
     identity::ObjectId,

@@ -1,18 +1,50 @@
 // SPDX-License-Identifier: MPL-2.0
 #![short_vis_path::add(overlayfs)]
 
-//! The xattr classification policy and delegation entries.
+//! The xattr two-path policy: the private record path and the passthrough
+//! path.
 //!
-//! This module classifies xattr names into public, private, reserved, and
-//! escaped classes, admits every xattr entry through the permission pipeline,
-//! delegates real work to the current real authority, and filters
-//! overlay-private names from caller-visible results.
+//! Every xattr full name is classified into one of two classes by prefix
+//! only (proposal §13):
 //!
-//! # Classification
+//! - `Private`: the name starts with the mount's selected private prefix —
+//!   `trusted.overlay.` by default, `user.overlay.` in `userxattr` mode.
+//!   These are the overlay's own records (origin, opaque, whiteout, impure,
+//!   uuid); they never cross copy-up and are hidden from the visible list.
+//! - `Passthrough`: every other name (`user.plain.any`, `security.selinux`,
+//!   `trusted.backup.notes`, ...); passed through unchanged, never
+//!   interpreted.
 //!
-//! A `trusted.overlay.`/`user.overlay.` name is `Private` when its suffix is
-//! a known overlay record and `Reserved` otherwise; a `overlay.overlay.`
-//! nesting-prefixed name is `Escaped`; everything else is `Public`.
+//! # The two paths
+//!
+//! - **Private path** ([`OverlayInode::set_overlay_xattr`] plus the raw
+//!   record reads): the name reaches the real object unchanged — the escape
+//!   infix is never inserted. Every internal overlay write routes through
+//!   this entry, so the un-escaped-name invariant has one enforcement point.
+//! - **Passthrough path** (the `*_impl` entries): an own-prefix name is
+//!   dislocated one segment down ([`ESCAPE_INFIX`] inserted right after the
+//!   selected prefix) before it reaches the real authority — unconditionally,
+//!   even for a name that already carries the infix (Linux
+//!   `ovl_own_xattr_{get,set}` parity). The list transform
+//!   ([`present_xattr_names`]) is the inverse map: own private records are
+//!   hidden and one infix segment is stripped per layer.
+//!
+//! Stacked same-prefix overlays therefore physically layer their records by
+//! infix-segment count: the count equals the number of overlays between the
+//! record's owner and the backing filesystem, and each layer's passthrough
+//! path adds exactly one segment while each layer's list transform strips
+//! exactly one (invariants I1-I3).
+//!
+//! # Reserved-mutex rule (documented reservation)
+//!
+//! `userxattr` excludes the `redirect_dir`/`metacopy` features. Both are
+//! unimplemented (proposal §16 no-goals), so this refactor documents the
+//! rule instead of enforcing it (Linux `fs/overlayfs/params.c:988-1003`):
+//! when either feature is designed, a `userxattr` mount must reject the
+//! explicit combination — `userxattr` + `redirect_dir`≠nofollow → `EINVAL`;
+//! `userxattr` + `metacopy=on` → `EINVAL`; the feature defaults are silently
+//! disabled in `userxattr` mode. The parse arm in `fs/mount/options.rs`
+//! carries the same reservation.
 
 use super::{OverlayInode, ReaddirIndex, permission::AccessType};
 use crate::{
@@ -21,97 +53,225 @@ use crate::{
         fs_impls::overlayfs::fs::OverlayFs,
         vfs::{
             inode::Inode,
-            xattr::{XATTR_LIST_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags},
+            xattr::{
+                XATTR_LIST_MAX_LEN, XATTR_NAME_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags,
+            },
         },
     },
     prelude::*,
 };
 
-/// The four-way classification result of an xattr full name.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum XattrClass {
-    /// A user.*/system.*/security.*/trusted.* (non-overlay) name: delegate to
-    /// the real authority.
-    Public,
-    /// A known Overlay-private record (suffix in `OVERLAY_PRIVATE_SUFFIXES`);
-    /// classified by suffix; filtered from listing; refused through the generic
-    /// path.
-    Private,
-    /// A `overlay.overlay.` nesting-prefixed name (refused and filtered).
-    Escaped,
-    /// An `overlay.*`-family name not in the known private table:
-    /// policy-refused, never auto-promoted to `Public`.
-    Reserved,
-}
-
-/// Known overlay-private record suffixes.
-///
-/// Suffix presence makes a name `Private`;
-/// any other `trusted.overlay.`/`user.overlay.` suffix is `Reserved`.
-const OVERLAY_PRIVATE_SUFFIXES: &[&str] = &[
-    "opaque", "whiteout", "redirect", "origin", "impure", "nlink", "upper", "uuid", "metacopy",
-    "protattr",
-];
-
+/// The default private prefix; writing it needs `CAP_SYS_ADMIN`, which
+/// stops non-root users from modifying the overlay's own records.
 const TRUSTED_OVERLAY_PREFIX: &str = "trusted.overlay.";
 
+/// The `userxattr`-mode private prefix; the unprivileged workaround. It
+/// cannot prevent users from modifying the records under it.
 const USER_OVERLAY_PREFIX: &str = "user.overlay.";
 
-/// The durable lower-source origin record name.
-const ORIGIN_XATTR_FULL_NAME: &str = "trusted.overlay.origin";
+/// The one-segment escape infix inserted right after the selected private
+/// prefix by the passthrough path (proposal §13:
+/// `insert_str(selected_prefix.len(), "overlay.")`).
+const ESCAPE_INFIX: &str = "overlay.";
 
-/// Returns the parsed [`XattrName`] for the overlay origin record.
-pub(super) fn origin_xattr_name() -> Result<XattrName<'static>> {
-    XattrName::try_from_full_name(ORIGIN_XATTR_FULL_NAME)
-        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay origin xattr name"))
-}
-
-/// The one-level nesting-escape prefix of a lower-overlay name.
-const ESCAPED_OVERLAY_PREFIX: &str = "overlay.overlay.";
-
-/// The opaque marker name; the clear-empty recipe writes it from here.
-const OPAQUE_XATTR_FULL_NAME: &str = "trusted.overlay.opaque";
+// Record full names, trusted-mode and userxattr-mode pairs (U1 closure);
+// the on-disk record surface of the five overlay record kinds.
+const TRUSTED_OVERLAY_ORIGIN: &str = "trusted.overlay.origin";
+const USER_OVERLAY_ORIGIN: &str = "user.overlay.origin";
+const TRUSTED_OVERLAY_OPAQUE: &str = "trusted.overlay.opaque";
+const USER_OVERLAY_OPAQUE: &str = "user.overlay.opaque";
+const TRUSTED_OVERLAY_WHITEOUT: &str = "trusted.overlay.whiteout";
+const USER_OVERLAY_WHITEOUT: &str = "user.overlay.whiteout";
+const TRUSTED_OVERLAY_IMPURE: &str = "trusted.overlay.impure";
+const USER_OVERLAY_IMPURE: &str = "user.overlay.impure";
+const TRUSTED_OVERLAY_UUID: &str = "trusted.overlay.uuid";
+const USER_OVERLAY_UUID: &str = "user.overlay.uuid";
 
 /// The opaque marker value; the reader requires the first byte `b'y'`.
 const OPAQUE_MARKER_VALUE: &[u8] = b"y";
 
-/// The whiteout recipe consumes this name.
-pub(super) const WHITEOUT_XATTR_FULL_NAME: &str = "trusted.overlay.whiteout";
-
 /// The whiteout marker value; the reader requires the first byte `b'y'`.
 pub(super) const WHITEOUT_MARKER_VALUE: &[u8] = b"y";
-
-/// The impure marker is only ever read/written/cleared through the internal
-/// xattr policy functions.
-const IMPURE_XATTR_FULL_NAME: &str = "trusted.overlay.impure";
 
 /// The impure marker value; the reader is presence-based.
 const IMPURE_MARKER_VALUE: &[u8] = b"y";
 
-/// The xattr-copy failure policy of the shared xattr copy
-/// ([`copy_eligible_xattrs`]): strict aborts on a denied
-/// source read or temp write, best-effort warns and skips; the transient
-/// list/read race (`ENODATA`/`ERANGE`) always degrades to a skip.
+/// The overlay private record kinds (closed set; extended with the table).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum XattrCopyPolicy {
-    /// Best-effort source reads and temp writes: EVERY xattr-copy error — a
-    /// denied source read or temp write (`EACCES`/`EPERM`), the transient
-    /// list/read race (`ENODATA`/`ERANGE`), and resource/I-O failures
-    /// (`ENOSPC`/`EIO`, ...) alike — degrades to warn-and-skip and the
-    /// operation continues. Used by the clear-empty recipe (`ClearEmpty`
-    /// path), whose source directory is about to be deleted: a pure rmdir
-    /// must never abort on the xattr fidelity copy.
-    BestEffort,
-    /// Strict source reads and temp writes: a denied source read or a
-    /// temp-write error (`EACCES`/`EPERM`, `ENOSPC`, `EIO`, ...) propagates
-    /// and fails the copy — the copy-up baseline — so no
-    /// `security.*`/`trusted.*` xattr is ever silently dropped. Only the
-    /// transient list/read race (`ENODATA`/`ERANGE`) degrades to a skip.
-    Strict,
+pub(in overlayfs) enum OverlayRecordName {
+    /// Durable lower-source origin record (`.../origin`).
+    Origin,
+    /// Directory merge barrier (`.../opaque`).
+    Opaque,
+    /// Whiteout marker (`.../whiteout`).
+    Whiteout,
+    /// Readdir-cache hint (`.../impure`).
+    Impure,
+    /// Persisted overlay UUID record (`.../uuid`).
+    Uuid,
 }
 
-fn is_skippable_source_error(err: &Error, policy: XattrCopyPolicy) -> bool {
-    policy == XattrCopyPolicy::BestEffort || matches!(err.error(), Errno::ENODATA | Errno::ERANGE)
+/// Returns the parsed [`XattrName`] of `record`'s full name under `prefix`.
+///
+/// Pure input→output mapping: no state, no side effects; every
+/// `(record, prefix)` pair is a module-owned const name that is
+/// namespace-parsable by construction, so the `EINVAL` arm is defensively
+/// unreachable.
+pub(in overlayfs) fn overlay_record_name(
+    record: OverlayRecordName,
+    prefix: OverlayXattrPrefix,
+) -> Result<XattrName<'static>> {
+    let full_name: &'static str = match (record, prefix) {
+        (OverlayRecordName::Origin, OverlayXattrPrefix::Trusted) => TRUSTED_OVERLAY_ORIGIN,
+        (OverlayRecordName::Origin, OverlayXattrPrefix::User) => USER_OVERLAY_ORIGIN,
+        (OverlayRecordName::Opaque, OverlayXattrPrefix::Trusted) => TRUSTED_OVERLAY_OPAQUE,
+        (OverlayRecordName::Opaque, OverlayXattrPrefix::User) => USER_OVERLAY_OPAQUE,
+        (OverlayRecordName::Whiteout, OverlayXattrPrefix::Trusted) => TRUSTED_OVERLAY_WHITEOUT,
+        (OverlayRecordName::Whiteout, OverlayXattrPrefix::User) => USER_OVERLAY_WHITEOUT,
+        (OverlayRecordName::Impure, OverlayXattrPrefix::Trusted) => TRUSTED_OVERLAY_IMPURE,
+        (OverlayRecordName::Impure, OverlayXattrPrefix::User) => USER_OVERLAY_IMPURE,
+        (OverlayRecordName::Uuid, OverlayXattrPrefix::Trusted) => TRUSTED_OVERLAY_UUID,
+        (OverlayRecordName::Uuid, OverlayXattrPrefix::User) => USER_OVERLAY_UUID,
+    };
+    XattrName::try_from_full_name(full_name)
+        .ok_or_else(|| Error::with_message(Errno::EINVAL, "invalid overlay record xattr name"))
+}
+
+/// The two-way classification of an xattr full name (proposal §13; do NOT
+/// rename — deliberately avoids clashing with the VFS `XattrName` struct).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XattrClass {
+    /// Starts with the mount's selected private prefix.
+    Private,
+    /// Every other name (`user.plain.any`, `security.selinux`,
+    /// `trusted.backup.notes`, ...): passed through, never interpreted.
+    Passthrough,
+}
+
+/// The selected private-prefix namespace of a mount (the `userxattr` mount
+/// option's decision state, stored in `MountPolicy`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in overlayfs) enum OverlayXattrPrefix {
+    /// `trusted.overlay.` (default; writing it needs `CAP_SYS_ADMIN`).
+    Trusted,
+    /// `user.overlay.` (`userxattr` mode; the unprivileged workaround).
+    User,
+}
+
+impl OverlayXattrPrefix {
+    /// Returns the selected private prefix string.
+    pub(in overlayfs) fn as_str(self) -> &'static str {
+        match self {
+            OverlayXattrPrefix::Trusted => TRUSTED_OVERLAY_PREFIX,
+            OverlayXattrPrefix::User => USER_OVERLAY_PREFIX,
+        }
+    }
+}
+
+/// Classifies a full name into `Private`/`Passthrough` by prefix only.
+fn classify(full_name: &str, prefix: OverlayXattrPrefix) -> XattrClass {
+    if full_name.starts_with(prefix.as_str()) {
+        XattrClass::Private
+    } else {
+        XattrClass::Passthrough
+    }
+}
+
+/// Returns whether `full_name` carries the selected private prefix.
+///
+/// This is the copy-time boundary filter: a name classifying `Private`
+/// under the copying mount's selected prefix never crosses copy-up
+/// (invariant I5).
+fn is_private(full_name: &str, prefix: OverlayXattrPrefix) -> bool {
+    matches!(classify(full_name, prefix), XattrClass::Private)
+}
+
+/// Returns the full name actually used against the real authority for the
+/// passthrough entries: an own-prefix name with one [`ESCAPE_INFIX`] segment
+/// inserted at `selected_prefix.len()`, or the unchanged name.
+///
+/// Errors `EOPNOTSUPP` when the escaped form would exceed
+/// [`XATTR_NAME_MAX_LEN`] (Linux `ovl_xattr_escape_name` parity). The
+/// insertion happens unconditionally on an own-prefix match — even for a
+/// name that already carries the infix — so each overlay layer adds exactly
+/// one segment (invariant I3, Linux `ovl_own_xattr_{get,set}` parity).
+fn used_full_name(name: &XattrName, selected_prefix: &str) -> Result<String> {
+    let full_name = name.full_name();
+    if !full_name.starts_with(selected_prefix) {
+        return Ok(String::from(full_name));
+    }
+    if full_name.len() + ESCAPE_INFIX.len() > XATTR_NAME_MAX_LEN {
+        return_errno_with_message!(
+            Errno::EOPNOTSUPP,
+            "the escaped overlay xattr name exceeds the xattr name length limit"
+        );
+    }
+    let mut used_name = String::from(full_name);
+    used_name.insert_str(selected_prefix.len(), ESCAPE_INFIX);
+    Ok(used_name)
+}
+
+/// Presents a raw real-authority name list for the viewer above this
+/// overlay: drops own-prefix names without the escape infix (private
+/// records), strips one [`ESCAPE_INFIX`] segment from own-prefix names that
+/// carry it right after the prefix, and passes every other name through.
+///
+/// With a zero-capacity `list_writer` (the size probe) it reports the
+/// transformed total size without writing; `ERANGE` on mid-stream overflow.
+/// This is the inverse map of the passthrough escape (invariant I1): each
+/// overlay layer's list transform strips exactly one segment.
+fn present_xattr_names(
+    raw_list: &[u8],
+    prefix: OverlayXattrPrefix,
+    list_writer: &mut VmWriter,
+) -> Result<usize> {
+    let selected_prefix = prefix.as_str();
+    let mut bytes_written = 0;
+    // The strip branch materializes the presented name: the selected private
+    // prefix is KEPT and one `ESCAPE_INFIX` segment is removed — the inverse
+    // map of the passthrough escape (Linux `ovl_listxattr` memmove parity:
+    // the prefix is retained, only the infix is moved out). The buffer is
+    // reused across entries; only the strip branch writes it.
+    let mut stripped_name = String::new();
+    for name_bytes in raw_list.split(|&byte| byte == 0) {
+        if name_bytes.is_empty() {
+            continue;
+        }
+        // A non-UTF-8 list entry cannot carry the UTF-8 selected prefix and
+        // is passed through unchanged.
+        let presented: &[u8] = match core::str::from_utf8(name_bytes) {
+            Ok(name) if name.starts_with(selected_prefix) => {
+                match name[selected_prefix.len()..].strip_prefix(ESCAPE_INFIX) {
+                    // Own escaped record: present `selected_prefix` followed
+                    // by the name with one infix segment removed.
+                    Some(stripped_suffix) => {
+                        stripped_name.clear();
+                        stripped_name.push_str(selected_prefix);
+                        stripped_name.push_str(stripped_suffix);
+                        stripped_name.as_bytes()
+                    }
+                    // Own private record: hidden from the viewer above.
+                    None => continue,
+                }
+            }
+            _ => name_bytes,
+        };
+        let entry_len = presented.len() + 1;
+        if list_writer.avail() == 0 {
+            bytes_written += entry_len;
+            continue;
+        }
+        if entry_len > list_writer.avail() {
+            return_errno_with_message!(
+                Errno::ERANGE,
+                "the xattr list buffer is too small for the presented list"
+            );
+        }
+        list_writer.write_fallible(&mut VmReader::from(presented))?;
+        list_writer.write_val(&0u8)?;
+        bytes_written += entry_len;
+    }
+    Ok(bytes_written)
 }
 
 /// The read semantics of an overlay marker xattr.
@@ -122,196 +282,6 @@ pub(super) enum MarkerReadSemantics {
     Presence,
     /// Value probe (whiteout/opaque): exactly one byte `b'y'` counts.
     ValueY,
-}
-
-/// Classifies an xattr full name into the four-way
-/// `Public`/`Private`/`Escaped`/`Reserved` classes.
-fn classify(full_name: &str) -> XattrClass {
-    if let Some(suffix) = full_name
-        .strip_prefix(TRUSTED_OVERLAY_PREFIX)
-        .or_else(|| full_name.strip_prefix(USER_OVERLAY_PREFIX))
-    {
-        if OVERLAY_PRIVATE_SUFFIXES.contains(&suffix) {
-            XattrClass::Private
-        } else {
-            XattrClass::Reserved
-        }
-    } else if full_name.starts_with(ESCAPED_OVERLAY_PREFIX) {
-        XattrClass::Escaped
-    } else {
-        XattrClass::Public
-    }
-}
-
-/// Returns whether `full_name` is an overlay-private xattr name.
-///
-/// `true` exactly for the `Private`/`Escaped`/`Reserved` classes — the
-/// same name set the copy-time predicate excluded. This is the copy-time
-/// boundary filter; no duplicated predicate survives.
-pub(super) fn is_private(full_name: &str) -> bool {
-    !matches!(classify(full_name), XattrClass::Public)
-}
-
-/// Streams the null-terminated raw name list, skipping every
-/// overlay-private name; with a zero-capacity `list_writer` (the
-/// `listxattr(path, NULL, 0)` size probe) it reports the total filtered
-/// size without writing.
-fn filter_private_names(raw_list: &[u8], list_writer: &mut VmWriter) -> Result<usize> {
-    let mut bytes_written = 0;
-    for name_bytes in raw_list.split(|&byte| byte == 0) {
-        if name_bytes.is_empty() {
-            continue;
-        }
-        let is_private = core::str::from_utf8(name_bytes).is_ok_and(is_private);
-        if is_private {
-            continue;
-        }
-        let entry_len = name_bytes.len() + 1;
-        if list_writer.avail() == 0 {
-            bytes_written += entry_len;
-            continue;
-        }
-        if entry_len > list_writer.avail() {
-            return_errno_with_message!(
-                Errno::ERANGE,
-                "the xattr list buffer is too small for the filtered list"
-            );
-        }
-        list_writer.write_fallible(&mut VmReader::from(name_bytes))?;
-        list_writer.write_val(&0u8)?;
-        bytes_written += entry_len;
-    }
-    Ok(bytes_written)
-}
-
-/// Copies the eligible public xattrs of `source` onto `temp`
-/// (copy-up / clear-empty) in the `User`/`Trusted`/`Security` namespaces,
-/// filtering overlay-private names.
-///
-/// No creator-credential scope is currently available,
-/// so source reads run under the caller's credentials;
-/// a denied read therefore propagates as an error
-/// instead of silently dropping `security.*`/`trusted.*` xattrs.
-pub(super) fn copy_eligible_xattrs(
-    source: &Arc<dyn Inode>,
-    temp: &Arc<dyn Inode>,
-    policy: XattrCopyPolicy,
-) -> Result<()> {
-    for namespace in [
-        XattrNamespace::User,
-        XattrNamespace::Trusted,
-        XattrNamespace::Security,
-    ] {
-        let names = match list_xattr_names(source, namespace) {
-            Ok(names) => names,
-            Err(err) if is_skippable_source_error(&err, policy) => {
-                warn!(
-                    "overlay xattr copy: source xattr list unavailable for {:?};                      skipping this namespace: {:?}",
-                    namespace, err
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-        for full_name in names
-            .split(|&byte| byte == 0)
-            .filter(|name| !name.is_empty())
-        {
-            let Ok(full_name) = core::str::from_utf8(full_name) else {
-                // The VFS `XattrName` is UTF-8 text; a non-UTF-8 list
-                // entry cannot be represented and is skipped.
-                continue;
-            };
-            if is_private(full_name) {
-                continue;
-            }
-            // The parsed `XattrName` is reused for the value read and the
-            // temp write.
-            let Some(name) = XattrName::try_from_full_name(full_name) else {
-                warn!(
-                    "overlay xattr copy: skipping unparsable xattr name: {}",
-                    full_name
-                );
-                continue;
-            };
-            if name.namespace() != namespace {
-                continue;
-            }
-            let value = match read_xattr_value(source, &name) {
-                Ok(value) => value,
-                Err(err) if is_skippable_source_error(&err, policy) => {
-                    warn!("overlay xattr copy: skipping {}: {:?}", full_name, err);
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let mut reader = VmReader::from(value.as_slice()).to_fallible();
-            match temp.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
-                Err(err) if policy == XattrCopyPolicy::BestEffort => {
-                    warn!(
-                        "overlay xattr copy: skipping {} on temp: {:?}",
-                        full_name, err
-                    );
-                    continue;
-                }
-                result => result?,
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Lists the xattr names of one namespace on `source`, probing the
-/// required size with a zero-capacity writer before materializing the
-/// list; a size change between the two calls surfaces as `ERANGE`.
-fn list_xattr_names(source: &Arc<dyn Inode>, namespace: XattrNamespace) -> Result<Vec<u8>> {
-    let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
-    let list_len = source.list_xattr(namespace, &mut probe)?;
-    let mut names = vec![0u8; list_len];
-    let mut list_writer = VmWriter::from(names.as_mut_slice()).to_fallible();
-    let written = source.list_xattr(namespace, &mut list_writer)?;
-    names.truncate(written);
-    Ok(names)
-}
-
-/// Reads one xattr value from `source`, probing the required size with a
-/// zero-capacity writer before materializing the value.
-fn read_xattr_value(source: &Arc<dyn Inode>, name: &XattrName<'_>) -> Result<Vec<u8>> {
-    let reborrow_fn = || match XattrName::try_from_full_name(name.full_name()) {
-        Some(name) => name,
-        None => unreachable!("the copy loop validated this xattr name"),
-    };
-    let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
-    let value_len = source.get_xattr(reborrow_fn(), &mut probe)?;
-    let mut value = vec![0u8; value_len];
-    let mut value_writer = VmWriter::from(value.as_mut_slice()).to_fallible();
-    let written = source.get_xattr(reborrow_fn(), &mut value_writer)?;
-    value.truncate(written);
-    Ok(value)
-}
-
-/// Parses the impure marker's full name — the shared parse of the three
-/// marker functions.
-fn impure_marker_name() -> Result<XattrName<'static>> {
-    XattrName::try_from_full_name(IMPURE_XATTR_FULL_NAME).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "invalid overlay impure marker xattr name")
-    })
-}
-
-/// Parses the opaque marker's full name — the shared parse of every
-/// opaque-marker write/read site.
-pub(super) fn opaque_marker_name() -> Result<XattrName<'static>> {
-    XattrName::try_from_full_name(OPAQUE_XATTR_FULL_NAME).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "invalid overlay opaque marker xattr name")
-    })
-}
-
-/// Parses the whiteout marker's full name — the shared parse of every
-/// whiteout-marker write/read site.
-pub(super) fn whiteout_marker_name() -> Result<XattrName<'static>> {
-    XattrName::try_from_full_name(WHITEOUT_XATTR_FULL_NAME).ok_or_else(|| {
-        Error::with_message(Errno::EINVAL, "invalid overlay whiteout marker xattr name")
-    })
 }
 
 /// Reads one overlay marker xattr under `semantics`.
@@ -343,70 +313,63 @@ pub(super) fn has_marker(
 ///
 /// Presence probe on the real upper directory: the marker is interpreted
 /// by presence, not by value.
-fn has_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<bool> {
+fn has_impure_marker(real_dir: &Arc<dyn Inode>, prefix: OverlayXattrPrefix) -> Result<bool> {
     has_marker(
         real_dir,
-        impure_marker_name()?,
+        overlay_record_name(OverlayRecordName::Impure, prefix)?,
         MarkerReadSemantics::Presence,
     )
 }
 
-/// Persists the impure marker on the real upper directory `real_dir`.
-///
-/// The internal write goes directly through the underlying inode — never
-/// through the user-facing `OverlayInode` xattr entries, whose `Private`
-/// refusal surface is untouched.
-pub(super) fn set_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<()> {
-    if has_impure_marker(real_dir)? {
-        return Ok(());
-    }
-    debug_assert!(
-        is_private(IMPURE_XATTR_FULL_NAME),
-        "the impure marker name must classify as an overlay-private record"
-    );
-    let name = impure_marker_name()?;
-    let mut marker_reader = VmReader::from(IMPURE_MARKER_VALUE).to_fallible();
-    real_dir.set_xattr(name, &mut marker_reader, XattrSetFlags::CREATE_OR_REPLACE)
-}
-
-/// Removes the impure marker from the real upper directory `real_dir`.
-/// Absence is already the cleared state, so clearing is idempotent.
-fn clear_impure_marker(real_dir: &Arc<dyn Inode>) -> Result<()> {
-    let name = impure_marker_name()?;
-    match real_dir.remove_xattr(name) {
-        Ok(()) => Ok(()),
-        Err(err) if err.error() == Errno::ENODATA => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-impl OverlayFs {
-    /// Writes the opaque marker onto `target` after the private-xattr
-    /// capability gate; `unsupported_message` is the caller-scoped static
-    /// `EOPNOTSUPP` message (the two call sites keep their distinct text).
-    pub(super) fn set_opaque_marker(
-        &self,
-        target: &Arc<dyn Inode>,
-        unsupported_message: &'static str,
+impl OverlayInode {
+    /// Private path (proposal §13): writes `name` to the real object `real`
+    /// unchanged — the name is never escaped here. All internal overlay
+    /// writes (markers, origin, uuid) route through this entry so the
+    /// un-escaped-name invariant has one enforcement point; a nested lower
+    /// overlay's passthrough path adds exactly one segment per layer.
+    pub(in overlayfs) fn set_overlay_xattr(
+        real: &Arc<dyn Inode>,
+        name: XattrName,
+        value_reader: &mut VmReader,
+        flags: XattrSetFlags,
     ) -> Result<()> {
-        let can_store_private_xattr = self
-            .policy()
-            .upper_capabilities()
-            .is_some_and(|caps| caps.can_store_private_xattr());
-        if !can_store_private_xattr {
-            return Err(Error::with_message(Errno::EOPNOTSUPP, unsupported_message));
+        real.set_xattr(name, value_reader, flags)
+    }
+
+    /// Persists the impure marker on the real upper directory `real_dir`.
+    ///
+    /// Read-first idempotent: an already-marked directory is a no-op. The
+    /// write routes through the private path
+    /// ([`OverlayInode::set_overlay_xattr`]) with the record's un-escaped
+    /// name.
+    pub(super) fn set_impure_marker(
+        real_dir: &Arc<dyn Inode>,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<()> {
+        if has_impure_marker(real_dir, prefix)? {
+            return Ok(());
         }
-        let marker_name = opaque_marker_name()?;
-        let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
-        target.set_xattr(
-            marker_name,
+        let name = overlay_record_name(OverlayRecordName::Impure, prefix)?;
+        let mut marker_reader = VmReader::from(IMPURE_MARKER_VALUE).to_fallible();
+        Self::set_overlay_xattr(
+            real_dir,
+            name,
             &mut marker_reader,
             XattrSetFlags::CREATE_OR_REPLACE,
         )
     }
-}
 
-impl OverlayInode {
+    /// Removes the impure marker from the real upper directory `real_dir`.
+    /// Absence is already the cleared state, so clearing is idempotent.
+    fn clear_impure_marker(real_dir: &Arc<dyn Inode>, prefix: OverlayXattrPrefix) -> Result<()> {
+        let name = overlay_record_name(OverlayRecordName::Impure, prefix)?;
+        match real_dir.remove_xattr(name) {
+            Ok(()) => Ok(()),
+            Err(err) if err.error() == Errno::ENODATA => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Refreshes the persisted impure marker after mutation,
     /// clearing it when no visible child keeps a non-empty lower stack.
     ///
@@ -422,7 +385,8 @@ impl OverlayInode {
         let Some(upper_real) = self.upper.get() else {
             return Ok(());
         };
-        if !has_impure_marker(upper_real.real_inode())? {
+        let prefix = self.fs_arc()?.policy().xattr_prefix();
+        if !has_impure_marker(upper_real.real_inode(), prefix)? {
             return Ok(());
         }
         let index = index.as_mut().ok_or_else(|| {
@@ -436,7 +400,7 @@ impl OverlayInode {
                 return Ok(());
             }
         }
-        clear_impure_marker(upper_real.real_inode())
+        Self::clear_impure_marker(upper_real.real_inode(), prefix)
     }
 
     /// Best-effort variant of [`OverlayInode::refresh_impure_marker`] for
@@ -454,79 +418,251 @@ impl OverlayInode {
             );
         }
     }
+}
 
-    /// Ensures `name` classifies as `Public` (the classification-refusal
-    /// guard shared by the generic xattr entries): a non-`Public` name is
-    /// refused BEFORE any admission side effect, with each entry's own
-    /// refusal error (`EOPNOTSUPP` for `get_xattr`; `EPERM` for
-    /// `set_xattr`/`remove_xattr`).
-    fn ensure_public_xattr(&self, name: &XattrName, refusal: (Errno, &'static str)) -> Result<()> {
-        if matches!(classify(name.full_name()), XattrClass::Public) {
-            return Ok(());
+impl OverlayFs {
+    /// Writes the opaque marker onto `target` after the private-xattr
+    /// capability gate; `unsupported_message` is the caller-scoped static
+    /// `EOPNOTSUPP` message (the two call sites keep their distinct text).
+    ///
+    /// The write routes through the private path
+    /// ([`OverlayInode::set_overlay_xattr`]) with the record's un-escaped
+    /// name.
+    pub(super) fn set_opaque_marker(
+        &self,
+        target: &Arc<dyn Inode>,
+        unsupported_message: &'static str,
+    ) -> Result<()> {
+        let can_store_private_xattr = self
+            .policy()
+            .upper_capabilities()
+            .is_some_and(|caps| caps.can_store_private_xattr());
+        if !can_store_private_xattr {
+            return Err(Error::with_message(Errno::EOPNOTSUPP, unsupported_message));
         }
-        Err(Error::with_message(refusal.0, refusal.1))
+        let marker_name =
+            overlay_record_name(OverlayRecordName::Opaque, self.policy().xattr_prefix())?;
+        let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
+        OverlayInode::set_overlay_xattr(
+            target,
+            marker_name,
+            &mut marker_reader,
+            XattrSetFlags::CREATE_OR_REPLACE,
+        )
     }
+}
 
+impl OverlayInode {
+    /// Passthrough `get`: an own-prefix name is dislocated one segment down
+    /// ([`used_full_name`]) before the real read, so an absent dislocated
+    /// name surfaces as the real authority's `ENODATA` — read-side hiding
+    /// without a refusal class (Linux `ovl_own_xattr_get` parity).
     pub(super) fn get_xattr_impl(
         &self,
         name: XattrName,
         value_writer: &mut VmWriter,
     ) -> Result<usize> {
-        self.ensure_public_xattr(
-            &name,
-            (
-                Errno::EOPNOTSUPP,
-                "the overlay-private xattr is not exposed through the generic get path",
-            ),
-        )?;
+        let prefix = self.fs_arc()?.policy().xattr_prefix();
+        let used_name = used_full_name(&name, prefix.as_str())?;
+        // The escaped name is namespace-parsable by construction (the
+        // insertion happens inside the trusted/user namespace), so the
+        // `EINVAL` arm is defensively unreachable.
+        let used = XattrName::try_from_full_name(&used_name).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
+        })?;
         self.check_permission(AccessType::ReadOnly, Permission::MAY_READ)?;
-        self.delegate_to_real(|real| real.get_xattr(name, value_writer))
+        self.delegate_to_real(|real| real.get_xattr(used, value_writer))
     }
 
+    /// Passthrough `set`: an own-prefix name is dislocated one segment down
+    /// ([`used_full_name`]) before the real write, so a nested lower
+    /// overlay's records stay per-layer invisible (Linux
+    /// `ovl_own_xattr_set` parity). No refusal class for own-prefix names.
     pub(super) fn set_xattr_impl(
         &self,
         name: XattrName,
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
-        self.ensure_public_xattr(
-            &name,
-            (
-                Errno::EPERM,
-                "overlay-private records cannot be forged through the generic set path",
-            ),
-        )?;
+        let prefix = self.fs_arc()?.policy().xattr_prefix();
+        let used_name = used_full_name(&name, prefix.as_str())?;
+        // See `get_xattr_impl`: the `EINVAL` arm is defensively unreachable.
+        let used = XattrName::try_from_full_name(&used_name).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
+        })?;
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.delegate_to_real(|real| real.set_xattr(name, value_reader, flags))
+        self.delegate_to_real(|real| real.set_xattr(used, value_reader, flags))
     }
 
-    // TODO: the `Permission::MAY_ACCESS` read-class demand is currently a
-    // no-op placeholder because the DAC block does not evaluate `MAY_ACCESS`
-    // yet. Remove this placeholder once `check_local_permission` evaluates
-    // `MAY_ACCESS` for the `ReadOnly` class.
+    /// Passthrough `list`: the raw real-authority list is presented through
+    /// [`present_xattr_names`] — own private records hidden, own escaped
+    /// records stripped one segment, others unchanged. No local DAC demand
+    /// applies (Linux `vfs_listxattr` parity): visibility is per-name
+    /// filtering.
     pub(super) fn list_xattr_impl(
         &self,
         namespace: XattrNamespace,
         list_writer: &mut VmWriter,
     ) -> Result<usize> {
-        self.check_permission(AccessType::ReadOnly, Permission::MAY_ACCESS)?;
+        let prefix = self.fs_arc()?.policy().xattr_prefix();
         self.delegate_to_real(|real| {
             let mut raw_list = vec![0u8; XATTR_LIST_MAX_LEN];
             let mut raw_writer = VmWriter::from(&mut raw_list[..]).to_fallible();
             let list_len = real.list_xattr(namespace, &mut raw_writer)?;
-            filter_private_names(&raw_list[..list_len], list_writer)
+            present_xattr_names(&raw_list[..list_len], prefix, list_writer)
         })
     }
 
+    /// Passthrough `remove`: an own-prefix name is dislocated one segment
+    /// down ([`used_full_name`]) before the real removal, mirroring the
+    /// get/set dislocation; `ENODATA` propagates when the dislocated name
+    /// is absent.
     pub(super) fn remove_xattr_impl(&self, name: XattrName) -> Result<()> {
-        self.ensure_public_xattr(
-            &name,
-            (
-                Errno::EPERM,
-                "overlay-private records cannot be removed through the generic path",
-            ),
-        )?;
+        let prefix = self.fs_arc()?.policy().xattr_prefix();
+        let used_name = used_full_name(&name, prefix.as_str())?;
+        // See `get_xattr_impl`: the `EINVAL` arm is defensively unreachable.
+        let used = XattrName::try_from_full_name(&used_name).ok_or_else(|| {
+            Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
+        })?;
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.delegate_to_real(|real| real.remove_xattr(name))
+        self.delegate_to_real(|real| real.remove_xattr(used))
     }
+}
+
+/// The xattr-copy failure policy of the shared xattr copy
+/// ([`OverlayInode::copy_eligible_xattrs`]): strict aborts on a denied
+/// source read or temp write, best-effort warns and skips; the transient
+/// list/read race (`ENODATA`/`ERANGE`) always degrades to a skip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum XattrCopyPolicy {
+    /// Best-effort source reads and temp writes: EVERY xattr-copy error — a
+    /// denied source read or temp write (`EACCES`/`EPERM`), the transient
+    /// list/read race (`ENODATA`/`ERANGE`), and resource/I-O failures
+    /// (`ENOSPC`/`EIO`, ...) alike — degrades to warn-and-skip and the
+    /// operation continues. Used by the clear-empty recipe (`ClearEmpty`
+    /// path), whose source directory is about to be deleted: a pure rmdir
+    /// must never abort on the xattr fidelity copy.
+    BestEffort,
+    /// Strict source reads and temp writes: a denied source read or a
+    /// temp-write error (`EACCES`/`EPERM`, `ENOSPC`, `EIO`, ...) propagates
+    /// and fails the copy — the copy-up baseline — so no
+    /// `security.*`/`trusted.*` xattr is ever silently dropped. Only the
+    /// transient list/read race (`ENODATA`/`ERANGE`) degrades to a skip.
+    Strict,
+}
+
+fn is_skippable_source_error(err: &Error, copy_policy: XattrCopyPolicy) -> bool {
+    copy_policy == XattrCopyPolicy::BestEffort
+        || matches!(err.error(), Errno::ENODATA | Errno::ERANGE)
+}
+
+impl OverlayInode {
+    /// Copies the eligible public xattrs of `source` onto `temp`
+    /// (copy-up / clear-empty) in the `User`/`Trusted`/`Security` namespaces,
+    /// dropping the copying mount's own-prefix names (invariant I5).
+    ///
+    /// `prefix` is the copying mount's selected prefix. No
+    /// creator-credential scope is currently available,
+    /// so source reads run under the caller's credentials;
+    /// a denied read therefore propagates as an error
+    /// instead of silently dropping `security.*`/`trusted.*` xattrs.
+    pub(super) fn copy_eligible_xattrs(
+        source: &Arc<dyn Inode>,
+        temp: &Arc<dyn Inode>,
+        copy_policy: XattrCopyPolicy,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<()> {
+        for namespace in [
+            XattrNamespace::User,
+            XattrNamespace::Trusted,
+            XattrNamespace::Security,
+        ] {
+            let names = match list_xattr_names(source, namespace) {
+                Ok(names) => names,
+                Err(err) if is_skippable_source_error(&err, copy_policy) => {
+                    warn!(
+                        "overlay xattr copy: source xattr list unavailable for {:?}; \
+                         skipping this namespace: {:?}",
+                        namespace, err
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            for full_name in names
+                .split(|&byte| byte == 0)
+                .filter(|name| !name.is_empty())
+            {
+                let Ok(full_name) = core::str::from_utf8(full_name) else {
+                    // The VFS `XattrName` is UTF-8 text; a non-UTF-8 list
+                    // entry cannot be represented and is skipped.
+                    continue;
+                };
+                if is_private(full_name, prefix) {
+                    continue;
+                }
+                // The parsed `XattrName` is reused for the value read and the
+                // temp write.
+                let Some(name) = XattrName::try_from_full_name(full_name) else {
+                    warn!(
+                        "overlay xattr copy: skipping unparsable xattr name: {}",
+                        full_name
+                    );
+                    continue;
+                };
+                if name.namespace() != namespace {
+                    continue;
+                }
+                let value = match read_xattr_value(source, &name) {
+                    Ok(value) => value,
+                    Err(err) if is_skippable_source_error(&err, copy_policy) => {
+                        warn!("overlay xattr copy: skipping {}: {:?}", full_name, err);
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                let mut reader = VmReader::from(value.as_slice()).to_fallible();
+                match temp.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
+                    Err(err) if copy_policy == XattrCopyPolicy::BestEffort => {
+                        warn!(
+                            "overlay xattr copy: skipping {} on temp: {:?}",
+                            full_name, err
+                        );
+                        continue;
+                    }
+                    result => result?,
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Lists the xattr names of one namespace on `source`, probing the
+/// required size with a zero-capacity writer before materializing the
+/// list; a size change between the two calls surfaces as `ERANGE`.
+fn list_xattr_names(source: &Arc<dyn Inode>, namespace: XattrNamespace) -> Result<Vec<u8>> {
+    let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
+    let list_len = source.list_xattr(namespace, &mut probe)?;
+    let mut names = vec![0u8; list_len];
+    let mut list_writer = VmWriter::from(names.as_mut_slice()).to_fallible();
+    let written = source.list_xattr(namespace, &mut list_writer)?;
+    names.truncate(written);
+    Ok(names)
+}
+
+/// Reads one xattr value from `source`, probing the required size with a
+/// zero-capacity writer before materializing the value.
+fn read_xattr_value(source: &Arc<dyn Inode>, name: &XattrName<'_>) -> Result<Vec<u8>> {
+    let reborrow_fn = || match XattrName::try_from_full_name(name.full_name()) {
+        Some(name) => name,
+        None => unreachable!("the copy loop validated this xattr name"),
+    };
+    let mut probe = VmWriter::from(&mut [] as &mut [u8]).to_fallible();
+    let value_len = source.get_xattr(reborrow_fn(), &mut probe)?;
+    let mut value = vec![0u8; value_len];
+    let mut value_writer = VmWriter::from(value.as_mut_slice()).to_fallible();
+    let written = source.get_xattr(reborrow_fn(), &mut value_writer)?;
+    value.truncate(written);
+    Ok(value)
 }
