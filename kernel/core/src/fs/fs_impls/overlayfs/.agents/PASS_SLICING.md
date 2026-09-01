@@ -1673,3 +1673,35 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     16 处机械修复，零语义发现，`14c404b45`，**GREEN run04 exit 0**）。
     xfstests 运行时验收按 user 指令未做，归后续独立 meso-integration
     Checker。执行细节与偏差见 live handoff 2026-08-30 wave 执行节。
+
+- **`pass_v2_mount_options_20260831`**
+  - **Kind**: Creator implementation pass（单 pass）+ wave 级 Reviewer 门
+    （rule 5(a) pre-completion static gate）。执行模型沿用 2026-08-30
+    user-directed 模型：Creator 获 `compile_preflight`，Reviewer 后发现
+    问题回**同一 Creator** 复工 → **同一 Reviewer** 复验（经直接消息通道，
+    user 本日明示，作为 §1.3 新 spawn continuation 规则的本 pass 例外）。
+  - **Parent**: `mount_resource_policy`（meso 01 生产扩展）。
+  - **Covered micro-features**: `MO1-parse-full-matrix`、
+    `MO2-degrade-taxonomy`、`MO3-warn-fail-policy`、
+    `MO4-policy-ownership-refactor`、`MO5-fringe-disposition`——
+    即 `components/mount-options-v2-20260831/` 设计（2026-08-31
+    continuation 1 后 ACCEPTED）的**全部生产面**。
+  - **Explicit exclusions**: `MO6-u1-contract-delta` 与全部测试面（ktest/
+    回归）不在本 pass——MO6 归后续 test-assets U-1 有界修订 pass；本 pass
+    不授权任何 ktest 表面（amended rule 17 的 packet 授权本 pass 不给）。
+  - **Write-set**: `fs/mount/options.rs`、`fs/policy.rs`、
+    `fs/mount/mod.rs`、`fs/mount/capabilities.rs`（消费面审计：MountOptions
+    在 options.rs 外仅此三处读）。
+  - **Capabilities**: `can_edit`（write-set）+ `compile_preflight` =
+    `docker exec -w /root/asterinas codex-asterinas-dev bash -lc 'cargo osdk check -p aster-core'`。
+  - **Rationale**: 五个 MO 在同四文件上互锁（MO4 签名变更依赖 MO1 新字段、
+    MO2 分层依赖 MO4 映射面），任何拆分都会产生不可编译中间态；单 pass
+    + High risk（mount 准入 + credential 邻接的 override_creds 裁决落地）
+    → rule 13 全量实体普查强制。
+  - **Validation boundary**: 本 pass 不含 ktest Validation Run、不含
+    xfstests 运行时验收（延后独立 packeted Checker）；关闭条件 =
+    Reviewer 门通过 + 编译证据齐备。
+
+  - **Amended 2026-08-31 (continuation 1)**: Write-Set 扩展
+    `inode/identity.rs`（spec MO3-R1 位点遗漏，Creator 按 Write-Set 零
+    越界原则上报为 D1）；同 Creator 线程补实现 + run_2 编译证据。

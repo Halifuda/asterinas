@@ -20,7 +20,7 @@ use self::{
 };
 use super::{
     OverlayFs,
-    policy::{MountPolicy, UuidMode},
+    policy::{MountPolicy, UuidMode, XinoMode},
 };
 use crate::{
     fs::{
@@ -57,6 +57,27 @@ impl OverlayFs {
             }
             None => true,
         };
+        // Site A1: `uuid=on` is ineffective on a read-only overlay because no
+        // identity flow runs. The verdict needs the final effective-readonly
+        // state (upper-fs evidence), so it cannot live in the parse layer.
+        if options.uuid_mode == Some(UuidMode::On) && is_effective_read_only {
+            info!(
+                "option `uuid=on` is ineffective on a read-only overlay; the overlay uuid is not persisted"
+            );
+        }
+
+        // The `xino=` default is resolved at the single construction
+        // consumer; `MountPolicy` receives the resolved mode.
+        let xino_mode = options.xino_mode.unwrap_or(XinoMode::Auto);
+        // The selected private-xattr prefix (option parse precedes every
+        // probe/identity call, so the selection is available here). Derived
+        // once and handed to the identity flow, the capability probes, and
+        // the published policy.
+        let xattr_prefix = if options.is_userxattr {
+            OverlayXattrPrefix::User
+        } else {
+            OverlayXattrPrefix::Trusted
+        };
 
         let mut upper_workdir_pair = None;
         let mut upper_capabilities = None;
@@ -88,13 +109,6 @@ impl OverlayFs {
             verify_inode_instance_stability(work_dir, workdir_path.inode())?;
 
             let uuid_mode = options.uuid_mode.unwrap_or(UuidMode::Auto);
-            // The selected private-xattr prefix (option parse precedes every
-            // probe/identity call, so the selection is available here).
-            let xattr_prefix = if options.is_userxattr {
-                OverlayXattrPrefix::User
-            } else {
-                OverlayXattrPrefix::Trusted
-            };
             let identity = if is_effective_read_only {
                 Ok(Uuid::generate())
             } else {
@@ -149,8 +163,14 @@ impl OverlayFs {
             upper_workdir_pair = Some(claimed_pair);
         }
 
-        let policy =
-            MountPolicy::assemble(is_effective_read_only, &options, uuid, upper_capabilities);
+        let policy = MountPolicy::assemble(
+            is_effective_read_only,
+            options.is_default_permissions,
+            xino_mode,
+            xattr_prefix,
+            uuid,
+            upper_capabilities,
+        );
 
         let anon_device_id = AnonDeviceId::acquire().ok_or_else(|| {
             Error::with_message(

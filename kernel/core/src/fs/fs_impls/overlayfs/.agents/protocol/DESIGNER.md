@@ -32,9 +32,10 @@ revision continuation; a revision may substantially rewrite both artifacts
 while preserving the parent Meso, covered Micro set, and accepted Architect
 topology. If the static owner or lock topology is wrong, report it for
 Architect repair instead of changing it silently. The evidence artifact maps
-those obligations to upstream xfstests; it is not a plan for internal tests.
-This refactor uses xfstests as its sole validation lane and must not create,
-modify, or imply any ktest or other internal test surface.
+those obligations to upstream xfstests. Behavioral validation is xfstests-only.
+Ktest unit-test design is permitted only for the pure-logic surfaces an accepted
+packet explicitly authorizes under amended PROTOCOL rule 17 (2026-08-31); no
+other internal test surface may be created or implied.
 
 ## Required Artifacts
 
@@ -167,7 +168,18 @@ do not add an internal test lane.
   helper shape open creates unmanageable surface area.
 - **NO ARCHITECTURAL REVISIONS**: Do not alter the static lock boundaries, macro-owners, or topology provided by the Architect. Do not skip any assigned micro-features.
 - **NO PASS SLICING**: Do not decide Creator Pass boundaries or say "Pass 1 should implement X and Y." That is owned by the main agent.
-- **XFSTESTS-ONLY VALIDATION**: Do not request, design, create, modify, or imply any internal unit-test lane, `#[ktest]`, `#[cfg(ktest)]`, kernel-mode test module, `test_support/`, memory-disk fixture, or other ktest harness anywhere in the repository. Validation must be expressible through the upstream xfstests lane. Any xfstests harness/configuration change must be outside `kernel/core/src/fs/fs_impls/` and explicitly authorized by the packet.
+- **VALIDATION LANE BOUNDARY (amended 2026-08-31)**: Do not request, design,
+  create, modify, or imply any internal test surface except the unit-test lane
+  explicitly authorized by this packet under amended PROTOCOL rule 17: ktest
+  design is allowed only for named pure-logic surfaces, asserting the pure
+  surface's own contract with no mounted-filesystem, VFS, block, or other I/O
+  fixtures. Behavioral validation of overlayfs remains expressible only through
+  the upstream xfstests lane. Regression-test design under
+  `test/initramfs/src/regression/` is allowed only when the packet names the
+  cases; such design must follow the repository testing guideline
+  (`book/src/to-contribute/coding-guidelines/for-development/testing.md`).
+  Any xfstests harness/configuration change must be outside
+  `kernel/core/src/fs/fs_impls/` and explicitly authorized by the packet.
 - **NO RAII/DROP MICROMANAGEMENT**: Define the locking rules and hazards, but do not dictate exact line-by-line `drop(guard)` statements or attempt to write the Rust syntax for scope blocks. Trust Rust's RAII and the Creator to implement the specified constraints.
 - **NO PRODUCTION CODE**: Do not write `.rs` files.
 

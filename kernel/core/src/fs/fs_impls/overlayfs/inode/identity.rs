@@ -163,6 +163,15 @@ impl IdentityPolicy {
                 .iter()
                 .all(|layer| layer.container_dev_id == first.container_dev_id)
         });
+        // Site R1: an explicit `xino=on` cannot encode anything on an
+        // all-same-fs stack — the same-fs short-circuit already yields the
+        // non-effective behavior (upstream `super.c:1145-1147` discloses and
+        // ignores) — so the mount proceeds with behavior unchanged.
+        if xino_mode == XinoMode::On && is_all_layers_same_fs {
+            info!(
+                "option `xino=on` is useless with all layers on the same filesystem; ignoring it"
+            );
+        }
         let mut lower_layer_devs: Vec<LowerLayerIdentity> = layer_devs
             .iter()
             .copied()

@@ -9,7 +9,7 @@
 //! upper-filesystem capabilities are measured during mount construction and
 //! stored separately in `fs::mount::capabilities`.
 
-use super::mount::{capabilities::UpperFilesystemCapabilities, inuse::Uuid, options::MountOptions};
+use super::mount::{capabilities::UpperFilesystemCapabilities, inuse::Uuid};
 use crate::fs::fs_impls::overlayfs::inode::OverlayXattrPrefix;
 
 /// The UUID/`fsid` policy of an overlay mount.
@@ -54,9 +54,15 @@ pub(in overlayfs) struct MountPolicy {
 // TODO: Reintroduce a scoped creator-credential switch once the VFS provides a credentials API.
 
 impl MountPolicy {
+    /// Assembles the published per-mount policy from the resolved
+    /// construction inputs (single caller: `OverlayFs::new`). The options
+    /// translation — default resolution and prefix selection — happens at
+    /// the construction consumer; the policy publishes effective state only.
     pub(super) fn assemble(
         is_effective_read_only: bool,
-        options: &MountOptions,
+        is_default_permissions: bool,
+        xino_mode: XinoMode,
+        xattr_prefix: OverlayXattrPrefix,
         uuid: Option<Uuid>,
         upper_capabilities: Option<UpperFilesystemCapabilities>,
     ) -> Self {
@@ -64,16 +70,12 @@ impl MountPolicy {
             is_effective_read_only,
             uuid,
             upper_capabilities,
-            is_default_permissions: options.is_default_permissions,
-            xino_mode: options.xino_mode.unwrap_or(XinoMode::Auto),
+            is_default_permissions,
+            xino_mode,
             // Stored for every mount — read-only mounts included — because
             // the passthrough get/list paths need the selected prefix even
             // without an upper.
-            xattr_prefix: if options.is_userxattr {
-                OverlayXattrPrefix::User
-            } else {
-                OverlayXattrPrefix::Trusted
-            },
+            xattr_prefix,
         }
     }
 
