@@ -925,7 +925,13 @@ mod test {
         assert_eq!(decoded.lower_layer_root_ino(), 100);
         assert_eq!(decoded.real_ino(), 0x1234);
         // Continuity (encodable): the constant-st_ino-across-copy-up property.
-        let policy = build_policy(dev(9, 9), &[layer(3, dev(1, 1), 100)], None, 16, XinoMode::On);
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::On,
+        );
         let via_record = policy
             .project_object_id_from_lower_id(&record(dev(1, 1), 100, 0x1234), false)
             .unwrap();

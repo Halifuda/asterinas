@@ -306,3 +306,43 @@ test-cleanup）约束。
   identity.rs 995 行，含内联测试块）；无独立 test.rs。
 - **状态**：工作树未提交；`make ktest` Checker Validation Run 与 Reviewer
   静态门、per-pass commit 均待 user 指令。
+
+## 12. 2026-08-31 执行记录：ktest 验证 run（含一次失败归因与修复）
+
+- **前置 commit**：单测 pass 已 commit（`0ab6442f6`，3 源文件 + 2 记账）。
+- **ktest 命令形态（查 CI 后确定并实证）**：CI ktest = `make ktest
+  NETDEV=tap`（根 cwd，遍历全部 30 个 default-member crate，每 crate 一次
+  QEMU 启动）。**crate 级 scoping**：`cargo metadata` 的
+  `workspace_default_members` 随 cwd 收缩（根 = 30，`kernel/core` = 1 =
+  aster-core）→ `cd kernel/core && cargo osdk test` = 单次 QEMU 启动仅跑
+  aster-core。OSDK.toml 经 workspace_root 回退解析、`$(./tools/…)` 以
+  manifest 目录为 workdir，cwd 不影响（manifest.rs:138-140 实证）。
+- **Checker run_1（task_checker_unit_tests_ktest_20260831）**：24 测
+  23 PASS / 1 FAIL。空探针实证退出码通道可靠（0=Success/1=Failed）。
+- **环境缺口 (a) 静默控制台（重要）**：aster-core 的 early cmdline parser
+  （父提交 `61e1ad700` 组件搬迁带入的强符号）要求 cmdline 含 `earlycon`，
+  而 OSDK 测试内核 cmdline 为空 → ktest 全部输出被丢弃（串口日志仅 403
+  字节引导桩）。**无需改仓库即可恢复**：`cargo osdk test
+  --kcmd-args="earlycon"`（403→4322 字节实证）。此缺陷影响全部 aster-core
+  ktest 的可观测性（含 CI），建议后续登记 VFS/OSDK 缺口（修复归属需
+  user 裁定：cmdline crate 或 OSDK 默认参数）。环境 (b)：WSL2 容器无
+  KVM，QEMU 走 TCG，不影响结论。
+- **失败归因（earlycon 诊断 run_27 取得断言原文）**：
+  `lower_id_wire_roundtrip_preserves_identity` 挂在 encodable 期望断言
+  （actual passthrough `{dev(1,1), 0x1234}` vs expected
+  `{dev(9,9), (3<<48)|0x1234}`），且 build_policy 时打出了 R1 INFO——
+  单层 lower 策略 `is_all_layers_same_fs` 空洞为真 → same-fs passthrough。
+  **裁决：spec 行 428 自相矛盾（单层策略 + encode 行期望），生产无 bug**
+  （passthrough 与 Linux numfs==1 语义及 spec 自己的 same-fs 行一致）。
+  test-assets spec 行 428 已由主代理修订为 encode 行的双层表
+  `[(3,dev(1,1),100),(4,dev(2,2),200)]`；同 Creator continuation 3 同步
+  测试（期望字面值与其余断言全部未动）。
+- **最终验证**：单测过滤 run exit 0；全量 `cargo osdk test
+  --kcmd-args="earlycon"`（cwd=kernel/core）→ `test result: ok.
+  138 passed; 0 failed`——**aster-core 138 测全绿**（含本 pass 24 + 既有
+  114，后者即我们生产改动的回归信号）。
+- **状态**：工作树未提交：identity.rs（continuation 3 一处层表修正）+
+  handoff/PASS_SLICING 记账（spec 在 gitignore 的 components/ 内）。
+- **Next main-agent actions**：(1) 修复后增量 commit（待 user 指令）；
+  (2) R 线 pass B（test/ 写集待圈定）；(3) ktest 静默控制台缺口登记
+  （待 user 裁定归属）；(4) Reviewer 静态门（可并入 wave 收尾）。
