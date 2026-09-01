@@ -255,3 +255,54 @@ test-cleanup）约束。
   spec §5 MO6 delta，ktest 授权经 amended rule 17）；(2) R 线 pass B
   （写集边界待 user 圈定）；(3) 本 pass 的 per-pass commit 与（可选）
   make check 全量 parity，待 user 指令。
+
+## 10. 2026-08-31 执行记录：ktest 单测 pass（U-1/U-2/U-3，板正纪律）
+
+- **前置**：pass V2 已 commit（`287b1ea5d`，生产 4 文件 + 6 .agents 记录；
+  components/ 与 subagent-tasks/ 由 .gitignore 刻意排除不入库）。
+- **Creator**（task_creator_pass_unit_tests_20260831，ktest 授权 per
+  amended rule 17）：
+  - 24 个 `#[ktest]`（U-1 16 = 8 基线 + 8 delta；U-2 8；U-3 8）+ 11 个
+    冻结签名 helper，落 `fs/mount/options/test.rs`、`inode/xattr/test.rs`、
+    `inode/identity/test.rs` 三新文件；三父文件各 +3 行
+    `#[cfg(ktest)] mod test;` 声明，零语义改动。生产实体 = 0（census 单列
+    test-only）。
+  - **板正纪律落实**：断言期望唯一来源 = 两 spec 冻结表；被测源码仅读
+    接口信息；**零测试执行**（两条编译 gate：常规 + `--cfg ktests`，
+    run_1/2/3 均记录；--ktests 首跑一次 exit 101 为 Creator 笔误、
+    Write-Set 内修复后通过）。
+  - Spec 歧义备案 5 项（uuid/xino 输入行并接 base lowerdir、行→函数
+    按名分组、缩写格展开、U-3 未钉输入细节、import 行）——均字面读法
+    实现并记录，未借生产代码消歧。
+- **主代理裁决（continuation 1，同 Creator 线程）**：
+  - Suspected mismatch #1（test-assets spec 冻结行 200 "empty entries
+    skipped" 输入列与期望列自相矛盾）判定为 Designer 输入列笔误：spec
+    输入列已修订为含 `default_permissions`（期望列不变）；Creator 同步
+    测试串 + rustfmt 三行折行。
+  - 歧义 #5（冻结 `use crate::prelude::*;` 3 处 unused import，会挂
+    clippy -Dwarnings 门）：主代理修订 spec 三处签名块删除该行；
+    Creator 删除三测试文件对应 import。
+  - run_3（`cargo osdk check --ktests -p aster-core`）exit 0、零 warning。
+- **状态**：本 pass 工作树改动未提交（6 文件，待 user 指令）；测试执行
+  验证（`make ktest` Checker Validation Run）未做——冻结测试与生产的
+  真实对齐由该 run 揭示。
+- **Next main-agent actions**：(1) `make ktest` Checker Validation Run
+  （待 user 授权执行）；(2) 本 pass per-pass commit（待 user 指令）；
+  (3) R 线 pass B（test/ 写集边界待 user 圈定）；(4) Reviewer 静态门
+  （可并入后续 wave 收尾或单独派发）。
+
+## 11. 2026-08-31 追记：单测布局改回单一文件（continuation 2）
+
+- **User 裁决**：拒绝 `options.rs` 旁的 `options/test.rs` 子目录形态
+  （Rust 2018 子模块路径规则的产物，单测 pass 刚引入）。要求单文件布局。
+- **裁决依据**：测试必须为目标模块子模块才能访问 module-private 项
+  （U-2 三个目标函数均私有），因此唯一单文件形态 = 内联
+  `#[cfg(ktest)] mod test { … }` 块追加于父文件末尾。
+- **执行**：test-assets spec 布局条款三处 + 路径规则注记由主代理修订
+  （内联形态 + rationale）；同 Creator 线程转换（内容逐字承继，脚本
+  反缩进比对验证零语义差异），三目录删除；run_4 双 gate exit 0 零
+  warning。
+- **Write-set 终态**：三父文件（options.rs 1086 行 / xattr.rs 956 行 /
+  identity.rs 995 行，含内联测试块）；无独立 test.rs。
+- **状态**：工作树未提交；`make ktest` Checker Validation Run 与 Reviewer
+  静态门、per-pass commit 均待 user 指令。

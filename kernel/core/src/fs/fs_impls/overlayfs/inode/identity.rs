@@ -579,3 +579,417 @@ impl OverlayFs {
         }
     }
 }
+
+#[cfg(ktest)]
+mod test {
+    // SPDX-License-Identifier: MPL-2.0
+
+    //! Unit tests for the xino encode/decode/fallback matrix (U-3).
+    //!
+    //! Every expectation below is the frozen U-3 case tables of the test-assets
+    //! design (`test-assets-20260831` §3.3). The tests assert the pure projection
+    //! surface only: no filesystem, VFS, block, or I/O fixture is constructed.
+
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    /// Builds a `DeviceId` from numeric major/minor.
+    fn dev(major: u16, minor: u32) -> DeviceId {
+        DeviceId::new(
+            device_id::MajorId::new(major),
+            device_id::MinorId::new(minor),
+        )
+    }
+
+    /// Builds one published-layer identity entry.
+    fn layer(fsid: u64, container_dev_id: DeviceId, lower_layer_root_ino: u64) -> LowerLayerIdentity {
+        LowerLayerIdentity {
+            fsid,
+            container_dev_id,
+            lower_layer_root_ino,
+        }
+    }
+
+    /// Builds a fresh `IdentityPolicy` (each call yields a fresh fallback
+    /// allocator).
+    fn build_policy(
+        overlay_dev_id: DeviceId,
+        layer_devs: &[LowerLayerIdentity],
+        upper_layer_dev_index: Option<usize>,
+        xino_shift: u32,
+        xino_mode: XinoMode,
+    ) -> IdentityPolicy {
+        IdentityPolicy::new(
+            overlay_dev_id,
+            layer_devs,
+            upper_layer_dev_index,
+            xino_shift,
+            xino_mode,
+        )
+        .unwrap()
+    }
+
+    /// Builds a `LowerIdOrigin` record directly (fields visible to this module).
+    fn record(container_dev_id: DeviceId, lower_layer_root_ino: u64, real_ino: u64) -> LowerIdOrigin {
+        LowerIdOrigin {
+            container_dev_id,
+            lower_layer_root_ino,
+            real_ino,
+        }
+    }
+
+    /// Returns the valid 32-byte v3 wire buffer of a fixed example record.
+    fn valid_wire() -> Vec<u8> {
+        record(dev(1, 1), 100, 0x1234).serialize()
+    }
+
+    #[ktest]
+    fn policy_rejects_xino_shift_over_limit() {
+        let err = IdentityPolicy::new(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100)],
+            None,
+            64,
+            XinoMode::On,
+        )
+        .unwrap_err();
+        assert_eq!(err.error(), Errno::EINVAL);
+        // 63 and 0 are accepted.
+        build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 63, XinoMode::On);
+        build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 0, XinoMode::On);
+    }
+
+    #[ktest]
+    fn same_fs_layers_pass_identity_through() {
+        // All-lower variant: every layer shares one underlying filesystem, so
+        // the origin passes through regardless of the mode or `is_directory`.
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100)],
+            None,
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::On,
+        );
+        assert_eq!(
+            policy.project(5, 777, dev(1, 1), false),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 777
+            }
+        );
+        assert_eq!(
+            policy.project(5, 777, dev(1, 1), true),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 777
+            }
+        );
+        assert!(!policy.is_xino_effective());
+        // Upper variant: the upper entry at position 0 also shares `dev(1, 1)`.
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(7, dev(1, 1), 1), layer(0, dev(1, 1), 100)],
+            Some(0),
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::On,
+        );
+        assert_eq!(
+            policy.project(5, 777, dev(1, 1), false),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 777
+            }
+        );
+        assert_eq!(
+            policy.project(5, 777, dev(1, 1), true),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 777
+            }
+        );
+        // `is_xino_effective() == false` even with `On`.
+        assert!(!policy.is_xino_effective());
+    }
+
+    #[ktest]
+    fn xino_encodes_fsid_in_high_bits() {
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::On,
+        );
+        // The layer fsid occupies the high 16 bits, the real ino the payload.
+        let encoded = policy.project(3, 0x1234, dev(1, 1), false);
+        assert_eq!(
+            encoded,
+            ObjectId {
+                dev: dev(9, 9),
+                ino: (3 << 48) | 0x1234
+            }
+        );
+        // Decode-side bit math.
+        assert_eq!(encoded.ino >> 48, 3);
+        assert_eq!(encoded.ino & 0x0000_ffff_ffff_ffff, 0x1234);
+        // `Auto` == `On` when feasible: identical encoded result.
+        let auto_policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::Auto,
+        );
+        assert_eq!(auto_policy.project(3, 0x1234, dev(1, 1), false), encoded);
+        assert!(auto_policy.is_xino_effective());
+        // Shift 63: the single-bit payload encodes `(1 << 1) | 1 == 3`.
+        let shift_63 = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            63,
+            XinoMode::On,
+        );
+        assert_eq!(
+            shift_63.project(1, 1, dev(1, 1), false),
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 3
+            }
+        );
+        // Shift 0 (degenerate): the payload is the full width, so the layer id is
+        // not encoded while the dev is still the overlay dev.
+        let shift_0 = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            0,
+            XinoMode::On,
+        );
+        assert_eq!(
+            shift_0.project(3, 0x1234, dev(1, 1), false),
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 0x1234
+            }
+        );
+    }
+
+    #[ktest]
+    fn xino_off_or_overflow_takes_fallback() {
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::On,
+        );
+        // Fallback trigger A: the ino does not fit -> file passthrough.
+        assert_eq!(
+            policy.project(3, 1 << 48, dev(1, 1), false),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 1 << 48
+            }
+        );
+        // Fallback trigger B: the ino does not fit and the object is a directory
+        // -> overlay dev plus an allocated ino.
+        assert_eq!(
+            policy.project(3, 1 << 48, dev(1, 1), true),
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 1
+            }
+        );
+        // Fallback trigger C: the layer id does not fit -> file passthrough.
+        assert_eq!(
+            policy.project(1 << 16, 5, dev(1, 1), false),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 5
+            }
+        );
+        // Fallback trigger D: xino off; file passthrough, directory allocation.
+        let off_policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::Off,
+        );
+        assert_eq!(
+            off_policy.project(3, 7, dev(1, 1), false),
+            ObjectId {
+                dev: dev(1, 1),
+                ino: 7
+            }
+        );
+        assert_eq!(
+            off_policy.project(3, 7, dev(1, 1), true),
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 1
+            }
+        );
+    }
+
+    #[ktest]
+    fn fallback_ino_allocates_from_one() {
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
+            None,
+            16,
+            XinoMode::Off,
+        );
+        // Three successive directory projections: starts at 1 (0 is never handed
+        // out) and strictly increases.
+        let first = policy.project(3, 7, dev(1, 1), true);
+        let second = policy.project(3, 7, dev(1, 1), true);
+        let third = policy.project(3, 7, dev(1, 1), true);
+        assert_eq!(
+            first,
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 1
+            }
+        );
+        assert_eq!(
+            second,
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 2
+            }
+        );
+        assert_eq!(
+            third,
+            ObjectId {
+                dev: dev(9, 9),
+                ino: 3
+            }
+        );
+    }
+
+    #[ktest]
+    fn resolve_layer_id_requires_unique_match() {
+        let policy = build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100), layer(1, dev(2, 2), 200)],
+            None,
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::Off,
+        );
+        assert_eq!(policy.resolve_layer_id_for_record(dev(1, 1), 100), Some(0));
+        assert_eq!(policy.resolve_layer_id_for_record(dev(2, 2), 200), Some(1));
+        // Absent pair.
+        assert_eq!(policy.resolve_layer_id_for_record(dev(3, 3), 300), None);
+        // Ambiguous pair with different fsids.
+        let ambiguous = build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100), layer(1, dev(1, 1), 100)],
+            None,
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::Off,
+        );
+        assert_eq!(ambiguous.resolve_layer_id_for_record(dev(1, 1), 100), None);
+        // Duplicate entries with equal fsid dedup.
+        let duplicate = build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100), layer(0, dev(1, 1), 100)],
+            None,
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::Off,
+        );
+        assert_eq!(duplicate.resolve_layer_id_for_record(dev(1, 1), 100), Some(0));
+        // Upper exclusion is by position, not by value: the lower sharing the
+        // upper's device id is kept.
+        let with_upper = build_policy(
+            dev(9, 9),
+            &[layer(7, dev(4, 4), 1), layer(0, dev(4, 4), 2)],
+            Some(0),
+            IdentityPolicy::XINO_SHIFT,
+            XinoMode::Off,
+        );
+        assert_eq!(with_upper.resolve_layer_id_for_record(dev(4, 4), 1), None);
+        assert_eq!(with_upper.resolve_layer_id_for_record(dev(4, 4), 2), Some(0));
+    }
+
+    #[ktest]
+    fn lower_id_wire_roundtrip_preserves_identity() {
+        // Roundtrip: buffer is exactly 32 bytes and every field survives.
+        let wire = valid_wire();
+        assert_eq!(wire.len(), 32);
+        let decoded = LowerIdOrigin::decode(&wire).unwrap().unwrap();
+        assert_eq!(decoded.container_dev_id(), dev(1, 1));
+        assert_eq!(decoded.lower_layer_root_ino(), 100);
+        assert_eq!(decoded.real_ino(), 0x1234);
+        // Continuity (encodable): the constant-st_ino-across-copy-up property.
+        let policy = build_policy(dev(9, 9), &[layer(3, dev(1, 1), 100)], None, 16, XinoMode::On);
+        let via_record = policy
+            .project_object_id_from_lower_id(&record(dev(1, 1), 100, 0x1234), false)
+            .unwrap();
+        let via_project = policy.project(3, 0x1234, dev(1, 1), false);
+        assert_eq!(via_record, via_project);
+        assert_eq!(
+            via_record,
+            ObjectId {
+                dev: dev(9, 9),
+                ino: (3 << 48) | 0x1234
+            }
+        );
+        // Continuity (directory, non-encodable): both sides take the
+        // allocated-fallback branch and allocate DIFFERENT inos; equality is NOT
+        // asserted (directory identity stability comes from the precomputed
+        // per-inode `ObjectId`, not from re-projection).
+        let dir_via_record = policy
+            .project_object_id_from_lower_id(&record(dev(1, 1), 100, 1 << 48), true)
+            .unwrap();
+        let dir_via_project = policy.project(3, 1 << 48, dev(1, 1), true);
+        assert_eq!(dir_via_record.dev, dev(9, 9));
+        assert_eq!(dir_via_project.dev, dev(9, 9));
+        assert_ne!(dir_via_record.ino, dir_via_project.ino);
+        // Unresolved record: the caller stays on the visible-source fallback.
+        assert_eq!(
+            policy.project_object_id_from_lower_id(&record(dev(9, 9), 999, 5), false),
+            None
+        );
+    }
+
+    #[ktest]
+    fn lower_id_wire_decode_rejects_malformed() {
+        // Total length 31 or 33.
+        let mut short = valid_wire();
+        short.truncate(31);
+        assert_eq!(LowerIdOrigin::decode(&short).unwrap(), None);
+        let mut long = valid_wire();
+        long.push(0);
+        assert_eq!(LowerIdOrigin::decode(&long).unwrap(), None);
+        // Magic byte 0 patched.
+        let mut magic = valid_wire();
+        magic[0] ^= 0xff;
+        assert_eq!(LowerIdOrigin::decode(&magic).unwrap(), None);
+        // Version 0 / 2 / 4 (retired or unknown).
+        for version in [0u8, 2, 4] {
+            let mut wire = valid_wire();
+            wire[4] = version;
+            assert_eq!(LowerIdOrigin::decode(&wire).unwrap(), None);
+        }
+        // Unknown flag bit.
+        let mut flags = valid_wire();
+        flags[5] = 0x01;
+        assert_eq!(LowerIdOrigin::decode(&flags).unwrap(), None);
+        // Type byte = 1.
+        let mut type_byte = valid_wire();
+        type_byte[6] = 1;
+        assert_eq!(LowerIdOrigin::decode(&type_byte).unwrap(), None);
+        // Reserved byte = 1.
+        let mut reserved = valid_wire();
+        reserved[7] = 1;
+        assert_eq!(LowerIdOrigin::decode(&reserved).unwrap(), None);
+        // Payload slot 0: major out of range -> `DeviceId` invalid.
+        let mut invalid_dev = valid_wire();
+        invalid_dev[8..16].copy_from_slice(&device_id::encode_device_numbers(0x1000, 0).to_ne_bytes());
+        assert_eq!(LowerIdOrigin::decode(&invalid_dev).unwrap(), None);
+    }
+}

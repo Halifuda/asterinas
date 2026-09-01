@@ -718,3 +718,369 @@ impl MountOptions {
         Ok(())
     }
 }
+
+#[cfg(ktest)]
+mod test {
+    // SPDX-License-Identifier: MPL-2.0
+
+    //! Unit tests for the pure [`MountOptions::parse`] contract (U-1).
+    //!
+    //! Every expectation below is the frozen U-1 case table of the test-assets
+    //! design (`test-assets-20260831` §3.1) as amended by the MO6 delta
+    //! (`mount-options-v2-20260831` §5). The tests assert the parse surface only:
+    //! no filesystem, VFS, block, or I/O fixture is constructed.
+
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    /// Parses `args` expecting success and returns the validated options.
+    fn parse_expect_ok(args: &str, fs_flags: FsFlags) -> MountOptions {
+        MountOptions::parse(Some(args), fs_flags).unwrap()
+    }
+
+    /// Parses `args` expecting `EINVAL` and returns the error for errno checks.
+    fn parse_expect_einval(args: Option<&str>, fs_flags: FsFlags) -> Error {
+        let err = MountOptions::parse(args, fs_flags).unwrap_err();
+        assert_eq!(err.error(), Errno::EINVAL);
+        err
+    }
+
+    #[ktest]
+    fn parse_requires_lowerdir() {
+        // `none` is treated as a missing `lowerdir`.
+        parse_expect_einval(None, FsFlags::empty());
+        // `empty`: all entries empty -> no `lowerdir`.
+        parse_expect_einval(Some(""), FsFlags::empty());
+        // `separators only`: empty entries skipped, then missing `lowerdir`.
+        parse_expect_einval(Some(",,"), FsFlags::empty());
+        // `empty value`.
+        parse_expect_einval(Some("lowerdir="), FsFlags::empty());
+        // `empty layer`.
+        parse_expect_einval(Some("lowerdir=a::b"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=:"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=a:"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_lowerdir_layer_list() {
+        // `single layer`.
+        let options = parse_expect_ok("lowerdir=a", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["a"]);
+        // `layer order`: the first path is the topmost layer.
+        let options = parse_expect_ok("lowerdir=a:b:c", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["a", "b", "c"]);
+        // `rdonly flag`.
+        let read_only = parse_expect_ok("lowerdir=l", FsFlags::RDONLY);
+        assert!(read_only.is_forced_read_only);
+        let writable = parse_expect_ok("lowerdir=l", FsFlags::empty());
+        assert!(!writable.is_forced_read_only);
+    }
+
+    #[ktest]
+    fn parse_upperdir_workdir_pairing() {
+        // Upper without work / work without upper.
+        parse_expect_einval(Some("lowerdir=l,upperdir=u"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,workdir=w"), FsFlags::empty());
+        // Both present.
+        let options = parse_expect_ok("lowerdir=l,upperdir=u,workdir=w", FsFlags::empty());
+        assert_eq!(options.upper_dir.as_deref(), Some("u"));
+        assert_eq!(options.work_dir.as_deref(), Some("w"));
+    }
+
+    #[ktest]
+    fn parse_rejects_duplicate_keys() {
+        // Duplicate key (each of the 7): the first occurrence never silently wins.
+        parse_expect_einval(Some("lowerdir=a,lowerdir=b"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,upperdir=u,upperdir=v"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,workdir=w,workdir=v"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,uuid=on,uuid=off"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,xino=on,xino=off"), FsFlags::empty());
+        parse_expect_einval(
+            Some("lowerdir=l,default_permissions,default_permissions"),
+            FsFlags::empty(),
+        );
+        parse_expect_einval(Some("lowerdir=l,userxattr,userxattr"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_rejects_bare_valued_keys() {
+        // Bare valued key (bare, no `=`).
+        parse_expect_einval(Some("lowerdir"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,upperdir"), FsFlags::empty());
+        parse_expect_einval(Some(",workdir"), FsFlags::empty());
+        parse_expect_einval(Some(",uuid"), FsFlags::empty());
+        parse_expect_einval(Some(",xino"), FsFlags::empty());
+        // Unknown key / empty key / case-sensitive key.
+        parse_expect_einval(Some("foo=bar"), FsFlags::empty());
+        parse_expect_einval(Some("foo"), FsFlags::empty());
+        parse_expect_einval(Some("=value"), FsFlags::empty());
+        parse_expect_einval(Some("LOWERDIR=l"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_valueless_keys() {
+        // Valueless keys, bare.
+        let options = parse_expect_ok("lowerdir=l,default_permissions", FsFlags::empty());
+        assert!(options.is_default_permissions);
+        let options = parse_expect_ok("lowerdir=l,userxattr", FsFlags::empty());
+        assert!(options.is_userxattr);
+        let options = parse_expect_ok("lowerdir=l,default_permissions,userxattr", FsFlags::empty());
+        assert!(options.is_default_permissions);
+        assert!(options.is_userxattr);
+        // Valueless keys, with value (an empty string is still a value).
+        parse_expect_einval(Some("default_permissions=x"), FsFlags::empty());
+        parse_expect_einval(Some("userxattr=1"), FsFlags::empty());
+        parse_expect_einval(Some("userxattr="), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_uuid_and_xino_values() {
+        // `uuid` domain.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,uuid=off", FsFlags::empty()).uuid_mode,
+            Some(UuidMode::Off)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,uuid=null", FsFlags::empty()).uuid_mode,
+            Some(UuidMode::Null)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,uuid=on", FsFlags::empty()).uuid_mode,
+            Some(UuidMode::On)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,uuid=auto", FsFlags::empty()).uuid_mode,
+            Some(UuidMode::Auto)
+        );
+        // `uuid` invalid.
+        parse_expect_einval(Some("uuid="), FsFlags::empty());
+        parse_expect_einval(Some("uuid=ON"), FsFlags::empty());
+        parse_expect_einval(Some("uuid=yes"), FsFlags::empty());
+        // `xino` domain.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,xino=off", FsFlags::empty()).xino_mode,
+            Some(XinoMode::Off)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,xino=auto", FsFlags::empty()).xino_mode,
+            Some(XinoMode::Auto)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,xino=on", FsFlags::empty()).xino_mode,
+            Some(XinoMode::On)
+        );
+        // `xino` invalid.
+        parse_expect_einval(Some("xino="), FsFlags::empty());
+        parse_expect_einval(Some("xino=ON"), FsFlags::empty());
+        parse_expect_einval(Some("xino=1"), FsFlags::empty());
+        parse_expect_einval(Some("xino=on "), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_literal_value_semantics() {
+        // A value containing `=`: the first `=` splits, the rest is a literal
+        // value.
+        let options = parse_expect_ok("lowerdir=a=b", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["a=b"]);
+        // A quoted value is literal: no unquoting.
+        let options = parse_expect_ok("lowerdir=\"a\"", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["\"a\""]);
+        // Whitespace is literal.
+        let options = parse_expect_ok("lowerdir=a b", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["a b"]);
+        let options = parse_expect_ok("lowerdir= a", FsFlags::empty());
+        assert_eq!(options.lower_dirs, [" a"]);
+        parse_expect_einval(Some("lowerdir=l,uuid=on "), FsFlags::empty());
+        // A comma cannot be escaped: the entry `b` is an unknown key.
+        parse_expect_einval(Some("lowerdir=a,b"), FsFlags::empty());
+        // Empty entries are skipped.
+        let options = parse_expect_ok(
+            ",,lowerdir=l,,userxattr,,default_permissions,,",
+            FsFlags::empty(),
+        );
+        assert!(options.is_userxattr);
+        assert!(options.is_default_permissions);
+    }
+
+    #[ktest]
+    fn parse_redirect_dir_domain() {
+        // `redirect_dir` domain.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,redirect_dir=on", FsFlags::empty()).redirect_dir,
+            Some(RedirectDirMode::On)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,redirect_dir=follow", FsFlags::empty()).redirect_dir,
+            Some(RedirectDirMode::Follow)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,redirect_dir=nofollow", FsFlags::empty()).redirect_dir,
+            Some(RedirectDirMode::NoFollow)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,redirect_dir=off", FsFlags::empty()).redirect_dir,
+            Some(RedirectDirMode::Off)
+        );
+        // `redirect_dir` invalid.
+        parse_expect_einval(Some("redirect_dir="), FsFlags::empty());
+        parse_expect_einval(Some("redirect_dir=ON"), FsFlags::empty());
+        parse_expect_einval(Some("redirect_dir=yes"), FsFlags::empty());
+        parse_expect_einval(Some("redirect_dir"), FsFlags::empty());
+        parse_expect_einval(Some("redirect_dir=on,redirect_dir=off"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_bool_option_domains() {
+        // Bool domain (`index`/`nfs_export`/`metacopy`).
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,index=on", FsFlags::empty()).index,
+            Some(true)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,index=off", FsFlags::empty()).index,
+            Some(false)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,nfs_export=on", FsFlags::empty()).nfs_export,
+            Some(true)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,nfs_export=off", FsFlags::empty()).nfs_export,
+            Some(false)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,metacopy=on", FsFlags::empty()).metacopy,
+            Some(true)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,metacopy=off", FsFlags::empty()).metacopy,
+            Some(false)
+        );
+        // Bool invalid (each).
+        parse_expect_einval(Some("index=1"), FsFlags::empty());
+        parse_expect_einval(Some("index=ON"), FsFlags::empty());
+        parse_expect_einval(Some("index="), FsFlags::empty());
+        parse_expect_einval(Some("index"), FsFlags::empty());
+        parse_expect_einval(Some("index=on,index=off"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_verity_and_fsync_domains() {
+        // `verity` domain.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,verity=off", FsFlags::empty()).verity,
+            Some(VerityMode::Off)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,verity=on", FsFlags::empty()).verity,
+            Some(VerityMode::On)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,verity=require", FsFlags::empty()).verity,
+            Some(VerityMode::Require)
+        );
+        // `verity` invalid.
+        parse_expect_einval(Some("verity=required"), FsFlags::empty());
+        parse_expect_einval(Some("verity="), FsFlags::empty());
+        parse_expect_einval(Some("verity"), FsFlags::empty());
+        parse_expect_einval(Some("verity=on,verity=off"), FsFlags::empty());
+        // `fsync` domain.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,fsync=auto", FsFlags::empty()).fsync_mode,
+            Some(FsyncMode::Auto)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,fsync=strict", FsFlags::empty()).fsync_mode,
+            Some(FsyncMode::Strict)
+        );
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,fsync=volatile", FsFlags::empty()).fsync_mode,
+            Some(FsyncMode::Volatile)
+        );
+        // `fsync` invalid.
+        parse_expect_einval(Some("fsync=0"), FsFlags::empty());
+        parse_expect_einval(Some("fsync="), FsFlags::empty());
+        parse_expect_einval(Some("fsync"), FsFlags::empty());
+        parse_expect_einval(Some("fsync=auto,fsync=strict"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_volatile_alias() {
+        // The valueless `volatile` option aliases `fsync=volatile`.
+        assert_eq!(
+            parse_expect_ok("lowerdir=l,volatile", FsFlags::empty()).fsync_mode,
+            Some(FsyncMode::Volatile)
+        );
+        // The alias shares the `fsync` duplicate slot.
+        parse_expect_einval(Some("volatile=1"), FsFlags::empty());
+        parse_expect_einval(Some("volatile="), FsFlags::empty());
+        parse_expect_einval(Some("volatile,volatile"), FsFlags::empty());
+        parse_expect_einval(Some("volatile,fsync=auto"), FsFlags::empty());
+        parse_expect_einval(Some("fsync=auto,volatile"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_override_creds_forms() {
+        // Positive `override_creds` is rejected.
+        parse_expect_einval(Some("lowerdir=l,override_creds"), FsFlags::empty());
+        parse_expect_einval(Some("override_creds=on"), FsFlags::empty());
+        // `nooverride_creds` is accepted; no field is set.
+        let options = parse_expect_ok("lowerdir=l,nooverride_creds", FsFlags::empty());
+        assert_eq!(options.redirect_dir, None);
+        assert_eq!(options.index, None);
+        assert_eq!(options.nfs_export, None);
+        assert_eq!(options.metacopy, None);
+        assert_eq!(options.verity, None);
+        assert_eq!(options.fsync_mode, None);
+        // `nooverride_creds` rejected forms.
+        parse_expect_einval(Some("nooverride_creds=x"), FsFlags::empty());
+        parse_expect_einval(Some("nonooverride_creds"), FsFlags::empty());
+        parse_expect_einval(Some("nooverride_creds,nooverride_creds"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_lowerdir_plus_append() {
+        // Each `lowerdir+` occurrence appends one path.
+        let options = parse_expect_ok("lowerdir+=/a,lowerdir+=/b", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["/a", "/b"]);
+        // `lowerdir+` takes one verbatim path: colons are not split.
+        let options = parse_expect_ok("lowerdir+=/a:b", FsFlags::empty());
+        assert_eq!(options.lower_dirs, ["/a:b"]);
+        // `lowerdir+` cannot be combined with `lowerdir`.
+        parse_expect_einval(Some("lowerdir=/l,lowerdir+=/a"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir+=/a,lowerdir=/l"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir+="), FsFlags::empty());
+        // The comma limitation extends to `lowerdir+`: the entry `b` is an
+        // unknown key.
+        parse_expect_einval(Some("lowerdir+=/a,b"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_datadir_plus_rejected() {
+        parse_expect_einval(Some("lowerdir=l,datadir+=/d"), FsFlags::empty());
+    }
+
+    #[ktest]
+    fn parse_new_key_conflicts() {
+        // `userxattr` x `redirect_dir` (anything but `nofollow`).
+        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=on"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=follow"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=off"), FsFlags::empty());
+        // `userxattr` x `redirect_dir=nofollow` is compatible.
+        parse_expect_ok("lowerdir=l,userxattr,redirect_dir=nofollow", FsFlags::empty());
+        // `userxattr` x `metacopy`.
+        parse_expect_einval(Some("lowerdir=l,userxattr,metacopy=on"), FsFlags::empty());
+        parse_expect_ok("lowerdir=l,userxattr,metacopy=off", FsFlags::empty());
+        // `metacopy=on` x `redirect_dir` (anything but `on`).
+        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=nofollow"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=off"), FsFlags::empty());
+        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=follow"), FsFlags::empty());
+        // `metacopy=on` x `redirect_dir=on` is compatible.
+        parse_expect_ok("lowerdir=l,metacopy=on,redirect_dir=on", FsFlags::empty());
+        // `nfs_export=on` x `index=off`.
+        parse_expect_einval(Some("lowerdir=l,nfs_export=on,index=off"), FsFlags::empty());
+        // `nfs_export=on` x `metacopy=on`.
+        parse_expect_einval(Some("lowerdir=l,nfs_export=on,metacopy=on"), FsFlags::empty());
+    }
+}

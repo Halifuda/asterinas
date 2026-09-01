@@ -1705,3 +1705,26 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
   - **Amended 2026-08-31 (continuation 1)**: Write-Set 扩展
     `inode/identity.rs`（spec MO3-R1 位点遗漏，Creator 按 Write-Set 零
     越界原则上报为 D1）；同 Creator 线程补实现 + run_2 编译证据。
+
+- **`pass_unit_tests_20260831`**
+  - **Kind**: Creator implementation pass（ktest 单测线；user 明示板正纪律：
+    断言唯一来源 = 冻结 spec 表、被测源码仅读接口、**零测试执行**、疑似
+    生产冲突只上报不迁就）。同 Creator 线程 continuation 修复模型。
+  - **Parent**: `test_assets`。
+  - **Covered micro-features**: `U1-mount-options-parse-ktest`（test-assets
+    §3.1 叠加 mount-options-v2 §5 MO6 delta）、`U2-xattr-name-mapping-ktest`、
+    `U3-xino-matrix-ktest`。R-1~R-4 排除。
+  - **Write-set 终态**（continuation 2 后）：`fs/mount/options.rs`、
+    `inode/xattr.rs`、`inode/identity.rs`——各自文件末尾内联
+    `#[cfg(ktest)] mod test { … }` 块；**无独立 test.rs/无新增目录**
+    （Amended 2026-08-31, user：拒绝子目录形态；测试须为目标模块子模块
+    以触私有项，内联是唯一单文件形态）。
+  - **Capabilities**: `compile_preflight` 两条（常规 + `--ktests`，
+    后者 `--cfg ktest` 类型检查测试块）；**零测试执行授权**。
+  - **Result**: 24 `#[ktest]`（U-1 16 / U-2 8 / U-3 8）+ 11 helper；
+    run_1..run_4 编译证据链，最终态双 gate exit 0 零 warning；
+    主代理裁决并修订 spec 两处（冻结行 200 输入列笔误补
+    `default_permissions`；三处冻结 import 行删除防 clippy -Dwarnings）。
+    census：production entities = 0；test-only 单列。
+  - **Explicit boundary**: 测试执行 Validation Run（`make ktest`）与
+    Reviewer 静态门不在本 pass；R 线回归另行切片。

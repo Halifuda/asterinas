@@ -666,3 +666,291 @@ fn read_xattr_value(source: &Arc<dyn Inode>, name: &XattrName<'_>) -> Result<Vec
     value.truncate(written);
     Ok(value)
 }
+
+#[cfg(ktest)]
+mod test {
+    // SPDX-License-Identifier: MPL-2.0
+
+    //! Unit tests for the pure xattr name mapping (U-2): classification, escape,
+    //! and the list-present transform.
+    //!
+    //! Every expectation below is the frozen U-2 case tables of the test-assets
+    //! design (`test-assets-20260831` §3.2). The tests assert the pure mapping
+    //! only: no filesystem, VFS, block, or I/O fixture is constructed.
+
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    /// Parses a namespace-parsable full name into an `XattrName`.
+    fn xname(full_name: &'static str) -> XattrName<'static> {
+        XattrName::try_from_full_name(full_name).unwrap()
+    }
+
+    /// Builds an own-prefix name of exactly `full_len` bytes (prefix + `a` fill).
+    fn own_name_of_len(selected_prefix: &str, full_len: usize) -> String {
+        let mut name = String::from(selected_prefix);
+        while name.len() < full_len {
+            name.push('a');
+        }
+        name
+    }
+
+    /// Presents `raw` with a `buffer_len`-byte buffer expecting success;
+    /// returns (reported total length, written buffer prefix).
+    fn present_expect_ok(
+        raw: &[u8],
+        prefix: OverlayXattrPrefix,
+        buffer_len: usize,
+    ) -> (usize, Vec<u8>) {
+        let mut buffer = vec![0u8; buffer_len];
+        let mut writer = VmWriter::from(buffer.as_mut_slice()).to_fallible();
+        let total = present_xattr_names(raw, prefix, &mut writer).unwrap();
+        let written = total.min(buffer_len);
+        (total, buffer[..written].to_vec())
+    }
+
+    /// Presents `raw` with a `buffer_len`-byte buffer expecting `ERANGE`.
+    fn present_expect_erange(raw: &[u8], prefix: OverlayXattrPrefix, buffer_len: usize) {
+        let mut buffer = vec![0u8; buffer_len];
+        let mut writer = VmWriter::from(buffer.as_mut_slice()).to_fallible();
+        let err = present_xattr_names(raw, prefix, &mut writer).unwrap_err();
+        assert_eq!(err.error(), Errno::ERANGE);
+    }
+
+    #[ktest]
+    fn classify_private_by_selected_prefix() {
+        assert_eq!(
+            classify("trusted.overlay.fsz", OverlayXattrPrefix::Trusted),
+            XattrClass::Private
+        );
+        assert_eq!(
+            classify("user.overlay.fsz", OverlayXattrPrefix::User),
+            XattrClass::Private
+        );
+        // No trailing dot: past the prefix.
+        assert_eq!(
+            classify("trusted.overlay", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        // Prefix boundary.
+        assert_eq!(
+            classify("trusted.overlayfsrz", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        // Exactly the prefix.
+        assert_eq!(
+            classify("trusted.overlay.", OverlayXattrPrefix::Trusted),
+            XattrClass::Private
+        );
+        // Case-sensitive.
+        assert_eq!(
+            classify("Trusted.overlay.x", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        // Cross-prefix.
+        assert_eq!(
+            classify("user.overlay.x", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        assert_eq!(
+            classify("trusted.overlay.x", OverlayXattrPrefix::User),
+            XattrClass::Passthrough
+        );
+        assert_eq!(
+            classify("user.plain.any", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        assert_eq!(
+            classify("security.selinux", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        assert_eq!(
+            classify("trusted.backup.notes", OverlayXattrPrefix::Trusted),
+            XattrClass::Passthrough
+        );
+        // The copy-time boundary filter (I5).
+        assert!(is_private("trusted.overlay.opaque", OverlayXattrPrefix::Trusted));
+        assert!(!is_private("user.plain", OverlayXattrPrefix::Trusted));
+    }
+
+    #[ktest]
+    fn used_full_name_passes_foreign_through() {
+        // A foreign name is used unchanged.
+        assert_eq!(
+            used_full_name(&xname("user.plain.any"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            "user.plain.any"
+        );
+        // A cross-prefix own-looking name is foreign here.
+        assert_eq!(
+            used_full_name(&xname("user.overlay.x"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            "user.overlay.x"
+        );
+        // The length limit is enforced only on the escape path (frozen
+        // asymmetry): a foreign name of length 300 passes through unchanged.
+        let foreign = own_name_of_len("user.", 300);
+        let used = used_full_name(
+            &XattrName::try_from_full_name(foreign.as_str()).unwrap(),
+            OverlayXattrPrefix::Trusted.as_str(),
+        )
+        .unwrap();
+        assert_eq!(used, foreign);
+    }
+
+    #[ktest]
+    fn used_full_name_escapes_own_prefix_unconditionally() {
+        // One `overlay.` infix is inserted right after the prefix.
+        assert_eq!(
+            used_full_name(&xname("trusted.overlay.fsz"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            "trusted.overlay.overlay.fsz"
+        );
+        // The insertion is unconditional, even for an already-escaped name.
+        assert_eq!(
+            used_full_name(
+                &xname("trusted.overlay.overlay.fsz"),
+                OverlayXattrPrefix::Trusted.as_str()
+            )
+            .unwrap(),
+            "trusted.overlay.overlay.overlay.fsz"
+        );
+        // Exactly-the-prefix boundary.
+        assert_eq!(
+            used_full_name(&xname("trusted.overlay."), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            "trusted.overlay.overlay."
+        );
+        // The same escape under the `userxattr` prefix.
+        assert_eq!(
+            used_full_name(&xname("user.overlay.fsz"), OverlayXattrPrefix::User.as_str()).unwrap(),
+            "user.overlay.overlay.fsz"
+        );
+    }
+
+    #[ktest]
+    fn used_full_name_enforces_name_length_limit_on_escape() {
+        // An own name of full length 247 escapes to length 255, which fits
+        // `XATTR_NAME_MAX_LEN`.
+        let fits = own_name_of_len(OverlayXattrPrefix::Trusted.as_str(), 247);
+        let used = used_full_name(
+            &XattrName::try_from_full_name(fits.as_str()).unwrap(),
+            OverlayXattrPrefix::Trusted.as_str(),
+        )
+        .unwrap();
+        assert_eq!(used.len(), XATTR_NAME_MAX_LEN);
+        // An own name of full length 248 escapes to length 256, exceeding the
+        // limit.
+        let exceeds = own_name_of_len(OverlayXattrPrefix::Trusted.as_str(), 248);
+        let err = used_full_name(
+            &XattrName::try_from_full_name(exceeds.as_str()).unwrap(),
+            OverlayXattrPrefix::Trusted.as_str(),
+        )
+        .unwrap_err();
+        assert_eq!(err.error(), Errno::EOPNOTSUPP);
+    }
+
+    #[ktest]
+    fn present_strips_one_infix_keeps_prefix() {
+        // A zero-capacity buffer is the size probe: reported = 19 + 1, nothing
+        // written.
+        let (total, written) =
+            present_expect_ok(b"trusted.overlay.overlay.fsz\0", OverlayXattrPrefix::Trusted, 0);
+        assert_eq!(total, 20);
+        assert!(written.is_empty());
+        // A large-enough buffer receives the presented bytes.
+        let (total, written) =
+            present_expect_ok(b"trusted.overlay.overlay.fsz\0", OverlayXattrPrefix::Trusted, 32);
+        assert_eq!(total, 20);
+        assert_eq!(written, b"trusted.overlay.fsz\0");
+        // Exactly one infix segment is stripped per layer.
+        let (_, written) = present_expect_ok(
+            b"trusted.overlay.overlay.overlay.x\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
+        assert_eq!(written, b"trusted.overlay.overlay.x\0");
+        // The prefix is kept at the boundary.
+        let (_, written) =
+            present_expect_ok(b"trusted.overlay.overlay.\0", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(written, b"trusted.overlay.\0");
+        // The same strip under the `userxattr` prefix.
+        let (_, written) =
+            present_expect_ok(b"user.overlay.overlay.fsz\0", OverlayXattrPrefix::User, 64);
+        assert_eq!(written, b"user.overlay.fsz\0");
+        // A mixed list: foreign entries pass through while the own escaped entry
+        // is stripped.
+        let (_, written) = present_expect_ok(
+            b"user.plain\0trusted.overlay.overlay.fsz\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
+        assert_eq!(written, b"user.plain\0trusted.overlay.fsz\0");
+    }
+
+    #[ktest]
+    fn present_hides_own_private_records() {
+        for raw in [
+            b"trusted.overlay.origin\0".as_slice(),
+            b"trusted.overlay.opaque\0".as_slice(),
+            b"trusted.overlay.whiteout\0".as_slice(),
+            b"trusted.overlay.impure\0".as_slice(),
+            b"trusted.overlay.uuid\0".as_slice(),
+        ] {
+            let (total, written) = present_expect_ok(raw, OverlayXattrPrefix::Trusted, 64);
+            assert_eq!(total, 0);
+            assert!(written.is_empty());
+        }
+        // Any own-prefix name without the infix is hidden.
+        let (total, written) = present_expect_ok(
+            b"trusted.overlay.no-infix-name\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
+        assert_eq!(total, 0);
+        assert!(written.is_empty());
+        // The infix without a trailing dot does not strip: hidden.
+        let (total, written) =
+            present_expect_ok(b"trusted.overlay.overlay\0", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(total, 0);
+        assert!(written.is_empty());
+    }
+
+    #[ktest]
+    fn present_probe_and_erange_accounting() {
+        // Size probe.
+        let (total, written) = present_expect_ok(b"a\0bb\0", OverlayXattrPrefix::Trusted, 0);
+        assert_eq!(total, 5);
+        assert!(written.is_empty());
+        // Exact fit.
+        let (total, written) = present_expect_ok(b"a\0bb\0", OverlayXattrPrefix::Trusted, 5);
+        assert_eq!(total, 5);
+        assert_eq!(written, b"a\0bb\0");
+        // Frozen boundary quirk: when the buffer fills exactly at an entry
+        // boundary, the remaining entries are counted (probe semantics at
+        // `avail == 0`); callers must use the reported length, not the buffer
+        // contents.
+        let (total, written) = present_expect_ok(b"a\0bb\0", OverlayXattrPrefix::Trusted, 2);
+        assert_eq!(total, 5);
+        assert_eq!(written, b"a\0");
+        // Mid-stream overflow with `avail > 0`.
+        present_expect_erange(b"a\0bbbb\0", OverlayXattrPrefix::Trusted, 3);
+        // Empty list / empty entries skipped.
+        let (total, written) = present_expect_ok(b"", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(total, 0);
+        assert!(written.is_empty());
+        let (total, written) = present_expect_ok(b"\0\0", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(total, 0);
+        assert!(written.is_empty());
+    }
+
+    #[ktest]
+    fn present_passes_foreign_and_non_utf8_through() {
+        // Verbatim, including the non-UTF-8 entry.
+        let (_, written) =
+            present_expect_ok(b"user.plain\0\xff\xfe\0", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(written, b"user.plain\0\xff\xfe\0");
+        // Hiding requires a UTF-8 prefix match: non-UTF-8 own-looking names are
+        // never hidden.
+        let (_, written) =
+            present_expect_ok(b"\xfftrusted.overlay.opaque\0", OverlayXattrPrefix::Trusted, 64);
+        assert_eq!(written, b"\xfftrusted.overlay.opaque\0");
+    }
+}
