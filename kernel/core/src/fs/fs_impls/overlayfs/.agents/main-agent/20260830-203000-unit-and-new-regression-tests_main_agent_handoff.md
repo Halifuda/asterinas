@@ -346,3 +346,265 @@ test-cleanup）约束。
 - **Next main-agent actions**：(1) 修复后增量 commit（待 user 指令）；
   (2) R 线 pass B（test/ 写集待圈定）；(3) ktest 静默控制台缺口登记
   （待 user 裁定归属）；(4) Reviewer 静态门（可并入 wave 收尾）。
+
+## 13. 2026-08-31 执行记录：单测 Reviewer 静态门（贴合性审计）
+
+- **Dispatch 顺序（user 指令 2-1-4）**：②GAP-KTEST-001 登记（新建
+  `.agents/GAPS.md`，含根因/workaround/归属两选项与主代理建议，归属裁定
+  仍待 user）→ ①增量 commit `cf2bd1fee`（continuation 3 层表修复 +
+  GAPS.md + handoff）→ ④Reviewer。
+- **Reviewer**（task_reviewer_pass_unit_tests_20260831）：**PASS**。
+  - 核心结论（user 审计焦点）：24 测逐断言三态审计——23 spec-traceable
+    + 1 ambiguity-documented，**0 untraceable**；无"为通过而贴合生产"
+    证据，测试是按 spec 冻结口径正常书写的。
+  - continuation 3 专项：五点文本论证判定为 spec 意图对齐（期望字面值
+    先于测试存在；原行被 spec 自己的 same-fs 行判死；修复复用 encode 行
+    既冻层表；备选方案会掏空行的检验目的；修订留痕完整）。
+  - 无弱断言/同义反复；接口读取边界干净（未断言生产错误消息、wire
+    magic 等未冻结细节；未调用 spec 禁用的内部函数）。
+  - 5 处 line-level rustfmt 规范换行已逐条披露（测试块内）；F4：生产区
+    5 处超宽行为不可断行字面量（fmt-stable，另行记录）。
+  - F1（Low/簿记）：packet 所引"行 200"为修订前编号，修订实际在现行
+    spec 行 205（主代理已 grep 实证），零断言失去可追溯性；F2/F3 为
+    spec 措辞/示例不对称的 Info 级记录，无需改测试。
+- **遗留（下一持锁 lane）**：Reviewer 的 5 处换行 + F4 需 `make check`
+  （`cargo fmt --check` 门）最终确认——建议直接 `make format` 后复跑
+  `make check`，归属 wave 收尾门。
+- **本日 commit 链**：`287b1ea5d`（pass V2）→ `0ab6442f6`（单测）→
+  `cf2bd1fee`（ktest 修复 + GAP 登记）。
+
+## 14. 2026-08-31 执行记录：回归 C 用例 pass（R-1/R-2/R-4）
+
+- **Creator**（task_creator_pass_regression_rline_20260831）：
+  - 三新用例落 `test/initramfs/src/regression/fs/overlayfs/`
+    （copyup_owner_permissions / sparse_copyup_consistency /
+    xino_dino_identity）+ run_test.sh 恰 +3 行注册；R-3 按既定流程未写。
+  - 编译 gate：`make -C test/initramfs/src/regression/fs/overlayfs`
+    5/5 二进制 exit 0 零 warning（-Wall -Werror；产物进 gitignored
+    build/）；clang-format dry-run 一次通过（配置
+    `test/initramfs/src/regression/.clang-format` 实证存在且既有文件
+    符合）。
+  - 9 项 Deviations/Notes 备案（fixture 播种、umask 卫生行、SKIP_TEST_IF
+    放置、cleanup 顺序物理约束解读等）。
+- **Reviewer**（task_reviewer_pass_regression_rline_20260831）：**PASS**，
+  零阻塞、零编辑。spec 追溯审计无红色项；testing.md 四则合规（行为
+  命名/断言宏/cleanup 全覆盖含 waitpid）；R-1 降权编排专项通过（先
+  setgid 后 setuid、waitpid 收割通道、属主断言方向=创建者而非
+  mounter）；R-4 双 tmpfs 卸载顺序逐字合 spec；9 项 Deviations 全部
+  disposition 接受；Write-Set 零越界（Makefile 未动、R-3 未写、
+  xfstests 配置未触）。
+- **状态**：工作树未提交（三新 .c + run_test.sh +3 行 + .agents 记账）。
+  回归用例**从未执行**——执行验证归后续 Checker Validation Run
+  （QEMU 内 run_test.sh lane，待 user 授权）。
+- **Next main-agent actions**：(1) R 线 commit（待 user 指令）；(2) 回归
+  执行 Validation Run（待 user 授权，预计形态
+  `make run_kernel AUTO_TEST=regression` 或等效）；(3) R-3 characterization
+  + flock 修复 pass（另行调度）；(4) GAP-KTEST-001 归属裁定仍开放。
+
+## 15. 2026-08-31 执行记录：回归执行 Validation Run（2 failures，证据固化）
+
+- **前置 commit**：注释精简后 R 线已 commit（`624e0ede5`；三用例共删
+  74 行注释，保留 6 条非自解释约定；同 Creator continuation 1，双 gate
+  复跑通过）。
+- **Checker**（task_checker_regression_rline_20260831）：临时两处脚本
+  限定（顶层 runner 限 fs + fs/run_test.sh 仅 overlay 五行）→
+  `make run_kernel AUTO_TEST=regression` → **还原闭环证据齐备**。
+  结果：ovl_test PASS / readdir_small_buffer PASS（12/12）/
+  sparse_copyup_consistency PASS（25/25 断言，隔离 run_2）/
+  **copyup_owner_permissions FAIL** / **xino_dino_identity FAIL**。
+  证据固化容器 `/tmp/ovfs_checker_run{1,2,3}_qemu.log`（sha256 记录在
+  Checker 报告）。
+- **Failure 1 主代理归因（高置信，待运行时确认）**：
+  `test_create_over_whiteout_owned_by_creator` 的降权子进程
+  `unlink(MERGED_DIR "/shared")` 得 EACCES。链路：unlink 的
+  remove_target 先在 **workdir** 造白out暂存（whiteout.rs
+  create_whiteout_temp），而 overlay 无 scoped-creds API
+  （policy.rs TODO，即 MO5 记录的 G1 凭据缺口——PASS_SLICING 既录
+  deferred），upper/work 变异以**调用者凭据**执行 → workdir（root
+  0700）对 nobody 不可写 → EACCES。测试期望与 Linux 语义一致
+  （上游 override_creds 使 mounter 权威执行 upper 变异，overlay/008
+  正是此场景）→ **测试保留为 pinning 测试，生产修复 = G1 凭据缺口
+  落地后自然通过**；R-1 就此从"回归门"转为"G1 缺口的可复现证据"。
+- **Failure 2 归因未定（需运行时诊断）**：
+  `test_ino_stable_across_copyup`——copy-up 后 st_ino/st_dev 稳定断言
+  全过，但读回内容 `memcmp "Hover-data"` 失败。疑点：跨 tmpfs copy-up
+  的内容转移或发布后读路径（R-2 在同根 ramfs 上同型断言通过，差异
+  = 双 tmpfs + xino=on）。需要诊断 run（打印读回字节/size、upper 直读）
+  定位，疑似 VM/page-cache 或 copy-up 发布类缺陷。
+- **路由建议（待 user 指令）**：(a) 派 diagnosis pass 定位 Failure 2
+  （Failure 1 已高置信归因 G1，可并入确认）；(b) 修复调度：Failure 1 =
+  G1 独立 Designer+Creator 轮（既录 deferred）；Failure 2 视诊断结果
+  定 Owner（overlayfs copyup 或 VM/page-cache）。测试本体不再改——
+  两失败均为生产侧问题的 pinning 证据。
+- **状态**：工作树仅余 .agents 记账未提交；R 线源码已全部 commit
+  （`624e0ede5`）。
+
+## 16. 2026-08-31 执行记录：Failure 2 插桩诊断与关闭
+
+- **诊断（同 Checker continuation 2，user 授权生产+测试临时插桩）**：
+  - **通道纪律先查证**：权威 console 通道 = `qemu.log`（QEMU chardev stdio
+    logfile，含完整内核 console + guest 测试输出；Makefile 成功门 grep 它）；
+    `qemu-serial.log`（OSDK.toml log_file）**不含**测试输出。内核 `info!`
+    受 `LOG_LEVEL`（默认 error）门控——显式 `LOG_LEVEL=info` 即可见；
+    **LOG_LEVEL=debug 不可用**（TCG 下 boot FPU DEBUG 洪流，24 万行无测试
+    输出，run_4 主动终止）。此通道知识对后续所有 lane 有效。
+  - **插桩点**：copyup 数据流（promote_regular_file）/发布
+    （replace_facts）/写路径/读路径 + 测试侧 read buf hex。
+  - **根因（证据闭环）**：lower "lower-data" → copy-up 数据流逐字节正确
+    （chunk0 head 实证）→ 发布同一 upper real inode → 写 'H' 落 upper →
+    读回 "Hower-data"，与 upper 直读一致。**测试期望常量 typo**：
+    `"Hover-data"` 应为 `"Hower-data"`（"lower-data" 首字节→H）。生产
+    无 bug，VM/page-cache 嫌疑排除。
+- **修复（同 R 线 Creator continuation 2）**：xino_dino_identity.c:232
+  期望串一行更正，双 gate 通过。
+- **确认（Checker continuation 3，run_5）**：单二进制回归 exit 0，
+  `test_ino_stable_across_copyup summary: 12 tests passed, 0 tests
+  failed`，成功门出现。**Failure 2 关闭。**
+- **五二进制终态**：ovl_test PASS / readdir_small_buffer PASS /
+  sparse_copyup_consistency PASS / xino_dino_identity PASS（修正后）/
+  copyup_owner_permissions **FAIL（开放）**——G1 凭据缺口（§15 归因），
+  测试保留为 pinning 证据，修复 = G1 独立 Designer+Creator 轮。
+- **状态**：xino_dino_identity.c 一行修正未提交（待 user 指令）；日志
+  归档 /tmp/ovfs_checker_run{1,2,3,4b,5}_qemu.log。
+
+## 17. 2026-08-31 追记：R-1 延后出树 + push
+
+- **User 裁决**：R-1（copyup_owner_permissions，G1 凭据缺口的 pinning
+  证据）暂从测试树移除；R-2/R-4 保留（均已在 guest 回归 lane 实测
+  PASS）。执行：用例备份至
+  `.agents/components/test-assets-20260831/deferred_R1_copyup_owner_permissions.c`
+  （gitignored 工作区产物区，G1 落地后随修复 pass 恢复）；
+  `run_test.sh` 注册行移除（现 2 行）；commit amend
+  （`624e0ede5` → `2906b7e3e`，3 files +390）；push origin 成功
+  （`a7e60595e..2906b7e3e`，本日全部提交随分支上远）。
+- **恢复条件**：G1 凭据缺口（scoped-credentials API 或等效机制）落地后，
+  从备份恢复用例 + 注册行，预期直接转绿。
+- **Push 状态**：工作树仅余 .agents 记账未提交（随下批提交）。
+
+## 18. 2026-08-31 追记：下一阶段方向（user 定纲）
+
+- **代码线（下一优先）**：上游 **Inode trait 重构 PR 的 pick 与适配**。
+  本仓 overlayfs 对 `Inode` trait 的实现面（`fs_impls/overlayfs/inode/`、
+  `InodeExt`/extension group 等）需随上游 trait 形态变化做 pick + 适配，
+  属生产改动——走既有模型（Designer 冻结适配面 → Creator → Reviewer），
+  派发前需先定位目标上游 PR 并盘点与本仓 `kernel/core` 的接口差异。
+- **注释线**：**新的 top doc comment 重写**（crate/模块级 top-down 文档
+  ——对应上游评审 "On commentting" 节对顶层文档缺失与术语先定义后使用
+  的批评，含 README/spec 形态的候选载体）+ **再次精简内部代码注释**。
+  与 V2 pass 已做的风格收敛不同，这轮是结构级重写而非逐条修剪。
+- **排队项不变（次序待 user 后续指令）**：G1 凭据轮（R-1 复活门槛）、
+  GAP-KTEST-001 归属裁定、R-3 characterization + flock 修复 pass、
+  `make check` wave 收尾门。
+- **当前盘面**：本日 5 commit 全部在 origin（`2906b7e3e` HEAD）；回归
+  lane R-2/R-4 + 既有两例全绿；R-1 已备份出树（§17）；GAP-KTEST-001
+  与 Failure 1/2 的归因均已固化记录（§12/§15/§16）。
+
+## 19. 2026-09-02 注释线开题（top doc 轮，user 三裁决）
+
+- **User 裁决**：① 载体 = 直接写 `mod.rs` crate 级 `//!` doc（不建
+  README/spec 目录），且**全部文件的 `//!` 模块 doc 都要审查**；② 本轮只做
+  top doc（行内/方法 doc 精简不在本轮）；③ 内部注释精简留下一轮，届时
+  **全树全量重审**。判据基线 = wave9 handoff §4.1.1（P2/P3/N1–N12）+
+  §4.1.3（C1–C6）+ §4.17/§4.19/§4.25 原则性裁决；驱动文本 = PR #3708
+  "On commentting"（issue comment 5300342476，原文已取回写入 criteria）。
+- **主代理普查（本日）**：28 个 .rs 全部已有 `//!` doc（1–44 行）。重点
+  缺口：crate 门口 `mod.rs` 仅 12 行（无词汇表/模块地图/阅读顺序）；
+  `copyup/mod.rs` Locking 段重新引入锁缩写 `CUL/DIR/PARENT`（§4.25 清零后
+  回潮，新代码带入）；`xattr.rs` 正文内联 `params.c:988-1003`（N8 强化
+  违规）+ 引 `proposal §13/§16`（P3）+ 未定义标签 `I1-I3`；`fs/mod.rs`
+  "projection state" 全树无定义处；`mount/mod.rs` 有 "`fs::mod`" 生硬路径
+  表述。
+- **Round 切片（`comment_topdoc_20260902`，PASS_SLICING 已录）**：
+  - T1 `task_designer_topdoc_frontdoor_20260902`（design/Normal）：crate
+    门口四文件（mod.rs/fs_type.rs/layer.rs/real.rs）顶层文档**草案**（仅
+    产物文件，零 .rs 写）→ 主代理结构验收 → **user 批准终稿**（§4.24.2
+    灵活档先例）→ 应用。
+  - T2 审计三 lane（Reviewer，只读）：A = fs 子树 7 文件、B = inode 核心
+    9 文件、C = dir+copyup 8 文件；每文件 verdict + findings（原则条目 +
+    锚点 + 现文 + 精确替换文案）。
+  - 执行轮：T1 终稿批准 + T2 提案主代理核准后另行切片（exact old→new
+    机械执行 + 诚实 Reviewer 复核）；验收门 = 非注释 diff = 0 + 锁缩写/
+    内联 Linux grep 0 + C6 阈值复查。
+- **Dispatch（本日，Direct Spawn Lane）**：packet 与共享 criteria 在
+  `subagent-tasks/comment-topdoc-20260902/`；四任务写集均限单产物文件
+  （`components/comment-topdoc-20260902/` 下）。**User 追加指示（派发当日）**：
+  T1 起草授权输入增列 designdoc `structure-design-proposal-final.md`
+  （`### 1.`–`### 16.` 节，即现行文档中 `proposal §N` 引用的锚点）；词汇表
+  与 proposal 术语对齐，并在草案附 proposal 节 → 词汇条目映射注记，作为
+  执行轮剥离 P3 指针的替换依据。
+- **Pending**：BLUEPRINT §3 记录待本 round 验收时补；未提交工作树（§16
+  rustfmt 修复 + 记账）维持待 user 指令。
+- **四任务收据与主代理验收（本日）**：
+  - T1 `topdoc_draft_20260902.md`（22.9KB）：Part 1 = mod.rs crate doc
+    178 行粘贴稿（概述/层模型与挂载流程/34 词条汇表/模块地图/阅读顺序/
+    References）；Part 2 = fs_type/layer/real 三重写稿；Annex A =
+    proposal §1–§16 → 词汇映射（含 xattr.rs §13/§16 剥离指引）；Annex B
+    = 执行轮注记。词汇 34 条全部带代码载体（主代理抽查
+    `XattrClass`/`UpperWorkdirInuse`/`visible_source` 真实）；粘贴块
+    零禁用 token（grep 命中全在自查节）；两偏离备案（挂载顺序按代码实序
+    parse→assembly→claims→probes→policy 修正 packet 草图；layer.rs `///`
+    指针属下一轮）。**结构验收 ACCEPTED，待 user 批准终稿**。
+  - T2A `audit_A_fs_20260902.md`：7 文件 = 1 compliant / 6 findings
+    （14 条：MED 7 / LOW 7；0 HIGH）。种子四项全证实；options.rs 键矩阵
+    与现行 parse/verify 面完全吻合（仅分组标签失准）。
+  - T2B `audit_B_inode_20260902.md`：9 文件 = 3 compliant / 6 findings
+    （16 条：HIGH 2 / MED 10 / LOW 4）。xattr.rs 最重——内联 Linux
+    引用（N8）且 v6.17 锚点错误（实为 params.c#L956-L976）、`proposal
+    §13/§16`（P3）、`I1-I3` 无指称、标题 "Reserved-mutex rule" 名不副实、
+    **过期 P10 断言**（doc 称 userxattr×redirect/metacopy 冲突
+    "documented instead of enforced"，主代理已实证 `verify()` 实际
+    EINVAL 拒绝——mount v2 pass 关闭了该预留，doc 滞后）；metadata.rs
+    "root credentials" rationale 过期（关联 G1 凭据缺口）。
+  - T2C `audit_C_dircopy_20260902.md`：8 文件 = 2 compliant / 6 findings
+    （10 条：HIGH 1 / MED 5 / LOW 4）。HIGH REGRESSION = copyup/mod.rs
+    锁缩写 13 处（`git log -S` 归因收敛 wave `ad79af590`/`462da89ad`
+    于 purge 之后带入），替换文案纯文字化+分 bullet（兼修 C6 超长段）；
+    MED 新发现 = remove.rs 锁契约与代码矛盾（rmdir 自述 publish
+    whiteout，主代理语义层实证）、dir/mod.rs 枚举漏 symlink `write_link`
+    条目。
+  - 汇总：T2 共 40 findings（HIGH 3 / MED 22 / LOW 15）；REGRESSION 1；
+    版本 tag 不统一（latest vs v6.17）按 no-churn 顺延；`///` 层残留
+    （rename.rs/copyup/mod.rs/dir/mod.rs 锁缩写、options.rs `///` Linux
+    引用）留下一轮全树重审。
+- **下一门（待 user）**：① T1 终稿批准（或修订意见）→ 应用 crate 门口
+  四文件；② T2 提案主代理核准后执行轮（先 T1 落地定词汇，再 T2 exact
+  old→new + 诚实 Reviewer 复核 + 验收门）。
+
+## 20. 2026-09-04 执行记录：注释线 top doc 轮闭环（user-directed close）
+
+- **User 裁决（本日）**：① 本轮只改顶层 `//!` module doc；对实际代码上的
+  注释（`///`、行内 `//`）用户另有考虑，一律不动；② 只改注释则**不派
+  Reviewer、不编译**，改完即收。§19 既定的「诚实 Reviewer 复核」与编译门
+  就此豁免。
+- **主代理核准（T2）**：40 条 findings（A 14 / B 16 / C 10）全部ACCEPTED，
+  锚点逐一对照当前树实证（metadata.rs "root credentials" 过期断言、
+  remove.rs 白out缓存锁契约矛盾、xattr.rs "documented instead of
+  enforcing" 过期 + 错误 params.c 锚点、copyup/mod.rs 锁段 102-160/391
+  代码锚点等均复核成立）。**裁决修订 2 处（P10 术语对齐，记录为唯一
+  两处偏离）**：T1 词汇表行 `per-directory transaction lock` →
+  `per-inode transaction lock`（与 inode/mod.rs Locking、data.rs 对齐；
+  锁是每-inode mutex，目录只是使用角色）；C-08 `publication coordinate`
+  → `copy-up coordinate`（对齐 T1 词汇表与 B-01）。
+- **执行（四 Creator 并行，Direct Spawn Lane）**：
+  `task_creator_topdoc_apply_t1_20260904`（T1 门口 4 文件：mod.rs crate
+  doc 125 行 + fs_type/layer/real 重写；词汇行按裁决应用）、
+  `task_creator_topdoc_exec_a_20260904`（14/14）、
+  `task_creator_topdoc_exec_b_20260904`（16/16；identity/xattr 的 §13
+  遗留 ktest 测试块 hunk 快照比对字节未动）、
+  `task_creator_topdoc_exec_c_20260904`（10/10；C-06 HIGH REGRESSION 的
+  CUL/DIR/PARENT 13 处随 Locking 段重写清零）。收据
+  `components/comment-topdoc-20260902/exec_{t1,a,b,c}_20260904.md`；
+  packet 归档 `subagent-tasks/comment-topdoc-20260902/`。
+- **验收门（主代理机械自查）**：全树非注释 diff 行 = 0（仅剩 §13 遗留的
+  两测试块 rustfmt hunk，预存）；`//!` 范围锁缩写/失效术语/`fs::mod`/
+  `proposal §`/内联 `file:line` grep = 0；新 crate doc 五节结构齐备
+  （Layer model / Vocabulary / Module map / Reading order / References）。
+  两处 ktest 模块 doc（identity.rs:590、xattr.rs:685）的
+  `test-assets-20260831 §` 引用按 T1 Annex A 既定**留下一轮**裁决。
+- **状态**：22 个 .rs 改动未提交（含 §13 遗留 hunk），per-pass commit 待
+  user 指令。本轮未跑任何编译/测试。
+- **Next**：① `///` 与行内注释的全树下一轮重审（user 已有安排；T1
+  Annex A 的 proposal→词汇映射、三 lane 审计的出圈残留清单、B-09 里
+  `///` 层 Linux 引用行号记录均可直接复用）；② ktest 模块 doc 设计文档
+  引用随该轮裁决；③ 排队项不变（G1 凭据轮、GAP-KTEST-001 归属、
+  R-3 characterization + flock、Inode trait 重构 pick）。

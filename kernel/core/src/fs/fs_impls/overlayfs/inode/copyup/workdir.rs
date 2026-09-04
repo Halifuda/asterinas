@@ -3,9 +3,13 @@
 #![short_vis_path::add(overlayfs)]
 //! The workdir temporary lifecycle.
 //!
-//! [`WorkdirTemp`] preserves the successful name/inode pair, and
-//! [`OverlayFs::create_workdir_temp`] retries only `EEXIST`, regenerating the
-//! name for each attempt and leaving publication or cleanup to its caller.
+//! [`WorkdirTemp`] preserves the created name, its dentry-anchored path, and
+//! the request-derived kind, and [`OverlayFs::create_workdir_temp`] retries
+//! only `EEXIST`, regenerating the name for each attempt and leaving
+//! publication or cleanup to its caller.
+//!
+//! Invariants: the workspace is pinned at mount time and lives outside every
+//! layer root; workdir temps are never visible entries of any layer.
 //!
 //! ## References
 //!

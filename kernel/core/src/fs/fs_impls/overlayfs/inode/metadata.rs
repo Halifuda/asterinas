@@ -5,21 +5,26 @@
 //!
 //! This module hosts the six metadata setters: `set_mode`/`set_owner`/
 //! `set_group` (chmod/chown) and `set_atime`/`set_mtime`/`set_ctime`
-//! (utimes). Admission is the two-stage permission-pipeline check through
-//! [`OverlayInode::check_permission`]/`AccessType::Mutating`; every entry
-//! admits through the pipeline, then forwards to the real authority via
-//! [`OverlayInode::delegate_to_real`].
+//! (utimes). Every entry admits through the two-stage
+//! [`OverlayInode::check_permission`]/`AccessType::Mutating` pipeline — the
+//! local permission check, copy-up promotion for the `Mutating` class, and
+//! the real-handle re-check (unless `default_permissions`) — then forwards
+//! to the real authority via [`OverlayInode::delegate_to_real`].
 //!
 //! # Ownership gate
 //!
-//! The uniform mutating admission is the two-stage
-//! [`OverlayInode::check_permission`]/`AccessType::Mutating` pipeline:
-//! the local permission check, copy-up promotion for the `Mutating`
-//! class, and the real-handle re-check (unless `default_permissions`).
-//! Because the real stage runs under root credentials, the
-//! ownership-sensitive setters additionally run a local
-//! **ownership/capability gate** before that uniform admission; this is
-//! a deliberate deviation from a `MAY_WRITE`-only shape.
+//! The pipeline checks mode DAC only: neither the syscall layer nor the
+//! pipeline performs an owner/`CAP_FOWNER`/`CAP_CHOWN` pre-check. The
+//! ownership-sensitive setters (`set_mode`, `set_owner`, `set_group`)
+//! therefore run a local **ownership/capability gate** before the uniform
+//! admission and admit with `Permission::empty()`, so ownership/capability
+//! alone is authoritative and the chmod-000-then-chmod-644 owner idiom never
+//! fails with `EACCES` — a deliberate deviation from a `MAY_WRITE`-only
+//! shape.
+//!
+//! The time setters follow the utimensat disjunction instead: `MAY_WRITE`,
+//! or an owner/`CAP_FOWNER` fallback that re-runs admission with
+//! `Permission::empty()`; failures are best-effort silent no-ops.
 
 use core::time::Duration;
 

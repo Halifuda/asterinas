@@ -567,6 +567,32 @@ Record only active or recently changed passes here. Durable slicing rationale be
     report `components/orphan-helper-audit-20260830/
     orphan_helper_audit_20260830.md`.
 
+- **`comment_topdoc_20260902`** — **EXECUTED & gate-accepted 2026-09-04
+  (comment-only top-doc round closed per user directive)**
+  - **Kind**: comment-only documentation wave (top-level `//!` module docs;
+    slicing in `PASS_SLICING.md` `comment_topdoc_20260902`). T1 front-door
+    draft (Designer, accepted) + T2 three read-only audit lanes (A fs 14 /
+    B inode 16 / C dir+copyup 10 findings), dispatched 2026-09-02.
+  - **User-directed close (2026-09-04)**: this round touches ONLY `//!`
+    module docs (`///` and inline comments reserved by the user for a later
+    round); comment-only changes receive no Reviewer wave and no compile —
+    done when applied.
+  - **Result**: main agent accepted all 40 T2 findings (anchors verified)
+    with two P10 adjudication amendments (T1 vocabulary row →
+    `per-inode transaction lock`; C-08 → `copy-up coordinate`); four parallel
+    Creators applied T1 (mod.rs 125-line crate doc + fs_type/layer/real
+    rewrites) and all 40 findings across 18 files — 22 `.rs` files total,
+    comment-only (non-comment diff = 0; lock-abbreviation / stale-term /
+    inline-Linux grep = 0 in `//!` scope; the pre-existing §13 rustfmt
+    test-block hunks in identity.rs/xattr.rs untouched). Two ktest module-doc
+    `test-assets §` citations deferred to the later round per T1 Annex A.
+  - **Artifacts**: draft/audits/receipts under
+    `components/comment-topdoc-20260902/`; packets under
+    `subagent-tasks/comment-topdoc-20260902/`.
+  - **Deferred**: per-pass commit awaits user instruction (changes
+    uncommitted); the `///`/inline-comment full-tree re-audit round is
+    user-scheduled.
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

@@ -1728,3 +1728,62 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     census：production entities = 0；test-only 单列。
   - **Explicit boundary**: 测试执行 Validation Run（`make ktest`）与
     Reviewer 静态门不在本 pass；R 线回归另行切片。
+
+- **`pass_regression_rline_20260831`**
+  - **Kind**: Creator implementation pass（回归 C 用例线）+ Reviewer 门。
+    同 Creator/同 Reviewer 修复循环模型。
+  - **Parent**: `test_assets`。
+  - **Covered micro-features**: `R1-copyup-owner-perms-regression`、
+    `R2-sparse-copyup-regression`、`R4-xino-dino-regression`。
+    `R3-flock-copyup-characterization` **排除**——characterization 用例与
+    flock 修复同 pass 落地（spec 既定流程）。
+  - **Write-set**: 新建
+    `test/initramfs/src/regression/fs/overlayfs/{copyup_owner_permissions,sparse_copyup_consistency,xino_dino_identity}.c`
+    + 修改 `test/initramfs/src/regression/fs/run_test.sh`（+3 注册行）。
+    圈外明文化：Makefile（common glob 自动收集）、`common/` 测试库、
+    xfstests runlist/block.list（另一 lane）、R-3、kernel/、.agents 记录。
+  - **Capabilities**: `compile_preflight` = `make -C
+    test/initramfs/src/regression/fs/overlayfs`（-Wall -Werror 编译该目录
+    5 个二进制，产物进 gitignored build/）+ clang-format scoped
+    检查/修复（仅限三新文件，配置 =
+    `test/initramfs/src/regression/.clang-format`）。**零测试执行授权**
+    （回归执行 = 后续 Checker Validation Run）。
+  - **Rationale**: 设计已在 test-assets spec §4 冻结（无需再走 Designer）；
+    `test/` 首次触碰故写集按文件级明文圈定；C 编译检查回应用户询问
+    （存在 scoped 形态故授权）。
+
+- **`comment_topdoc_20260902`**（2026-09-02，user 三裁决后开线）
+  - **Kind**: comment-only documentation wave（顶层 `//!` 文档面；
+    PROTOCOL rule 5 wave-level 静态门模型；rule 12 目标逐条列举于
+    packets）。零生产行为改动，验收门 = 非注释 diff = 0。
+  - **Parent**: 无新 meso（覆盖面 = 既有已接受组件的文档表面）。
+  - **Scope**: 28 文件全部 `//!` doc。T1 = crate 门口 4 文件
+    （mod.rs/fs_type.rs/layer.rs/real.rs；mod.rs 含 crate 级词汇表 +
+    模块地图 + 阅读顺序）；T2 = 其余 24 文件审计（lane A = fs 子树 7 /
+    lane B = inode 核心 9 / lane C = dir+copyup 8）。
+  - **Explicit boundary**: 行内/方法 doc 精简不在本轮（user 裁决：下一轮
+    全树全量重审）；不改任何代码语义；References 版本号不无谓翻动。
+  - **Flow**: T1 草案 → user 批准终稿 → 应用；T2 findings → 主代理核准 →
+    执行轮（机械 exact old→new）→ 诚实 Reviewer 复核。
+  - **Status**: T1 + T2A/B/C 已派发（Direct Spawn Lane，2026-09-02）；
+    产物目录 `components/comment-topdoc-20260902/`。
+  - **Execution round (2026-09-04, user-directed close)**: user 裁定——本轮
+    只改顶层 `//!` module doc（`///` 与行内注释由用户另有安排，一律不动）；
+    只改注释则不派 Reviewer、不编译，改完即收。主代理核准 T2 全部 40 条
+    findings（锚点逐一实证），裁决修订 2 处（P10 术语对齐）：T1 词汇行
+    `per-directory transaction lock` → `per-inode transaction lock`；C-08
+    `publication coordinate` → `copy-up coordinate`。四 Creator 并行
+    （`task_creator_topdoc_apply_t1_20260904` +
+    `task_creator_topdoc_exec_{a,b,c}_20260904`）：T1 四门口文件落地
+    （mod.rs crate doc 125 行 + fs_type/layer/real 重写）、lane A 14/14、
+    lane B 16/16（§13 遗留 ktest 测试块 hunk 字节未动）、lane C 10/10
+    （C-06 HIGH REGRESSION 锁缩写段纯文字化重写）。收据
+    `exec_{t1,a,b,c}_20260904.md`。
+  - **Gate result (main-agent mechanical self-check; no Reviewer/compile per
+    user directive)**: 非注释 diff = 0（全树仅剩 §13 遗留的两测试块
+    rustfmt hunk，预存非本轮产物）；`//!` 范围锁缩写 grep = 0、失效术语
+    grep = 0（`publication coordinate`/`per-directory transaction lock`/
+    `fs::mod`/stale enforcement 断言）；剩余 `CUL/DIR` 命中全在出圈的
+    `///`/行内注释与 `.agents/refactor/old/` 归档。两处 ktest 模块 doc 的
+    `test-assets-20260831 §` 引用按 T1 Annex A 既定留下一轮裁决。
+    22 文件改动未提交，per-pass commit 待 user 指令。

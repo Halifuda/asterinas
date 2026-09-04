@@ -5,7 +5,7 @@
 //! path.
 //!
 //! Every xattr full name is classified into one of two classes by prefix
-//! only (proposal §13):
+//! only:
 //!
 //! - `Private`: the name starts with the mount's selected private prefix —
 //!   `trusted.overlay.` by default, `user.overlay.` in `userxattr` mode.
@@ -24,8 +24,7 @@
 //! - **Passthrough path** (the `*_impl` entries): an own-prefix name is
 //!   dislocated one segment down ([`ESCAPE_INFIX`] inserted right after the
 //!   selected prefix) before it reaches the real authority — unconditionally,
-//!   even for a name that already carries the infix (Linux
-//!   `ovl_own_xattr_{get,set}` parity). The list transform
+//!   even for a name that already carries the infix. The list transform
 //!   ([`present_xattr_names`]) is the inverse map: own private records are
 //!   hidden and one infix segment is stripped per layer.
 //!
@@ -33,18 +32,26 @@
 //! infix-segment count: the count equals the number of overlays between the
 //! record's owner and the backing filesystem, and each layer's passthrough
 //! path adds exactly one segment while each layer's list transform strips
-//! exactly one (invariants I1-I3).
+//! exactly one.
 //!
-//! # Reserved-mutex rule (documented reservation)
+//! # userxattr feature exclusions (enforced at mount time)
 //!
-//! `userxattr` excludes the `redirect_dir`/`metacopy` features. Both are
-//! unimplemented (proposal §16 no-goals), so this refactor documents the
-//! rule instead of enforcing it (Linux `fs/overlayfs/params.c:988-1003`):
-//! when either feature is designed, a `userxattr` mount must reject the
-//! explicit combination — `userxattr` + `redirect_dir`≠nofollow → `EINVAL`;
-//! `userxattr` + `metacopy=on` → `EINVAL`; the feature defaults are silently
-//! disabled in `userxattr` mode. The parse arm in `fs/mount/options.rs`
-//! carries the same reservation.
+//! `userxattr` excludes the `redirect_dir`/`metacopy` features. The option
+//! verify phase rejects the explicit combinations — `userxattr` +
+//! `redirect_dir`≠`nofollow` → `EINVAL`; `userxattr` + `metacopy=on` →
+//! `EINVAL` — and both features remain unimplemented, so every other
+//! explicit request degrades with a disclosed one-shot warning. The
+//! exclusivity contract is recorded here because the private-prefix
+//! decision and the option surface must stay consistent.
+//!
+//! ## References
+//!
+//! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/xattrs.c#L157-L180>
+//!   (Linux `ovl_xattr_escape_name` infix insertion and `EOPNOTSUPP` limit)
+//! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/xattrs.c#L182-L218>
+//!   (Linux `ovl_own_xattr_{get,set}` unconditional escape)
+//! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/params.c#L956-L976>
+//!   (Linux userxattr redirect/metacopy exclusivity and default disabling)
 
 use super::{OverlayInode, ReaddirIndex, permission::AccessType};
 use crate::{
@@ -801,7 +808,8 @@ mod test {
     fn used_full_name_escapes_own_prefix_unconditionally() {
         // One `overlay.` infix is inserted right after the prefix.
         assert_eq!(
-            used_full_name(&xname("trusted.overlay.fsz"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            used_full_name(&xname("trusted.overlay.fsz"), OverlayXattrPrefix::Trusted.as_str())
+                .unwrap(),
             "trusted.overlay.overlay.fsz"
         );
         // The insertion is unconditional, even for an already-escaped name.
@@ -815,7 +823,8 @@ mod test {
         );
         // Exactly-the-prefix boundary.
         assert_eq!(
-            used_full_name(&xname("trusted.overlay."), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            used_full_name(&xname("trusted.overlay."), OverlayXattrPrefix::Trusted.as_str())
+                .unwrap(),
             "trusted.overlay.overlay."
         );
         // The same escape under the `userxattr` prefix.

@@ -7,7 +7,7 @@
 //! effectively read-only or `default_permissions`, the `xino`/UUID modes, the
 //! selected private-xattr prefix, and the effective overlay UUID. The
 //! upper-filesystem capabilities are measured during mount construction and
-//! stored separately in `fs::mount::capabilities`.
+//! published here as fixed state; the policy performs no probing itself.
 
 use super::mount::{capabilities::UpperFilesystemCapabilities, inuse::Uuid};
 use crate::fs::fs_impls::overlayfs::inode::OverlayXattrPrefix;

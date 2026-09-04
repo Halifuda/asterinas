@@ -4,8 +4,10 @@
 //! The overlay filesystem object and its VFS-facing superblock surface.
 //!
 //! `OverlayFs` is the per-mount overlay filesystem object that owns the
-//! layer stack, claims, policy, and projection state; the `FileSystem`
-//! impl forwards the superblock surface to the underlying real filesystem.
+//! layer stack, the upper/workdir in-use claims, the mount policy, and the
+//! dev/ino projection state — the mapping that presents overlay-visible
+//! device and inode numbers to the VFS. The `FileSystem` impl forwards the
+//! superblock surface to the underlying real filesystem.
 
 pub(super) mod mount;
 pub(super) mod policy;

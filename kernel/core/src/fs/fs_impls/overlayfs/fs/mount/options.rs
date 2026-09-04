@@ -3,16 +3,18 @@
 #![short_vis_path::add(overlayfs)]
 //! Mount option parsing for overlayfs.
 //!
-//! This module validates the mount option string into an
-//! [`MountOptions`] construction input. The recognized keys are the string
-//! keys `lowerdir`, `lowerdir+`, `upperdir`, `workdir`, `uuid`, and `xino`,
-//! the enum keys `redirect_dir`, `index`, `nfs_export`, `metacopy`,
-//! `verity`, and `fsync`, and the valueless keys `default_permissions`,
-//! `userxattr`, `volatile`, and `nooverride_creds`; unknown keys fail with
-//! `EINVAL` before any layer state is created, as do `datadir+` and
-//! `override_creds`. A key whose implementing feature is absent is accepted
-//! as raw intent and disclosed as a one-shot mount-time degrade by the
-//! verify phase.
+//! This module validates the mount option string into a
+//! [`MountOptions`] construction input. The recognized keys are the path
+//! keys `lowerdir`, `lowerdir+`, `upperdir`, and `workdir`, the mode keys
+//! `uuid` and `xino`, the raw-intent keys `redirect_dir`, `index`,
+//! `nfs_export`, `metacopy`, `verity`, and `fsync`, and the valueless keys
+//! `default_permissions`, `userxattr`, `volatile`, and `nooverride_creds`.
+//!
+//! Unknown keys fail with `EINVAL` before any layer state is created, as
+//! do `datadir+` and `override_creds`. A raw-intent key records an
+//! explicitly requested feature that is not implemented: the request is
+//! accepted and disclosed as a one-shot mount-time degrade by the verify
+//! phase.
 //!
 //! ## References
 //!
@@ -723,12 +725,11 @@ impl MountOptions {
 mod test {
     // SPDX-License-Identifier: MPL-2.0
 
-    //! Unit tests for the pure [`MountOptions::parse`] contract (U-1).
+    //! Unit tests for the pure [`MountOptions::parse`] contract.
     //!
-    //! Every expectation below is the frozen U-1 case table of the test-assets
-    //! design (`test-assets-20260831` §3.1) as amended by the MO6 delta
-    //! (`mount-options-v2-20260831` §5). The tests assert the parse surface only:
-    //! no filesystem, VFS, block, or I/O fixture is constructed.
+    //! The expectations are a frozen case table for the parse surface; the
+    //! tests assert the parse surface only: no filesystem, VFS, block, or
+    //! I/O fixture is constructed.
 
     use ostd::prelude::ktest;
 

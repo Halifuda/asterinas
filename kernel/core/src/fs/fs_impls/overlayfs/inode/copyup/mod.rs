@@ -4,26 +4,48 @@
 //! The copy-up authority: per-object coordination, winner/waiter trigger,
 //! and object-kind promotion.
 //!
-//! [`OverlayInode::copy_up`] is the single promotion entry. Each lower-backed
-//! object carries its pending publication coordinate from projection time;
-//! the entry promotes ancestors before the child and serializes winners
-//! through the `copyup` mutex.
+//! Key concepts:
+//! - **copy-up coordinate**: the pending publication name a lower-backed
+//!   object carries, with its recorded parent, from projection time until the
+//!   copy-up commit retires it.
+//! - **winner/waiter**: the tasks racing on one object's `copyup` mutex — the
+//!   winner performs the promotion; the waiters re-observe upper authority
+//!   and return.
+//! - **copy-up frame**: one recursive promotion step for one object, from
+//!   coordinate read through commit and retirement.
+//!
+//! [`OverlayInode::copy_up`] is the single promotion entry: it promotes
+//! ancestors before the child and serializes winners through the `copyup`
+//! mutex.
+//!
+//! ## Structure
+//!
+//! | Submodule | Responsibility |
+//! | --- | --- |
+//! | `workdir` | private workdir temp create/publish/cleanup lifecycle |
 //!
 //! ## Locking
 //!
-//! `InodeCache` is a leaf lock. `publish_rekey` runs under `entries.write()`
-//! alone: it never waits, never acquires another overlay lock, and never
-//! calls back into projection or copy-up. Within one copy-up frame the locks
-//! nest strictly as `CUL(self) -> DIR(publication parent) ->
-//! InodeCache.entries.write()`: the coordinate read acquires and releases
-//! `CUL` together with the `PARENT` read guard before the ancestor walk (no
-//! `CUL(child) -> CUL(parent)` edge exists), the winner then holds `CUL`
-//! continuously from re-acquisition through the commit tail and the
-//! coordinate retirement, `publish_by_rename` takes the parent `DIR` lock
-//! inside that `CUL` hold, and the cache write is the innermost leaf. No
-//! lock is released and reacquired inside the cache guard, and no new lock
-//! domain or lock edge is introduced. The pre-existing orders `CUL -> DIR`,
-//! `DIR -> PARENT`, and `CUL -> PARENT` are unchanged.
+//! The `InodeCache` write guard is the innermost leaf: `publish_rekey` runs
+//! under it alone, never waits, never acquires another overlay lock, and
+//! never calls back into projection or copy-up.
+//!
+//! Within one copy-up frame the locks nest strictly in this order: the
+//! object's `copyup` mutex, then the publication parent's directory
+//! transaction lock, then the `InodeCache` write guard.
+//!
+//! - The coordinate read acquires and releases the `copyup` mutex together
+//!   with the `recorded_parent` read guard before the ancestor walk; no
+//!   child-to-parent `copyup` mutex edge exists.
+//! - The winner then holds the `copyup` mutex continuously from
+//!   re-acquisition through the commit tail and the coordinate retirement;
+//!   `publish_by_rename` takes the parent directory transaction lock inside
+//!   that hold, and the cache write is the innermost leaf.
+//! - No lock is released and reacquired inside the cache guard, and no new
+//!   lock domain or lock edge is introduced. The pre-existing orders —
+//!   `copyup` mutex before directory transaction lock, directory transaction
+//!   lock before the `recorded_parent` guard, and `copyup` mutex before the
+//!   `recorded_parent` guard — are unchanged.
 //!
 //! ## References
 //!

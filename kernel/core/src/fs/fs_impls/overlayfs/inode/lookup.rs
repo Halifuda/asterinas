@@ -14,7 +14,8 @@
 //! the first non-directory hit terminates as a single-object result;
 //! directory hits accumulate into the lower stack until a barrier — a
 //! whiteout, an opaque directory, or a non-directory below an accumulated
-//! directory — or the upper-miss opaque-parent case.
+//! directory — or the upper-miss opaque-parent case (the name is absent
+//! in the upper and the upper parent itself is opaque).
 
 use spin::Once;
 

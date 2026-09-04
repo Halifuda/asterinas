@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #![short_vis_path::add(overlayfs)]
-//! Real (underlying) object references used by overlayfs.
+//! The real-object reference model beneath the overlay namespace.
 //!
-//! [`RealObject`] anchors one real filesystem object: its `layer_index`
-//! names the owning layer of the mount's layer stack and its dentry anchors
-//! the real entry. [`RealObject::real_inode`] reads the dentry-owned inode
-//! infallibly; a full dentry-anchored [`Path`] is rebuilt on demand through
-//! the owning layer's private clone view via `OverlayFs::real_object_path`.
-//! The owning layer carries the identity fields (fsid / container device
-//! id); they are not copied per object. [`RealObjectKey`] is the identity
-//! pair used by the inode cache.
+//! A real object is one underlying filesystem entry as seen from one layer.
+//! [`RealObject`] anchors it with the owning layer index plus the anchoring
+//! dentry; the layer's identity fields (fsid, container device id) stay on
+//! the owning layer and are not copied per object, and the anchored inode is
+//! read infallibly because the dentry owns it. A full dentry-anchored path
+//! is rebuilt on demand through the owning layer's clone view.
+//!
+//! Anchor validity follows the overlay lifetime: the owning layer strongly
+//! holds its private clone view, so a reachable logical object never
+//! observes a dead anchor. [`RealObjectKey`] pairs the visible source's
+//! layer fsid with its real inode number; it is the identity-reuse key of
+//! the inode cache.
 
 use crate::{
     fs::vfs::{inode::Inode, path::Dentry},

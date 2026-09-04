@@ -5,8 +5,23 @@
 //!
 //! [`OverlayInode`] is the published logical inode shared by every name bound
 //! to the same overlay object. It owns the per-object real-object facts, the
-//! recorded parent pointer, the per-directory transaction lock, the
+//! recorded parent pointer, the per-inode transaction lock, the
 //! precomputed projected identity, and the copy-up coordinate.
+//!
+//! # Module structure
+//!
+//! | Submodule | Responsibility |
+//! |---|---|
+//! | [`copyup`] | Copy-up promotion of lower-backed objects to the upper layer. |
+//! | [`data`] | Data-path delegation to the real authority (read, write, resize, sync). |
+//! | [`dir`] | Directory namespace mutations and whiteout publication. |
+//! | [`identity`] | Dev/ino identity projection and the lower-id record. |
+//! | [`inode_cache`] | The mount-wide real-object-key inode reuse cache. |
+//! | [`lookup`] | Upper-first name resolution and inode projection. |
+//! | [`metadata`] | The six metadata setters behind the admission pipeline. |
+//! | [`permission`] | The two-stage permission admission pipeline. |
+//! | [`readdir`] | The merged-directory readdir index and enumeration. |
+//! | [`xattr`] | The xattr private-record and passthrough paths. |
 //!
 //! # Locking
 //!

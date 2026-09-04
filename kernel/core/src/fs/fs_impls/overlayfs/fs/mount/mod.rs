@@ -1,11 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #![short_vis_path::add(overlayfs)]
-//! Mount build-time subtree: options, layer assembly, claims, and policy.
+//! Mount construction: the one-shot preparation of an overlay filesystem's
+//! published state.
 //!
-//! This module contains only mount construction state. The per-mount
-//! overlay filesystem object lives in `fs::mod` and VFS registration lives
-//! in the top-level `fs_type` module.
+//! Construction runs once per mount, before the overlay filesystem object
+//! is published: options are parsed and validated, the layer stack is
+//! assembled, the upper/workdir pair is claimed, upper-filesystem
+//! capabilities are probed, and the mount policy is assembled from the
+//! results.
+//!
+//! ## Structure
+//!
+//! | Submodule | Responsibility |
+//! | --- | --- |
+//! | `options` | parse and validate the mount option string into construction input |
+//! | `layer_parts` | resolve layer roots and assemble the layer stack |
+//! | `inuse` | claim the upper/workdir pair and carry the overlay identity |
+//! | `capabilities` | probe upper-filesystem capabilities after the claim |
 
 pub(super) mod capabilities;
 pub(in overlayfs) mod inuse;

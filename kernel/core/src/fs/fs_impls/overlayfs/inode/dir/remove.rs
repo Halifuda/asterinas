@@ -3,12 +3,15 @@
 //! The remove recipes: the shared unlink/rmdir recipe on [`OverlayInode`],
 //! parameterized by [`RemoveKind`].
 //!
-//! [`RemoveKind::{Unlink, Rmdir}`] names the operation; `remove_target` is
-//! the shared recipe, with `clear_empty_exchange` and `translate_stale_upper_enoent` as helpers.
+//! [`RemoveKind::Unlink`] and [`RemoveKind::Rmdir`] name the operation;
+//! `remove_target` is the shared recipe, with `clear_empty_exchange` and
+//! `translate_stale_upper_enoent` as helpers.
 //!
 //! Lock contract: this module enters the per-object copy-up coordination
-//! lock only through the copy-up step of `check_permission`, and never
-//! touches the whiteout cache lock.
+//! lock only through the copy-up step of `check_permission`, which runs
+//! before the parent transaction lock is taken; the whiteout cache lock is
+//! entered only through `publish_whiteout`, while holding the parent
+//! directory transaction lock.
 //!
 //! ## References
 //!

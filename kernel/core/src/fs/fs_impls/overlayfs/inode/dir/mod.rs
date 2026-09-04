@@ -3,9 +3,11 @@
 //! The overlayfs namespace-mutation and whiteout subsystem.
 //!
 //! This module hosts the `Inode`-trait entries for directory name-space
-//! mutations (create/mknod/link/unlink/rmdir/rename). Each entry resolves a
-//! fresh projection of the target name under the parent directory transaction
-//! lock and delegates the actual mutation to a per-directory recipe.
+//! mutations: create (which also serves mkdir), mknod, link, unlink, rmdir,
+//! rename, and the symlink `write_link`. Each entry except `write_link`
+//! resolves a fresh projection of the target name under the parent directory
+//! transaction lock and delegates the actual mutation to a per-directory
+//! recipe.
 //!
 //! Key concepts:
 //! - **lookup**: the overlay-visible answer for a `(parent, name)` pair — a
@@ -16,12 +18,14 @@
 //! - **whiteout**: an upper-layer visibility barrier published when a
 //!   lower-backed name is removed; the `whiteout` submodule owns its cache and
 //!   publish mechanics.
-//! - **entry admission contract**: the six namespace-mutation entries run
-//!   `check_permission(Mutating, MAY_WRITE)` (including any required
-//!   copy-up promotion) before acquiring the parent directory transaction
-//!   lock; rename additionally pre-promotes the source before taking either
-//!   parent lock. The recipes therefore assume the caller already admitted
-//!   the request and do not re-check permission.
+//! - **entry admission contract**: the six parent-lock-taking entries run
+//!   `check_permission(Mutating, MAY_WRITE)` (including any required copy-up
+//!   promotion) before acquiring the parent directory transaction lock;
+//!   rename additionally pre-promotes the source before taking either parent
+//!   lock. The recipes therefore assume the caller already admitted the
+//!   request and do not re-check permission. The symlink `write_link` entry
+//!   is the exception: a thin delegation with no transaction lock and no
+//!   admission check.
 //!
 //! ## Structure
 //!

@@ -13,8 +13,8 @@
 //! cookies are monotonic and never reused, with `1`/`2` reserved for `.`/`..`.
 //!
 //! A **`Tombstone`** entry records a deleted name that keeps its cookie. An
-//! **opaque directory** in a lower layer is a lower-search barrier: the
-//! layer's own names still surface, but names in the layers below it never do.
+//! **opaque directory** is a lower-search barrier: the opaque layer's own
+//! names still surface, but names in the layers below it never do.
 //!
 //! ## `..` identity
 //!

@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #![short_vis_path::add(overlayfs)]
-//! Layer stack and real-object stack types for overlayfs.
+//! The layer-model types of an overlay mount.
 //!
-//! [`Layer`] and [`LayerStack`] describe the static layer roots of one mount.
-//! [`RealObjectStack`] describes the real-object composition behind one
-//! logical overlay object: an optional upper object plus the ordered lower
-//! objects.
+//! [`Layer`] is one pinned real directory root of the mount: the writable
+//! upper (at most one) or one of the read-only lowers. Each layer is the
+//! sole strong holder of a private, unregistered clone view rooted at its
+//! resolved directory, so the layer root need not be the underlying mount's
+//! root and stays alive for the mount's lifetime.
+//!
+//! [`LayerStack`] is the ordered, mount-fixed layer collection: the upper
+//! first, then the lowers topmost-first, immutable after assembly. The
+//! mount-time assembly and validation of these types is not part of this
+//! module. [`RealObjectStack`] is the per-object half of the model: the
+//! real-object composition behind one logical overlay object, with the
+//! visible-metadata source defined as the upper when present, else the
+//! topmost lower.
 
 use device_id::DeviceId;
 

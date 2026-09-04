@@ -26,8 +26,8 @@
 //! upper inode. [`IdentityPolicy::project_object_id_from_lower_id`] feeds
 //! such a record back through the same xino matrix so the object keeps a
 //! constant `st_ino` across copy-up (authority-continuity); the record's
-//! device/root pair is resolved to a per-mount `fsid` from the immutable
-//! lower-layer snapshot.
+//! device/root pair is resolved to a per-mount `fsid` against the mount's
+//! immutable lower-layer device table.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -603,7 +603,11 @@ mod test {
     }
 
     /// Builds one published-layer identity entry.
-    fn layer(fsid: u64, container_dev_id: DeviceId, lower_layer_root_ino: u64) -> LowerLayerIdentity {
+    fn layer(
+        fsid: u64,
+        container_dev_id: DeviceId,
+        lower_layer_root_ino: u64,
+    ) -> LowerLayerIdentity {
         LowerLayerIdentity {
             fsid,
             container_dev_id,
@@ -631,7 +635,11 @@ mod test {
     }
 
     /// Builds a `LowerIdOrigin` record directly (fields visible to this module).
-    fn record(container_dev_id: DeviceId, lower_layer_root_ino: u64, real_ino: u64) -> LowerIdOrigin {
+    fn record(
+        container_dev_id: DeviceId,
+        lower_layer_root_ino: u64,
+        real_ino: u64,
+    ) -> LowerIdOrigin {
         LowerIdOrigin {
             container_dev_id,
             lower_layer_root_ino,
@@ -995,7 +1003,8 @@ mod test {
         assert_eq!(LowerIdOrigin::decode(&reserved).unwrap(), None);
         // Payload slot 0: major out of range -> `DeviceId` invalid.
         let mut invalid_dev = valid_wire();
-        invalid_dev[8..16].copy_from_slice(&device_id::encode_device_numbers(0x1000, 0).to_ne_bytes());
+        invalid_dev[8..16]
+            .copy_from_slice(&device_id::encode_device_numbers(0x1000, 0).to_ne_bytes());
         assert_eq!(LowerIdOrigin::decode(&invalid_dev).unwrap(), None);
     }
 }

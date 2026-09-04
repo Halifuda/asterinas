@@ -6,8 +6,8 @@
 //! This module contains the mount-time half of the layer model: root path
 //! resolution, instance-stability probing, two-phase `LayerParts`
 //! assembly, and [`LayerStack::assemble`]. The [`Layer`] / [`LayerStack`]
-//! type definitions themselves live in `overlayfs::layer`, while this module
-//! only provides the construction logic that runs during `OverlayFs::new`.
+//! types are defined by the layer model itself; only the construction
+//! logic that runs during `OverlayFs::new` lives here.
 //!
 //! Every layer (and, riding the upper view, the workdir) is assembled with a
 //! private unregistered clone view rooted at its resolved path, reusing the
@@ -18,18 +18,19 @@
 //! - Non-`default_permissions` mounts promote mutating paths to the upper
 //!   first.
 //! - `default_permissions` mounts keep a documented limitation: the persisted
-//!   directory-merging staleness marker (the overlay `trusted.overlay.impure`
-//!   xattr) is not refreshed after mutations, so the marker can remain stale.
-//!   This limitation is scoped to that persisted marker; the other layer-stack
-//!   invariants in this module still hold.
+//!   directory-merging staleness marker (the impure xattr record under the
+//!   mount's selected private prefix) is not refreshed after mutations, so the
+//!   marker can remain stale. This limitation is scoped to that persisted
+//!   marker; the other layer-stack invariants in this module still hold.
 //! - External concurrent modification of the lower layers is unsupported:
-//!   projection and identity assume a stable layer stack, and an external
-//!   lower writer can corrupt the visible merge.
-//! - The mount boundary rejects the one mountable corruption form — lower/
-//!   upper/workdir/lower-root overlap — while read-write lower backends
-//!   remain accepted.
+//!   the dev/ino projection and the inode identity-reuse cache assume a
+//!   stable layer stack, and an external lower writer can corrupt the
+//!   visible merge.
+//! - Overlap between the upper, the workdir, and the lower layers is
+//!   rejected at the mount boundary — the one corruption form detectable
+//!   at mount time; read-write lower backends remain accepted.
 //!
-//! References:
+//! ## References
 //!
 //! - <https://elixir.bootlin.com/linux/v7.0/source/Documentation/filesystems/overlayfs.rst#L350-L364>
 //!   (Linux overlayfs parity; stacks colon-separated lowerdirs with the first entry topmost)

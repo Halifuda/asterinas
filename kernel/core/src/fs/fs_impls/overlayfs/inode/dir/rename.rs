@@ -15,7 +15,7 @@
 //!   inverts via `Exchange`. The VFS interface has no `RENAME_WHITEOUT`, and
 //!   both steps run under the same directory transaction domain, so it is
 //!   the accepted design rather than a pending TODO.
-//! - Redirect is not implemented, so the flat EXDEV default applies.
+//! - The `redirect_dir` policy is not implemented, so the flat EXDEV default applies.
 //! - Target fallback is covered by the moved source: after a successful move,
 //!   the target name is backed by the moved source's own upper/lower state,
 //!   so no separate target projection or whiteout is needed.

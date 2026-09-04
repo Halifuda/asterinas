@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The create-object recipes.
+//! The create-object recipe family.
 //!
-//! This module hosts [`OverlayInode::create_object`] (dispatcher),
-//! [`OverlayInode::create_upper_only`], and
-//! [`OverlayInode::create_over_whiteout`] (over-whiteout/opaque branch).
+//! One dispatcher routes on the fresh layer lookup of the target name: an
+//! absent or opaque-hidden name creates directly in the upper parent, a
+//! whiteout-hidden name replaces the whiteout through a completely prepared
+//! private workdir temp, and a fresh positive target fails with `ESTALE`.
 //!
 use crate::{
     fs::{
