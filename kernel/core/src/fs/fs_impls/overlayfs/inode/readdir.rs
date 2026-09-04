@@ -34,11 +34,6 @@ use crate::{
     prelude::*,
 };
 
-/// Cookie value used as the readdir offset cursor.
-///
-/// This is an ordered scalar domain distinct from a raw `usize` offset:
-/// `Ord` supports binary-search `partition_point`, while `Hash`/`Eq` keep the
-/// newtype usable as a key/cursor.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ReaddirCookie(u64);
 
@@ -48,7 +43,6 @@ enum ReaddirIndexValidity {
     NeedsRebuild,
 }
 
-/// The readdir index for an overlay merged directory; `entries` are ordered by ascending `cookie`.
 pub(super) struct ReaddirIndex {
     entries: Vec<ReaddirIndexEntry>,
     validity: ReaddirIndexValidity,
@@ -71,12 +65,6 @@ enum ReaddirIndexEntry {
 }
 
 impl OverlayInode {
-    /// Serves the VFS readdir entry: the synthesized `.`/`..` head entries and the
-    /// index's visible real entries in cookie order.
-    ///
-    /// `offset` selects the next entry after that cookie, and the returned delta
-    /// is `last_visited_cookie - offset` (0 when nothing is consumed). `Tombstone`
-    /// entries are skipped; a non-directory receiver fails with `ENOTDIR`.
     pub(super) fn readdir_at_impl(
         &self,
         offset: usize,
@@ -106,7 +94,7 @@ impl OverlayInode {
                 .is_err()
             {
                 // `.` was already consumed by this call, so the consumed
-                // delta is returned.
+                // delta is returned instead of propagating the error.
                 return Ok(delta_fn(last_visited));
             }
             last_visited = Some(ReaddirCookie(2));
@@ -128,7 +116,6 @@ impl OverlayInode {
                 Ok(d_off) => d_off,
                 Err(_) => break,
             };
-            // `d_ino` is the shared identity-policy `object_id`.
             if let Err(err) = visitor.visit(name, inode.ino(), *type_, d_off) {
                 if last_visited.is_none() {
                     return Err(err);
@@ -142,22 +129,14 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Invalidates the index for namespace mutations
-    /// and copy-up directory-authority transitions.
-    ///
-    /// Callers must already hold `self.lock`.
     pub(super) fn invalidate_readdir_index(&self, index: &mut Option<ReaddirIndex>) {
         if let Some(index) = index.as_mut() {
             index.validity = ReaddirIndexValidity::NeedsRebuild;
         }
     }
 
-    /// Inserts a freshly visible name (create/mkdir/mknod/symlink/link
-    /// publication) into a `Valid` upper-only index without a full rebuild
-    /// because a merged/lower-backed or stale index cannot provably keep
-    /// the cookie order.
-    ///
-    /// Callers must already hold `self.lock`.
+    /// A merged/lower-backed or stale index cannot provably keep cookie
+    /// order, so only a `Valid` upper-only index is updated in place.
     pub(super) fn readdir_index_insert(
         &self,
         name: &str,
@@ -166,8 +145,8 @@ impl OverlayInode {
         index: &mut Option<ReaddirIndex>,
     ) {
         // Always record the freshly visible inode so the remove path can
-        // detect a later stale-upper disappearance even in merged/lower-backed
-        // parents whose index has not been built by a prior readdir.
+        // later detect a stale-upper disappearance even in parents whose
+        // index no prior readdir has built.
         let index = index.get_or_insert_with(ReaddirIndex::new);
         if !index.insert_visible(name, inode, type_)
             || index.validity != ReaddirIndexValidity::Valid
@@ -178,15 +157,6 @@ impl OverlayInode {
         }
     }
 
-    /// Removes a hidden/removed name (unlink/rmdir publication) from a
-    /// `Valid` index without a full rebuild. If the name cannot be
-    /// tombstoned, the index falls back to `NeedsRebuild`.
-    ///
-    /// Tombstoning preserves the removed name's cookie, so readdir positions
-    /// already exposed remain stable; that is why a failed tombstone cannot
-    /// stay `Valid`.
-    ///
-    /// Callers must already hold `self.lock`.
     pub(super) fn readdir_index_remove(&self, name: &str, index: &mut Option<ReaddirIndex>) {
         let Some(index) = index.as_mut() else {
             return;
@@ -196,12 +166,6 @@ impl OverlayInode {
         }
     }
 
-    /// Updates this parent's index after a whiteout publication.
-    ///
-    /// Remove tombstones the hidden name; rename invalidates the whole index
-    /// because the visible sequence is reordered. `name` is `Some` for the
-    /// remove-style single-name update and `None` for the rename-style
-    /// invalidation.
     pub(super) fn finish_whiteout_index(
         &self,
         name: Option<&str>,
@@ -213,10 +177,8 @@ impl OverlayInode {
         }
     }
 
-    /// Counts the visible children.
-    ///
-    /// This method acquires the target directory's own `lock`; callers that
-    /// already hold it must use `ensure_readdir_index` directly.
+    /// Acquires the directory's own `lock`; a caller already holding it
+    /// must use `ensure_readdir_index` directly.
     pub(super) fn visible_child_count(&self) -> Result<usize> {
         let mut lock = self.lock.lock();
         let index = lock.as_mut().ok_or_else(|| {
@@ -231,12 +193,6 @@ impl OverlayInode {
             .count())
     }
 
-    /// Ensures the directory's index is `Valid`.
-    ///
-    /// Returns the facts the index was published from; a persistent mismatch
-    /// surfaces `EIO` and never publishes a stale index, and a failed scan
-    /// leaves the previous `Valid` index intact. The caller must already hold
-    /// `self.lock` and pass the locked index payload.
     pub(super) fn ensure_readdir_index(
         &self,
         facts: &RealObjectStack,
@@ -245,19 +201,13 @@ impl OverlayInode {
         if index.validity == ReaddirIndexValidity::Valid {
             return Ok(facts.clone());
         }
-        // Directory copy-up preserves the visible sequence (empty upper +
+        // Directory copy-up preserves the visible sequence (empty upper,
         // retained lowers), so no post-scan facts revalidation is needed.
         let sequence = self.readdir_sequence(facts)?;
         index.rebuild(sequence);
         Ok(facts.clone())
     }
 
-    /// Observes the current visible sequence of this directory from the
-    /// pinned layer real objects.
-    ///
-    /// Scans the upper (when present) and then the lowers top-to-bottom,
-    /// stops after the first opaque layer, dedupes by visible name, and
-    /// never scans `.`/`..`.
     fn readdir_sequence(
         &self,
         facts: &RealObjectStack,
@@ -272,8 +222,6 @@ impl OverlayInode {
         let layers: Vec<&RealObject> = if !facts.is_merged() {
             let source = match facts.upper.as_ref() {
                 Some(upper) => upper,
-                // The `upper.is_some() || !lowers.is_empty()` facts
-                // invariant guarantees `lowers[0]`.
                 None => &facts.lowers[0],
             };
             vec![source]
@@ -306,8 +254,6 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Serves the overlay-parent identity for the `..` entry by reading the
-    /// stored weak parent; a dead parent falls back to the self identity.
     fn resolve_parent_object_id(&self) -> ObjectId {
         let Some(parent) = self.recorded_parent.read().upgrade() else {
             return self.object_id();
@@ -317,10 +263,6 @@ impl OverlayInode {
 }
 
 impl ReaddirIndex {
-    /// Constructs the empty initial index.
-    ///
-    /// Every directory's index is built through this constructor
-    /// (`NeedsRebuild` initial state).
     pub(super) fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -330,7 +272,6 @@ impl ReaddirIndex {
         }
     }
 
-    /// Returns the visible inode pins in cookie order, skipping tombstones.
     pub(super) fn visible_inodes(&self) -> Vec<Arc<OverlayInode>> {
         self.entries
             .iter()
@@ -341,10 +282,8 @@ impl ReaddirIndex {
             .collect()
     }
 
-    /// Returns the still-remembered visible inode for `name`, if any.
-    ///
-    /// This is the in-overlay per-name record used to detect an upper-backed
-    /// name that disappeared behind the overlay.
+    /// The per-name record used to detect an upper-backed name that
+    /// disappeared behind the overlay.
     pub(super) fn visible_inode(&self, name: &str) -> Option<Arc<OverlayInode>> {
         self.entries.iter().find_map(|entry| match entry {
             ReaddirIndexEntry::Visible {
@@ -356,14 +295,9 @@ impl ReaddirIndex {
         })
     }
 
-    /// Rebuilds the index from a complete visible sequence.
-    ///
-    /// A name that was `Visible` before, points to the same logical object,
-    /// and has its previous cookie above `last_assigned` keeps that cookie;
-    /// any other appearance receives a fresh cookie.
-    ///
-    /// The rebuild discards every tombstone and sets `validity` to `Valid`;
-    /// `last_assigned` only moves forward, so cookie order stays monotonic.
+    /// A name that was `Visible` before, denotes the same logical object,
+    /// and kept a cookie above `last_assigned` retains its cookie; every
+    /// other appearance gets a fresh one.
     fn rebuild(&mut self, sequence: Vec<(String, Arc<OverlayInode>, InodeType)>) {
         let mut entries = Vec::with_capacity(sequence.len());
         let mut last_assigned = ReaddirCookie(2);
@@ -381,7 +315,8 @@ impl ReaddirIndex {
                 Some(previous) if previous > last_assigned => previous,
                 _ => {
                     let fresh = self.next_cookie;
-                    // cookie exhaustion is unreachable for any real directory; saturating keeps the cookie ordering monotonic.
+                    // Cookie exhaustion is unreachable for a real directory;
+                    // saturating keeps cookie order monotonic.
                     self.next_cookie = ReaddirCookie(self.next_cookie.0.saturating_add(1));
                     fresh
                 }
@@ -399,7 +334,6 @@ impl ReaddirIndex {
         self.tombstone_count = 0;
     }
 
-    /// Returns the index of the first entry whose cookie is above `cookie`.
     fn first_entry_after(&self, cookie: ReaddirCookie) -> Option<usize> {
         let index = self.entries.partition_point(|entry| match entry {
             ReaddirIndexEntry::Visible {
@@ -414,8 +348,6 @@ impl ReaddirIndex {
         (index < self.entries.len()).then_some(index)
     }
 
-    /// Converts the `Visible` entry `name` into a `Tombstone` in place (O(n)
-    /// by-name find, the dominant maintenance cost).
     #[must_use]
     fn remove_visible(&mut self, name: &str) -> bool {
         let Some(index) = self.entries.iter().position(|entry| {
@@ -447,12 +379,9 @@ impl ReaddirIndex {
         true
     }
 
-    /// Revives or creates the visible entry.
-    ///
-    /// The caller must only use the
-    /// create path when it can prove the new name's correct visible position
-    /// is the end of the cookie order; a mid-sequence insert must instead
-    /// mark `NeedsRebuild` — never renumber already-exposed cookies.
+    /// The create path is only for names proven to belong at the end of the
+    /// cookie order; a mid-sequence insert must fall back to `NeedsRebuild`
+    /// — never renumber already-exposed cookies.
     #[must_use]
     fn insert_visible(&mut self, name: &str, inode: Arc<OverlayInode>, type_: InodeType) -> bool {
         if let Some(index) = self.entries.iter().position(|entry| {
@@ -461,12 +390,7 @@ impl ReaddirIndex {
                 ReaddirIndexEntry::Tombstone { name: entry_name, .. } if entry_name == name
             )
         }) {
-            // Clone the revive data first: the tombstone borrow must end
-            // before `self.entries[index]` is mutated in place.
             let revive = match &self.entries[index] {
-                // The pattern binding is renamed (`weak_inode`) so the
-                // `Arc::ptr_eq` below compares the upgraded tombstone against
-                // the passed `inode` parameter, not against the `Weak`.
                 ReaddirIndexEntry::Tombstone {
                     name,
                     cookie,
@@ -501,7 +425,6 @@ impl ReaddirIndex {
         false
     }
 
-    /// Drops all tombstones, retaining only the visible entries.
     fn compact_tombstones(&mut self) {
         self.entries
             .retain(|entry| matches!(entry, ReaddirIndexEntry::Visible { .. }));

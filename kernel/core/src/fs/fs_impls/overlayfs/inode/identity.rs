@@ -49,40 +49,21 @@ use crate::{
     prelude::*,
 };
 
-/// Total bit width of a `u64` inode value.
 const U64_BITS: u32 = u64::BITS;
 
-/// The published `st_dev`/`st_ino` identity of one overlay object.
-///
-/// The pair is precomputed once by [`IdentityPolicy`] at inode creation and
-/// stored on the `OverlayInode`; it identifies one logical overlay object
-/// wherever that object is reached.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ObjectId {
-    /// Published `st_dev`.
     pub(super) dev: DeviceId,
-    /// Published `st_ino`.
     pub(super) ino: u64,
 }
 
-/// One published layer's identity triplet.
 #[derive(Clone, Copy, Debug)]
 pub(in overlayfs) struct LowerLayerIdentity {
-    /// The per-mount layer ordinal.
     fsid: u64,
-    /// The backend container device id of the layer.
     container_dev_id: DeviceId,
-    /// The layer root's real inode number.
     lower_layer_root_ino: u64,
 }
 
-/// Collects the construction-local layer identity inputs for
-/// [`IdentityPolicy::new`].
-///
-/// Returns the per-published-layer [`LowerLayerIdentity`] list (upper first
-/// when present) with the upper's entry position. The exclusion is by
-/// position, not by value: an upper sharing an underlying filesystem with a
-/// lower must not also drop the lower's entry.
 pub(in overlayfs) fn collect_layer_devs(
     layer_stack: &LayerStack,
 ) -> (Vec<LowerLayerIdentity>, Option<usize>) {
@@ -109,45 +90,21 @@ pub(in overlayfs) fn collect_layer_devs(
     (layer_devs, upper_layer_dev_index)
 }
 
-/// The immutable per-mount dev/ino projection policy.
-///
-/// Invariants: `xino_shift <= 63` (enforced by [`IdentityPolicy::new`]);
-/// `fallback_ino_allocator` never wraps (saturating); `is_all_layers_same_fs`
-/// is fixed at construction; `lower_layer_devs` is an fsid-sorted immutable
-/// snapshot with one entry per configured lower — never re-probed at runtime.
 #[derive(Debug)]
 pub(in overlayfs) struct IdentityPolicy {
-    /// The `xino=` mode; consumed from the mount policy at construction.
     xino_mode: XinoMode,
-    /// The overlay's own `st_dev` (`AnonDeviceId`), acquired in the extended
-    /// `OverlayFs::new`.
     overlay_dev_id: DeviceId,
-    /// High-bit encoding width of the xino layer id (e.g. `64 - 16` = 48-bit
-    /// payload).
     xino_shift: u32,
-    /// Whether every layer shares one underlying filesystem (fast path);
-    /// derived at construction from the published layer dev ids.
     is_all_layers_same_fs: bool,
-    /// Immutable LOWER-only identity snapshot for durable origin records.
     lower_layer_devs: Box<[LowerLayerIdentity]>,
-    /// Saturating fallback ino allocator for directories / anon inos when
-    /// xino is not applicable.
     fallback_ino_allocator: AtomicU64,
 }
 
 impl IdentityPolicy {
-    /// The xino layer id occupies the high 16 bits; the inode payload is the
-    /// low 48 bits.
     pub(in overlayfs) const XINO_SHIFT: u32 = 16;
 
-    /// Constructs the immutable projection policy from the published layer
-    /// snapshot.
-    ///
-    /// The policy keeps a LOWER-only identity snapshot: the published layer
-    /// list minus the upper's entry. Exclusion is by position, not by
-    /// value — an upper sharing an underlying filesystem with a lower must
-    /// keep the lower's entry so no lower is dropped only because its
-    /// device id matches the upper's.
+    /// Upper exclusion is by position, not by value: a lower sharing the
+    /// upper's underlying filesystem must keep its entry.
     pub(in overlayfs) fn new(
         overlay_dev_id: DeviceId,
         layer_devs: &[LowerLayerIdentity],
@@ -163,10 +120,6 @@ impl IdentityPolicy {
                 .iter()
                 .all(|layer| layer.container_dev_id == first.container_dev_id)
         });
-        // Site R1: an explicit `xino=on` cannot encode anything on an
-        // all-same-fs stack — the same-fs short-circuit already yields the
-        // non-effective behavior (upstream `super.c:1145-1147` discloses and
-        // ignores) — so the mount proceeds with behavior unchanged.
         if xino_mode == XinoMode::On && is_all_layers_same_fs {
             info!(
                 "option `xino=on` is useless with all layers on the same filesystem; ignoring it"
@@ -197,14 +150,6 @@ impl IdentityPolicy {
         matches!(self.xino_mode, XinoMode::Auto | XinoMode::On)
     }
 
-    /// Projects the dev/ino identity of a real object from its owning
-    /// layer's evidence.
-    ///
-    /// This is the entry for callers that already hold a [`RealObject`] (the
-    /// real ino is read from the object, while the layer fsid and container
-    /// dev come from the owning [`Layer`]), as opposed to the lower-id entry
-    /// that starts from a durable record, so callers need not unpack the
-    /// layer evidence into `project` themselves.
     pub(super) fn project_object_id(
         &self,
         layer: &Layer,
@@ -219,9 +164,6 @@ impl IdentityPolicy {
         )
     }
 
-    /// Projects the dev/ino identity from the durable lower-id record
-    /// through the shared [`IdentityPolicy::project`] matrix; an unresolved
-    /// origin pair leaves the caller on the visible-source fallback.
     pub(super) fn project_object_id_from_lower_id(
         &self,
         lower_id: &LowerIdOrigin,
@@ -239,14 +181,6 @@ impl IdentityPolicy {
         ))
     }
 
-    /// Projects one `(layer_id, real_ino, origin_dev)` identity input to
-    /// its published `st_dev`/`st_ino`.
-    ///
-    /// The branches make every published `st_ino` unambiguous: shared-fs
-    /// passes the origin through, an encodable pair is packed into the xino
-    /// payload, and an unencodable pair takes the fallback. The fit test
-    /// rejects truncation that would alias two layers; checked arithmetic
-    /// keeps the `payload_bits == U64_BITS` case from shifting by the full width.
     fn project(
         &self,
         layer_id: u64,
@@ -260,8 +194,6 @@ impl IdentityPolicy {
                 ino: real_ino,
             };
         }
-        // Xino encoding applies when both the real ino and the layer id
-        // fit the encoded space.
         if self.is_xino_effective() && self.xino_fits(layer_id, real_ino) {
             let payload_bits = U64_BITS - self.xino_shift;
             let encoded_ino = if payload_bits == U64_BITS {
@@ -274,10 +206,6 @@ impl IdentityPolicy {
                 ino: encoded_ino,
             };
         }
-        // No xino encoding (or the ino overflowed the payload):
-        // directories take the overlay dev plus an allocated ino, so they
-        // stay stable without an encodable payload; non-directories pass
-        // through the origin dev/ino unchanged.
         if is_directory {
             ObjectId {
                 dev: self.overlay_dev_id,
@@ -291,22 +219,15 @@ impl IdentityPolicy {
         }
     }
 
-    /// Returns whether the `(layer_id, real_ino)` pair fits the xino-encoded
-    /// ino space.
-    ///
-    /// Checked arithmetic skips the degenerate `payload_bits == U64_BITS`
-    /// (`xino_shift == 0`) case, so it never shifts by the full bit width.
+    /// The fit test rejects truncation that would alias two layers;
+    /// `xino_shift == 0` must not shift by the full width.
     fn xino_fits(&self, layer_id: u64, real_ino: u64) -> bool {
         let payload_bits = U64_BITS - self.xino_shift;
         payload_bits == U64_BITS
             || (real_ino >> payload_bits == 0 && layer_id >> self.xino_shift == 0)
     }
 
-    /// Allocates a fallback ino for directories / anon objects when xino is
-    /// not applicable.
-    ///
-    /// Saturating by construction (the counter never wraps). The first
-    /// allocation returns `1` (ino 0 is not handed out).
+    /// Starts at 1: ino 0 is never a valid published inode number.
     fn allocate_fallback_ino(&self) -> u64 {
         match self.fallback_ino_allocator.try_update(
             Ordering::Relaxed,
@@ -318,13 +239,6 @@ impl IdentityPolicy {
         }
     }
 
-    /// Resolves the unique per-mount layer id (fsid) for a durable origin
-    /// record's `(container_dev_id, lower_layer_root_ino)` pair among the
-    /// current lower layers.
-    ///
-    /// The LOWER-only table is consulted because origin records only ever
-    /// come from lower sources; an absent pair or multiple matching fsids
-    /// returns `None` to keep the visible-source fallback.
     pub(super) fn resolve_layer_id_for_record(
         &self,
         container_dev_id: DeviceId,
@@ -346,47 +260,28 @@ impl IdentityPolicy {
     }
 }
 
-/// The durable lower-source identity record: a stateless value type carrying
-/// the origin layer's `container_dev_id`, configured lower root inode, and
-/// real inode number (pre-copy-up provenance).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct LowerIdOrigin {
-    /// Durable underlying-fs identity of the origin layer: the layer root's
-    /// `st_dev` (`Layer::container_dev_id`), replacing the mount-local
-    /// `fsid` ordinal.
     container_dev_id: DeviceId,
-    /// Configured lower-layer root inode for pair-only record resolution.
     lower_layer_root_ino: u64,
-    /// Real inode number of the lower source (pre-copy-up provenance).
     real_ino: u64,
 }
 
-/// Wire version. Every older or unknown version decodes as no origin.
 const ORIGIN_WIRE_VERSION: u8 = 3;
 
-/// The wire magic marking a native origin-record buffer; any other magic
-/// decodes as "no origin".
 const ORIGIN_WIRE_MAGIC: u32 = 0x0000_00fb;
 
-/// Wire header length: magic (4) + version/flags/type/reserved (4).
 const ORIGIN_WIRE_HEADER_LEN: usize = 8;
 
-/// Wire payload length: `container_dev_id`, `lower_layer_root_ino`, and
-/// `real_ino` (8 bytes each), all native endian.
 const ORIGIN_WIRE_PAYLOAD_LEN: usize = 24;
 
 const ORIGIN_WIRE_TOTAL_LEN: usize = ORIGIN_WIRE_HEADER_LEN + ORIGIN_WIRE_PAYLOAD_LEN;
 
-/// The only known flag bits; unknown flag bits mean "origin unknown"
-/// (`Ok(None)`).
 const ORIGIN_WIRE_FLAGS_KNOWN: u8 = 0;
 
 impl LowerIdOrigin {
-    /// Constructs the record from a lower [`RealObject`] and its owning
-    /// layer.
-    ///
-    /// The per-mount `fsid` is deliberately not persisted — it is derived at
-    /// read time from the device/root pair.
+    /// The per-mount `fsid` is deliberately not persisted: it is mount-local,
+    /// so only the durable device/root pair is stored.
     fn try_from_lower(
         layer: &Layer,
         lower: &RealObject,
@@ -399,7 +294,6 @@ impl LowerIdOrigin {
         })
     }
 
-    /// Serializes the record into the native 32-byte wire buffer.
     fn serialize(&self) -> Vec<u8> {
         let mut wire = Vec::with_capacity(ORIGIN_WIRE_TOTAL_LEN);
         wire.extend_from_slice(&ORIGIN_WIRE_MAGIC.to_ne_bytes());
@@ -413,8 +307,6 @@ impl LowerIdOrigin {
         wire
     }
 
-    /// Reads one native-endian `u64` payload field at the 8-byte slot `slot`
-    /// of the wire payload (slot 0 = `container_dev_id`).
     fn read_payload_u64(bytes: &[u8], slot: usize) -> u64 {
         let offset = ORIGIN_WIRE_HEADER_LEN + slot * 8;
         u64::from_ne_bytes([
@@ -429,9 +321,6 @@ impl LowerIdOrigin {
         ])
     }
 
-    /// Conservatively decodes a wire buffer into a record: `Ok(None)` on any
-    /// structural mismatch (wrong length, bad magic, bad version, or unknown
-    /// flag bits); `Err` is reserved and unreachable.
     fn decode(bytes: &[u8]) -> Result<Option<Self>> {
         if bytes.len() != ORIGIN_WIRE_TOTAL_LEN {
             return Ok(None);
@@ -442,7 +331,6 @@ impl LowerIdOrigin {
         let version = bytes[4];
         let flags = bytes[5];
         let type_ = bytes[6];
-        // Retired v1/v2 formats are never decoded.
         if version != ORIGIN_WIRE_VERSION {
             return Ok(None);
         }
@@ -476,22 +364,13 @@ impl LowerIdOrigin {
 }
 
 impl OverlayFs {
-    /// Returns whether the persisted lower-source record is consistent with
-    /// the retained same-layer lower of `facts`: the record's real inode must
-    /// equal the retained lower's, so a forged or stale record falls back to
-    /// the visible-source projection (identity authenticity wins).
-    ///
-    // TODO(origin-verify): once the VFS gains an ino-to-inode / file-handle
-    // resolution surface, upgrade this cross-check to a full origin
-    // verification and drop the retained-lower approximation.
+    /// The real-ino equality is the authenticity check: a forged or stale
+    /// record must fall back to the visible-source projection.
     pub(super) fn origin_real_ino_resolves(
         &self,
         record: &LowerIdOrigin,
         facts: &RealObjectStack,
     ) -> bool {
-        // The record's layer is the unique current lower fsid matching its
-        // device/root pair; the retained lower at that layer is the
-        // same-layer evidence in the fresh facts.
         let Some(layer_fsid) = self
             .identity()
             .resolve_layer_id_for_record(record.container_dev_id(), record.lower_layer_root_ino())
@@ -503,22 +382,11 @@ impl OverlayFs {
             .iter()
             .find(|lower| self.layer(lower.layer_index()).fsid == layer_fsid)
         {
-            // Accepted only when the record's real inode equals the retained
-            // same-layer lower; a mismatch (the lower was replaced since
-            // copy-up) or an absent retained lower (the lower no longer
-            // participates in the name) rejects the record.
             Some(retained_lower) => record.real_ino() == retained_lower.real_inode().ino(),
             None => false,
         }
     }
 
-    /// Persists the lower-source identity record on the upper inode with a
-    /// single `set_xattr(..., CREATE_OR_REPLACE)` call; a missing
-    /// capability or `EOPNOTSUPP` is a gated no-op.
-    ///
-    /// The write routes through the xattr private path
-    /// ([`OverlayInode::set_overlay_xattr`]), so the origin record name is
-    /// never escaped.
     pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
         let layer = self.layer(lower.layer_index());
         let lower_layer_root_ino = self
@@ -540,17 +408,11 @@ impl OverlayFs {
             &mut reader,
             XattrSetFlags::CREATE_OR_REPLACE,
         ) {
-            // `EOPNOTSUPP` is a gated no-op: `Ok(())` with no record.
             Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(()),
             result => result,
         }
     }
 
-    /// Reads the persisted lower-source identity record from the upper inode.
-    ///
-    /// Returns `Ok(None)` for absent, malformed, foreign, or ambiguous
-    /// evidence, preserving the visible-source fallback; genuine xattr-read
-    /// errors propagate.
     pub(super) fn read_lower_id(&self, upper: &Arc<dyn Inode>) -> Result<Option<LowerIdOrigin>> {
         let name = overlay_record_name(OverlayRecordName::Origin, self.policy().xattr_prefix())?;
         let mut value = [0u8; ORIGIN_WIRE_TOTAL_LEN];
@@ -571,9 +433,8 @@ impl OverlayFs {
             }
             Err(err) if err.error() == Errno::ENODATA => Ok(None),
             Err(err) if err.error() == Errno::EOPNOTSUPP => Ok(None),
-            // Fail-safe: the origin wire is fixed-length, so a value that
-            // does not fit the 32-byte buffer cannot be a canonical v3
-            // record and reads as "no record".
+            // ERANGE reads as "no record": a value that overflows the fixed-length buffer
+            // cannot be a canonical v3 record.
             Err(err) if err.error() == Errno::ERANGE => Ok(None),
             Err(err) => Err(err),
         }
@@ -594,7 +455,6 @@ mod test {
 
     use super::*;
 
-    /// Builds a `DeviceId` from numeric major/minor.
     fn dev(major: u16, minor: u32) -> DeviceId {
         DeviceId::new(
             device_id::MajorId::new(major),
@@ -602,7 +462,6 @@ mod test {
         )
     }
 
-    /// Builds one published-layer identity entry.
     fn layer(
         fsid: u64,
         container_dev_id: DeviceId,
@@ -615,8 +474,6 @@ mod test {
         }
     }
 
-    /// Builds a fresh `IdentityPolicy` (each call yields a fresh fallback
-    /// allocator).
     fn build_policy(
         overlay_dev_id: DeviceId,
         layer_devs: &[LowerLayerIdentity],
@@ -634,7 +491,6 @@ mod test {
         .unwrap()
     }
 
-    /// Builds a `LowerIdOrigin` record directly (fields visible to this module).
     fn record(
         container_dev_id: DeviceId,
         lower_layer_root_ino: u64,
@@ -647,7 +503,6 @@ mod test {
         }
     }
 
-    /// Returns the valid 32-byte v3 wire buffer of a fixed example record.
     fn valid_wire() -> Vec<u8> {
         record(dev(1, 1), 100, 0x1234).serialize()
     }
@@ -663,15 +518,12 @@ mod test {
         )
         .unwrap_err();
         assert_eq!(err.error(), Errno::EINVAL);
-        // 63 and 0 are accepted.
         build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 63, XinoMode::On);
         build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 0, XinoMode::On);
     }
 
     #[ktest]
     fn same_fs_layers_pass_identity_through() {
-        // All-lower variant: every layer shares one underlying filesystem, so
-        // the origin passes through regardless of the mode or `is_directory`.
         let policy = build_policy(
             dev(9, 9),
             &[layer(0, dev(1, 1), 100)],
@@ -694,7 +546,6 @@ mod test {
             }
         );
         assert!(!policy.is_xino_effective());
-        // Upper variant: the upper entry at position 0 also shares `dev(1, 1)`.
         let policy = build_policy(
             dev(9, 9),
             &[layer(7, dev(1, 1), 1), layer(0, dev(1, 1), 100)],
@@ -716,7 +567,6 @@ mod test {
                 ino: 777
             }
         );
-        // `is_xino_effective() == false` even with `On`.
         assert!(!policy.is_xino_effective());
     }
 
@@ -729,7 +579,6 @@ mod test {
             16,
             XinoMode::On,
         );
-        // The layer fsid occupies the high 16 bits, the real ino the payload.
         let encoded = policy.project(3, 0x1234, dev(1, 1), false);
         assert_eq!(
             encoded,
@@ -738,10 +587,8 @@ mod test {
                 ino: (3 << 48) | 0x1234
             }
         );
-        // Decode-side bit math.
         assert_eq!(encoded.ino >> 48, 3);
         assert_eq!(encoded.ino & 0x0000_ffff_ffff_ffff, 0x1234);
-        // `Auto` == `On` when feasible: identical encoded result.
         let auto_policy = build_policy(
             dev(9, 9),
             &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
@@ -751,7 +598,6 @@ mod test {
         );
         assert_eq!(auto_policy.project(3, 0x1234, dev(1, 1), false), encoded);
         assert!(auto_policy.is_xino_effective());
-        // Shift 63: the single-bit payload encodes `(1 << 1) | 1 == 3`.
         let shift_63 = build_policy(
             dev(9, 9),
             &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
@@ -766,8 +612,6 @@ mod test {
                 ino: 3
             }
         );
-        // Shift 0 (degenerate): the payload is the full width, so the layer id is
-        // not encoded while the dev is still the overlay dev.
         let shift_0 = build_policy(
             dev(9, 9),
             &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
@@ -793,7 +637,6 @@ mod test {
             16,
             XinoMode::On,
         );
-        // Fallback trigger A: the ino does not fit -> file passthrough.
         assert_eq!(
             policy.project(3, 1 << 48, dev(1, 1), false),
             ObjectId {
@@ -801,8 +644,6 @@ mod test {
                 ino: 1 << 48
             }
         );
-        // Fallback trigger B: the ino does not fit and the object is a directory
-        // -> overlay dev plus an allocated ino.
         assert_eq!(
             policy.project(3, 1 << 48, dev(1, 1), true),
             ObjectId {
@@ -810,7 +651,6 @@ mod test {
                 ino: 1
             }
         );
-        // Fallback trigger C: the layer id does not fit -> file passthrough.
         assert_eq!(
             policy.project(1 << 16, 5, dev(1, 1), false),
             ObjectId {
@@ -818,7 +658,6 @@ mod test {
                 ino: 5
             }
         );
-        // Fallback trigger D: xino off; file passthrough, directory allocation.
         let off_policy = build_policy(
             dev(9, 9),
             &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
@@ -851,8 +690,6 @@ mod test {
             16,
             XinoMode::Off,
         );
-        // Three successive directory projections: starts at 1 (0 is never handed
-        // out) and strictly increases.
         let first = policy.project(3, 7, dev(1, 1), true);
         let second = policy.project(3, 7, dev(1, 1), true);
         let third = policy.project(3, 7, dev(1, 1), true);
@@ -890,9 +727,7 @@ mod test {
         );
         assert_eq!(policy.resolve_layer_id_for_record(dev(1, 1), 100), Some(0));
         assert_eq!(policy.resolve_layer_id_for_record(dev(2, 2), 200), Some(1));
-        // Absent pair.
         assert_eq!(policy.resolve_layer_id_for_record(dev(3, 3), 300), None);
-        // Ambiguous pair with different fsids.
         let ambiguous = build_policy(
             dev(9, 9),
             &[layer(0, dev(1, 1), 100), layer(1, dev(1, 1), 100)],
@@ -901,7 +736,6 @@ mod test {
             XinoMode::Off,
         );
         assert_eq!(ambiguous.resolve_layer_id_for_record(dev(1, 1), 100), None);
-        // Duplicate entries with equal fsid dedup.
         let duplicate = build_policy(
             dev(9, 9),
             &[layer(0, dev(1, 1), 100), layer(0, dev(1, 1), 100)],
@@ -910,8 +744,6 @@ mod test {
             XinoMode::Off,
         );
         assert_eq!(duplicate.resolve_layer_id_for_record(dev(1, 1), 100), Some(0));
-        // Upper exclusion is by position, not by value: the lower sharing the
-        // upper's device id is kept.
         let with_upper = build_policy(
             dev(9, 9),
             &[layer(7, dev(4, 4), 1), layer(0, dev(4, 4), 2)],
@@ -925,14 +757,12 @@ mod test {
 
     #[ktest]
     fn lower_id_wire_roundtrip_preserves_identity() {
-        // Roundtrip: buffer is exactly 32 bytes and every field survives.
         let wire = valid_wire();
         assert_eq!(wire.len(), 32);
         let decoded = LowerIdOrigin::decode(&wire).unwrap().unwrap();
         assert_eq!(decoded.container_dev_id(), dev(1, 1));
         assert_eq!(decoded.lower_layer_root_ino(), 100);
         assert_eq!(decoded.real_ino(), 0x1234);
-        // Continuity (encodable): the constant-st_ino-across-copy-up property.
         let policy = build_policy(
             dev(9, 9),
             &[layer(3, dev(1, 1), 100), layer(4, dev(2, 2), 200)],
@@ -952,10 +782,9 @@ mod test {
                 ino: (3 << 48) | 0x1234
             }
         );
-        // Continuity (directory, non-encodable): both sides take the
-        // allocated-fallback branch and allocate DIFFERENT inos; equality is NOT
-        // asserted (directory identity stability comes from the precomputed
-        // per-inode `ObjectId`, not from re-projection).
+        // Non-encodable directories allocate DIFFERENT fallback inos on the two
+        // sides; equality is not asserted because directory stability comes from
+        // the precomputed per-inode `ObjectId`.
         let dir_via_record = policy
             .project_object_id_from_lower_id(&record(dev(1, 1), 100, 1 << 48), true)
             .unwrap();
@@ -963,7 +792,6 @@ mod test {
         assert_eq!(dir_via_record.dev, dev(9, 9));
         assert_eq!(dir_via_project.dev, dev(9, 9));
         assert_ne!(dir_via_record.ino, dir_via_project.ino);
-        // Unresolved record: the caller stays on the visible-source fallback.
         assert_eq!(
             policy.project_object_id_from_lower_id(&record(dev(9, 9), 999, 5), false),
             None
@@ -972,36 +800,29 @@ mod test {
 
     #[ktest]
     fn lower_id_wire_decode_rejects_malformed() {
-        // Total length 31 or 33.
         let mut short = valid_wire();
         short.truncate(31);
         assert_eq!(LowerIdOrigin::decode(&short).unwrap(), None);
         let mut long = valid_wire();
         long.push(0);
         assert_eq!(LowerIdOrigin::decode(&long).unwrap(), None);
-        // Magic byte 0 patched.
         let mut magic = valid_wire();
         magic[0] ^= 0xff;
         assert_eq!(LowerIdOrigin::decode(&magic).unwrap(), None);
-        // Version 0 / 2 / 4 (retired or unknown).
         for version in [0u8, 2, 4] {
             let mut wire = valid_wire();
             wire[4] = version;
             assert_eq!(LowerIdOrigin::decode(&wire).unwrap(), None);
         }
-        // Unknown flag bit.
         let mut flags = valid_wire();
         flags[5] = 0x01;
         assert_eq!(LowerIdOrigin::decode(&flags).unwrap(), None);
-        // Type byte = 1.
         let mut type_byte = valid_wire();
         type_byte[6] = 1;
         assert_eq!(LowerIdOrigin::decode(&type_byte).unwrap(), None);
-        // Reserved byte = 1.
         let mut reserved = valid_wire();
         reserved[7] = 1;
         assert_eq!(LowerIdOrigin::decode(&reserved).unwrap(), None);
-        // Payload slot 0: major out of range -> `DeviceId` invalid.
         let mut invalid_dev = valid_wire();
         invalid_dev[8..16]
             .copy_from_slice(&device_id::encode_device_numbers(0x1000, 0).to_ne_bytes());

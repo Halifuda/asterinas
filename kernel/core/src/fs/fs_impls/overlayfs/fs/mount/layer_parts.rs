@@ -51,16 +51,8 @@ use crate::{
     prelude::*,
 };
 
-/// Two-phase assembly input: resolve-then-clone. The mount is the layer's
-/// private unregistered clone view.
 type LayerParts = (Arc<Mount>, DeviceId);
 
-/// Resolves `raw_path` through `lookup_no_follow` in the mounting task's
-/// filesystem context: intermediate symlink components are followed, the
-/// final component is not (mount-time roots are the literal resolved
-/// directories). This is the single shared path-resolution helper of the
-/// mount module, used for the upper/workdir resolution and the
-/// instance-stability probe.
 pub(super) fn resolve_root_path(raw_path: &str) -> Result<Path> {
     let fs_path = FsPath::from_fd_at(AT_FDCWD, raw_path, EmptyPathStr::Reject)?;
     super::super::super::with_current_posix_thread(|_task, posix_thread| {
@@ -75,11 +67,6 @@ pub(super) fn resolve_root_path(raw_path: &str) -> Result<Path> {
     })?
 }
 
-/// Probes that a root path resolves to a backend-instance-stable inode.
-///
-/// Both resolutions must match `pinned_inode`, so the checked object is the
-/// one that [`super::inuse::UpperWorkdirInuse::claim`] later uses. This is a
-/// heuristic; a failing backend returns `EOPNOTSUPP`.
 pub(super) fn verify_inode_instance_stability(
     raw_path: &str,
     pinned_inode: &Arc<dyn Inode>,
@@ -96,14 +83,7 @@ pub(super) fn verify_inode_instance_stability(
 }
 
 impl Layer {
-    /// Resolves `raw_path` into the layer's private clone view.
-    ///
-    /// The resolved layer-root dentry becomes the root of a private mount
-    /// clone (an empty mount namespace yields an unregistered view), so the
-    /// layer root need not be the underlying mount's root.
     fn resolve_parts(raw_path: &str) -> Result<LayerParts> {
-        // Missing paths surface the resolver's `ENOENT`; non-directory roots
-        // fail with `ENOTDIR`.
         let path = resolve_root_path(raw_path)?;
         if !path.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "the layer root is not a directory");
@@ -115,11 +95,6 @@ impl Layer {
 }
 
 impl LayerStack {
-    /// Assembles the resolved upper/lower layer stack of an overlay mount.
-    ///
-    /// The upper root fails with `EROFS` when its backend is read-only and
-    /// the overlay itself was not forced read-only. Non-empty `lower_dirs` is
-    /// enforced here: an empty lower stack is rejected with `EINVAL`.
     pub(super) fn assemble(
         upper_dir: Option<String>,
         lower_dirs: Vec<String>,
@@ -145,7 +120,6 @@ impl LayerStack {
             .map(|raw_path| Layer::resolve_parts(raw_path))
             .collect::<Result<_>>()?;
 
-        // The upper filesystem owns `fsid` 0 on writable overlays.
         let mut unique_fses: Vec<Arc<dyn FileSystem>> = Vec::new();
         let mut fsid_of_fn = |fs: &Arc<dyn FileSystem>| -> u64 {
             if let Some(index) = unique_fses

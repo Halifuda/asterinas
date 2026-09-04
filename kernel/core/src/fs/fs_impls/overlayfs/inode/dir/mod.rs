@@ -55,7 +55,6 @@ mod link;
 mod remove;
 mod rename;
 
-/// The two parent transaction guards acquired by rename.
 type DirLockPair<'a, 'b> = (
     MutexGuard<'a, Option<ReaddirIndex>>,
     Option<MutexGuard<'b, Option<ReaddirIndex>>>,
@@ -96,9 +95,6 @@ impl OverlayInode {
         Ok(projected)
     }
 
-    /// Detects a stale upper-backed name: `current_index` still remembers an
-    /// upper-backed inode for `name`, but `fresh_lookup` no longer resolves to
-    /// that same object.
     pub(super) fn is_stale_upper(
         &self,
         name: &str,
@@ -120,33 +116,24 @@ impl OverlayInode {
         }
     }
 
-    // Thin delegation to the current authority with no promotion: the
-    // created symlink is already upper-backed.
     pub(super) fn write_link_impl(&self, target: &str) -> Result<()> {
         self.select_real_inode().write_link(target)
     }
 
     pub(super) fn link_impl(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        // Admission and source promotion run before the parent transaction
-        // lock so no lock is ever held while copy-up takes a CUL.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        // The source must be an Overlay inode (the VFS passes an inode of
-        // this filesystem); a foreign inode is a defensive error, never a
-        // silent cast.
         let old_overlay = Arc::downcast::<OverlayInode>(old.clone()).map_err(|_| {
             Error::with_message(Errno::EIO, "the link source is not an overlay inode")
         })?;
-        // The `link` syscall performs no source check of its own (VFS gap),
-        // so this source-side check is required; the base permission check
-        // still remains authoritative.
+        // The VFS `link` syscall performs no source check of its own (VFS
+        // gap), so these source-side checks are required; the parent's base
+        // permission check remains authoritative.
         let source_metadata = old_overlay.metadata()?;
         let source_owned =
             super::permission::current_fsuid().is_some_and(|fsuid| fsuid == source_metadata.uid);
-        // Non-owner source checks: when there is no current task/posix thread
-        // (kernel-internal context), `current_fsuid()` is `None` and the
-        // permission probe permits the operation (no user credential exists
-        // to be checked); in a user context, the source-side checks below
-        // run in addition to the parent's base permission check.
+        // With no current task the source probe permits (no user credential
+        // to check); in a user context these checks run in addition to the
+        // parent's base permission check.
         if !source_owned {
             if old_overlay
                 .check_permission(
@@ -177,15 +164,9 @@ impl OverlayInode {
                 ));
             }
         }
-        // Source promotion is also part of the pre-lock admission: the shared
-        // upper path must be ready before the parent lock serializes the
-        // target-name mutation.
         let source_path = self.link_source(&old_overlay)?;
         let fs = self.fs_arc()?;
         let mut dir_guard = self.lock_dir_transaction();
-        // Fresh target projection under the parent directory transaction
-        // lock: link expects a negative target; a fresh positive means that
-        // expectation became stale, so surface ESTALE.
         let target_lookup = fs.lookup(self, name)?;
         if matches!(target_lookup, Lookup::Positive(_)) {
             return Err(Error::new(Errno::ESTALE));
@@ -208,8 +189,6 @@ impl OverlayInode {
         } else {
             self.upper_parent_path()?.link(&source_path, name)?;
         }
-        // The new name shares the source `OverlayInode`; only the readdir
-        // index needs maintenance.
         self.readdir_index_insert(
             name,
             old_overlay.clone(),
@@ -240,7 +219,6 @@ impl OverlayInode {
         replaced_inode: Option<&Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
-        // A foreign inode is a defensive error, never a silent cast.
         let source_overlay = Arc::downcast::<OverlayInode>(old_inode.clone()).map_err(|_| {
             Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
         })?;
@@ -248,14 +226,8 @@ impl OverlayInode {
             Arc::downcast::<OverlayInode>(new_dir_inode.clone()).map_err(|_| {
                 Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
             })?;
-        // Both parent admission checks run before any parent lock is taken:
-        // each `Mutating` check promotes that directory to upper authority
-        // without holding the transaction lock.
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         target_overlay.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        // The VFS-provided source inode is used for the pre-lock source
-        // promotion and the EXDEV gate; `rename_upper` performs a fresh
-        // liveness recheck after the parent locks are taken.
         source_overlay.copy_up()?;
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
             self.cross_device_gate(&source_overlay)?;
@@ -278,19 +250,14 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Returns the per-inode transaction guard for this directory.
-    ///
-    /// The payload is `Some(ReaddirIndex)` for directories; non-directories
-    /// still carry the lock as a plain serialization token.
+    /// Non-directories still carry this lock as a plain serialization token;
+    /// the `ReaddirIndex` payload is meaningful only for directories.
     fn lock_dir_transaction(&self) -> MutexGuard<'_, Option<ReaddirIndex>> {
         self.lock.lock()
     }
 
-    /// Acquires the two affected parent directory transaction guards in
-    /// stable object-identity order, each parent exactly once.
-    ///
-    /// `RealObjectKey` is not orderable, so the parents are ordered by
-    /// `Arc::as_ptr`; the same-inode case acquires the single guard once.
+    /// Acquires both parent guards in a fixed `Arc::as_ptr` address order,
+    /// each parent exactly once, so two-lock acquisition cannot deadlock.
     fn lock_parent_dir_transactions<'a, 'b>(
         &'a self,
         other: Option<&'b Arc<OverlayInode>>,

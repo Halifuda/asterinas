@@ -36,20 +36,11 @@ pub(in overlayfs) struct UpperFilesystemCapabilities {
 }
 
 impl UpperFilesystemCapabilities {
-    /// Probes the upper/workspace capabilities post-claim (writable mounts
-    /// only, sleep-capable construction context).
-    ///
-    /// The private-xattr probe measures the mount's **selected** prefix
-    /// namespace (`trusted.overlay.` by default, `user.overlay.` in
-    /// `userxattr` mode), threaded from `OverlayFs::new`.
     pub(super) fn probe(
         upper_inode: &Arc<dyn Inode>,
         workspace_inode: &Arc<dyn Inode>,
         prefix: OverlayXattrPrefix,
     ) -> Result<Self> {
-        // The d_type and char-device probes create uniquely-named temp
-        // entries in the workdir staging workspace and remove them on
-        // success/failure.
         let can_store_private_xattr = Self::probe_private_xattr(upper_inode, prefix)?;
         let can_report_directory_type = Self::probe_d_type(workspace_inode)?;
         let can_mknod_char = Self::probe_mknod_char(workspace_inode)?;
@@ -119,7 +110,6 @@ impl UpperFilesystemCapabilities {
         }
     }
 
-    /// Consumed by the origin-record store.
     pub(in overlayfs) fn can_store_private_xattr(&self) -> bool {
         self.can_store_private_xattr
     }
@@ -128,17 +118,10 @@ impl UpperFilesystemCapabilities {
         self.can_report_directory_type
     }
 
-    /// Reports whether the workdir supports the classic whiteout char device
-    /// `0:0`.
     pub(in overlayfs) fn can_mknod_char(&self) -> bool {
         self.can_mknod_char
     }
 
-    /// Applies the post-claim capability checks and derives whether the UUID
-    /// mode is effective.
-    ///
-    /// Returns whether the UUID is effective; the caller owns the
-    /// capabilities probe and the persistence step.
     pub(super) fn validate_uuid_support(&self, uuid_mode: UuidMode) -> Result<bool> {
         if !self.can_report_directory_type() {
             return_errno_with_message!(
@@ -168,11 +151,6 @@ impl UpperFilesystemCapabilities {
     }
 }
 
-/// A [`DirentVisitor`] that records whether any non-dot entry reports
-/// `InodeType::Unknown`.
-///
-/// The `readdir_at` interface requires a visitor; no existing implementation
-/// captures entry types.
 struct DTypeProbeVisitor {
     saw_unknown_non_dot: bool,
 }

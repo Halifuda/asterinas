@@ -30,7 +30,6 @@ use crate::{
     prelude::*,
 };
 
-/// The operation to retry while creating a private workdir temp.
 pub(in super::super) enum WorkdirTempRequest<'a> {
     Create {
         kind: InodeType,
@@ -45,8 +44,6 @@ pub(in super::super) enum WorkdirTempRequest<'a> {
     },
 }
 
-/// A successful private workdir-temp creation; the handle carries the
-/// request-derived [`InodeType`] needed by the kind-aware cleanup dispatcher.
 pub(in super::super) struct WorkdirTemp {
     name: String,
     path: Path,
@@ -64,15 +61,10 @@ impl WorkdirTemp {
         self.kind
     }
 
-    /// Returns the real inode of the staged workdir temp.
-    ///
-    /// Derived from the dentry-anchored [`Path`], so the inode and the path
-    /// always refer to the same workdir object.
     pub(in super::super) fn inode(&self) -> &Arc<dyn Inode> {
         self.path.inode()
     }
 
-    /// Returns the dentry-anchored path of the staged workdir temp.
     fn path(&self) -> &Path {
         &self.path
     }
@@ -117,11 +109,6 @@ impl WorkdirTempRequest<'_> {
 }
 
 impl OverlayFs {
-    /// Creates a private workdir temp object for copy-up staging, retrying
-    /// only `EEXIST` with a fresh name and propagating all other errors.
-    ///
-    /// Staging lives in the workdir workspace; the caller owns publication
-    /// and cleanup via the returned handle.
     pub(in super::super) fn create_workdir_temp(
         &self,
         target_name: &str,
@@ -151,10 +138,6 @@ impl OverlayFs {
         }
     }
 
-    /// Publishes a staged workdir temp at `(upper_parent_path, name)`.
-    ///
-    /// The token is the [`WorkdirTemp`] handle: its name routes the rename and
-    /// its dentry-anchored path remains valid as the published upper path.
     pub(in super::super) fn publish_temp(
         &self,
         temp: &WorkdirTemp,
@@ -167,11 +150,6 @@ impl OverlayFs {
         Ok(temp.path().clone())
     }
 
-    /// Removes a workdir temp object, dispatching on its known kind.
-    ///
-    /// Directories are removed with `rmdir` and every other kind with
-    /// `unlink`, because the underlying filesystem refuses to `unlink` a
-    /// directory (`EISDIR`) and would otherwise leak directory-temp residue.
     pub(in super::super) fn cleanup_workdir_temp(
         &self,
         temp_name: &str,
@@ -185,12 +163,6 @@ impl OverlayFs {
         }
     }
 
-    /// Resolves the pinned workdir staging workspace path of this writable
-    /// mount.
-    ///
-    /// The path is fixed at mount time and never re-resolves the `work` name;
-    /// a missing claim or unprepared workspace means the mount is effectively
-    /// read-only, so this entry returns `EROFS` before any workdir side effect.
     pub(in super::super) fn workdir_root_path(&self) -> Result<Path> {
         let claim = self.upper_workdir_pair().as_ref().ok_or_else(|| {
             Error::with_message(Errno::EROFS, "the overlay mount has no workdir claim")
@@ -200,10 +172,6 @@ impl OverlayFs {
 }
 
 impl OverlayInode {
-    /// Returns the pinned workdir staging workspace path of this mount.
-    ///
-    /// Lets the copy-up recipe arms resolve the staging workspace without
-    /// re-upgrading the mount themselves.
     pub(in super::super) fn workdir_root_path(&self) -> Result<Path> {
         self.fs_arc()?.workdir_root_path()
     }

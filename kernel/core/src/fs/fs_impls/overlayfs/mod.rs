@@ -151,10 +151,6 @@ use crate::{
     process::posix_thread::{AsPosixThread, PosixThread},
 };
 
-/// Runs `operation_fn` with the current task's POSIX thread.
-///
-/// `None` means a kernel-internal operation (no task / no POSIX thread);
-/// callers map `None` to their own default.
 pub(in overlayfs) fn with_current_posix_thread<T>(
     operation_fn: impl FnOnce(&CurrentTask, &PosixThread) -> T,
 ) -> Option<T> {
@@ -163,8 +159,6 @@ pub(in overlayfs) fn with_current_posix_thread<T>(
     Some(operation_fn(&task, posix_thread))
 }
 
-/// Returns the pinned child path `parent_path`/`name` through the base VFS
-/// dentry lookup; lookup errors propagate unchanged.
 pub(in overlayfs) fn lookup_child_path(parent_path: &Path, name: &str) -> Result<Path> {
     let child_dentry = parent_path
         .dentry()
@@ -173,8 +167,6 @@ pub(in overlayfs) fn lookup_child_path(parent_path: &Path, name: &str) -> Result
     Ok(Path::new(parent_path.mount_node().clone(), child_dentry))
 }
 
-/// Collects the non-`.`/non-`..` child names of a real directory inode,
-/// draining `readdir_at` until it reports no consumed entries.
 pub(in overlayfs) fn read_child_names(real_dir: &Arc<dyn Inode>) -> Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
     let mut offset = 0;
@@ -188,10 +180,6 @@ pub(in overlayfs) fn read_child_names(real_dir: &Arc<dyn Inode>) -> Result<Vec<S
     Ok(names)
 }
 
-/// Maps the `mknod` kind request to the overlay-visible object type.
-///
-/// `MknodType` has no `InodeType` conversion, so this match is the only
-/// mapping.
 pub(in overlayfs) fn mknod_object_type(mknod: &MknodType) -> InodeType {
     match mknod {
         MknodType::NamedPipe => InodeType::NamedPipe,
@@ -200,16 +188,8 @@ pub(in overlayfs) fn mknod_object_type(mknod: &MknodType) -> InodeType {
     }
 }
 
-/// The fixed-length random hex suffix of a workdir temp name (8 CSPRNG
-/// bytes rendered as 16 hex digits).
 const TEMP_NAME_RANDOM_SUFFIX_LEN: usize = 16;
 
-/// Generates a uniquely-named workdir temp name for `target_name`.
-///
-/// Uniqueness comes from a CSPRNG random suffix rather than a serial;
-/// `create_workdir_temp` already retries `EEXIST` with a fresh name, so a
-/// collision is harmless. The target component is capped so the composite
-/// stays within [`crate::fs::utils::NAME_MAX`] for any legal target name.
 pub(in overlayfs) fn workdir_temp_name(target_name: &str) -> String {
     let mut random_bytes = [0u8; 8];
     crate::util::random::getrandom(&mut random_bytes);
@@ -222,11 +202,6 @@ pub(in overlayfs) fn workdir_temp_name(target_name: &str) -> String {
         u64::from_le_bytes(random_bytes)
     )
 }
-
-// The persisted overlay UUID record lives in the xattr module's record
-// table (`inode/xattr.rs`): `overlay_record_name(OverlayRecordName::Uuid,
-// prefix)` replaces the former `TRUSTED_OVERLAY_UUID`/`uuid_xattr_name`
-// root items.
 
 pub(super) fn init() {
     crate::fs::vfs::registry::register(&fs_type::OverlayFsType).unwrap();

@@ -31,39 +31,16 @@ use crate::{
     prelude::*,
 };
 
-/// The top-level overlay filesystem object.
-///
-/// Created by [`OverlayFs::new`]; owns the layer stack, claims, policy,
-/// projection state.
 pub(super) struct OverlayFs {
     layer_stack: LayerStack,
     policy: MountPolicy,
-    /// The dev/ino projection policy.
     identity: IdentityPolicy,
-    /// The claimed upper/workdir pair; `Some` only for writable mounts.
-    ///
-    /// Established single-threaded before publication,
-    /// and released by the claim guard's `Drop`.
-    /// The claim additionally pins the prepared workdir staging workspace inode
-    /// (`<workdir>/work`) once `prepare_workdir` completes.
     upper_workdir_pair: Option<UpperWorkdirInuse>,
-    /// The mount-scoped reusable whiteout cache.
-    ///
-    /// Bounded to one workdir staging slot.
     whiteout_cache: Mutex<WhiteoutCache>,
-    /// The mount-wide inode identity-reuse cache.
-    ///
-    /// Maps each `RealObjectKey` to a `Weak<OverlayInode>`.
     inodes: InodeCache,
     fs_event_stats: FsEventSubscriberStats,
-    /// The overlay `AnonDeviceId` RAII guard, retained for the mount lifetime.
-    ///
-    /// `IdentityPolicy::overlay_dev_id` copies the device id, so the guard
-    /// must live on the published `OverlayFs` (the substrate-idiomatic owner —
-    /// every Asterinas pseudo-fs and the legacy overlayfs hold `AnonDeviceId`
-    /// on the fs struct) or the minor number could be recycled under a live
-    /// mount. The `_`-prefixed name mirrors the sibling pseudo-fs precedent
-    /// and suppresses the unused-field lint.
+    /// Keeps the mount's `AnonDeviceId` alive: `identity` copies its device
+    /// id, so an early drop could let the minor be recycled under a live mount.
     _anon_device_id: AnonDeviceId,
     self_weak: Weak<OverlayFs>,
 }
@@ -73,12 +50,6 @@ impl OverlayFs {
         &self.layer_stack
     }
 
-    /// Resolves the layer of a real object by the uniform layer-index rule:
-    /// index `0` is the upper when present, `n >= 1` addresses
-    /// `lowers[n-1]` — the same rule the root and lookup construction use.
-    ///
-    /// Real objects are minted only from this stack's layers, so the lookup
-    /// cannot fail for a live overlay; a violation is a structural bug.
     pub(super) fn layer(&self, layer_index: usize) -> &Layer {
         if layer_index == 0 {
             return self
@@ -93,11 +64,6 @@ impl OverlayFs {
             .expect("a real object references a configured lower layer")
     }
 
-    /// Rebuilds the dentry-anchored path of a real object through its
-    /// owning layer's private clone view.
-    ///
-    /// The view strongly holds the layer root and the layer stack outlives
-    /// every reachable real object, so the rebuild is infallible.
     pub(super) fn real_object_path(&self, real: &RealObject) -> Path {
         Path::new(
             self.layer(real.layer_index()).mount.clone(),
@@ -105,8 +71,6 @@ impl OverlayFs {
         )
     }
 
-    /// Builds the inode-cache key of a real object: the owning layer's fsid
-    /// plus the real inode number.
     pub(super) fn real_object_key(&self, real: &RealObject) -> RealObjectKey {
         RealObjectKey::from_source(self.layer(real.layer_index()).fsid, real)
     }
@@ -135,10 +99,6 @@ impl OverlayFs {
         &self.whiteout_cache
     }
 
-    /// Returns the real filesystem that superblock hooks forward to: the upper
-    /// filesystem for writable mounts, otherwise the topmost lower layer.
-    ///
-    /// `sync`/`statfs` semantics are forwarded to this filesystem.
     fn selected_real_fs(&self) -> &Arc<dyn FileSystem> {
         self.layer_stack
             .upper_layer()

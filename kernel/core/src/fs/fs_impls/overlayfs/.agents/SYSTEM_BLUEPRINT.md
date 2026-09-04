@@ -593,6 +593,43 @@ Record only active or recently changed passes here. Durable slicing rationale be
     uncommitted); the `///`/inline-comment full-tree re-audit round is
     user-scheduled.
 
+- **`comment_inline_20260904`** — **EXECUTED & gate-accepted 2026-09-04
+  (harsh `///` + inline `//` adjudication round closed same day)**
+  - **Kind**: comment-only adjudication + execution wave (user rulings of
+    record: one sentence per `///` / two per inline `//` as upper bounds
+    only; **default disposition = DELETE; survival is the exception**;
+    harsher than the ext2 baseline, virtiofs-calibrated; `//!` module docs
+    out of scope). Slicing in `PASS_SLICING.md` `comment_inline_20260904`.
+  - **Audit phase**: six parallel read-only Reviewers (door / fsmount /
+    options / inodecore / identity_xattr / dircopy) — census 589 blocks /
+    ~1725 lines, per-file grep accounting closed; verdicts DELETE ~86%,
+    KEEP 101 items (each with a cap-compliant exact replacement),
+    MOVE 2 (both main-agent-accepted: options.rs params.c References
+    consolidation + override_creds fail-fast rationale to module doc).
+  - **Execution phase**: five parallel Creators, disjoint write-sets,
+    mechanical application — 588/588 items applied, 0 stopped. One audit
+    accounting slip (8 uncovered `rename_upper` doc lines) supplemented by
+    main-agent adjudication (1 sentence kept). Gates (main-agent mechanical;
+    no Reviewer/compile per standing user ruling): comment/blank-only diff
+    PASS; forbidden-token residual grep = 0; survivors 248 lines tree-wide
+    (~86% reduction).
+  - **Artifacts**: criteria/packets under
+    `subagent-tasks/comment-inline-20260904/`; six audit reports + five
+    exec receipts + four review reports under
+    `components/comment-inline-20260904/`.
+  - **Review phase (user-directed)**: four read-only Reviewers, five-gate
+    protocol (traceability / KEEP fidelity / boundary / residual tokens /
+    independently re-derived coverage) — 4/4 PASS, zero mismatches, zero
+    execution defects. Main-agent adjudication of two cross-lane
+    observations (carrier docs deleted by a sibling lane): **code-as-spec
+    accepted** — marker-read semantics carried by the `has_marker` match
+    arms, real-object invariant by the `debug_assert` in
+    `RealObjectStack::new`. Round **CLOSED (review-accepted)**.
+  - **Deferred**: per-pass commit awaits user instruction. Side finding
+    adjudicated by the user (2026-09-04): `UuidMode::Null` vs `Off`
+    behavioral indistinguishability becomes its own future round (code
+    placement and redundancy handling), not a comment-line item.
+
 ## 4. Open Escalations / Notes
 
 - Protocol decision recorded for the design wave: Macro/Meso/Micro remain the

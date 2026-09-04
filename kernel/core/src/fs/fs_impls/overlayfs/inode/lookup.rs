@@ -39,27 +39,19 @@ use crate::{
     prelude::*,
 };
 
-/// The overlay-visible result of resolving one name under a directory.
 #[derive(Clone)]
 pub(super) enum Lookup {
     Positive(Arc<OverlayInode>),
     Negative(NegativeLookup),
 }
 
-/// The reason a name is not visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NegativeLookup {
-    /// The name is absent from every layer.
     Absent,
-    /// The name is hidden by a whiteout barrier.
     HiddenByWhiteout,
-    /// The name is hidden by an opaque-directory barrier.
     HiddenByOpaque,
 }
 
-/// How a projected [`OverlayInode`] binds into the namespace: the mount
-/// root (its self-parent `Weak` is built by `Arc::new_cyclic`) or a named
-/// child under its canonical parent.
 #[derive(Clone, Copy)]
 pub(super) enum ProjectionBinding<'a> {
     Root,
@@ -69,15 +61,6 @@ pub(super) enum ProjectionBinding<'a> {
     },
 }
 
-/// Returns whether `real_inode` is a whiteout.
-///
-/// `true` when either: the object is a character device with device
-/// number `0:0` (backends report it as `Some(DeviceId::null())`, or as
-/// `None` for a zero device number such as ramfs); or the mount's selected
-/// private-prefix whiteout record (`trusted.overlay.whiteout` by default,
-/// `user.overlay.whiteout` in `userxattr` mode) has the value exactly
-/// `'y'`. An `ERANGE`, `ENODATA`, or `EOPNOTSUPP` marker read is not a
-/// whiteout (`false`); any other error propagates.
 pub(super) fn is_whiteout_inode(
     real_inode: &Arc<dyn Inode>,
     prefix: OverlayXattrPrefix,
@@ -95,13 +78,6 @@ pub(super) fn is_whiteout_inode(
     )
 }
 
-/// Returns whether `real` is an opaque directory (a lower-search barrier).
-///
-/// A non-directory is never opaque (`false`). A directory is opaque exactly
-/// when the mount's selected private-prefix opaque record
-/// (`trusted.overlay.opaque` by default, `user.overlay.opaque` in
-/// `userxattr` mode) has the value `'y'`; an `ENODATA`, `EOPNOTSUPP`, or
-/// `ERANGE` read is not opaque (`false`), and any other error propagates.
 pub(super) fn is_opaque_directory(real: &RealObject, prefix: OverlayXattrPrefix) -> Result<bool> {
     if !real.real_inode().type_().is_directory() {
         return Ok(false);
@@ -114,8 +90,6 @@ pub(super) fn is_opaque_directory(real: &RealObject, prefix: OverlayXattrPrefix)
 }
 
 impl OverlayFs {
-    /// Runs the upper-first layer lookup for `name` inside `parent`'s
-    /// real layers, with overlayfs merge-stop semantics.
     fn lookup_in_layers(&self, parent: &Arc<OverlayInode>, name: &str) -> Result<Lookup> {
         let prefix = self.policy().xattr_prefix();
         let mut dir_hits: Vec<RealObject> = Vec::new();
@@ -158,9 +132,6 @@ impl OverlayFs {
                 Ok(child_path) => {
                     let hit = RealObject::new(layer_index, child_path.dentry().clone());
                     if is_whiteout_inode(hit.real_inode(), prefix)? {
-                        // A whiteout is the topmost occurrence of the name:
-                        // the name is hidden. Below an already-visible
-                        // directory it only ends the downward merge scan.
                         if dir_hits.is_empty() {
                             return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                         }
@@ -173,9 +144,6 @@ impl OverlayFs {
                                 ProjectionBinding::Child { parent, name },
                             )));
                         }
-                        // A non-directory below an accumulated directory hit
-                        // stops the downward merge: every deeper layer stays
-                        // hidden.
                         break;
                     }
                     let is_opaque = is_opaque_directory(&hit, prefix)?;
@@ -204,10 +172,6 @@ impl OverlayFs {
         )))
     }
 
-    /// Resolves one `name` under `parent` into a [`Lookup`].
-    ///
-    /// The flow is pure resolve: the layer-ordered lookup re-observes fresh
-    /// layer truth and projects it directly, with no verify-then-serve cache.
     pub(super) fn lookup(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
         let parent_arc = self.inodes().get(parent.key(self)).ok_or_else(|| {
             Error::with_message(
@@ -218,15 +182,8 @@ impl OverlayFs {
         self.lookup_in_layers(&parent_arc, name)
     }
 
-    /// Creates or reuses the shared [`OverlayInode`] for `facts`.
-    ///
-    /// The `object_id` is computed lazily: a valid cache hit is returned
-    /// without reading the upper's lower-id origin record. On a miss the
-    /// lower-id read is still done before the inode-cache write path, so it
-    /// never runs inside the cache's upgraded guard.
-    ///
-    /// A validated hit returns the existing inode unwritten; the binding
-    /// shapes only the miss-side construction.
+    /// A valid cache hit returns without the lower-id origin read; on a miss
+    /// that read completes before the inode-cache write guard is taken.
     pub(super) fn project_inode(
         &self,
         facts: &RealObjectStack,
@@ -235,20 +192,13 @@ impl OverlayFs {
         let source = facts.visible_source();
         let key = self.real_object_key(source);
         let is_directory = facts.is_merged() || source.real_inode().type_().is_directory();
-        // Clone the visible source before the closures move `facts`: the
-        // get-or-create predicate validates a cached hit against this real
-        // inode, replacing an ino-reuse stale occupant. The fresh-truth
-        // upper presence is captured here as well, because the predicate
-        // must distinguish a lower-only fresh truth (below) from an
-        // upper-backed one.
         let source_inode = facts.visible_source().real_inode().clone();
         let fresh_is_lower_only = facts.upper.is_none();
         if let Some(inode) = self.inodes().get(key) {
             let hit_valid = if fresh_is_lower_only {
-                // Reuse only an inode whose visible source is exactly
-                // this lower; a stale-upper inode must not be reused even
-                // though `contains_real_inode` matches the retained
-                // lower, because its dead-upper metadata would be wrong.
+                // A stale-upper inode must not be reused even though
+                // `contains_real_inode` matches the retained lower: its
+                // dead-upper metadata would be wrong.
                 Arc::ptr_eq(inode.visible_source().real_inode(), &source_inode)
             } else {
                 inode.contains_real_inode(&source_inode)
@@ -264,12 +214,7 @@ impl OverlayFs {
         };
         let object_id = if source.layer_index() == 0 {
             match self.read_lower_id(source.real_inode()) {
-                // Defensive: the record was device-validated at the read boundary,
-                // so `None` here is the absent/ambiguous-device corner.
                 Ok(Some(record)) => {
-                    // The record is accepted only when its real inode is
-                    // consistent with the retained same-layer lower of the
-                    // fresh facts.
                     if self.origin_real_ino_resolves(&record, facts) {
                         self.identity()
                             .project_object_id_from_lower_id(&record, is_directory)
@@ -298,10 +243,9 @@ impl OverlayFs {
             key,
             move |carrier| {
                 if fresh_is_lower_only {
-                    // Reuse only an inode whose visible source is exactly
-                    // this lower; a stale-upper inode must not be reused even
-                    // though `contains_real_inode` matches the retained
-                    // lower, because its dead-upper metadata would be wrong.
+                    // A stale-upper inode must not be reused even though
+                    // `contains_real_inode` matches the retained lower: its
+                    // dead-upper metadata would be wrong.
                     Arc::ptr_eq(carrier.visible_source().real_inode(), &source_inode)
                 } else {
                     carrier.contains_real_inode(&source_inode)

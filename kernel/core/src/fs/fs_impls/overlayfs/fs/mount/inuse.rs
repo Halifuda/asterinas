@@ -34,17 +34,10 @@ const WORKDIR_MODE: InodeMode = InodeMode::from_bits_truncate(0o700);
 
 const WORKDIR_CLEANUP_MAX_DEPTH: usize = 2;
 
-/// The unified 64-bit identity of one writable overlay mount.
-///
-/// The value is never zero. It serves as the claim token for
-/// [`InuseGuard`]; when effective, it is also the overlay UUID
-/// persisted as `trusted.overlay.uuid` and published through
-/// `MountPolicy::uuid()`/`SuperBlock::fsid`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in super::super) struct Uuid(u64);
 
 impl Uuid {
-    /// Creates a [`Uuid`], rejecting the zero value with `EINVAL`.
     fn try_new(value: u64) -> Result<Self> {
         if value == 0 {
             return_errno_with_message!(Errno::EINVAL, "the overlay uuid must be non-zero");
@@ -56,7 +49,6 @@ impl Uuid {
         self.0
     }
 
-    /// Generates a fresh non-zero identity from the kernel CSPRNG.
     pub(super) fn generate() -> Self {
         loop {
             let mut bytes = [0u8; OVERLAY_UUID_SIZE];
@@ -69,10 +61,8 @@ impl Uuid {
     }
 }
 
-/// A runtime lease on one root inode's `OverlayInuseSlot`.
-///
-/// The guard pins the claimed inode so the slot cannot be evicted while the
-/// claim is held and holds the unified non-zero token.
+/// Pins the claimed inode so its `OverlayInuseSlot` cannot be evicted (and
+/// the claim silently lost) while the lease is held.
 #[derive(Debug)]
 struct InuseGuard {
     inode: Arc<dyn Inode>,
@@ -80,9 +70,6 @@ struct InuseGuard {
 }
 
 impl InuseGuard {
-    /// Claims the inode's `OverlayInuseSlot` with `identity` as the token.
-    ///
-    /// Returns `EBUSY` when the slot is already claimed by another holder.
     fn try_claim(inode: Arc<dyn Inode>, identity: Uuid) -> Result<Self> {
         inode.overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
@@ -98,7 +85,6 @@ impl Drop for InuseGuard {
     }
 }
 
-/// The exclusively claimed upper/workdir pair of a writable overlay mount.
 #[derive(Debug)]
 pub(in overlayfs) struct UpperWorkdirInuse {
     workdir: InuseGuard,
@@ -108,11 +94,6 @@ pub(in overlayfs) struct UpperWorkdirInuse {
 }
 
 impl UpperWorkdirInuse {
-    /// Validates the upper/workdir pair structurally.
-    ///
-    /// Both roots must be directories on one underlying filesystem (`st_dev`
-    /// evidence) sharing one mount node; the workdir must not overlap the
-    /// upperdir. Failures map to `ENOTDIR` / `EINVAL`.
     pub(super) fn validate_pair(upper: &Path, workdir: &Path) -> Result<()> {
         if !upper.type_().is_directory() {
             return_errno_with_message!(Errno::ENOTDIR, "upperdir is not a directory");
@@ -149,10 +130,6 @@ impl UpperWorkdirInuse {
         Ok(())
     }
 
-    /// Determines the overlay identity for the given `uuid_mode`.
-    ///
-    /// The existing-identity read measures the mount's selected private
-    /// prefix (`prefix`, threaded from `OverlayFs::new`).
     pub(super) fn determine_identity(
         upper_inode: &Arc<dyn Inode>,
         uuid_mode: UuidMode,
@@ -192,10 +169,6 @@ impl UpperWorkdirInuse {
         })
     }
 
-    /// Ensures the `<workdir>/work` staging workspace exists empty,
-    /// recreating it and replacing any residue.
-    ///
-    /// Other entries under the workdir root are left untouched.
     pub(super) fn prepare_workdir(&mut self, workdir_path: &Path) -> Result<()> {
         match self.workdir.inode.lookup(WORKDIR_NAME) {
             Ok(residue) if residue.type_().is_directory() => {
@@ -229,11 +202,6 @@ impl UpperWorkdirInuse {
         Ok(())
     }
 
-    /// Persists the overlay identity under the mount's selected private
-    /// prefix (`prefix`, threaded from `OverlayFs::new`). The write routes
-    /// through the xattr private path
-    /// ([`OverlayInode::set_overlay_xattr`]), so the record name is never
-    /// escaped.
     pub(super) fn persist_identity(&self, prefix: OverlayXattrPrefix) -> Result<()> {
         let name = overlay_record_name(OverlayRecordName::Uuid, prefix)?;
         let value = self.identity.value().to_le_bytes();
@@ -246,7 +214,6 @@ impl UpperWorkdirInuse {
         )
     }
 
-    /// Returns the pinned `<workdir>/work` staging workspace inode.
     pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
         self.workspace
             .as_ref()
@@ -259,7 +226,6 @@ impl UpperWorkdirInuse {
             })
     }
 
-    /// Returns the pinned `<workdir>/work` staging workspace path.
     pub(in overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {
         self.workspace.as_ref().ok_or_else(|| {
             Error::with_message(
@@ -269,10 +235,6 @@ impl UpperWorkdirInuse {
         })
     }
 
-    /// Reads an existing persisted identity from the upper root.
-    ///
-    /// Returns `Ok(None)` when no selected-prefix uuid record exists
-    /// (`ENODATA`); a malformed value fails with `EINVAL`.
     fn read_identity_from_upper(
         upper_inode: &Arc<dyn Inode>,
         prefix: OverlayXattrPrefix,

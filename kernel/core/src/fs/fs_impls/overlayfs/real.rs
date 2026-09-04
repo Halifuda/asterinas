@@ -21,22 +21,13 @@ use crate::{
     prelude::*,
 };
 
-/// One dentry-anchored real object of a known layer.
-///
-/// The anchor's validity follows the overlay lifetime: the owning
-/// [`Layer`](super::layer::Layer) strongly holds the layer's clone view,
-/// and the view strongly holds the dentry, so a reachable logical object
-/// never observes a dead anchor.
 #[derive(Clone, Debug)]
 pub(super) struct RealObject {
-    /// The owning layer's index in the layer stack.
     layer_index: usize,
-    /// The dentry anchoring the real entry.
     dentry: Arc<Dentry>,
 }
 
 impl RealObject {
-    /// Builds the real object for a dentry resolved at `layer_index`.
     pub(super) fn new(layer_index: usize, dentry: Arc<Dentry>) -> Self {
         Self {
             layer_index,
@@ -52,8 +43,6 @@ impl RealObject {
         &self.dentry
     }
 
-    /// Returns the anchored dentry's inode; infallible because the dentry
-    /// strongly owns it.
     pub(super) fn real_inode(&self) -> &Arc<dyn Inode> {
         self.dentry.inode()
     }
@@ -61,9 +50,7 @@ impl RealObject {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct RealObjectKey {
-    /// Layer fsid of the visible-metadata source (upper, else topmost lower).
     fsid: u64,
-    /// Real inode number of the visible-metadata source.
     real_ino: u64,
 }
 

@@ -32,9 +32,6 @@ use crate::{
 };
 
 impl OverlayInode {
-    /// Promotes the link source to upper authority and returns the shared
-    /// upper real object's dentry-anchored [`Path`] that the new target hard
-    /// link shares with the source; promotion errors propagate unchanged.
     pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
         let fs = self.fs_arc()?;
         old.copy_up()?;
@@ -47,9 +44,6 @@ impl OverlayInode {
         Ok(fs.real_object_path(upper))
     }
 
-    /// Atomically replaces the published whiteout at `name` with a hard link
-    /// to the shared source upper real object; on failure the staged hard
-    /// link is removed best-effort.
     pub(super) fn link_over_whiteout(&self, name: &str, source_path: &Path) -> Result<()> {
         let fs = self.fs_arc()?;
         let upper_parent_path = self.upper_parent_path()?;

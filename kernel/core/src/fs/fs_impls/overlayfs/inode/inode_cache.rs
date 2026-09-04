@@ -28,10 +28,7 @@ const SWEEP_INTERVAL: u64 = 1024;
 
 #[derive(Clone)]
 struct InodeCacheEntry {
-    /// Weak pin to the shared [`OverlayInode`].
     carrier: Weak<OverlayInode>,
-    /// Strong keep-alive of the real inode denoted by this entry's key when
-    /// the inode's facts no longer pin it (stale alias); `None` otherwise.
     keep_alive: Option<Arc<dyn Inode>>,
 }
 
@@ -47,18 +44,11 @@ impl Debug for InodeCacheEntry {
     }
 }
 
-/// The mount-wide inode identity-reuse cache.
-///
-/// Invariants: one real object maps to one [`OverlayInode`] while any
-/// reference lives. After a copy-up facts transition the inode is also
-/// registered under a retained old-key alias, retired by the dead-pin sweep
-/// once the inode drops.
+/// After a copy-up facts transition the entry is also retained under the
+/// old key as a stale alias, retired by the dead-pin sweep.
 #[derive(Debug)]
 pub(in overlayfs) struct InodeCache {
-    /// Weak inode pins (with optional stale-alias keep-alives).
     entries: RwMutex<HashMap<RealObjectKey, InodeCacheEntry>>,
-    /// Miss-path insert counter driving the `SWEEP_INTERVAL`-based dead-entry
-    /// sweep.
     misses_since_sweep: AtomicU64,
 }
 
@@ -70,8 +60,6 @@ impl InodeCache {
         }
     }
 
-    /// Returns the cached overlay inode for `key`, if a live inode is
-    /// registered.
     pub(super) fn get(&self, key: RealObjectKey) -> Option<Arc<OverlayInode>> {
         self.entries
             .read()
@@ -79,15 +67,10 @@ impl InodeCache {
             .and_then(|entry| entry.carrier.upgrade())
     }
 
-    /// Publishes the committing instance under its post-copy-up key and
-    /// re-takes the old key as its stale alias.
-    ///
-    /// Infallible by construction: the committing pin is a parameter (never
-    /// derived from the old-key slot, which a sibling's mint may transiently
-    /// hold), both inserts are unconditional, and a same-object or ino-reuse
-    /// occupant at the new key is superseded, not failed. Leaf lock: runs
-    /// under `entries.write()` alone, waits for nothing, calls nothing that
-    /// locks.
+    /// Infallible by construction: the committing pin is a caller parameter
+    /// (never derived from the old-key slot, which a sibling's mint may
+    /// transiently hold) and both inserts supersede any occupant rather than
+    /// fail.
     pub(super) fn publish_rekey(
         &self,
         old_key: RealObjectKey,
@@ -96,18 +79,12 @@ impl InodeCache {
         pin: &Arc<OverlayInode>,
     ) {
         let mut guard = self.entries.write();
-        // Diagnostic classification of a live different-instance occupant at
-        // the new key. The unconditional publication below supersedes every
-        // class; the log only records which convergence happened.
         if let Some(existing) = guard.get(&new_key)
             && existing.carrier.strong_count() > 0
             && !Weak::ptr_eq(&existing.carrier, &Arc::downgrade(pin))
             && let Some(occupant) = existing.carrier.upgrade()
         {
             if occupant.contains_real_inode(pin.visible_source().real_inode()) {
-                // The same real object was projected early under
-                // the new key by a concurrent lookup; the
-                // committing copy-up inode supersedes it.
                 notice!(
                     "overlay inode-cache convergence at the post-transition key \
                      {:?}: an early projection of the same real object is \
@@ -115,8 +92,6 @@ impl InodeCache {
                     new_key
                 );
             } else {
-                // A different object (ino reuse) stale-occupies
-                // the new key; its registration is replaced.
                 error!(
                     "overlay inode-cache stale identity at the post-transition key \
                      {:?}: replacing the occupant with the committing inode \
@@ -124,8 +99,8 @@ impl InodeCache {
                     new_key
                 );
             }
-            // The occupant died racing this check: superseded as a
-            // dead pin by the publication below.
+            // The occupant may die after this check; the publication below
+            // supersedes it as a dead pin regardless.
         }
         guard.insert(
             new_key,
@@ -145,13 +120,8 @@ impl InodeCache {
         }
     }
 
-    /// Returns the cached overlay inode for `key`, or creates and publishes
-    /// one via `create_fn` on a miss.
-    ///
-    /// On a live hit, `is_same_object` validates the cached inode; a stale
-    /// inode (backing-fs ino reuse) is evicted and replaced so the key is
-    /// never served a different real object. The check-then-publish sequence
-    /// is atomic.
+    /// A live hit is validated by `is_same_object`; a stale (ino-reuse)
+    /// occupant is evicted so a key never serves a different real object.
     pub(super) fn get_or_create(
         &self,
         key: RealObjectKey,
@@ -171,14 +141,9 @@ impl InodeCache {
         }
         let inode = create_fn();
         let mut guard = guard.upgrade();
-        // O(1) per-key eviction: clears any stale weak pin before the fresh
-        // inode replaces it.
         guard.remove(&key);
-        // Amortized full sweep: every `SWEEP_INTERVAL`-th miss.
         let misses = self.misses_since_sweep.fetch_add(1, Ordering::Relaxed) + 1;
         if misses.is_multiple_of(SWEEP_INTERVAL) {
-            // Reclaims dead inode pins AND their stale-alias keep-alives:
-            // dropping the entry drops the keep-alive `Arc`.
             guard.retain(|_, entry| entry.carrier.strong_count() > 0);
         }
         guard.insert(

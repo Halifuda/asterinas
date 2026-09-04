@@ -44,12 +44,6 @@ use crate::{
     prelude::*,
 };
 
-/// The classic-whiteout char device `0:0`.
-///
-/// The device number `0` is the `makedev(0, 0)` encoding of the kernel's
-/// whiteout device identity. The whiteout reader is presence-based and never
-/// inspects the number, but the char-device whiteout form is exactly this
-/// contract.
 const WHITEOUT_CHAR_DEV: u64 = 0;
 
 const WHITEOUT_TEMP_NAME_COMPONENT: &str = "whiteout";
@@ -74,11 +68,6 @@ impl WhiteoutCache {
         self.cached.take()
     }
 
-    /// Pushes a whiteout handle back into the cache's single slot.
-    ///
-    /// Bounded to one slot: an occupied slot is a protocol violation, so the
-    /// stale handle is dropped (workdir-cleanup residue, never a visible
-    /// source) rather than exceeding the bound.
     fn store(&mut self, handle: WhiteoutHandle) {
         if self.cached.replace(handle).is_some() {
             warn!(
@@ -88,26 +77,16 @@ impl WhiteoutCache {
         }
     }
 
-    /// Disables whiteout sharing by link (the cache's fallback flag).
-    ///
-    /// Set on `EMLINK`/`EOPNOTSUPP` from the link path; once `false`, every
-    /// future publish uses rename-over move semantics.
     fn disable_sharing(&mut self) {
         self.can_share_by_link = false;
     }
 }
 
-/// One cached or mutation-local workdir whiteout.
-///
-/// Invariants: `workdir_name` is non-empty and unique; the handle never
-/// outlives its use in one mutation unless re-cached. Owned by
-/// `WhiteoutCache::cached` or a mutation-local.
+/// Invariants: `workdir_name` is non-empty and unique among live temps; the
+/// handle is owned by the cache slot or a single mutation.
 #[derive(Debug)]
 struct WhiteoutHandle {
-    /// Its name in the workdir; needed for rename-over publishes.
     workdir_name: String,
-    /// The dentry-anchored workdir temp path of the whiteout; the
-    /// `Path::link`/`Path::rename` publish arms route through it.
     path: Path,
 }
 
@@ -116,17 +95,11 @@ struct WhiteoutHandle {
 /// create+xattr).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WhiteoutRepresentation {
-    /// Classic whiteout: char device `0:0` (workdir mknod).
     CharDevice,
-    /// Xattr whiteout: zero-size regular file + `trusted.overlay.whiteout`
-    /// (needs `can_store_private_xattr`).
     Xattr,
 }
 
 impl OverlayFs {
-    /// Derives the whiteout representation from the published capabilities;
-    /// a missing capability snapshot is `EROFS` and an unsupported upper is
-    /// the defensive `EOPNOTSUPP`.
     fn whiteout_representation(&self) -> Result<WhiteoutRepresentation> {
         let capabilities = self.policy().upper_capabilities().ok_or_else(|| {
             Error::with_message(
@@ -147,12 +120,6 @@ impl OverlayFs {
         }
     }
 
-    /// Creates one private workdir whiteout temp without touching the
-    /// whiteout cache lock.
-    ///
-    /// The temp is created in the workdir (never a visible source); on a
-    /// failure the created temp is removed best-effort so no workdir residue
-    /// outlives the failed creation.
     fn create_whiteout_temp(&self) -> Result<WhiteoutHandle> {
         let representation = self.whiteout_representation()?;
         let (workdir_name, path) = match representation {
@@ -186,8 +153,6 @@ impl OverlayFs {
                     &mut marker_reader,
                     XattrSetFlags::CREATE_OR_REPLACE,
                 ) {
-                    // Best-effort temp cleanup on the pre-publication failure
-                    // (the cleanup debt never becomes a visible entry).
                     let _ = self.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
                 }
@@ -197,14 +162,6 @@ impl OverlayFs {
         Ok(WhiteoutHandle { workdir_name, path })
     }
 
-    /// Publishes a whiteout at `(upper_parent_path, name)`.
-    ///
-    /// `None` publishes by link and re-caches the shared workdir original
-    /// (`EMLINK`/`EOPNOTSUPP` degrade to rename-over move semantics);
-    /// `Some(non-dir)` publishes by `Replace`, consuming the whiteout;
-    /// `Some(Dir)` publishes by `Exchange`, cleaning up the displaced
-    /// directory best-effort. The whiteout marker is written at temp
-    /// creation, before the link/rename.
     pub(super) fn publish_whiteout(
         &self,
         upper_parent_path: &Path,
@@ -224,10 +181,9 @@ impl OverlayFs {
         };
 
         let workdir_path = self.workdir_root_path()?;
-        // Publishing a whiteout inside the parent makes it impure, so the
-        // marker is refreshed before the physical publish. The marker is a
-        // cache hint whose consumer refreshes it best-effort, so a marker
-        // failure must not abort the physical publish: warn and continue.
+        // Publishing a whiteout makes the parent impure, so the marker is
+        // set before the physical publish. The marker is a best-effort
+        // cache hint, so a marker failure must not abort the publish.
         if let Err(err) =
             OverlayInode::set_impure_marker(upper_parent_path.inode(), self.policy().xattr_prefix())
         {
@@ -280,13 +236,8 @@ impl OverlayFs {
         Ok(())
     }
 
-    /// Sweeps physical whiteout residue out of an upper directory before the
-    /// physical rmdir/rename.
-    ///
-    /// Non-atomic and pre-commit: a failure aborts the removal and a retry
-    /// converges; it never recurses into directories and propagates errors
-    /// unchanged. `prefix` is the mount's selected private-xattr prefix,
-    /// threaded from the callers for the whiteout classification.
+    /// Non-atomic and pre-commit: a failure aborts the caller and a retry
+    /// converges; never recurses into directories.
     pub(super) fn cleanup_upper_whiteouts(
         upper_dir_path: &Path,
         prefix: OverlayXattrPrefix,
@@ -297,13 +248,10 @@ impl OverlayFs {
         Ok(())
     }
 
-    /// Re-observes and unlinks every named whiteout child of `upper_dir_path`.
-    ///
-    /// The removal pass of the sweep: each child is re-classified immediately
-    /// before its `unlink`, so an entry swapped in since the validation pass is
-    /// refused (`ENOTEMPTY`) instead of deleted. The re-check narrows but cannot
-    /// close the residual check-to-use window, so the upper directory must not be
-    /// modified concurrently.
+    /// Each child is re-classified immediately before its `unlink`, so an
+    /// entry swapped in since the validation pass is refused (`ENOTEMPTY`)
+    /// instead of deleted; the check-to-use window narrows but cannot
+    /// close, so the upper directory must not be modified concurrently.
     fn unlink_rechecked_whiteouts(
         upper_dir_path: &Path,
         names: &[String],
@@ -322,12 +270,6 @@ impl OverlayFs {
     }
 }
 
-/// Returns whether the named physical child of `upper_dir_path` is a whiteout.
-///
-/// The child is re-observed through the base VFS `Path` layer (`lookup_child`)
-/// and classified with the shared [`is_whiteout_inode`] predicate, keeping
-/// the base view's `DentryChildren` coherent. Underlying lookup errors
-/// propagate unchanged.
 fn is_whiteout_child(
     upper_dir_path: &Path,
     name: &str,
@@ -337,11 +279,6 @@ fn is_whiteout_child(
     is_whiteout_inode(child_path.inode(), prefix)
 }
 
-/// Validates that every named physical child of `upper_dir_path` is a
-/// whiteout, removing nothing.
-///
-/// The full-validation pass of the sweep: any non-whiteout child returns
-/// `ENOTEMPTY`, so the sweep refuses the removal before any entry is deleted.
 fn validate_whiteout_children(
     upper_dir_path: &Path,
     names: &[String],

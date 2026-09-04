@@ -1787,3 +1787,45 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     `///`/行内注释与 `.agents/refactor/old/` 归档。两处 ktest 模块 doc 的
     `test-assets-20260831 §` 引用按 T1 Annex A 既定留下一轮裁决。
     22 文件改动未提交，per-pass commit 待 user 指令。
+
+- **`comment_inline_20260904`**（2026-09-04，user 裁决后开线）
+  - **Kind**: comment-only 判别轮（`///` 与行内 `//`；topdoc round 的既定
+    下一轮）。零代码改动，判别阶段只读。
+  - **Parent**: 无新 meso（既有已接受组件的注释表面）。
+  - **User rulings（判据基线，criteria.md 为准）**: ① 上限——`///` 每条
+    ≤1 句、行内 `//` 每处 ≤2 句；上限只是存活者最大长度而非目标形态；
+    ② **下限 = 删除：默认处置 DELETE，存活是例外**；③ 判别要严厉，逐条
+    独立给理由，不许批量判决；④ `//!` 模块 doc 出圈（刚重写）。
+  - **Flow**: 全树清点 + 逐条三态判别（DELETE / KEEP 带精确替换文案 /
+    MOVE 少量提案）→ 主代理核准 → 机械执行轮（另行切片）。
+  - **Lanes（6 个只读 Reviewer，2026-09-04 派发）**: door（4 门口文件）/
+    fsmount（fs+mount 6 文件）/ options（单文件，最大注释体量）/
+    inodecore（7 文件）/ identity_xattr（2 重型文件）/ dircopy（8 文件）。
+    报告落 `components/comment-inline-20260904/`。
+  - **Status**: **EXECUTED & gate-accepted（2026-09-04 当日闭环）**。审计
+    ACCEPTED（6 lane，census 589 块/~1725 行，逐文件 grep 对账闭合；主代理
+    核准 KEEP 抽查 + 2 条 MOVE 全收）。执行轮（user 指令 4-5 Creator 负载
+    均衡）：5 个 Creator（exec1 = xattr+fsmount 150 件 / exec2 =
+    identity+copyup 127 / exec3 = dir 5 文件+door 107 / exec4 = options
+    101 + 2 MOVE / exec5 = inodecore 103），**588/588 applied、0 stopped**
+    （exec1 两次瞬时失误自恢复：HEAD blob 恢复后重落刀并机器复验）。
+    exec3 发现审计行数记账 slip——rename.rs `rename_upper` 8 行 doc 无条目
+    覆盖，主代理补判：删两句复述、留 1 句（post-rename 失败整组保守
+    reconcile）。**Gates（主代理机械自查，无 Reviewer/编译 per user 裁决）**:
+    comment/blank-only diff = PASS；锁缩写/params.c:行号/proposal § 残留
+    grep = 0；全树 `///`+`//` 存活 248 行（原 ~1725，削减 ~86%）。
+    26 文件改动未提交，per-pass commit 待 user 指令。
+  - **Review phase (2026-09-04, user-directed)**: 4 个只读 Reviewer
+    （review1 = mount 侧 7 文件 / review2 = identity+xattr / review3 =
+    copyup+inodecore 9 文件 / review4 = dir+door 10 文件），五门协议
+    （traceability / KEEP 保真 / boundary / 残留 token / coverage 独立
+    重derive）——**4/4 PASS、零 mismatch**；两条 MOVE 逐字落地核验、
+    rename.rs 主代理补判核验一致；审计/exec 收据的三处纯记账 slip
+    （identity 193 vs 194、dir/mod.rs 12 vs 11 DELETE、dircopy §5 行账）
+    均为报告内部数字，条目级与树面全部正确。**主代理裁决两条跨 lane
+    观察（均"承载文档被他 lane 并发删除"型）= code-as-spec 接受**：
+    O-1 marker-read 规格（'y'-exact + errno→false 映射）现由 has_marker
+    函数体 match 臂自承载；O-2 real-object invariant 现由
+    RealObjectStack::new 的 debug_assert + 可见 EIO 臂自承载——符合
+    user 本轮哲学（注释不承载代码可见物），不补文档。**Round CLOSED
+    (review-accepted)**。

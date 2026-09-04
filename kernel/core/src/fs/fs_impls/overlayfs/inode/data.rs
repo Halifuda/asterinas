@@ -20,9 +20,6 @@ use crate::{
 };
 
 impl OverlayInode {
-    // One `Once` read picks both the authority and the flag class:
-    // lower-backed reads add `O_NOATIME` so reading never updates the lower
-    // atime; upper-backed reads delegate with the caller's flags unchanged.
     pub(super) fn read_at_impl(
         &self,
         offset: usize,
@@ -47,11 +44,6 @@ impl OverlayInode {
         real.read_at(offset, writer, status_flags)
     }
 
-    // The `O_APPEND` branch serializes `offset := real size` + `write_at`
-    // under the per-inode lock (`append_write`) — a bare two-step
-    // size-read-then-write would be a TOCTOU where concurrent appends could
-    // read the same size and lose an update. Write-capable fds are upper by
-    // construction, so delegation never bypasses the trigger.
     pub(super) fn write_at_impl(
         &self,
         offset: usize,
@@ -65,8 +57,6 @@ impl OverlayInode {
         real.write_at(offset, reader, status_flags)
     }
 
-    // The VFS handle uses this inode's own `FileOps`, so the successful path
-    // returns `None`; failures surface as `Some(Err)`.
     pub(super) fn open_impl(
         &self,
         access_mode: AccessMode,
@@ -98,18 +88,18 @@ impl OverlayInode {
         self.select_real_inode().seek_end()
     }
 
-    // The path-based `truncate()` syscall performs no VFS-level `MAY_WRITE`
-    // check of its own, so this entry runs the uniform mutating admission
-    // before any side effect, including the copy-up promotion.
+    // The path-based `truncate()` syscall performs no VFS `MAY_WRITE` check
+    // of its own, so this entry runs the uniform mutating admission before
+    // any side effect.
     pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.copy_up()?;
         self.select_real_inode().resize(new_size)
     }
 
-    // Admission runs uniformly via `check_permission` at this entry:
-    // `fallocate` shares `resize`'s side-effect class, so the admission also
-    // runs here rather than relying on the fd path alone.
+    // `fallocate` shares `resize`'s side-effect class, so the uniform
+    // mutating admission runs at this entry too rather than on the fd path
+    // alone.
     pub(super) fn fallocate_impl(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
         self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
         self.copy_up()?;

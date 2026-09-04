@@ -52,8 +52,6 @@ impl OverlayInode {
                 "the caller is not the file owner and lacks CAP_FOWNER",
             ));
         }
-        // A non-owner without `CAP_FSETID` cannot stamp set-id bits onto the
-        // file.
         let has_fsetid = current_task_has_capability(CapSet::FSETID);
         let mut mode = mode;
         if !is_owner && !has_fsetid {
@@ -80,9 +78,8 @@ impl OverlayInode {
         if gid != metadata.gid {
             let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
             let has_cap = current_task_has_capability(CapSet::CHOWN);
-            // The owner-chgrp exemption: the owner may change the group to one
-            // of its own supplementary groups (kernel contexts default to
-            // `false`).
+            // The owner-chgrp exemption: the owner may change the group to
+            // one of its own supplementary groups.
             let in_own_group = current_in_group(gid);
             if !has_cap && !(is_owner && in_own_group) {
                 return Err(Error::with_message(
@@ -109,8 +106,6 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
-    /// Runs one best-effort time setter (the infallible VFS time-setter surface
-    /// makes failures silent no-ops).
     fn best_effort_time_set(&self, operation_fn: impl FnOnce(&Arc<dyn Inode>)) {
         let Some(metadata) = self.metadata().ok() else {
             return;

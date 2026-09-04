@@ -53,7 +53,6 @@ use crate::{
 };
 
 impl OverlayFs {
-    /// Constructs and publishes a fully prepared overlay filesystem.
     pub(in overlayfs) fn new(fs_creation_ctx: &FsCreationCtx) -> Result<Arc<Self>> {
         let options = MountOptions::parse(fs_creation_ctx.args(), fs_creation_ctx.flags())?;
 
@@ -69,22 +68,13 @@ impl OverlayFs {
             }
             None => true,
         };
-        // Site A1: `uuid=on` is ineffective on a read-only overlay because no
-        // identity flow runs. The verdict needs the final effective-readonly
-        // state (upper-fs evidence), so it cannot live in the parse layer.
         if options.uuid_mode == Some(UuidMode::On) && is_effective_read_only {
             info!(
                 "option `uuid=on` is ineffective on a read-only overlay; the overlay uuid is not persisted"
             );
         }
 
-        // The `xino=` default is resolved at the single construction
-        // consumer; `MountPolicy` receives the resolved mode.
         let xino_mode = options.xino_mode.unwrap_or(XinoMode::Auto);
-        // The selected private-xattr prefix (option parse precedes every
-        // probe/identity call, so the selection is available here). Derived
-        // once and handed to the identity flow, the capability probes, and
-        // the published policy.
         let xattr_prefix = if options.is_userxattr {
             OverlayXattrPrefix::User
         } else {
@@ -95,8 +85,8 @@ impl OverlayFs {
         let mut upper_capabilities = None;
         let mut uuid = None;
         if let Some(upper) = &layer_stack.upper {
-            // The parse invariant guarantees both option strings are present
-            // for an upper-backed overlay; the conversions below are defensive.
+            // The parse verify invariant guarantees both option strings exist
+            // for an upper-backed overlay; these conversions are defensive.
             let upper_dir = options.upper_dir.as_deref().ok_or_else(|| {
                 Error::with_message(Errno::EINVAL, "internal error: missing upperdir option")
             })?;
@@ -104,18 +94,14 @@ impl OverlayFs {
                 Error::with_message(Errno::EINVAL, "internal error: missing workdir option")
             })?;
 
-            // The upper path rides the upper layer's clone view. The workdir
-            // is not a layer and gets no view of its own: its workspace pins
-            // the resolved workdir dentry on the upper view's mount, keeping
-            // every workdir↔upper rename/link on one mount.
+            // The workdir is not a layer: building it on the upper view's
+            // mount keeps every workdir↔upper rename/link on one mount.
             let upper_path = upper.root_path();
             let workdir_path = {
                 let workdir_dentry = resolve_root_path(work_dir)?.dentry().clone();
                 Path::new(upper_path.mount_node().clone(), workdir_dentry)
             };
             UpperWorkdirInuse::validate_pair(&upper_path, &workdir_path)?;
-            // The workdir is not a layer, so `assemble`'s pairwise check
-            // cannot cover it.
             layer_stack.validate_workdir_against_lowers(&workdir_path)?;
             verify_inode_instance_stability(upper_dir, upper.root_dentry().inode())?;
             verify_inode_instance_stability(work_dir, workdir_path.inode())?;

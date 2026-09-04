@@ -82,44 +82,20 @@ use crate::{
     vm::page_cache::Vmo,
 };
 
-/// The logical overlay inode exposed to the VFS: one logical overlay object
-/// shared by every name bound to it, with an immutable lower stack and an
-/// upper object published at most once by copy-up.
 pub(super) struct OverlayInode {
-    /// The owning mount.
     fs: Weak<OverlayFs>,
-    /// The immutable lower real-object stack, topmost first.
     lowers: Vec<RealObject>,
-    /// The upper real object; unset until copy-up publishes one.
     upper: Once<RealObject>,
-    /// The precomputed projected `st_dev`/`st_ino`.
     object_id: ObjectId,
-    /// The per-inode transaction lock. Directories carry their merged-readdir
-    /// index in the payload; non-directories use the lock as a pure
-    /// serialization token with `None`.
     lock: Mutex<Option<ReaddirIndex>>,
-    /// The recorded overlay parent: the logical parent written at first
-    /// binding, which is also the copy-up publication parent. The mount root
-    /// points to itself through a `Weak` self-reference; every other inode
-    /// points to its logical parent. `Weak` avoids the parent-child cycle
-    /// with the readdir index.
+    /// The mount root self-points through this `Weak`, which breaks the
+    /// parent/readdir-index ownership cycle.
     recorded_parent: RwMutex<Weak<OverlayInode>>,
-    /// The copy-up arbitration coordinate and pending publication name:
-    /// `Some(name)` while the object is lower-backed (to be published at
-    /// `(recorded_parent, name)`), `None` once retired. The sole
-    /// published-facts source is `upper`.
     copyup: Mutex<Option<String>>,
-    /// The VFS inode extension groups (fs event publisher / fs lock context).
     extension: Extension,
 }
 
 impl OverlayInode {
-    /// Constructs the overlay mount root inode on demand.
-    ///
-    /// The root facts merge the upper root with all lower roots; the root is
-    /// always a directory. Construction is delegated to the shared
-    /// [`OverlayFs::project_inode`] path so the root uses the same inode-cache
-    /// and identity projection as every other logical object.
     pub(super) fn new_root(fs: Weak<OverlayFs>) -> Arc<dyn Inode> {
         let fs = match fs.upgrade() {
             Some(fs) => fs,
@@ -147,15 +123,10 @@ impl OverlayInode {
         )
     }
 
-    /// Returns the inode-cache key derived from the current visible source.
-    ///
-    /// The owning layer's fsid is read through the mount's layer stack, so
-    /// the caller supplies the live mount.
     fn key(&self, fs: &OverlayFs) -> RealObjectKey {
         fs.real_object_key(self.visible_source())
     }
 
-    /// Returns the current visible real-object source.
     fn visible_source(&self) -> &RealObject {
         self.upper.get().unwrap_or_else(|| {
             self.lowers
@@ -164,8 +135,6 @@ impl OverlayInode {
         })
     }
 
-    /// Returns whether `real_inode` is this object's visible source or one of
-    /// its retained lowers.
     fn contains_real_inode(&self, real_inode: &Arc<dyn Inode>) -> bool {
         Arc::ptr_eq(self.visible_source().real_inode(), real_inode)
             || self
@@ -174,15 +143,10 @@ impl OverlayInode {
                 .any(|lower| Arc::ptr_eq(lower.real_inode(), real_inode))
     }
 
-    /// Materializes the current real-object stack as an owned value.
     fn real_object_stack(&self) -> RealObjectStack {
         RealObjectStack::new(self.upper.get().cloned(), self.lowers.clone())
     }
 
-    /// Returns the precomputed projected `st_dev`/`st_ino`.
-    ///
-    /// Copy-up re-projection keeps the lower-id-derived identity, so the
-    /// value is stable across copy-up (authority-continuity invariant).
     fn object_id(&self) -> ObjectId {
         self.object_id
     }
@@ -191,11 +155,6 @@ impl OverlayInode {
         self.visible_source().real_inode().clone()
     }
 
-    /// Returns the dentry-anchored path of the promoted upper real parent
-    /// directory, rebuilt through the upper layer's clone view.
-    ///
-    /// After promotion the object is guaranteed to have an upper real parent;
-    /// `EROFS` propagates when that guarantee does not hold.
     fn upper_parent_path(&self) -> Result<Path> {
         let fs = self.fs_arc()?;
         let upper = self.upper.get().ok_or_else(|| {
@@ -204,7 +163,6 @@ impl OverlayInode {
         Ok(fs.real_object_path(upper))
     }
 
-    /// Returns `Err` when the inode does not belong to an overlay filesystem.
     fn fs_arc(&self) -> Result<Arc<OverlayFs>> {
         let fs = self.fs();
         Arc::downcast::<OverlayFs>(fs).map_err(|_| {
@@ -215,7 +173,6 @@ impl OverlayInode {
         })
     }
 
-    /// Returns this inode's canonical cached `Arc`, or `Err(EIO)` when absent.
     fn cached_self_arc(&self) -> Result<Arc<OverlayInode>> {
         let fs = self.fs_arc()?;
         fs.inodes().get(self.key(&fs)).ok_or_else(|| {
@@ -226,11 +183,6 @@ impl OverlayInode {
         })
     }
 
-    /// Serializes an `O_APPEND` write as one atomic size-read + write.
-    ///
-    /// The per-inode `lock` is held across both steps because the underlying
-    /// fs does not process `O_APPEND` itself. This serializes concurrent
-    /// appends on the post-write size.
     fn append_write(&self, reader: &mut VmReader, status_flags: StatusFlags) -> Result<usize> {
         let _guard = self.lock.lock();
         let real = self.select_real_inode();
@@ -238,25 +190,16 @@ impl OverlayInode {
         real.write_at(offset, reader, status_flags)
     }
 
-    /// Publishes the upper real object of this inode — the copy-up facts
-    /// transition.
-    ///
-    /// The `Once` publication runs before the cache registration: between the
-    /// two, the instance is upper-backed but registered at the stale old key —
-    /// the legitimate stale-upper state that fresh lower-only scans rebuild
-    /// from. `pin` is the committing instance's own strong `Arc`; the
-    /// registration is the infallible `publish_rekey`. `lowers` are immutable
-    /// across copy-up.
+    /// The `Once` publication flips before the cache rekey — the transient
+    /// stale-upper window that fresh lower-only scans legitimately rebuild
+    /// from.
     fn replace_facts(&self, new_upper: RealObject, pin: &Arc<OverlayInode>) {
         let Some(fs) = self.fs.upgrade() else {
-            // Teardown arm: no live lookup can observe this inode, so only
-            // publish the local upper object.
+            // Teardown arm: with no live mount no lookup can observe this
+            // inode, so only the local upper object is published.
             self.upper.call_once(|| new_upper);
             return;
         };
-        // The cache identities are derived from the pre-publication facts:
-        // once the `Once` flips, `visible_source`/`key` denote the new upper
-        // object.
         let new_key = fs.real_object_key(&new_upper);
         let old_key = fs.real_object_key(self.visible_source());
         let old_real_inode = self.visible_source().real_inode().clone();
@@ -271,10 +214,6 @@ impl OverlayInode {
         );
     }
 
-    /// Runs `operation_fn` directly against the current real authority.
-    ///
-    /// Precondition: the permission stage has already admitted the operation
-    /// (or the entry is a pure read delegation).
     fn delegate_to_real<T>(
         &self,
         operation_fn: impl FnOnce(&Arc<dyn Inode>) -> Result<T>,

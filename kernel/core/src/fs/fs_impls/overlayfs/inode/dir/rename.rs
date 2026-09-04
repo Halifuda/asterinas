@@ -43,25 +43,12 @@ use crate::{
     prelude::*,
 };
 
-/// The two parent directory transaction payloads held by a rename.
 pub(super) struct RenameLocks<'a> {
     pub(super) self_index: &'a mut Option<ReaddirIndex>,
     pub(super) target_index: Option<&'a mut Option<ReaddirIndex>>,
 }
 
 impl OverlayInode {
-    /// Returns `Err(EXDEV)` for a cross-directory move of a lower-backed or
-    /// merged directory: the `redirect_dir` policy is not implemented, so
-    /// the EXDEV default applies (future work is tracked below).
-    ///
-    /// The gate runs from the resolved source overlay inode before any upper
-    /// side effect; the source liveness recheck in `rename_upper` remains the
-    /// authority for races after this point.
-    // TODO(redirect_dir): replace this flat EXDEV default with a
-    // redirect-policy probe bounded by the `redirect_max`-style length rule
-    // when redirect support is implemented. A redirect updating an
-    // outstanding copy-up coordinate must take CUL before the parent DIRs
-    // (`CUL -> DIR`).
     pub(super) fn cross_device_gate(&self, source_inode: &Arc<OverlayInode>) -> Result<()> {
         if !source_inode.type_().is_directory() {
             return Ok(());
@@ -76,14 +63,8 @@ impl OverlayInode {
         ))
     }
 
-    /// Runs the upper rename recipe under the caller's two parent directory
-    /// transaction guards.
-    ///
-    /// It first performs a fresh overlay-internal source liveness recheck, so
-    /// a stale VFS-supplied source inode is rejected with `ESTALE` before any
-    /// physical upper rename. Any failure after that physical rename commits
-    /// triggers the conservative reconcile of the whole affected set as a unit
-    /// before the error is returned.
+    /// Any failure after the physical rename triggers a conservative
+    /// reconcile of the whole affected set before the error returns.
     #[expect(clippy::too_many_arguments)]
     pub(super) fn rename_upper(
         &self,
@@ -97,10 +78,9 @@ impl OverlayInode {
     ) -> Result<()> {
         let fs = self.fs_arc()?;
 
-        // The VFS-provided `old_inode` is only an optimization for the
-        // pre-lock admission path. Under the parent transaction locks,
-        // re-resolve the source name and require that it still resolves to
-        // the same overlay inode; otherwise the rename source went stale.
+        // The VFS-provided `old_inode` is only a pre-lock admission hint:
+        // under the parent locks the source is re-resolved, and any
+        // divergence means the rename source went stale.
         let fresh_source = fs.lookup(self, old_name)?;
         match &fresh_source {
             Lookup::Positive(fresh) => {
@@ -115,11 +95,10 @@ impl OverlayInode {
 
         let source_has_lower = !source_inode.lowers.is_empty();
 
-        // When the VFS provides the replaced target inode, it is the source
-        // of truth for a positive target and no fresh target scan is needed.
-        // For a `None` replaced inode, keep the overlay lookup path so
-        // whiteout/negative target classification still reflects merged
-        // layer truth.
+        // A VFS-provided replaced inode is the source of truth for a
+        // positive target, so no fresh target scan is needed; with `None`,
+        // the overlay lookup still classifies whiteout/negative targets
+        // against merged layer truth.
         let target_lookup = if replaced_inode.is_none() {
             Some(fs.lookup(target, new_name)?)
         } else {
@@ -143,12 +122,11 @@ impl OverlayInode {
             ));
         }
 
-        // `Replace` over a visible lower-backed directory target requires the
-        // merged target directory to be overlay-visible-empty before the move
-        // (whiteout-hidden children do not count; a pure-upper target defers
-        // to the upper rename's own emptiness enforcement). The gate records
-        // the fresh target facts so the target's physical whiteout-residue
-        // sweep can run after the per-branch promotions.
+        // `Replace` over a visible lower-backed directory target requires
+        // overlay-visible emptiness (whiteout-hidden children do not count;
+        // a pure-upper target defers to the upper rename's own enforcement),
+        // and the recorded fresh facts feed the target's whiteout-residue
+        // sweep.
         let gate_target_facts = if mode == RenameMode::Replace && target_is_positive {
             let target_object = match replaced_inode {
                 Some(replaced) => {
@@ -183,11 +161,9 @@ impl OverlayInode {
         let upper_parent_path = self.upper_parent_path()?;
         let target_upper_parent_path = target.upper_parent_path()?;
 
-        // When the `Replace` gate passed for a directory target with a
-        // physical upper copy, sweep the target's physical whiteout residue
-        // before the physical rename. Strict and pre-commit: a failure aborts
-        // before the inlined recipe, whose pre-commit cleanup is a no-op
-        // because no workdir temp is staged.
+        // Strict and pre-commit: the sweep runs before the physical rename,
+        // and the inlined recipe's pre-commit cleanup is a no-op because no
+        // workdir temp is staged.
         if let Some(target_upper_dir) = gate_target_facts
             .as_ref()
             .and_then(|target_facts| target_facts.upper.as_ref())
@@ -211,12 +187,12 @@ impl OverlayInode {
 
         let mut committed = false;
         let result: Result<()> = (|| {
-            // A whiteout target is always replaced or switched (never a
-            // visible `NOREPLACE` failure): a lower-backed source
-            // switches via `Exchange` (the whiteout lands at the source
-            // name, avoiding a composed second step), any other source
-            // consumes it with a plain `Replace`, and a caller-requested
-            // `Exchange` is preserved.
+            // A whiteout target is always replaced or switched, never a
+            // visible `NOREPLACE` failure. A lower-backed source switches
+            // via `Exchange` so the whiteout lands at the source name
+            // without a composed second step; any other source consumes it
+            // with `Replace`, and a caller-requested `Exchange` is
+            // preserved.
             let effective_mode = match mode {
                 RenameMode::Exchange => RenameMode::Exchange,
                 _ if target_is_whiteout && source_has_lower => RenameMode::Exchange,
@@ -237,8 +213,6 @@ impl OverlayInode {
             if source_has_lower && !target_is_whiteout && mode != RenameMode::Exchange {
                 fs.publish_whiteout(&upper_parent_path, old_name, None)?;
             }
-            // Rename reorders the visible sequence; the conservative rule
-            // invalidates on every affected parent (same parent once).
             self.finish_whiteout_index(None, locks.self_index);
             if !same_parent {
                 let Some(index) = locks.target_index.as_mut() else {
@@ -266,17 +240,9 @@ impl OverlayInode {
                 return Err(err);
             }
         }
-        // Repoint the moved object's canonical parent after a successful
-        // cross-parent move, while both parent DIR transaction locks are
-        // held (`DIR -> PARENT` write order).
         if !same_parent {
             *source_inode.recorded_parent.write() = Arc::downgrade(target);
         }
-        // A cross-directory rename may have restored purity in the source or
-        // target parent (the overwrite-of-origin-target case can clear the
-        // target's last origin-bearing entry) — refresh both markers
-        // best-effort (the mutation already committed; a refresh failure
-        // never fails the rename).
         if !same_parent {
             self.refresh_impure_marker_best_effort(locks.self_index, "rename: source parent");
             let Some(index) = locks.target_index.as_mut() else {

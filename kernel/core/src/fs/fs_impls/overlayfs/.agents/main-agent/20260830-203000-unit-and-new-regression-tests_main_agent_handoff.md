@@ -3,7 +3,7 @@
 # Main-Agent Handoff: 2026-08-30 单测与新回归测试规划（开题）
 
 **Date / Time:** 2026-08-30 20:30 CST
-**Status:** `SPEC-DESIGN IN FLIGHT — 2026-08-31：user 圈定全部七测（U-1/U-2/U-3 + R-1~R-4）一次设计；PROTOCOL rule 17 已正式修订（ktest 单测限权放行）；Designer packet `task_designer_test_assets_20260831` 已派发（Direct Spawn Lane）。产品实现仍未动工。`
+**Status:** `CLOSED 2026-09-04。本 tenure 全部闭环：单测/新回归测试线（§6-§17，ktest 24 测 + 回归 R-2/R-4 全绿、R-1 备份出树）、mount options v2（§8-§9）、注释线两轮（§19-§20 top doc 轮：crate 级词汇表 + 模块地图落地；§21 内部注释轮：589 块/~1725 行 `///`+`//` 严厉判别，588/588 落刀，存活 248 行，Reviewer 4/4 PASS）。遗留与排队项移交后继 handoff：20260904-130000-placement-redundancy_main_agent_handoff.md（G1 凭据轮、GAP-KTEST-001 归属、R-3 characterization + flock、Inode trait 重构 pick、R-1 复活、UuidMode::Null → 代码位置与冗余处理轮 [本轮开题]。）`
 **Parent:** 前一 tenure handoff
 `20260826-140940-parent-copyup-state-design_main_agent_handoff.md`
 （**CLOSED** 2026-08-30；wave 五 pass 闭环 + make check GREEN + xfstests
@@ -608,3 +608,59 @@ test-cleanup）约束。
   `///` 层 Linux 引用行号记录均可直接复用）；② ktest 模块 doc 设计文档
   引用随该轮裁决；③ 排队项不变（G1 凭据轮、GAP-KTEST-001 归属、
   R-3 characterization + flock、Inode trait 重构 pick）。
+
+## 21. 2026-09-04 执行记录：注释线 `///`+行内 `//` 严厉判别轮闭环
+
+- **User 裁决（本日）**：① 一句（`///`）/两句（`//`）只是**上限**，
+  **下限 = 删除**；② 存活是例外；③ 判别要严厉、逐条独立给理由；
+  ④ subagent 执行"全树清点 + 逐条判别"；⑤ 执行轮 4-5 个 Creator、
+  负载均衡、省 token。参照基线：virtiofs 形态（比 ext2 更严）。
+- **审计阶段（6 个只读 Reviewer 并行）**：door / fsmount / options（单
+  文件）/ inodecore / identity_xattr / dircopy。六报告 census 逐文件
+  grep 对账闭合：**589 块 / ~1725 行**。Verdict：DELETE ~86%（P2 复述
+  ~200、duplicated-by-moduledoc ~96、no-why ~90、脆弱指针 ~21、TODO
+  叙事、锁缩写 CUL/DIR 块）；KEEP 101 条（全部带 ≤上限精确替换句 +
+  load-bearing 论证）；MOVE 2 条（options：① 8 处散落 `params.c:N`
+  收编进模块 References 单条目；② override_creds fail-fast 理由进模块
+  doc）。door 4 文件与 link.rs 注释归零。主代理核准：KEEP 抽查逐条读
+  过、2 MOVE 全收；顺带发现 `fs/policy.rs` `UuidMode::Null` doc 为全树
+  唯一 stale（Off|Null 消费点成对、无行为差别——设计缺口，已报 user）。
+- **执行阶段（5 个 Creator 并行，写集不相交，机械落刀不复判）**：
+  exec1 = xattr+fsmount 150 件 / exec2 = identity+copyup 127 / exec3 =
+  dir 5 文件+door 107 / exec4 = options 101+2 MOVE / exec5 = inodecore
+  103 → **588/588 applied、0 stopped**。exec1 曾两次瞬时失误，自行从
+  HEAD blob 恢复重落并机器复验（记录在收据）；exec3 发现审计行数记账
+  slip（rename.rs `rename_upper` 8 行 doc 无条目覆盖），按契约保持原样
+  上报 → **主代理补判**：删两句复述（签名可见 + recheck why 已由
+  L100-103 KEEP 承载），留 1 句（post-rename 失败整组保守 reconcile）。
+- **验收门（主代理机械自查；无 Reviewer/编译 per user 常设裁决）**：
+  ① 全树 diff 仅注释行+空行 = PASS；② 锁缩写/`params.c:行号`/
+  `proposal §` 残留 grep = 0 = PASS；③ 全树 `///`+`//` 存活 **248 行**
+  （原 ~1725，削减 ~86%）；存活大户 = copyup/mod.rs（38）、rename.rs
+  （29）、readdir.rs（21）、xattr.rs（21）——并发/协议 why 集中地。
+- **Review phase（2026-09-04，user 指令派一轮 Reviewer）**：4 个只读
+  Reviewer 并行（review1 mount 侧 / review2 identity+xattr / review3
+  copyup+inodecore / review4 dir+door），五门协议（traceability、KEEP
+  保真、boundary、残留 token、coverage 独立重derive 不信任 exec 收据）
+  ——**4/4 PASS、零 mismatch、零执行缺陷**：588 条全部可追溯、KEEP
+  74 条逐字保真、两条 MOVE 逐字落地、rename.rs 补判核验一致；复核另做
+  "未判决存活行"反查确认无漏删。三处审计/收据纯记账 slip（identity
+  193 vs 194、dir/mod.rs 12 vs 11 DELETE、dircopy §5 行账 23 vs 31）均为
+  报告内部数字，条目级与树面正确。
+- **主代理裁决（review3 两条跨 lane 观察）= code-as-spec 接受，不补
+  文档**：O-1 marker-read 规格（'y'-exact；ERANGE/ENODATA/EOPNOTSUPP→
+  false、其余传播）的承载文档被 lookup.rs 与 xattr.rs 两条 lane 并发删除，
+  现由 `has_marker` 函数体 match 臂自承载；O-2 real-object invariant
+  （`upper.is_some() || !lowers.is_empty()`）现由 `RealObjectStack::new`
+  debug_assert + 可见 EIO 臂自承载。符合 user 本轮"注释不承载代码可见物"
+  的哲学；如 user 不同意可单独点名补回。
+- **UuidMode::Null 设计缺口（user 裁决 2026-09-04）**：单独立
+  **「代码位置与冗余处理轮」**（Off|Null 成对处理无行为差别的归属/合并），
+  本轮与注释线均不处理；该轮开线前记入排队项。
+- **状态**：Round **CLOSED (review-accepted)**。26 文件改动未提交，
+  commit 待 user 指令。审计报告/exec 收据/review 报告在
+  `components/comment-inline-20260904/`（audit_* / exec_* / review_*），
+  全部 packet 在 `subagent-tasks/comment-inline-20260904/`。
+- **Next**：注释线两轮（top doc + 内部注释）均闭环。排队项不变：
+  G1 凭据轮（R-1 复活门槛）、GAP-KTEST-001 归属、R-3 characterization +
+  flock 修复、Inode trait 重构 pick、UuidMode::Null 设计缺口归属。
