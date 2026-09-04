@@ -518,8 +518,20 @@ mod test {
         )
         .unwrap_err();
         assert_eq!(err.error(), Errno::EINVAL);
-        build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 63, XinoMode::On);
-        build_policy(dev(9, 9), &[layer(0, dev(1, 1), 100)], None, 0, XinoMode::On);
+        build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100)],
+            None,
+            63,
+            XinoMode::On,
+        );
+        build_policy(
+            dev(9, 9),
+            &[layer(0, dev(1, 1), 100)],
+            None,
+            0,
+            XinoMode::On,
+        );
     }
 
     #[ktest]
@@ -743,7 +755,10 @@ mod test {
             IdentityPolicy::XINO_SHIFT,
             XinoMode::Off,
         );
-        assert_eq!(duplicate.resolve_layer_id_for_record(dev(1, 1), 100), Some(0));
+        assert_eq!(
+            duplicate.resolve_layer_id_for_record(dev(1, 1), 100),
+            Some(0)
+        );
         let with_upper = build_policy(
             dev(9, 9),
             &[layer(7, dev(4, 4), 1), layer(0, dev(4, 4), 2)],
@@ -752,7 +767,10 @@ mod test {
             XinoMode::Off,
         );
         assert_eq!(with_upper.resolve_layer_id_for_record(dev(4, 4), 1), None);
-        assert_eq!(with_upper.resolve_layer_id_for_record(dev(4, 4), 2), Some(0));
+        assert_eq!(
+            with_upper.resolve_layer_id_for_record(dev(4, 4), 2),
+            Some(0)
+        );
     }
 
     #[ktest]

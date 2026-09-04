@@ -613,18 +613,29 @@ mod test {
             classify("trusted.backup.notes", OverlayXattrPrefix::Trusted),
             XattrClass::Passthrough
         );
-        assert!(is_private("trusted.overlay.opaque", OverlayXattrPrefix::Trusted));
+        assert!(is_private(
+            "trusted.overlay.opaque",
+            OverlayXattrPrefix::Trusted
+        ));
         assert!(!is_private("user.plain", OverlayXattrPrefix::Trusted));
     }
 
     #[ktest]
     fn used_full_name_passes_foreign_through() {
         assert_eq!(
-            used_full_name(&xname("user.plain.any"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            used_full_name(
+                &xname("user.plain.any"),
+                OverlayXattrPrefix::Trusted.as_str()
+            )
+            .unwrap(),
             "user.plain.any"
         );
         assert_eq!(
-            used_full_name(&xname("user.overlay.x"), OverlayXattrPrefix::Trusted.as_str()).unwrap(),
+            used_full_name(
+                &xname("user.overlay.x"),
+                OverlayXattrPrefix::Trusted.as_str()
+            )
+            .unwrap(),
             "user.overlay.x"
         );
         // The length limit is enforced only on the escape path: a foreign name of
@@ -641,8 +652,11 @@ mod test {
     #[ktest]
     fn used_full_name_escapes_own_prefix_unconditionally() {
         assert_eq!(
-            used_full_name(&xname("trusted.overlay.fsz"), OverlayXattrPrefix::Trusted.as_str())
-                .unwrap(),
+            used_full_name(
+                &xname("trusted.overlay.fsz"),
+                OverlayXattrPrefix::Trusted.as_str()
+            )
+            .unwrap(),
             "trusted.overlay.overlay.fsz"
         );
         assert_eq!(
@@ -654,12 +668,19 @@ mod test {
             "trusted.overlay.overlay.overlay.fsz"
         );
         assert_eq!(
-            used_full_name(&xname("trusted.overlay."), OverlayXattrPrefix::Trusted.as_str())
-                .unwrap(),
+            used_full_name(
+                &xname("trusted.overlay."),
+                OverlayXattrPrefix::Trusted.as_str()
+            )
+            .unwrap(),
             "trusted.overlay.overlay."
         );
         assert_eq!(
-            used_full_name(&xname("user.overlay.fsz"), OverlayXattrPrefix::User.as_str()).unwrap(),
+            used_full_name(
+                &xname("user.overlay.fsz"),
+                OverlayXattrPrefix::User.as_str()
+            )
+            .unwrap(),
             "user.overlay.overlay.fsz"
         );
     }
@@ -684,12 +705,18 @@ mod test {
 
     #[ktest]
     fn present_strips_one_infix_keeps_prefix() {
-        let (total, written) =
-            present_expect_ok(b"trusted.overlay.overlay.fsz\0", OverlayXattrPrefix::Trusted, 0);
+        let (total, written) = present_expect_ok(
+            b"trusted.overlay.overlay.fsz\0",
+            OverlayXattrPrefix::Trusted,
+            0,
+        );
         assert_eq!(total, 20);
         assert!(written.is_empty());
-        let (total, written) =
-            present_expect_ok(b"trusted.overlay.overlay.fsz\0", OverlayXattrPrefix::Trusted, 32);
+        let (total, written) = present_expect_ok(
+            b"trusted.overlay.overlay.fsz\0",
+            OverlayXattrPrefix::Trusted,
+            32,
+        );
         assert_eq!(total, 20);
         assert_eq!(written, b"trusted.overlay.fsz\0");
         let (_, written) = present_expect_ok(
@@ -698,8 +725,11 @@ mod test {
             64,
         );
         assert_eq!(written, b"trusted.overlay.overlay.x\0");
-        let (_, written) =
-            present_expect_ok(b"trusted.overlay.overlay.\0", OverlayXattrPrefix::Trusted, 64);
+        let (_, written) = present_expect_ok(
+            b"trusted.overlay.overlay.\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
         assert_eq!(written, b"trusted.overlay.\0");
         let (_, written) =
             present_expect_ok(b"user.overlay.overlay.fsz\0", OverlayXattrPrefix::User, 64);
@@ -732,8 +762,11 @@ mod test {
         );
         assert_eq!(total, 0);
         assert!(written.is_empty());
-        let (total, written) =
-            present_expect_ok(b"trusted.overlay.overlay\0", OverlayXattrPrefix::Trusted, 64);
+        let (total, written) = present_expect_ok(
+            b"trusted.overlay.overlay\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
         assert_eq!(total, 0);
         assert!(written.is_empty());
     }
@@ -763,8 +796,11 @@ mod test {
         let (_, written) =
             present_expect_ok(b"user.plain\0\xff\xfe\0", OverlayXattrPrefix::Trusted, 64);
         assert_eq!(written, b"user.plain\0\xff\xfe\0");
-        let (_, written) =
-            present_expect_ok(b"\xfftrusted.overlay.opaque\0", OverlayXattrPrefix::Trusted, 64);
+        let (_, written) = present_expect_ok(
+            b"\xfftrusted.overlay.opaque\0",
+            OverlayXattrPrefix::Trusted,
+            64,
+        );
         assert_eq!(written, b"\xfftrusted.overlay.opaque\0");
     }
 }

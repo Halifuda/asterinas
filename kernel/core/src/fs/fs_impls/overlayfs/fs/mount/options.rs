@@ -880,17 +880,41 @@ mod test {
 
     #[ktest]
     fn parse_new_key_conflicts() {
-        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=on"), FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=follow"), FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,userxattr,redirect_dir=off"), FsFlags::empty());
-        parse_expect_ok("lowerdir=l,userxattr,redirect_dir=nofollow", FsFlags::empty());
+        parse_expect_einval(
+            Some("lowerdir=l,userxattr,redirect_dir=on"),
+            FsFlags::empty(),
+        );
+        parse_expect_einval(
+            Some("lowerdir=l,userxattr,redirect_dir=follow"),
+            FsFlags::empty(),
+        );
+        parse_expect_einval(
+            Some("lowerdir=l,userxattr,redirect_dir=off"),
+            FsFlags::empty(),
+        );
+        parse_expect_ok(
+            "lowerdir=l,userxattr,redirect_dir=nofollow",
+            FsFlags::empty(),
+        );
         parse_expect_einval(Some("lowerdir=l,userxattr,metacopy=on"), FsFlags::empty());
         parse_expect_ok("lowerdir=l,userxattr,metacopy=off", FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=nofollow"), FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=off"), FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,metacopy=on,redirect_dir=follow"), FsFlags::empty());
+        parse_expect_einval(
+            Some("lowerdir=l,metacopy=on,redirect_dir=nofollow"),
+            FsFlags::empty(),
+        );
+        parse_expect_einval(
+            Some("lowerdir=l,metacopy=on,redirect_dir=off"),
+            FsFlags::empty(),
+        );
+        parse_expect_einval(
+            Some("lowerdir=l,metacopy=on,redirect_dir=follow"),
+            FsFlags::empty(),
+        );
         parse_expect_ok("lowerdir=l,metacopy=on,redirect_dir=on", FsFlags::empty());
         parse_expect_einval(Some("lowerdir=l,nfs_export=on,index=off"), FsFlags::empty());
-        parse_expect_einval(Some("lowerdir=l,nfs_export=on,metacopy=on"), FsFlags::empty());
+        parse_expect_einval(
+            Some("lowerdir=l,nfs_export=on,metacopy=on"),
+            FsFlags::empty(),
+        );
     }
 }

@@ -15,6 +15,11 @@ use crate::fs::fs_impls::overlayfs::inode::OverlayXattrPrefix;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UuidMode {
     Off,
+    /// Upstream's `uuid=null` mode: locally identical to `Off` (no origin-fh
+    /// handling), but upstream `ovl_origin_uuid` and `ovl_uuid_match` still
+    /// distinguish them — `Null` keeps writing UUID-bearing origin records
+    /// while `Off` is the uuid-blind legacy/clone track — and `Null` is
+    /// upstream's universal UUID degrade target.
     Null,
     On,
     /// Reuse an existing persisted UUID, else upgrade to `On`; persistence

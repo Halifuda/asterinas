@@ -1829,3 +1829,26 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     RealObjectStack::new 的 debug_assert + 可见 EIO 臂自承载——符合
     user 本轮哲学（注释不承载代码可见物），不补文档。**Round CLOSED
     (review-accepted)**。
+
+- **`placement_redundancy_20260904`**（2026-09-04，user 开线：UuidMode::Null
+  归属 + 冗余处理；handoff
+  `main-agent/20260904-130000-placement-redundancy_main_agent_handoff.md`）
+  - **Kind**: bounded 修订轮（enum 分支冗余：审计 → Designer → Creator）。
+  - **Audit**: `task_audit_enum_variants_20260904`（只读）——19 enum/56
+    变体全构造点+消费点核对，DISTINCT 17 / INSEPARABLE 2 / DEAD 0；
+    user 点名 NegativeLookup 深挖。上游核查（主代理直查
+    /home/ayd/linux）：`uuid=` 四态 off/null/auto/on，OFF≠NULL 分叉唯一在
+    `ovl_origin_uuid`/`ovl_uuid_match`（origin-fh 校验），NULL 为上游通用
+    降级靶 → 翻案建议 keep，user 采纳。
+  - **User 裁决**: ① `UuidMode::Null` 保留 + 一句 doc 解释并存原因；
+    ② `NegativeLookup::HiddenByOpaque` 删除并入 `Absent`。
+  - **Designer**: `task_designer_placement_redundancy_20260904` —
+    ACCEPTED（两 deliverable 冻结面 + 上游逐行复核；D2 关键不变量 I1 =
+    `is_opaque_directory` gate 与早退必须保留，防过删）。
+  - **Creator**: `task_creator_placement_redundancy_20260904`（compile
+    preflight 授权）— D1 policy.rs +5 行注释逐字；D2 变体删除/生产臂改
+    Absent/create.rs 臂收拢/两处 doc 重写逐字；**compile gate exit 0**
+    （codex-asterinas-dev `cargo osdk check -p aster-core`）；census：删
+    一个 enum 变体（56→55），零新实体。主代理 exact-diff 验收 ACCEPTED。
+  - **Write-set**: `fs/policy.rs`、`inode/lookup.rs`、
+    `inode/dir/create.rs`、`inode/dir/mod.rs`。未提交，待 user 指令。

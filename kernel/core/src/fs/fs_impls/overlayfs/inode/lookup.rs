@@ -14,8 +14,9 @@
 //! the first non-directory hit terminates as a single-object result;
 //! directory hits accumulate into the lower stack until a barrier — a
 //! whiteout, an opaque directory, or a non-directory below an accumulated
-//! directory — or the upper-miss opaque-parent case (the name is absent
-//! in the upper and the upper parent itself is opaque).
+//! directory — or an opaque upper parent, which leaves the absent upper
+//! name invisible in the whole overlay and stops the scan before the
+//! lowers.
 
 use spin::Once;
 
@@ -49,7 +50,6 @@ pub(super) enum Lookup {
 pub(super) enum NegativeLookup {
     Absent,
     HiddenByWhiteout,
-    HiddenByOpaque,
 }
 
 #[derive(Clone, Copy)]
@@ -118,7 +118,7 @@ impl OverlayFs {
                 }
                 Err(err) if err.error() == Errno::ENOENT => {
                     if is_opaque_directory(upper_real, prefix)? {
-                        return Ok(Lookup::Negative(NegativeLookup::HiddenByOpaque));
+                        return Ok(Lookup::Negative(NegativeLookup::Absent));
                     }
                 }
                 Err(err) => return Err(err),

@@ -695,3 +695,22 @@ Record only active or recently changed passes here. Durable slicing rationale be
   `main-agent/20260803-creator-pass-slicing_main_agent_handoff.md`; PROTOCOL
   §1 rule 5 remains unedited pending user confirmation of a permanent
   amendment.
+
+- **`placement_redundancy_20260904`** — **EXECUTED & accepted 2026-09-04
+  (enum-variant redundancy round, two user-adjudicated items)**
+  - **Kind**: bounded round (read-only enum audit → bounded Designer
+    revision → single Creator pass with compile preflight). Slicing in
+    `PASS_SLICING.md` `placement_redundancy_20260904`.
+  - **Result**: tree-wide enum census (19 enums / 56 variants, zero dead;
+    2 inseparable groups). User rulings: keep `UuidMode::Null` with a
+    one-sentence upstream-anchor doc (Off vs Null diverge only in
+    `ovl_origin_uuid`/`ovl_uuid_match` origin-fh validation — unimplemented
+    locally; Null is upstream's degrade target); delete
+    `NegativeLookup::HiddenByOpaque` into `Absent` (no upstream operation
+    can distinguish an opaque-parent miss from absence). Applied verbatim;
+    compile gate `cargo osdk check -p aster-core` exit 0; one enum variant
+    removed (56→55), zero new entities. Main-agent exact-diff acceptance.
+  - **Artifacts**: audit/designer/exec under
+    `components/placement-redundancy-20260904/`; packets under
+    `subagent-tasks/placement-redundancy-20260904/`.
+  - **Deferred**: per-pass commit awaits user instruction.

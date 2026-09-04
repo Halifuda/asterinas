@@ -35,7 +35,7 @@ impl OverlayInode {
         let fs = self.fs_arc()?;
         let lookup = fs.lookup(self, name)?;
         match lookup {
-            Lookup::Negative(NegativeLookup::Absent | NegativeLookup::HiddenByOpaque) => {
+            Lookup::Negative(NegativeLookup::Absent) => {
                 self.create_upper_only(name, type_, mode, mknod_type, index)
             }
             Lookup::Negative(NegativeLookup::HiddenByWhiteout) => {

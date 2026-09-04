@@ -11,8 +11,7 @@
 //!
 //! Key concepts:
 //! - **lookup**: the overlay-visible answer for a `(parent, name)` pair — a
-//!   positive inode, or a negative reason (`Absent`, `HiddenByWhiteout`,
-//!   `HiddenByOpaque`).
+//!   positive inode, or a negative reason (`Absent`, `HiddenByWhiteout`).
 //! - **parent directory transaction**: the per-directory `Mutex` guard that
 //!   serializes mutation recipes for one parent.
 //! - **whiteout**: an upper-layer visibility barrier published when a
