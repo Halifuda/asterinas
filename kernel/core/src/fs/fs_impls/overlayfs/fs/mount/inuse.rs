@@ -21,7 +21,12 @@ use crate::{
             inode::{OverlayInode, OverlayRecordName, OverlayXattrPrefix, overlay_record_name},
             read_child_names,
         },
-        vfs::{inode::Inode, inode_ext::InodeExt, path::Path, xattr::XattrSetFlags},
+        vfs::{
+            inode::Inode,
+            inode_ext::InodeExt,
+            path::{Dentry, Path},
+            xattr::XattrSetFlags,
+        },
     },
     prelude::*,
 };
@@ -62,18 +67,22 @@ impl Uuid {
 }
 
 /// Pins the claimed inode so its `OverlayInuseSlot` cannot be evicted (and
-/// the claim silently lost) while the lease is held.
+/// the claim silently lost) while the lease is held. The claimed dentry is
+/// kept alongside the inode so the persisted-identity record write can pair
+/// them (`real_dentry.inode()` ptr-equals the claimed inode).
 #[derive(Debug)]
 struct InuseGuard {
     inode: Arc<dyn Inode>,
+    dentry: Arc<Dentry>,
     token: Uuid,
 }
 
 impl InuseGuard {
-    fn try_claim(inode: Arc<dyn Inode>, identity: Uuid) -> Result<Self> {
-        inode.overlay_inuse_slot().try_claim(identity.value())?;
+    fn try_claim(path: &Path, identity: Uuid) -> Result<Self> {
+        path.inode().overlay_inuse_slot().try_claim(identity.value())?;
         Ok(Self {
-            inode,
+            inode: path.inode().clone(),
+            dentry: path.dentry().clone(),
             token: identity,
         })
     }
@@ -148,13 +157,9 @@ impl UpperWorkdirInuse {
         }
     }
 
-    pub(super) fn claim(
-        upper_inode: Arc<dyn Inode>,
-        workdir_inode: Arc<dyn Inode>,
-        identity: Uuid,
-    ) -> Result<Self> {
-        let upper = InuseGuard::try_claim(upper_inode, identity)?;
-        let workdir = match InuseGuard::try_claim(workdir_inode, identity) {
+    pub(super) fn claim(upper_path: &Path, workdir_path: &Path, identity: Uuid) -> Result<Self> {
+        let upper = InuseGuard::try_claim(upper_path, identity)?;
+        let workdir = match InuseGuard::try_claim(workdir_path, identity) {
             Ok(workdir) => workdir,
             Err(err) => {
                 drop(upper);
@@ -170,7 +175,13 @@ impl UpperWorkdirInuse {
     }
 
     pub(super) fn prepare_workdir(&mut self, workdir_path: &Path) -> Result<()> {
-        match self.workdir.inode.lookup(WORKDIR_NAME) {
+        // The prepared path must be the claimed workdir root: the workdir
+        // claim lease pins this very dentry's in-use slot.
+        debug_assert!(
+            Arc::ptr_eq(&self.workdir.dentry, workdir_path.dentry()),
+            "the prepared workdir path is not the claimed workdir root"
+        );
+        match workdir_path.lookup_child(WORKDIR_NAME) {
             Ok(residue) if residue.type_().is_directory() => {
                 self.remove_work_entries(&residue, 0)?;
                 workdir_path.rmdir(WORKDIR_NAME)?;
@@ -181,22 +192,22 @@ impl UpperWorkdirInuse {
             Err(err) if err.error() == Errno::ENOENT => {}
             Err(err) => return Err(err),
         }
-        let workspace = workdir_path.new_fs_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
+        let workspace = workdir_path.new_child(WORKDIR_NAME, InodeType::Dir, WORKDIR_MODE)?;
         self.workspace = Some(workspace);
         Ok(())
     }
 
-    fn remove_work_entries(&self, dir: &Arc<dyn Inode>, level: usize) -> Result<()> {
-        let names = read_child_names(dir)?;
+    fn remove_work_entries(&self, dir_path: &Path, level: usize) -> Result<()> {
+        let names = read_child_names(dir_path.inode())?;
         for name in names {
-            let child = dir.lookup(&name)?;
+            let child = dir_path.lookup_child(&name)?;
             if child.type_().is_directory() {
                 if level < WORKDIR_CLEANUP_MAX_DEPTH {
                     self.remove_work_entries(&child, level + 1)?;
                 }
-                dir.rmdir(&name)?;
+                dir_path.rmdir(&name)?;
             } else {
-                dir.unlink(&name)?;
+                dir_path.unlink(&name)?;
             }
         }
         Ok(())
@@ -208,22 +219,11 @@ impl UpperWorkdirInuse {
         let mut reader = VmReader::from(value.as_slice()).to_fallible();
         OverlayInode::set_overlay_xattr(
             &self.upper.inode,
+            &self.upper.dentry,
             name,
             &mut reader,
             XattrSetFlags::CREATE_OR_REPLACE,
         )
-    }
-
-    pub(in overlayfs) fn workdir_workspace(&self) -> Result<&Arc<dyn Inode>> {
-        self.workspace
-            .as_ref()
-            .map(|workspace| workspace.inode())
-            .ok_or_else(|| {
-                Error::with_message(
-                    Errno::EROFS,
-                    "the overlay workdir workspace is not prepared",
-                )
-            })
     }
 
     pub(in overlayfs) fn workdir_workspace_path(&self) -> Result<&Path> {

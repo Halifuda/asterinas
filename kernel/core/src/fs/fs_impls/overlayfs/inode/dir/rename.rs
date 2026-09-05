@@ -181,6 +181,7 @@ impl OverlayInode {
         if !same_parent && source_has_lower {
             OverlayInode::set_impure_marker(
                 target_upper_parent_path.inode(),
+                target_upper_parent_path.dentry(),
                 fs.policy().xattr_prefix(),
             )?;
         }

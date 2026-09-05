@@ -117,18 +117,15 @@ impl OverlayFs {
                 )
             }?;
 
-            let mut claimed_pair = UpperWorkdirInuse::claim(
-                upper.root_dentry().inode().clone(),
-                workdir_path.inode().clone(),
-                identity,
-            )?;
+            let mut claimed_pair =
+                UpperWorkdirInuse::claim(&upper_path, &workdir_path, identity)?;
 
             if !is_effective_read_only {
                 claimed_pair.prepare_workdir(&workdir_path)?;
 
                 let capabilities = UpperFilesystemCapabilities::probe(
                     upper.root_dentry().inode(),
-                    claimed_pair.workdir_workspace()?,
+                    claimed_pair.workdir_workspace_path()?,
                     xattr_prefix,
                 )?;
                 let is_uuid_effective = capabilities.validate_uuid_support(uuid_mode)?;

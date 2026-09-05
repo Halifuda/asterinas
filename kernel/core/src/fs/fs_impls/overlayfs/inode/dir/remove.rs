@@ -214,11 +214,15 @@ impl OverlayInode {
         };
         let old_upper_dir = upper_obj.real_inode().clone();
         let prefix = fs.policy().xattr_prefix();
+        let workdir_path = self.workdir_root_path()?;
+        // The opaque marker and the transfers target the temp itself: the
+        // temp's own dentry reconstructs its dcache-anchored workdir path.
+        let temp_path = Path::new(workdir_path.mount_node().clone(), temp.dentry().clone());
         // The opaque marker keeps the name a lower-search barrier at every
         // instant of the swap (crash window included), so it is written on
         // the temp before the exchange as part of complete preparation.
         fs.set_opaque_marker(
-            temp.inode(),
+            &temp_path,
             "the upper filesystem cannot store the opaque marker \
              required for the clear-empty directory exchange",
         )?;
@@ -227,13 +231,12 @@ impl OverlayInode {
         // carrying xattrs cannot fail `EACCES` on the temp `set_xattr`.
         OverlayInode::copy_eligible_xattrs(
             &old_upper_dir,
-            temp.inode(),
+            temp,
             XattrCopyPolicy::BestEffort,
             prefix,
         )?;
-        self.transfer_metadata(&old_upper_dir, temp.inode())?;
-        self.transfer_timestamps(&old_upper_dir, temp.inode())?;
-        let workdir_path = self.workdir_root_path()?;
+        self.transfer_metadata(&old_upper_dir, temp)?;
+        self.transfer_timestamps(&old_upper_dir, temp)?;
         fs.publish_temp(temp, upper_parent_path, name, RenameMode::Exchange)
             .map_err(translate_stale_upper_enoent)?;
         match super::super::super::lookup_child_path(&workdir_path, temp.name()) {

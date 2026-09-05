@@ -26,15 +26,18 @@
 use crate::{
     fs::{
         fs_impls::overlayfs::inode::{OverlayInode, copyup::workdir::WorkdirTempRequest},
-        vfs::{inode::RenameMode, path::Path},
+        vfs::{
+            inode::RenameMode,
+            path::{Dentry, Path},
+        },
     },
     prelude::*,
 };
 
 impl OverlayInode {
-    pub(super) fn link_source(&self, old: &Arc<OverlayInode>) -> Result<Path> {
+    pub(super) fn link_source(&self, old: &Arc<OverlayInode>, old_dentry: &Dentry) -> Result<Path> {
         let fs = self.fs_arc()?;
-        old.copy_up()?;
+        old.copy_up_at(old_dentry)?;
         let upper = old.upper.get().ok_or_else(|| {
             Error::with_message(
                 Errno::EIO,

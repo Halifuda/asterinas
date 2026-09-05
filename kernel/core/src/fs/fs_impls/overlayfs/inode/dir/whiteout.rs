@@ -149,6 +149,7 @@ impl OverlayFs {
                 let mut marker_reader = VmReader::from(WHITEOUT_MARKER_VALUE).to_fallible();
                 if let Err(err) = OverlayInode::set_overlay_xattr(
                     temp.inode(),
+                    temp.dentry(),
                     marker_name,
                     &mut marker_reader,
                     XattrSetFlags::CREATE_OR_REPLACE,
@@ -184,9 +185,11 @@ impl OverlayFs {
         // Publishing a whiteout makes the parent impure, so the marker is
         // set before the physical publish. The marker is a best-effort
         // cache hint, so a marker failure must not abort the publish.
-        if let Err(err) =
-            OverlayInode::set_impure_marker(upper_parent_path.inode(), self.policy().xattr_prefix())
-        {
+        if let Err(err) = OverlayInode::set_impure_marker(
+            upper_parent_path.inode(),
+            upper_parent_path.dentry(),
+            self.policy().xattr_prefix(),
+        ) {
             warn!(
                 "overlay whiteout publish: failed to set the impure marker on {:?} \
                  (best-effort cache hint; continuing with the physical publish): {:?}",

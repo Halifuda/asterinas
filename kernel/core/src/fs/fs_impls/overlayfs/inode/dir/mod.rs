@@ -3,11 +3,10 @@
 //! The overlayfs namespace-mutation and whiteout subsystem.
 //!
 //! This module hosts the `Inode`-trait entries for directory name-space
-//! mutations: create (which also serves mkdir), mknod, link, unlink, rmdir,
-//! rename, and the symlink `write_link`. Each entry except `write_link`
-//! resolves a fresh projection of the target name under the parent directory
-//! transaction lock and delegates the actual mutation to a per-directory
-//! recipe.
+//! mutations: create (which also serves mkdir), create_symlink, mknod, link,
+//! unlink, rmdir, and rename. Each entry resolves a fresh projection of the
+//! target name under the parent directory transaction lock and delegates the
+//! actual mutation to a per-directory recipe.
 //!
 //! Key concepts:
 //! - **lookup**: the overlay-visible answer for a `(parent, name)` pair — a
@@ -17,31 +16,39 @@
 //! - **whiteout**: an upper-layer visibility barrier published when a
 //!   lower-backed name is removed; the `whiteout` submodule owns its cache and
 //!   publish mechanics.
-//! - **entry admission contract**: the six parent-lock-taking entries run
-//!   `check_permission(Mutating, MAY_WRITE)` (including any required copy-up
+//! - **entry admission contract**: the parent-lock-taking entries run
+//!   `check_mutating_permission(...)` (including any required copy-up
 //!   promotion) before acquiring the parent directory transaction lock;
 //!   rename additionally pre-promotes the source before taking either parent
 //!   lock. The recipes therefore assume the caller already admitted the
-//!   request and do not re-check permission. The symlink `write_link` entry
-//!   is the exception: a thin delegation with no transaction lock and no
-//!   admission check.
+//!   request and do not re-check permission. The `create_symlink` entry
+//!   shares this contract and publishes the symlink atomically with its
+//!   target — it replaced the retired two-step `create`-plus-`write_link`
+//!   flow, so `create` rejects `SymLink` with `EINVAL` (the VFS routes
+//!   symlink creation only through `create_symlink`).
 //!
 //! ## Structure
 //!
 //! | Submodule | Responsibility |
 //! | --- | --- |
-//! | `create` | create-object recipes (absent and over-whiteout branches) |
+//! | `create` | create-object recipes (absent and over-whiteout branches) and the atomic symlink recipe |
 //! | `link` | hard-link recipe |
 //! | `remove` | shared unlink/rmdir recipe and whiteout-publish removal |
 //! | `rename` | rename recipe |
 //! | `whiteout` | shared whiteout cache and whiteout-publish mechanics |
 
 use self::remove::RemoveKind;
-use super::{AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex};
+use super::{
+    AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
+    permission::CopyUpOrigin,
+};
 use crate::{
     fs::{
         file::{InodeMode, InodeType, Permission},
-        vfs::inode::{Inode, MknodType, RenameMode},
+        vfs::{
+            inode::{Inode, MknodType, RenameMode},
+            path::Dentry,
+        },
     },
     prelude::*,
     process::credentials::capabilities::CapSet,
@@ -60,14 +67,25 @@ type DirLockPair<'a, 'b> = (
 );
 
 impl OverlayInode {
-    // The symlink target is filled by the later `write_link` delegation.
+    // Symlinks are never routed here: the VFS creates them only through
+    // `create_symlink` (`create_symlink_impl` in `create.rs`).
     pub(super) fn create_impl(
         &self,
+        self_dentry: &Dentry,
         name: &str,
         type_: InodeType,
         mode: InodeMode,
     ) -> Result<Arc<dyn Inode>> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+        if type_ == InodeType::SymLink {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "overlay symlinks are created only through create_symlink"
+            );
+        }
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
         let mut dir_guard = self.lock_dir_transaction();
         let projected: Arc<dyn Inode> =
             self.create_object(name, type_, mode, None, &mut dir_guard)?;
@@ -76,6 +94,7 @@ impl OverlayInode {
 
     pub(super) fn mknod_impl(
         &self,
+        self_dentry: &Dentry,
         name: &str,
         mode: InodeMode,
         type_: MknodType,
@@ -86,7 +105,10 @@ impl OverlayInode {
                 "a raw 0:0 whiteout char device must not be user-creatable"
             );
         }
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
         let mut dir_guard = self.lock_dir_transaction();
         let object_type = crate::fs::fs_impls::overlayfs::mknod_object_type(&type_);
         let projected: Arc<dyn Inode> =
@@ -115,15 +137,20 @@ impl OverlayInode {
         }
     }
 
-    pub(super) fn write_link_impl(&self, target: &str) -> Result<()> {
-        self.select_real_inode().write_link(target)
-    }
-
-    pub(super) fn link_impl(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        let old_overlay = Arc::downcast::<OverlayInode>(old.clone()).map_err(|_| {
-            Error::with_message(Errno::EIO, "the link source is not an overlay inode")
-        })?;
+    pub(super) fn link_impl(
+        &self,
+        self_dentry: &Dentry,
+        old_dentry: &Dentry,
+        name: &str,
+    ) -> Result<()> {
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
+        let old_overlay =
+            Arc::downcast::<OverlayInode>(old_dentry.inode().clone()).map_err(|_| {
+                Error::with_message(Errno::EIO, "the link source is not an overlay inode")
+            })?;
         // The VFS `link` syscall performs no source check of its own (VFS
         // gap), so these source-side checks are required; the parent's base
         // permission check remains authoritative.
@@ -163,7 +190,7 @@ impl OverlayInode {
                 ));
             }
         }
-        let source_path = self.link_source(&old_overlay)?;
+        let source_path = self.link_source(&old_overlay, old_dentry)?;
         let fs = self.fs_arc()?;
         let mut dir_guard = self.lock_dir_transaction();
         let target_lookup = fs.lookup(self, name)?;
@@ -178,8 +205,10 @@ impl OverlayInode {
         // impure marker to the upper parent before either physical-link
         // branch (before committing the link).
         if !old_overlay.lowers.is_empty() {
+            let upper_parent_path = self.upper_parent_path()?;
             OverlayInode::set_impure_marker(
-                self.upper_parent_path()?.inode(),
+                upper_parent_path.inode(),
+                upper_parent_path.dentry(),
                 fs.policy().xattr_prefix(),
             )?;
         }
@@ -197,48 +226,65 @@ impl OverlayInode {
         Ok(())
     }
 
-    pub(super) fn unlink_impl(&self, name: &str) -> Result<()> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+    pub(super) fn unlink_impl(&self, child_dentry: &Dentry, name: String) -> Result<()> {
+        // The admission promotes the parent directory itself, sourcing its
+        // publication coordinate from the removed entry's parent dentry; the
+        // root case is structurally unreachable and falls back to the
+        // recorded parent.
+        let parent_dentry = child_dentry.parent();
+        let origin = match &parent_dentry {
+            Some(parent) => CopyUpOrigin::Operation(parent),
+            None => CopyUpOrigin::Recorded,
+        };
+        self.check_mutating_permission(origin, Permission::MAY_WRITE)?;
         let mut dir_guard = self.lock_dir_transaction();
-        self.remove_target(name, RemoveKind::Unlink, &mut dir_guard)
+        self.remove_target(&name, RemoveKind::Unlink, &mut dir_guard)
     }
 
-    pub(super) fn rmdir_impl(&self, name: &str) -> Result<()> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
+    pub(super) fn rmdir_impl(&self, child_dentry: &Dentry, name: String) -> Result<()> {
+        let parent_dentry = child_dentry.parent();
+        let origin = match &parent_dentry {
+            Some(parent) => CopyUpOrigin::Operation(parent),
+            None => CopyUpOrigin::Recorded,
+        };
+        self.check_mutating_permission(origin, Permission::MAY_WRITE)?;
         let mut dir_guard = self.lock_dir_transaction();
-        self.remove_target(name, RemoveKind::Rmdir, &mut dir_guard)
+        self.remove_target(&name, RemoveKind::Rmdir, &mut dir_guard)
     }
 
     pub(super) fn rename_impl(
         &self,
-        old_name: &str,
-        old_inode: &Arc<dyn Inode>,
-        new_dir_inode: &Arc<dyn Inode>,
+        old_child_dentry: &Dentry,
+        old_name: String,
+        source_overlay: Arc<OverlayInode>,
+        target_overlay: Arc<OverlayInode>,
+        new_dir_dentry: &Dentry,
         new_name: &str,
-        replaced_inode: Option<&Arc<dyn Inode>>,
+        replaced_inode: Option<Arc<dyn Inode>>,
         mode: RenameMode,
     ) -> Result<()> {
-        let source_overlay = Arc::downcast::<OverlayInode>(old_inode.clone()).map_err(|_| {
-            Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
-        })?;
-        let target_overlay =
-            Arc::downcast::<OverlayInode>(new_dir_inode.clone()).map_err(|_| {
-                Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
-            })?;
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        target_overlay.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        source_overlay.copy_up()?;
+        let parent_dentry = old_child_dentry.parent();
+        let self_origin = match &parent_dentry {
+            Some(parent) => CopyUpOrigin::Operation(parent),
+            None => CopyUpOrigin::Recorded,
+        };
+        self.check_mutating_permission(self_origin, Permission::MAY_WRITE)?;
+        target_overlay.check_mutating_permission(
+            CopyUpOrigin::Operation(new_dir_dentry),
+            Permission::MAY_WRITE,
+        )?;
+        source_overlay.copy_up_at(old_child_dentry)?;
         if !core::ptr::addr_eq(core::ptr::from_ref(self), Arc::as_ptr(&target_overlay)) {
             self.cross_device_gate(&source_overlay)?;
         }
         let (mut source_guard, mut target_guard) =
             self.lock_parent_dir_transactions(Some(&target_overlay))?;
         self.rename_upper(
-            old_name,
+            &old_name,
             &source_overlay,
             &target_overlay,
             new_name,
-            replaced_inode,
+            replaced_inode.as_ref(),
             mode,
             rename::RenameLocks {
                 self_index: &mut source_guard,

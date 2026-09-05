@@ -19,7 +19,7 @@ use crate::{
         utils::DirentVisitor,
         vfs::{
             inode::{Inode, MknodType},
-            path::is_dot_or_dotdot,
+            path::{Path, is_dot_or_dotdot},
         },
     },
     prelude::*,
@@ -36,14 +36,18 @@ pub(in overlayfs) struct UpperFilesystemCapabilities {
 }
 
 impl UpperFilesystemCapabilities {
+    /// The probes run at mount time on the private workdir clone view: the
+    /// private-xattr probe reads the upper root directly, while the d_type
+    /// and char-device probes create and remove transient entries under the
+    /// workspace `Path` (transient dcache entries are overlay-private).
     pub(super) fn probe(
         upper_inode: &Arc<dyn Inode>,
-        workspace_inode: &Arc<dyn Inode>,
+        workspace_path: &Path,
         prefix: OverlayXattrPrefix,
     ) -> Result<Self> {
         let can_store_private_xattr = Self::probe_private_xattr(upper_inode, prefix)?;
-        let can_report_directory_type = Self::probe_d_type(workspace_inode)?;
-        let can_mknod_char = Self::probe_mknod_char(workspace_inode)?;
+        let can_report_directory_type = Self::probe_d_type(workspace_path)?;
+        let can_mknod_char = Self::probe_mknod_char(workspace_path)?;
         Ok(Self {
             can_store_private_xattr,
             can_report_directory_type,
@@ -67,13 +71,13 @@ impl UpperFilesystemCapabilities {
         }
     }
 
-    fn probe_d_type(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
+    fn probe_d_type(workspace_path: &Path) -> Result<bool> {
         let d_type_probe_name = workdir_temp_name(D_TYPE_PROBE_PREFIX);
-        workspace_inode.create(&d_type_probe_name, InodeType::File, InodeMode::empty())?;
+        workspace_path.new_child(&d_type_probe_name, InodeType::File, InodeMode::empty())?;
         let mut d_type_probe = DTypeProbeVisitor::new();
         let mut offset = 0;
         let d_type_scan_result = loop {
-            match workspace_inode.readdir_at(offset, &mut d_type_probe) {
+            match workspace_path.inode().readdir_at(offset, &mut d_type_probe) {
                 Ok(0) => break Ok(()),
                 Ok(visited) => offset += visited,
                 Err(err) => break Err(err),
@@ -81,21 +85,21 @@ impl UpperFilesystemCapabilities {
         };
         match d_type_scan_result {
             Ok(()) => {
-                workspace_inode.unlink(&d_type_probe_name)?;
+                workspace_path.unlink(&d_type_probe_name)?;
                 Ok(!d_type_probe.saw_unknown_non_dot)
             }
             Err(err) => {
-                let _ = workspace_inode.unlink(&d_type_probe_name);
+                let _ = workspace_path.unlink(&d_type_probe_name);
                 Err(err)
             }
         }
     }
 
-    fn probe_mknod_char(workspace_inode: &Arc<dyn Inode>) -> Result<bool> {
+    fn probe_mknod_char(workspace_path: &Path) -> Result<bool> {
         let probe_name = workdir_temp_name(CHAR_DEVICE_PROBE_PREFIX);
-        match workspace_inode.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
+        match workspace_path.mknod(&probe_name, InodeMode::empty(), MknodType::CharDevice(0)) {
             Ok(_) => {
-                workspace_inode.unlink(&probe_name)?;
+                workspace_path.unlink(&probe_name)?;
                 Ok(true)
             }
             Err(err)

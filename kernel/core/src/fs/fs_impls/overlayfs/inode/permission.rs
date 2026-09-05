@@ -88,11 +88,13 @@ pub(super) fn current_in_group(gid: Gid) -> bool {
 
 impl OverlayInode {
     /// Verdicts are never cached.
+    ///
+    /// The no-promotion admission: the local gate plus the real re-check.
+    /// Every mutating flow — including the copy-up promotion — runs only
+    /// through [`Self::check_mutating_permission`]; this entry never
+    /// promotes.
     pub(super) fn check_permission(&self, access: AccessType, perm: Permission) -> Result<()> {
         self.check_local_permission(access, perm)?;
-        if access == AccessType::Mutating {
-            self.copy_up()?;
-        }
         if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(perm)?;
         }

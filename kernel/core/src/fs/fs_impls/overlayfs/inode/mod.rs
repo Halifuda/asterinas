@@ -421,43 +421,74 @@ impl Inode for OverlayInode {
         self.remove_xattr_impl(self_dentry, name)
     }
 
-    fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {
-        self.create_impl(name, type_, mode)
+    fn create(
+        &self,
+        self_dentry: &Dentry,
+        name: &str,
+        type_: InodeType,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        self.create_impl(self_dentry, name, type_, mode)
     }
 
-    fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Arc<dyn Inode>> {
-        self.mknod_impl(name, mode, type_)
+    fn create_symlink(
+        &self,
+        self_dentry: &Dentry,
+        name: &str,
+        target: &str,
+        mode: InodeMode,
+    ) -> Result<Arc<dyn Inode>> {
+        self.create_symlink_impl(self_dentry, name, target, mode)
     }
 
-    fn write_link(&self, target: &str) -> Result<()> {
-        self.write_link_impl(target)
+    fn mknod(
+        &self,
+        self_dentry: &Dentry,
+        name: &str,
+        mode: InodeMode,
+        type_: MknodType,
+    ) -> Result<Arc<dyn Inode>> {
+        self.mknod_impl(self_dentry, name, mode, type_)
     }
 
-    fn link(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        self.link_impl(old, name)
+    fn link(&self, self_dentry: &Dentry, old_dentry: &Dentry, name: &str) -> Result<()> {
+        self.link_impl(self_dentry, old_dentry, name)
     }
 
-    fn unlink(&self, name: &str) -> Result<()> {
-        self.unlink_impl(name)
+    fn unlink(&self, child_dentry: &Dentry) -> Result<()> {
+        let name = child_dentry.name();
+        self.unlink_impl(child_dentry, name)
     }
 
-    fn rmdir(&self, name: &str) -> Result<()> {
-        self.rmdir_impl(name)
+    fn rmdir(&self, child_dentry: &Dentry) -> Result<()> {
+        let name = child_dentry.name();
+        self.rmdir_impl(child_dentry, name)
     }
 
     fn rename(
         &self,
-        old_name: &str,
-        old_inode: &Arc<dyn Inode>,
-        new_dir_inode: &Arc<dyn Inode>,
+        old_child_dentry: &Dentry,
+        new_dir_dentry: &Dentry,
         new_name: &str,
-        replaced_inode: Option<&Arc<dyn Inode>>,
+        target_dentry: Option<&Dentry>,
         mode: RenameMode,
     ) -> Result<()> {
+        let old_name = old_child_dentry.name();
+        let source_overlay =
+            Arc::downcast::<OverlayInode>(old_child_dentry.inode().clone()).map_err(|_| {
+                Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
+            })?;
+        let target_overlay =
+            Arc::downcast::<OverlayInode>(new_dir_dentry.inode().clone()).map_err(|_| {
+                Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
+            })?;
+        let replaced_inode = target_dentry.map(|d| d.inode().clone());
         self.rename_impl(
+            old_child_dentry,
             old_name,
-            old_inode,
-            new_dir_inode,
+            source_overlay,
+            target_overlay,
+            new_dir_dentry,
             new_name,
             replaced_inode,
             mode,
