@@ -56,10 +56,9 @@
 //!   (Linux userxattr redirect/metacopy exclusivity and default disabling)
 
 use super::{
-    OverlayInode,
+    OverlayInode, ReaddirIndex,
     copyup::workdir::WorkdirTemp,
     permission::{AccessType, CopyUpOrigin},
-    ReaddirIndex,
 };
 use crate::{
     fs::{

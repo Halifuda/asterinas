@@ -465,24 +465,11 @@ impl Inode for OverlayInode {
         target_dentry: Option<&Dentry>,
         mode: RenameMode,
     ) -> Result<()> {
-        let old_name = old_child_dentry.name();
-        let source_overlay =
-            Arc::downcast::<OverlayInode>(old_child_dentry.inode().clone()).map_err(|_| {
-                Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
-            })?;
-        let target_overlay =
-            Arc::downcast::<OverlayInode>(new_dir_dentry.inode().clone()).map_err(|_| {
-                Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
-            })?;
-        let replaced_inode = target_dentry.map(|d| d.inode().clone());
         self.rename_impl(
             old_child_dentry,
-            old_name,
-            source_overlay,
-            target_overlay,
             new_dir_dentry,
             new_name,
-            replaced_inode,
+            target_dentry,
             mode,
         )
     }

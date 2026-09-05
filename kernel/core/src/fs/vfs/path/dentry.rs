@@ -824,13 +824,7 @@ impl DirDentry<'_> {
                 }
             }
 
-            old_dir_inode.rename(
-                &old_dentry,
-                self,
-                new_name,
-                new_dentry.as_deref(),
-                mode,
-            )?;
+            old_dir_inode.rename(&old_dentry, self, new_name, new_dentry.as_deref(), mode)?;
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {
@@ -887,13 +881,7 @@ impl DirDentry<'_> {
                 new_dir.check_sticky_bit_permission(replaced_inode)?;
             }
 
-            old_dir_inode.rename(
-                &old_dentry,
-                new_dir,
-                new_name,
-                new_dentry.as_deref(),
-                mode,
-            )?;
+            old_dir_inode.rename(&old_dentry, new_dir, new_name, new_dentry.as_deref(), mode)?;
 
             match mode {
                 RenameMode::Replace | RenameMode::NoReplace => {

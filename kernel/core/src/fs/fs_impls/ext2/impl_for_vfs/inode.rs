@@ -246,10 +246,7 @@ impl Inode for Ext2Inode {
             return_errno_with_message!(Errno::EINVAL, "RENAME_EXCHANGE is not supported on ext2");
         }
 
-        let new_dir_inode = new_dir_dentry
-            .inode()
-            .downcast_ref::<Ext2Inode>()
-            .unwrap();
+        let new_dir_inode = new_dir_dentry.inode().downcast_ref::<Ext2Inode>().unwrap();
         let old_inode = old_child_dentry
             .inode()
             .downcast_ref::<Ext2Inode>()

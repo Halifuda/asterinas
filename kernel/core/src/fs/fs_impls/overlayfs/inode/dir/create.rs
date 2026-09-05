@@ -17,8 +17,7 @@ use crate::{
         fs_impls::overlayfs::{
             inode::{
                 Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
-                copyup::workdir::WorkdirTempRequest,
-                permission::CopyUpOrigin,
+                copyup::workdir::WorkdirTempRequest, permission::CopyUpOrigin,
             },
             layer::RealObjectStack,
             mknod_object_type,
@@ -162,18 +161,12 @@ impl OverlayInode {
         match fs.lookup(self, name)? {
             Lookup::Negative(NegativeLookup::Absent) => {
                 let upper_parent_path = self.upper_parent_path()?;
-                let new_upper_path =
-                    upper_parent_path.new_symlink_child(name, target, mode)?;
+                let new_upper_path = upper_parent_path.new_symlink_child(name, target, mode)?;
                 let upper_layer = fs.layer_stack().upper_layer()?;
                 let new_facts =
                     RealObjectStack::upper_only(upper_layer.child_real_object(&new_upper_path));
                 let inode = fs.project_inode(&new_facts);
-                self.readdir_index_insert(
-                    name,
-                    inode.clone(),
-                    InodeType::SymLink,
-                    &mut dir_guard,
-                );
+                self.readdir_index_insert(name, inode.clone(), InodeType::SymLink, &mut dir_guard);
                 Ok(inode)
             }
             Lookup::Negative(NegativeLookup::HiddenByWhiteout) => {
@@ -191,9 +184,8 @@ impl OverlayInode {
                         fs.publish_temp(&temp, &upper_parent_path, name, RenameMode::Replace)?;
                     committed = true;
                     let upper_layer = fs.layer_stack().upper_layer()?;
-                    let new_facts = RealObjectStack::upper_only(
-                        upper_layer.child_real_object(&published_path),
-                    );
+                    let new_facts =
+                        RealObjectStack::upper_only(upper_layer.child_real_object(&published_path));
                     let inode = fs.project_inode(&new_facts);
                     self.readdir_index_insert(
                         name,

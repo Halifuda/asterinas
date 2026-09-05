@@ -57,10 +57,7 @@ impl OverlayInode {
         if !is_owner && !has_fsetid {
             mode.remove(InodeMode::S_ISUID | InodeMode::S_ISGID);
         }
-        self.check_mutating_permission(
-            CopyUpOrigin::Operation(self_dentry),
-            Permission::empty(),
-        )?;
+        self.check_mutating_permission(CopyUpOrigin::Operation(self_dentry), Permission::empty())?;
         self.delegate_to_real(|real, d| real.set_mode(d, mode))
     }
 
@@ -72,10 +69,7 @@ impl OverlayInode {
                 "the caller lacks CAP_CHOWN for an ownership change",
             ));
         }
-        self.check_mutating_permission(
-            CopyUpOrigin::Operation(self_dentry),
-            Permission::empty(),
-        )?;
+        self.check_mutating_permission(CopyUpOrigin::Operation(self_dentry), Permission::empty())?;
         self.delegate_to_real(|real, d| real.set_owner(d, uid))
     }
 
@@ -94,10 +88,7 @@ impl OverlayInode {
                 ));
             }
         }
-        self.check_mutating_permission(
-            CopyUpOrigin::Operation(self_dentry),
-            Permission::empty(),
-        )?;
+        self.check_mutating_permission(CopyUpOrigin::Operation(self_dentry), Permission::empty())?;
         self.delegate_to_real(|real, d| real.set_group(d, gid))
     }
 
@@ -126,10 +117,7 @@ impl OverlayInode {
         let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
         let has_cap = current_task_has_capability(CapSet::FOWNER);
         if self
-            .check_mutating_permission(
-                CopyUpOrigin::Operation(self_dentry),
-                Permission::MAY_WRITE,
-            )
+            .check_mutating_permission(CopyUpOrigin::Operation(self_dentry), Permission::MAY_WRITE)
             .is_err()
         {
             if !is_owner && !has_cap {

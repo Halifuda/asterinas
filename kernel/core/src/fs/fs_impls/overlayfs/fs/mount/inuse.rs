@@ -79,7 +79,9 @@ struct InuseGuard {
 
 impl InuseGuard {
     fn try_claim(path: &Path, identity: Uuid) -> Result<Self> {
-        path.inode().overlay_inuse_slot().try_claim(identity.value())?;
+        path.inode()
+            .overlay_inuse_slot()
+            .try_claim(identity.value())?;
         Ok(Self {
             inode: path.inode().clone(),
             dentry: path.dentry().clone(),

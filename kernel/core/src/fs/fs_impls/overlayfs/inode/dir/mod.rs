@@ -39,8 +39,7 @@
 
 use self::remove::RemoveKind;
 use super::{
-    AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
-    permission::CopyUpOrigin,
+    AccessType, Lookup, NegativeLookup, OverlayInode, ReaddirIndex, permission::CopyUpOrigin,
 };
 use crate::{
     fs::{
@@ -255,14 +254,21 @@ impl OverlayInode {
     pub(super) fn rename_impl(
         &self,
         old_child_dentry: &Dentry,
-        old_name: String,
-        source_overlay: Arc<OverlayInode>,
-        target_overlay: Arc<OverlayInode>,
         new_dir_dentry: &Dentry,
         new_name: &str,
-        replaced_inode: Option<Arc<dyn Inode>>,
+        target_dentry: Option<&Dentry>,
         mode: RenameMode,
     ) -> Result<()> {
+        let old_name = old_child_dentry.name();
+        let source_overlay = Arc::downcast::<OverlayInode>(old_child_dentry.inode().clone())
+            .map_err(|_| {
+                Error::with_message(Errno::EIO, "the rename source is not an overlay inode")
+            })?;
+        let target_overlay = Arc::downcast::<OverlayInode>(new_dir_dentry.inode().clone())
+            .map_err(|_| {
+                Error::with_message(Errno::EIO, "the rename target is not an overlay inode")
+            })?;
+        let replaced_inode = target_dentry.map(|d| d.inode().clone());
         let parent_dentry = old_child_dentry.parent();
         let self_origin = match &parent_dentry {
             Some(parent) => CopyUpOrigin::Operation(parent),

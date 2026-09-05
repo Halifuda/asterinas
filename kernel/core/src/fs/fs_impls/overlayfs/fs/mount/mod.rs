@@ -117,8 +117,7 @@ impl OverlayFs {
                 )
             }?;
 
-            let mut claimed_pair =
-                UpperWorkdirInuse::claim(&upper_path, &workdir_path, identity)?;
+            let mut claimed_pair = UpperWorkdirInuse::claim(&upper_path, &workdir_path, identity)?;
 
             if !is_effective_read_only {
                 claimed_pair.prepare_workdir(&workdir_path)?;
