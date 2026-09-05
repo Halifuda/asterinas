@@ -1852,3 +1852,63 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     一个 enum 变体（56→55），零新实体。主代理 exact-diff 验收 ACCEPTED。
   - **Write-set**: `fs/policy.rs`、`inode/lookup.rs`、
     `inode/dir/create.rs`、`inode/dir/mod.rs`。未提交，待 user 指令。
+
+- **`pr3767_adaptation_wave_20260905`**（2026-09-05，user 批准执行；live
+  handoff `main-agent/20260905-pr3767-adaptation-execution_main_agent_handoff.md`）
+  - **Kind**: 四-pass 适配执行波（P1 rename PoC/VFS 轮 → P2a
+    admission+frame+数据面 → P2b namespace+plumbing → P3 Variant B
+    简化增量）。设计依据 = `components/pr3767-merge-20260904/
+    designer_spec.md`（§2–§12 = A 形态中间面，§13.4/§13.5 = B 增量）+
+    `designer_validation.md` + handoff §12/§14 终裁。
+  - **User directives（2026-09-05）**: 每 pass 后 commit 一次（base 先空
+    amend 去 WIP 标记，= `75f5d1f43`）；Creator 需要编译时自行在
+    codex-asterinas-dev container 编译（放宽限制，命令形态照 CREATOR.md
+    §8）；P2/P3 结束后各一轮 Reviewer，不过则同轮同 creator + 同
+    reviewer 再 loop 一次（一轮为限，仍败升级 user）。
+  - **P1 `pass_56_pr3767_vfs_rename_poc`**（Normal）: trait `rename`
+    签名 `new_dir_inode: &Arc<dyn Inode>` → `new_dir_dentry: &Dentry` +
+    参数更名 `replaced_dentry`→`target_dentry` + 参数 doc 冻结可达组合
+    不变式（handoff §12）；`DirDentry::rename` 两处调用点改传 dentry
+    （Deref 强转）并删除 `new_dir_inode` 坍缩变量；`Dentry::parent`
+    （dentry.rs:283）`pub(super)`→`pub(in crate::fs)`（spec §8.1）；
+    机械适配 census = 6 trait impl（exfat/procfs-template/virtiofs/
+    ramfs/ext2-impl_for_vfs/devpts）+ systree blanket default
+    （systree_inode.rs:555；cgroupfs 无 rename impl——handoff §14
+    7-清单经普查修正）。compile gate = 全 crate 错误只许落在
+    overlayfs 目录内（预存 56 错误面保留，验证 VFS+外 FS 零新增破坏）。
+  - **P2a `pass_57_pr3767_admission_frame_dataplane`**（High）: spec
+    §3/§4/§5 + §6 数据面行 + §7 staging 行，A 形态逐字（`CopyUpOrigin`
+    、`check_mutating_permission`、frame 重写 `Mutex<()>`、
+    `delegate_to_real`、workdir `Symlink` 变体、staging helpers 改型、
+    §11 文档）。无 compile gate（namespace 行未落，树保持红）。
+  - **P2b `pass_58_pr3767_namespace_plumbing`**（High）: spec §6
+    namespace 行 + §7 其余（capabilities Path-API 探针、inuse、dir/*
+    调用点）。rename 行按 handoff §12 最小形态改写 = packet 内主代理
+    修正项（新父 admission = `Operation(new_dir_dentry)`，Creator 零
+    推断）。**G-1 compile preflight = 第一个编译绿点。**
+  - **R1 Reviewer**: P1+P2a+P2b 累计 diff（机械面）。不过 → 同
+    creator 修复 + 同 reviewer 复审，一轮为限。
+  - **P3 `pass_59_pr3767_variant_b_delta`**（High）: spec §13.5 删除
+    清单 + §13.4 anchor 机制（`anchor_path`/`resolve_at_anchor` 落
+    `inode/lookup.rs`）+ `Recorded`→`Anchor` + `..` F5+F1。compile
+    保持绿。
+  - **R2 Reviewer**: P3 diff（语义面）。loop 规则同 R1。
+  - **Runtime gates（本轮后置，Checker lane）**: 回归四例（validation
+    §2）→ make check + rustdoc（G-2/G-3）→ xfstests 全表（VB-1 序列
+    必须组合，否则 Variant B 不得放行；§7.2 激活）。
+  - **Result（2026-09-05，EXECUTED & CLOSED）**: 四 pass 全闭环——
+    P1 `pass_56_pr3767_vfs_rename_poc`（commit `f7af219d4`；compile
+    gate run01：错误全落 overlayfs）；P2a
+    `pass_57_pr3767_admission_frame_dataplane`（commit `976e9890a`；run03
+    剩余 29 错全落 P2b 写集；deviation D1 = identity.rs store_lower_id
+    改型（packet 写集枚举遗漏，主代理追认））；P2b
+    `pass_58_pr3767_namespace_plumbing`（commit `d6afdfa5b`；**G-1 全绿
+    run06 exit 0 / 0 warning**；deviation 1 = rename_impl 8 参（packet
+    §3.1 内部不一致的消解）、2 = claim(&Path) 改型、4 = `Path::new(
+    mount_node, dentry)` 重建）；P3 `pass_59_pr3767_variant_b_delta`
+    （commit `a54c1375d`；保持绿 run02 exit 0 / 0 warning；deviation
+    D-3 = dir/mod.rs 3 处 one-token Recorded→Anchor（主代理写集遗漏，
+    编译硬阻塞，已追认））。**R1 PASS**（0B/0M/2 MINOR/3 LINE；F-1/F-2
+    doc fold-in 并入 P3 落地）、**R2 PASS**（0B/0M/0 MINOR/3 LINE，
+    全为文档措辞级；loop 未触发）。树终态全绿。运行时 gates 未跑
+    （后置 Checker lane）。

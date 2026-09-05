@@ -1,0 +1,102 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
+# Main-Agent Handoff: 2026-09-05 PR #3767 适配执行轮（P1→P2a→P2b→P3）
+
+**Date / Time:** 2026-09-05 08:02 CST
+**Status:** `EXECUTION CLOSED (2026-09-05) — 四 pass + 两 Reviewer 全闭环，
+R1/R2 均 PASS（loop 未触发），树全绿（pass_59_run02 exit 0 / 0 warning）。
+运行时 gates（回归四例 → make check/rustdoc → xfstests 全表含 VB-1）后置
+Checker lane，待 user 指令。`
+**Parent:** `20260904-140000-upstream-pr3767-merge_main_agent_handoff.md`
+（§14 终裁 Variant B；本 handoff 承接其执行面）。
+
+## 1. 切片记录（权威 = PASS_SLICING `pr3767_adaptation_wave_20260905`）
+
+- P1 `pass_56_pr3767_vfs_rename_poc`（Normal）→ commit
+- P2a `pass_57_pr3767_admission_frame_dataplane`（High）→ commit
+- P2b `pass_58_pr3767_namespace_plumbing`（High，G-1 首个编译绿点）→ commit
+- R1 Reviewer（P1+P2a+P2b 累计 diff；loop 同 creator+reviewer 一次为限）
+- P3 `pass_59_pr3767_variant_b_delta`（High，compile 保持绿）→ commit
+- R2 Reviewer（P3 diff；loop 规则同 R1）
+- Runtime gates（后置，Checker lane）：回归四例 → make check + rustdoc →
+  xfstests 全表（VB-1 序列必须组合，§7.2 激活）。
+
+## 2. 已完成的前置动作
+
+1. **空 amend**：`faa3abf55`（WIP: overlayfs picks PR #3767…）→
+   `75f5d1f43`（去 WIP 标记与 "execution pending" 子句，内容零变化）。
+2. **P1 普查**（主代理直查，修正 handoff §14 的 7-清单）：
+   - trait rename 签名 = `fs_apis/inode.rs:483-491`；
+   - dispatch = `path/dentry.rs` `DirDentry::rename`（~:765-905），两处
+     `old_dir_inode.rename(...)` 调用点（同目录 ~:833 传 `old_dir_inode`、
+     跨目录 ~:886 传 `new_dir_inode`），头部 `let new_dir_inode =
+     new_dir.inode();` 改后成死变量须删；`DirDentry: Deref<Target=Dentry>`
+     （dentry.rs:383-393），调用点直接传 `self`/`new_dir` 即可强转；
+   - `Dentry::parent` = dentry.rs:283 `pub(super)`（§8.1 目标）；
+   - trait impl rename 全集 = exfat/inode.rs:1690、procfs/template/dir.rs:233、
+     virtiofs/inode/mod.rs:469、ramfs/fs.rs:1314、ext2/impl_for_vfs/inode.rs:237、
+     devpts/mod.rs:371 + systree blanket default（systree_inode.rs:555，
+     `impl<KInode: SysTreeInodeTy> Inode for KInode` :416 内的
+     specialization `default fn`）。**cgroupfs 无 rename impl**（handoff §14
+     的 7-清单含 cgroupfs 系笔误）；ext2/inode/dir/mod.rs:234 是 ext2 内部
+     方法非 trait 面。
+   - `Dentry::inode()` 返回 `&Arc<dyn Inode>`（非 Option）→ 提取模式 =
+     `new_dir_dentry.inode().downcast_ref::<X>().unwrap()` /
+     `Arc::downcast::<X>(new_dir_dentry.inode().clone()).unwrap()`（随原 impl 惯例）。
+   - `Path::rename`（path/mod.rs:726）只转发 DirDentry，不需改；syscall 只走
+     Path::rename；fs/ 之外无 Inode impl。
+3. **P1 write-set（9 生产文件 + 1 收据）**：上述 2 的全部位点文件。
+
+## 3. Pass 执行记录（2026-09-05 全部闭环）
+
+- **P1 `pass_56_pr3767_vfs_rename_poc`** → commit **`f7af219d4`**。9 文件；
+  compile gate run01：错误全落 overlayfs（56 错误面逐文件与基线一致）。
+  验收 = 主代理逐 hunk exact-diff。
+- **P2a `pass_57_pr3767_admission_frame_dataplane`** → commit
+  **`976e9890a`**。10 文件（8 写集 + identity.rs D1）；run03 剩余 29 错
+  全落 P2b 写集。Deviation D1（identity.rs store_lower_id 改型 = packet
+  写集枚举遗漏）主代理追认；D2-D5（Symlink 带 mode、check_mutating_permission
+  经冻结入口分派、publication-parent-no-upper EIO 臂、祖先 origin 先行
+  推导）均 spec 内成立。
+- **P2b `pass_58_pr3767_namespace_plumbing`** → commit **`d6afdfa5b`**。
+  11 文件；**G-1 全绿 run06 exit 0 / 0 warning**（run01 编辑前基线 29 错）。
+  Deviation 1（rename_impl 8 参 = packet §3.1 内部不一致消解）主代理追认；
+  2（UpperWorkdirInuse::claim(&Path) 改型）为 InuseGuard::try_claim(&Path)
+  的机械后果；4（`Path::new(mount_node, dentry)` 重建）R1 复核结构等价。
+- **R1 `review_r1_pr3767_adaptation_20260905`** → **PASS**（0 BLOCKER /
+  0 MAJOR / 2 MINOR / 3 LINE）。F-1（rename 准入 doc 过时）与 F-2（词汇表
+  双入口终态）fold-in 并入 P3 落地；LINE 项（EIO 消息串重复、create.rs
+  temp_path 无条件构造、spec RELY 枚举）记录接受不处置。loop 未触发。
+- **P3 `pass_59_pr3767_variant_b_delta`** → commit **`a54c1375d`**。10 文件
+  （8 写集 + create.rs D-1/D-2 授权最小编辑 + dir/mod.rs D-3）；保持绿
+  run02 exit 0 / 0 warning。**D-3 主代理追认**：dir/mod.rs 3 处 one-token
+  `Recorded`→`Anchor`（unlink/rmdir/rename 防御性回退）系 variant 改名的
+  编译硬阻塞，主代理写集遗漏，Creator 停手询问未达后按先例最小执行并
+  记录——处置正确。R2 独立复核 D-3 无语义夹带。
+- **R2 `review_r2_pr3767_variant_b_20260905`** → **PASS**（0 BLOCKER /
+  0 MAJOR / 0 MINOR / 3 LINE，全为文档措辞级：Locking 段历史过去时（收据
+  声明的有意 delta doc）、`..` doc "dead mount" 措辞过度声明、
+  resolve_at_anchor doc 语义澄清）。不处置，留待后续注释轮。loop 未触发。
+- **Spec errata（主代理记账）**：designer_spec §3/§10 "rename 新父准入 =
+  Recorded" 冻结文本早于 handoff §12 终裁，实际形态 = Operation(
+  new_dir_dentry)；R1 报告 §8 建议 errata，本条即为记录，spec 文本不改。
+- **树终态**：`cargo osdk check -p aster-core` exit 0 / 0 warning
+  （pass_59_run02）。分支 = `864b9138b`（main）+ 29 重放 + 2 pick +
+  本轮 4 commit + base amend。
+
+## 4. Next-main-agent actions
+
+1. **Runtime gates 排期（待 user 指令，Checker lane / $ovfs-checker）**：
+   ① 回归四例（ovl_test / readdir_small_buffer / R-2 sparse / R-4 xino）；
+   ② G-2 `make check` + G-3 rustdoc；③ xfstests 全表（**VB-1 序列必须
+   组合**：祖先改名后 rename 进 lower 子目录，否则 Variant B 不得放行；
+   §7.2 VB-2..VB-4 激活）。
+2. R2 的 3 条 LINE 级文档措辞项并入未来注释轮（不单独开线）。
+3. 收尾后 handoff 关闭（Status → CLOSED）；WIP 无——四 pass 均已正式
+   commit。
+
+## 5. Prohibitions
+
+- Reviewer loop 以一轮为限，仍败升级 user，不自动加轮（本轮未触发）。
+- runtime gates（回归/xfstests）未获 user 指令前不得自行触发。
+- 除各 pass 写集外不动任何生产代码；`.agents` 记录仅主代理改。

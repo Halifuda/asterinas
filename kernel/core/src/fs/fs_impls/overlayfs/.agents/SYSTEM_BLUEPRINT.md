@@ -714,3 +714,39 @@ Record only active or recently changed passes here. Durable slicing rationale be
     `components/placement-redundancy-20260904/`; packets under
     `subagent-tasks/placement-redundancy-20260904/`.
   - **Deferred**: per-pass commit awaits user instruction.
+
+- **`pr3767_adaptation_wave_20260905`** — **EXECUTED & CLOSED 2026-09-05
+  (four Creator passes + two Reviewer gates, all committed; runtime gates
+  deferred to the Checker lane)**
+  - **Kind**: user-directed adaptation wave for upstream PR #3767 (dentry-
+    centric `Inode` trait) + self-implemented rename PoC + Variant B
+    simplification. Slicing in `PASS_SLICING.md`
+    (`pr3767_adaptation_wave_20260905`); live handoff
+    `main-agent/20260905-pr3767-adaptation-execution_main_agent_handoff.md`.
+  - **Result**: P1 rename PoC (`f7af219d4`: trait rename takes
+    `new_dir_dentry: &Dentry` + `target_dentry` doc invariants; dispatch
+    passes the dentry through; `Dentry::parent` widened to
+    `pub(in crate::fs)`; 6 implementors + systree blanket adapted) →
+    P2a admission/frame/data-plane (`976e9890a`: `CopyUpOrigin`,
+    `check_mutating_permission`, frame rewrite with `Mutex<()>` token and
+    extract-then-lock, `delegate_to_real` pairing, sync collapse, atomic
+    symlink temps) → P2b namespace/plumbing (`d6afdfa5b`: dentry-sourced
+    namespace entries, `create_symlink` atomic replacing create+write_link,
+    Path-API capability probes, workdir claim carries its dentry; **first
+    compile-green point, run06 exit 0 / 0 warnings**) → R1 Reviewer PASS
+    (0 BLOCKER / 0 MAJOR) → P3 Variant B delta (`a54c1375d`:
+    `recorded_parent` field + lock domain + repoint + both edges removed,
+    `ProjectionBinding` deleted, anchor-path re-resolution machinery,
+    `..` degrades F5+F1) → R2 Reviewer PASS (0 BLOCKER / 0 MAJOR / 0
+    MINOR). Tree final state: `cargo osdk check -p aster-core` exit 0,
+    zero warnings.
+  - **Deviation adjudications (main-agent)**: P2a D1 `identity.rs`
+    store_lower_id retype (packet write-set enumeration omission);
+    P2b deviation 1 rename_impl 8-param form (packet §3.1 internal
+    inconsistency resolved by the Creator); P3 D-3 dir/mod.rs three
+    one-token `Recorded`→`Anchor` fallback renames (write-set omission,
+    compile-hard-blocked, R2 independently verified as semantics-free).
+  - **Deferred**: runtime gates — regression four-case suite, `make check`
+    + rustdoc, and the full-table xfstests run with the mandatory VB-1
+    composition — are Checker-lane work awaiting user instruction
+    (designer_validation §6 order, §7.2 Variant-B obligations active).
