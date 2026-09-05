@@ -3,9 +3,11 @@
 
 //! The two-stage permission admission pipeline.
 //!
-//! This module hosts the single admission entry
-//! [`OverlayInode::check_permission`] plus the two stage helpers, and the
-//! shared current-credential probes used by the metadata entries.
+//! This module hosts the two admission entries
+//! ([`OverlayInode::check_permission`] for read-only requests,
+//! [`OverlayInode::check_mutating_permission`] for mutating requests) plus
+//! the two stage helpers, and the shared current-credential probes used by
+//! the metadata entries.
 //!
 //! # Stages
 //!
@@ -14,8 +16,10 @@
 //! | Local | [`OverlayInode::check_local_permission`] (EROFS gate + projected DAC). |
 //! | Real | [`OverlayInode::check_real_permission`] (explicit real re-check). |
 //!
-//! The read-only `Inode::check_permission` forwarder calls this entry
-//! with `AccessType::ReadOnly`, never promoting.
+//! The read-only `Inode::check_permission` forwarder calls the read-only
+//! entry with `AccessType::ReadOnly`, never promoting. The mutating entry
+//! inserts the copy-up promotion between the two stages, sourcing the
+//! publication coordinate from [`CopyUpOrigin`].
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AccessType {
@@ -23,9 +27,23 @@ pub(super) enum AccessType {
     Mutating,
 }
 
+/// The dentry context a mutating admission uses to source the copy-up
+/// publication coordinate. `Operation` reads (parent, name) from the
+/// operation's overlay dentry at entry; `Recorded` falls back to the
+/// recorded parent and the visible-source real dentry's name for the
+/// dentry-less entries (fallocate, rename's new-parent admission).
+pub(super) enum CopyUpOrigin<'a> {
+    Operation(&'a Dentry),
+    Recorded,
+}
+
 use super::OverlayInode;
 use crate::{
-    fs::{file::Permission, fs_impls::overlayfs::with_current_posix_thread, vfs::inode::Inode},
+    fs::{
+        file::Permission,
+        fs_impls::overlayfs::with_current_posix_thread,
+        vfs::{inode::Inode, path::Dentry},
+    },
     prelude::*,
     process::{Gid, Uid, credentials::capabilities::CapSet},
     security::lsm::hooks as lsm_hooks,
@@ -74,6 +92,25 @@ impl OverlayInode {
         self.check_local_permission(access, perm)?;
         if access == AccessType::Mutating {
             self.copy_up()?;
+        }
+        if !self.fs_arc()?.policy().is_default_permissions() {
+            self.check_real_permission(perm)?;
+        }
+        Ok(())
+    }
+
+    /// The mutating admission: the local gate (`Mutating`: EROFS + projected
+    /// DAC), the copy-up promotion sourced from `origin`, then the real
+    /// re-check — the same stage order as [`Self::check_permission`].
+    pub(super) fn check_mutating_permission(
+        &self,
+        origin: CopyUpOrigin<'_>,
+        perm: Permission,
+    ) -> Result<()> {
+        self.check_local_permission(AccessType::Mutating, perm)?;
+        match origin {
+            CopyUpOrigin::Operation(dentry) => self.copy_up_at(dentry)?,
+            CopyUpOrigin::Recorded => self.copy_up()?,
         }
         if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(perm)?;

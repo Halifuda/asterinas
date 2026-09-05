@@ -5,11 +5,11 @@
 //!
 //! This module hosts the six metadata setters: `set_mode`/`set_owner`/
 //! `set_group` (chmod/chown) and `set_atime`/`set_mtime`/`set_ctime`
-//! (utimes). Every entry admits through the two-stage
-//! [`OverlayInode::check_permission`]/`AccessType::Mutating` pipeline — the
-//! local permission check, copy-up promotion for the `Mutating` class, and
-//! the real-handle re-check (unless `default_permissions`) — then forwards
-//! to the real authority via [`OverlayInode::delegate_to_real`].
+//! (utimes). Every entry admits through
+//! [`OverlayInode::check_mutating_permission`] — the local permission check,
+//! copy-up promotion sourced from the entry's own dentry, and the
+//! real-handle re-check (unless `default_permissions`) — then forwards to
+//! the real authority via [`OverlayInode::delegate_to_real`].
 //!
 //! # Ownership gate
 //!
@@ -30,19 +30,19 @@ use core::time::Duration;
 
 use super::{
     OverlayInode,
-    permission::{AccessType, current_fsuid, current_in_group, current_task_has_capability},
+    permission::{CopyUpOrigin, current_fsuid, current_in_group, current_task_has_capability},
 };
 use crate::{
     fs::{
         file::{InodeMode, Permission},
-        vfs::inode::Inode,
+        vfs::{inode::Inode, path::Dentry},
     },
     prelude::*,
     process::{Gid, Uid, credentials::capabilities::CapSet},
 };
 
 impl OverlayInode {
-    pub(super) fn set_mode_impl(&self, mode: InodeMode) -> Result<()> {
+    pub(super) fn set_mode_impl(&self, self_dentry: &Dentry, mode: InodeMode) -> Result<()> {
         let metadata = self.metadata()?;
         let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
         let has_cap = current_task_has_capability(CapSet::FOWNER);
@@ -57,11 +57,14 @@ impl OverlayInode {
         if !is_owner && !has_fsetid {
             mode.remove(InodeMode::S_ISUID | InodeMode::S_ISGID);
         }
-        self.check_permission(AccessType::Mutating, Permission::empty())?;
-        self.delegate_to_real(|real| real.set_mode(mode))
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::empty(),
+        )?;
+        self.delegate_to_real(|real, d| real.set_mode(d, mode))
     }
 
-    pub(super) fn set_owner_impl(&self, uid: Uid) -> Result<()> {
+    pub(super) fn set_owner_impl(&self, self_dentry: &Dentry, uid: Uid) -> Result<()> {
         let metadata = self.metadata()?;
         if uid != metadata.uid && !current_task_has_capability(CapSet::CHOWN) {
             return Err(Error::with_message(
@@ -69,11 +72,14 @@ impl OverlayInode {
                 "the caller lacks CAP_CHOWN for an ownership change",
             ));
         }
-        self.check_permission(AccessType::Mutating, Permission::empty())?;
-        self.delegate_to_real(|real| real.set_owner(uid))
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::empty(),
+        )?;
+        self.delegate_to_real(|real, d| real.set_owner(d, uid))
     }
 
-    pub(super) fn set_group_impl(&self, gid: Gid) -> Result<()> {
+    pub(super) fn set_group_impl(&self, self_dentry: &Dentry, gid: Gid) -> Result<()> {
         let metadata = self.metadata()?;
         if gid != metadata.gid {
             let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
@@ -88,46 +94,59 @@ impl OverlayInode {
                 ));
             }
         }
-        self.check_permission(AccessType::Mutating, Permission::empty())?;
-        self.delegate_to_real(|real| real.set_group(gid))
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::empty(),
+        )?;
+        self.delegate_to_real(|real, d| real.set_group(d, gid))
     }
 
-    pub(super) fn set_atime_impl(&self, time: Duration) {
-        self.best_effort_time_set(|real| real.set_atime(time));
+    pub(super) fn set_atime_impl(&self, self_dentry: &Dentry, time: Duration) {
+        self.best_effort_time_set(self_dentry, |real, d| real.set_atime(d, time));
     }
 
-    pub(super) fn set_mtime_impl(&self, time: Duration) {
-        self.best_effort_time_set(|real| real.set_mtime(time));
+    pub(super) fn set_mtime_impl(&self, self_dentry: &Dentry, time: Duration) {
+        self.best_effort_time_set(self_dentry, |real, d| real.set_mtime(d, time));
     }
 
-    pub(super) fn set_ctime_impl(&self, time: Duration) {
-        self.best_effort_time_set(|real| real.set_ctime(time));
+    pub(super) fn set_ctime_impl(&self, self_dentry: &Dentry, time: Duration) {
+        self.best_effort_time_set(self_dentry, |real, d| real.set_ctime(d, time));
     }
 }
 
 impl OverlayInode {
-    fn best_effort_time_set(&self, operation_fn: impl FnOnce(&Arc<dyn Inode>)) {
+    fn best_effort_time_set(
+        &self,
+        self_dentry: &Dentry,
+        operation_fn: impl FnOnce(&Arc<dyn Inode>, &Dentry),
+    ) {
         let Some(metadata) = self.metadata().ok() else {
             return;
         };
         let is_owner = current_fsuid().is_some_and(|fsuid| fsuid == metadata.uid);
         let has_cap = current_task_has_capability(CapSet::FOWNER);
         if self
-            .check_permission(AccessType::Mutating, Permission::MAY_WRITE)
+            .check_mutating_permission(
+                CopyUpOrigin::Operation(self_dentry),
+                Permission::MAY_WRITE,
+            )
             .is_err()
         {
             if !is_owner && !has_cap {
                 return;
             }
             if self
-                .check_permission(AccessType::Mutating, Permission::empty())
+                .check_mutating_permission(
+                    CopyUpOrigin::Operation(self_dentry),
+                    Permission::empty(),
+                )
                 .is_err()
             {
                 return;
             }
         }
-        let _ = self.delegate_to_real(|real| {
-            operation_fn(real);
+        let _ = self.delegate_to_real(|real, d| {
+            operation_fn(real, d);
             Ok(())
         });
     }

@@ -26,7 +26,9 @@
 //!   selected prefix) before it reaches the real authority — unconditionally,
 //!   even for a name that already carries the infix. The list transform
 //!   ([`present_xattr_names`]) is the inverse map: own private records are
-//!   hidden and one infix segment is stripped per layer.
+//!   hidden and one infix segment is stripped per layer. The mutating
+//!   entries (`set_xattr`, `remove_xattr`) admit through
+//!   [`OverlayInode::check_mutating_permission`] before delegating.
 //!
 //! Stacked same-prefix overlays therefore physically layer their records by
 //! infix-segment count: the count equals the number of overlays between the
@@ -53,13 +55,19 @@
 //! - <https://elixir.bootlin.com/linux/v6.17/source/fs/overlayfs/params.c#L956-L976>
 //!   (Linux userxattr redirect/metacopy exclusivity and default disabling)
 
-use super::{OverlayInode, ReaddirIndex, permission::AccessType};
+use super::{
+    OverlayInode,
+    copyup::workdir::WorkdirTemp,
+    permission::{AccessType, CopyUpOrigin},
+    ReaddirIndex,
+};
 use crate::{
     fs::{
         file::Permission,
         fs_impls::overlayfs::fs::OverlayFs,
         vfs::{
             inode::Inode,
+            path::{Dentry, Path},
             xattr::{
                 XATTR_LIST_MAX_LEN, XATTR_NAME_MAX_LEN, XattrName, XattrNamespace, XattrSetFlags,
             },
@@ -255,17 +263,22 @@ fn has_impure_marker(real_dir: &Arc<dyn Inode>, prefix: OverlayXattrPrefix) -> R
 }
 
 impl OverlayInode {
+    /// `real_dentry` is the dentry anchor of `real` — the caller-supplied
+    /// half of the `RealObject` anchor invariant (`real_dentry.inode()`
+    /// ptr-equals `real`).
     pub(in overlayfs) fn set_overlay_xattr(
         real: &Arc<dyn Inode>,
+        real_dentry: &Dentry,
         name: XattrName,
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
-        real.set_xattr(name, value_reader, flags)
+        real.set_xattr(real_dentry, name, value_reader, flags)
     }
 
     pub(super) fn set_impure_marker(
         real_dir: &Arc<dyn Inode>,
+        real_dentry: &Dentry,
         prefix: OverlayXattrPrefix,
     ) -> Result<()> {
         if has_impure_marker(real_dir, prefix)? {
@@ -275,15 +288,20 @@ impl OverlayInode {
         let mut marker_reader = VmReader::from(IMPURE_MARKER_VALUE).to_fallible();
         Self::set_overlay_xattr(
             real_dir,
+            real_dentry,
             name,
             &mut marker_reader,
             XattrSetFlags::CREATE_OR_REPLACE,
         )
     }
 
-    fn clear_impure_marker(real_dir: &Arc<dyn Inode>, prefix: OverlayXattrPrefix) -> Result<()> {
+    fn clear_impure_marker(
+        real_dir: &Arc<dyn Inode>,
+        real_dentry: &Dentry,
+        prefix: OverlayXattrPrefix,
+    ) -> Result<()> {
         let name = overlay_record_name(OverlayRecordName::Impure, prefix)?;
-        match real_dir.remove_xattr(name) {
+        match real_dir.remove_xattr(real_dentry, name) {
             Ok(()) => Ok(()),
             Err(err) if err.error() == Errno::ENODATA => Ok(()),
             Err(err) => Err(err),
@@ -311,7 +329,7 @@ impl OverlayInode {
                 return Ok(());
             }
         }
-        Self::clear_impure_marker(upper_real.real_inode(), prefix)
+        Self::clear_impure_marker(upper_real.real_inode(), upper_real.dentry(), prefix)
     }
 
     pub(super) fn refresh_impure_marker_best_effort(
@@ -331,7 +349,7 @@ impl OverlayInode {
 impl OverlayFs {
     pub(super) fn set_opaque_marker(
         &self,
-        target: &Arc<dyn Inode>,
+        temp_path: &Path,
         unsupported_message: &'static str,
     ) -> Result<()> {
         let can_store_private_xattr = self
@@ -345,7 +363,8 @@ impl OverlayFs {
             overlay_record_name(OverlayRecordName::Opaque, self.policy().xattr_prefix())?;
         let mut marker_reader = VmReader::from(OPAQUE_MARKER_VALUE).to_fallible();
         OverlayInode::set_overlay_xattr(
-            target,
+            temp_path.inode(),
+            temp_path.dentry(),
             marker_name,
             &mut marker_reader,
             XattrSetFlags::CREATE_OR_REPLACE,
@@ -367,11 +386,12 @@ impl OverlayInode {
             Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
         })?;
         self.check_permission(AccessType::ReadOnly, Permission::MAY_READ)?;
-        self.delegate_to_real(|real| real.get_xattr(used, value_writer))
+        self.delegate_to_real(|real, _d| real.get_xattr(used, value_writer))
     }
 
     pub(super) fn set_xattr_impl(
         &self,
+        self_dentry: &Dentry,
         name: XattrName,
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
@@ -381,8 +401,11 @@ impl OverlayInode {
         let used = XattrName::try_from_full_name(&used_name).ok_or_else(|| {
             Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
         })?;
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.delegate_to_real(|real| real.set_xattr(used, value_reader, flags))
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
+        self.delegate_to_real(|real, d| real.set_xattr(d, used, value_reader, flags))
     }
 
     pub(super) fn list_xattr_impl(
@@ -391,7 +414,7 @@ impl OverlayInode {
         list_writer: &mut VmWriter,
     ) -> Result<usize> {
         let prefix = self.fs_arc()?.policy().xattr_prefix();
-        self.delegate_to_real(|real| {
+        self.delegate_to_real(|real, _d| {
             let mut raw_list = vec![0u8; XATTR_LIST_MAX_LEN];
             let mut raw_writer = VmWriter::from(&mut raw_list[..]).to_fallible();
             let list_len = real.list_xattr(namespace, &mut raw_writer)?;
@@ -399,14 +422,17 @@ impl OverlayInode {
         })
     }
 
-    pub(super) fn remove_xattr_impl(&self, name: XattrName) -> Result<()> {
+    pub(super) fn remove_xattr_impl(&self, self_dentry: &Dentry, name: XattrName) -> Result<()> {
         let prefix = self.fs_arc()?.policy().xattr_prefix();
         let used_name = used_full_name(&name, prefix.as_str())?;
         let used = XattrName::try_from_full_name(&used_name).ok_or_else(|| {
             Error::with_message(Errno::EINVAL, "invalid escaped overlay xattr name")
         })?;
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.delegate_to_real(|real| real.remove_xattr(used))
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
+        self.delegate_to_real(|real, d| real.remove_xattr(d, used))
     }
 }
 
@@ -428,10 +454,11 @@ fn is_skippable_source_error(err: &Error, copy_policy: XattrCopyPolicy) -> bool 
 impl OverlayInode {
     /// Source reads run under the caller's credentials (no creator-credential
     /// scope exists), so a denied read propagates rather than silently dropping
-    /// `security.*`/`trusted.*` xattrs.
+    /// `security.*`/`trusted.*` xattrs. Writes land on the workdir temp's own
+    /// inode/dentry pair.
     pub(super) fn copy_eligible_xattrs(
         source: &Arc<dyn Inode>,
-        temp: &Arc<dyn Inode>,
+        temp: &WorkdirTemp,
         copy_policy: XattrCopyPolicy,
         prefix: OverlayXattrPrefix,
     ) -> Result<()> {
@@ -481,7 +508,12 @@ impl OverlayInode {
                     Err(err) => return Err(err),
                 };
                 let mut reader = VmReader::from(value.as_slice()).to_fallible();
-                match temp.set_xattr(name, &mut reader, XattrSetFlags::CREATE_OR_REPLACE) {
+                match temp.inode().set_xattr(
+                    temp.dentry(),
+                    name,
+                    &mut reader,
+                    XattrSetFlags::CREATE_OR_REPLACE,
+                ) {
                     Err(err) if copy_policy == XattrCopyPolicy::BestEffort => {
                         warn!(
                             "overlay xattr copy: skipping {} on temp: {:?}",

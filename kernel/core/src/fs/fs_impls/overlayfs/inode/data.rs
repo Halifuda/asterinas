@@ -7,13 +7,19 @@
 //! `O_NOATIME` so a read never updates the lower atime. Writes are
 //! upper-backed by construction: the write-capable open path runs the copy-up
 //! trigger before the handle is used, so delegation never bypasses the
-//! trigger. `O_APPEND` is serialized under the per-inode transaction lock.
+//! trigger. The mutating data-path entries (`resize`, `fallocate`) admit
+//! through [`OverlayInode::check_mutating_permission`] — the local gate plus
+//! the copy-up promotion — before delegating. `O_APPEND` is serialized under
+//! the per-inode transaction lock.
 
-use super::{OverlayInode, permission::AccessType};
+use super::{OverlayInode, permission::CopyUpOrigin};
 use crate::{
     fs::{
-        file::{AccessMode, PerOpenFileOps, Permission, StatusFlags},
-        vfs::inode::{FallocMode, Inode, SymbolicLink},
+        file::{AccessMode, PerOpenFileOps, Permission, StatusFlags, SyncMode},
+        vfs::{
+            inode::{FallocMode, Inode, SymbolicLink},
+            path::Dentry,
+        },
     },
     prelude::*,
     vm::page_cache::Vmo,
@@ -59,6 +65,7 @@ impl OverlayInode {
 
     pub(super) fn open_impl(
         &self,
+        self_dentry: &Dentry,
         access_mode: AccessMode,
         _status_flags: StatusFlags,
     ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
@@ -78,7 +85,7 @@ impl OverlayInode {
                 "the overlay mount is read-only",
             )));
         }
-        match self.copy_up() {
+        match self.copy_up_at(self_dentry) {
             Ok(()) => None,
             Err(err) => Some(Err(err)),
         }
@@ -90,28 +97,27 @@ impl OverlayInode {
 
     // The path-based `truncate()` syscall performs no VFS `MAY_WRITE` check
     // of its own, so this entry runs the uniform mutating admission before
-    // any side effect.
-    pub(super) fn resize_impl(&self, new_size: usize) -> Result<()> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.copy_up()?;
-        self.select_real_inode().resize(new_size)
+    // any side effect; the admission itself promotes the copy-up.
+    pub(super) fn resize_impl(&self, self_dentry: &Dentry, new_size: usize) -> Result<()> {
+        self.check_mutating_permission(
+            CopyUpOrigin::Operation(self_dentry),
+            Permission::MAY_WRITE,
+        )?;
+        self.delegate_to_real(|real, d| real.resize(d, new_size))
     }
 
     // `fallocate` shares `resize`'s side-effect class, so the uniform
     // mutating admission runs at this entry too rather than on the fd path
-    // alone.
+    // alone. The trait passes no dentry, so the admission records the
+    // dentry-less origin; the promotion behind it is a structural no-op for
+    // every dispatched fallocate (writable opens always copy up first).
     pub(super) fn fallocate_impl(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
-        self.check_permission(AccessType::Mutating, Permission::MAY_WRITE)?;
-        self.copy_up()?;
+        self.check_mutating_permission(CopyUpOrigin::Recorded, Permission::MAY_WRITE)?;
         self.select_real_inode().fallocate(mode, offset, len)
     }
 
-    pub(super) fn sync_all_impl(&self) -> Result<()> {
-        self.select_real_inode().sync_all()
-    }
-
-    pub(super) fn sync_data_impl(&self) -> Result<()> {
-        self.select_real_inode().sync_data()
+    pub(super) fn sync_impl(&self, mode: SyncMode) -> Result<()> {
+        self.select_real_inode().sync(mode)
     }
 
     pub(super) fn read_link_impl(&self) -> Result<SymbolicLink> {

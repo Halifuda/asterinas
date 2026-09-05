@@ -24,7 +24,7 @@ use crate::{
         },
         vfs::{
             inode::{Inode, MknodType, RenameMode},
-            path::Path,
+            path::{Dentry, Path},
         },
     },
     prelude::*,
@@ -33,6 +33,12 @@ use crate::{
 pub(in super::super) enum WorkdirTempRequest<'a> {
     Create {
         kind: InodeType,
+        mode: InodeMode,
+    },
+    /// A symlink temp is created atomically with its target; the mode is
+    /// carried so the copy-up publishes the lower's mode unchanged.
+    Symlink {
+        target: String,
         mode: InodeMode,
     },
     Mknod {
@@ -65,6 +71,12 @@ impl WorkdirTemp {
         self.path.inode()
     }
 
+    /// The temp's own dentry, paired with [`Self::inode`] for the real-layer
+    /// setter calls that take a `(self_dentry, …)` pair.
+    pub(in super::super) fn dentry(&self) -> &Arc<Dentry> {
+        self.path.dentry()
+    }
+
     fn path(&self) -> &Path {
         &self.path
     }
@@ -81,6 +93,7 @@ impl WorkdirTempRequest<'_> {
     fn kind(&self) -> InodeType {
         match self {
             Self::Create { kind, .. } => *kind,
+            Self::Symlink { .. } => InodeType::SymLink,
             Self::Mknod { node, .. } => mknod_object_type(node),
             Self::Link { source } => source.inode().type_(),
         }
@@ -88,7 +101,10 @@ impl WorkdirTempRequest<'_> {
 
     fn create_in(&self, workdir_path: &Path, temp_name: &str) -> Result<Path> {
         match self {
-            Self::Create { kind, mode } => workdir_path.new_fs_child(temp_name, *kind, *mode),
+            Self::Create { kind, mode } => workdir_path.new_child(temp_name, *kind, *mode),
+            Self::Symlink { target, mode } => {
+                workdir_path.new_symlink_child(temp_name, target, *mode)
+            }
             Self::Mknod { mode, node } => {
                 let node = match node {
                     MknodType::NamedPipe => MknodType::NamedPipe,

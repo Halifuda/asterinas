@@ -5,18 +5,24 @@
 //! and object-kind promotion.
 //!
 //! Key concepts:
-//! - **copy-up coordinate**: the pending publication name a lower-backed
-//!   object carries, with its recorded parent, from projection time until the
-//!   copy-up commit retires it.
-//! - **winner/waiter**: the tasks racing on one object's `copyup` mutex — the
-//!   winner performs the promotion; the waiters re-observe upper authority
-//!   and return.
+//! - **publication coordinate**: the `(publication parent, name)` pair a
+//!   lower-backed object publishes at, extracted per frame at trigger time —
+//!   from the operation's overlay dentry ([`CopyUpOrigin::Operation`]) or,
+//!   for the dentry-less entries, from the recorded parent plus the
+//!   visible-source real dentry's name ([`CopyUpOrigin::Recorded`]). The
+//!   extraction completes before any overlay lock is acquired and the
+//!   extracted `Arc`/`String` are owned by the frame.
+//! - **winner/waiter**: the tasks racing on one object's `copyup` mutex — a
+//!   pure token with no payload, because the sole published-state fact is
+//!   `upper: Once` being set. The winner performs the promotion; the waiters
+//!   re-observe upper authority under the mutex and return.
 //! - **copy-up frame**: one recursive promotion step for one object, from
-//!   coordinate read through commit and retirement.
+//!   coordinate extraction through commit.
 //!
-//! [`OverlayInode::copy_up`] is the single promotion entry: it promotes
-//! ancestors before the child and serializes winners through the `copyup`
-//! mutex.
+//! [`OverlayInode::copy_up_at`] (the `Operation` entry) and
+//! [`OverlayInode::copy_up`] (the `Recorded` entry) are the promotion
+//! entries: ancestors promote before the child, and winners serialize
+//! through the `copyup` mutex.
 //!
 //! ## Structure
 //!
@@ -34,18 +40,17 @@
 //! object's `copyup` mutex, then the publication parent's directory
 //! transaction lock, then the `InodeCache` write guard.
 //!
-//! - The coordinate read acquires and releases the `copyup` mutex together
-//!   with the `recorded_parent` read guard before the ancestor walk; no
-//!   child-to-parent `copyup` mutex edge exists.
-//! - The winner then holds the `copyup` mutex continuously from
-//!   re-acquisition through the commit tail and the coordinate retirement;
-//!   `publish_by_rename` takes the parent directory transaction lock inside
-//!   that hold, and the cache write is the innermost leaf.
+//! - Coordinate extraction acquires no overlay mutex: the `recorded_parent`
+//!   read guard (`Recorded` origin) is a leaf taken alone and released before
+//!   the ancestor walk — the former `copyup`-mutex → `recorded_parent`-read
+//!   edge is removed. No child-to-parent `copyup` mutex edge exists: each
+//!   ancestor frame releases its own mutex between frames.
+//! - The winner holds the `copyup` mutex continuously from acquisition after
+//!   the ancestor walk through the commit tail; `publish_by_rename` takes the
+//!   parent directory transaction lock inside that hold, and the cache write
+//!   is the innermost leaf.
 //! - No lock is released and reacquired inside the cache guard, and no new
-//!   lock domain or lock edge is introduced. The pre-existing orders —
-//!   `copyup` mutex before directory transaction lock, directory transaction
-//!   lock before the `recorded_parent` guard, and `copyup` mutex before the
-//!   `recorded_parent` guard — are unchanged.
+//!   lock domain or lock edge is introduced.
 //!
 //! ## References
 //!
@@ -57,15 +62,19 @@
 use core::cmp::min;
 
 use self::workdir::{WorkdirTemp, WorkdirTempRequest};
+use super::permission::CopyUpOrigin;
 use crate::{
     fs::{
-        file::{InodeType, StatusFlags},
+        file::{InodeType, StatusFlags, SyncMode},
         fs_impls::overlayfs::{
             fs::OverlayFs,
             inode::{Lookup, OverlayInode, xattr::XattrCopyPolicy},
             real::RealObject,
         },
-        vfs::inode::{Inode, MknodType, RenameMode, SymbolicLink},
+        vfs::{
+            inode::{Inode, MknodType, RenameMode, SymbolicLink},
+            path::Dentry,
+        },
     },
     prelude::*,
 };
@@ -79,33 +88,48 @@ const MAX_COPYUP_DEPTH: usize = 1024;
 const COPY_CHUNK_SIZE: usize = 64 * 1024;
 
 impl OverlayInode {
-    pub(super) fn copy_up(&self) -> Result<()> {
-        self.copy_up_inner(0)
+    /// The dentry-bearing promotion entry: the publication coordinate is
+    /// sourced from the operation's own overlay dentry, so the physical copy
+    /// lands where the trigger path resolves.
+    pub(super) fn copy_up_at(&self, self_dentry: &Dentry) -> Result<()> {
+        self.copy_up_via(CopyUpOrigin::Operation(self_dentry), 0)
     }
 
-    fn copy_up_inner(&self, depth: usize) -> Result<()> {
+    /// The dentry-less promotion entry (fallocate, rename's new-parent
+    /// admission): the coordinate falls back to the recorded parent and the
+    /// visible-source real dentry's name.
+    pub(super) fn copy_up(&self) -> Result<()> {
+        self.copy_up_via(CopyUpOrigin::Recorded, 0)
+    }
+
+    fn copy_up_via(&self, origin: CopyUpOrigin<'_>, depth: usize) -> Result<()> {
         let fs = self.fs_arc()?;
 
         if self.upper.get().is_some() {
             return Ok(());
         }
 
-        let (publication_parent, name) = {
-            let published = self.lock_copyup();
-            let Some(name) = published.as_ref() else {
-                // No pending coordinate means the object was already published (the
-                // mount root never carries one); every mutating entry is EROFS-gated
-                // upstream, so this read-only exit is sound.
-                return Ok(());
-            };
-            let Some(parent) = self.recorded_parent.read().upgrade() else {
-                return Err(Error::with_message(
-                    Errno::EIO,
-                    "the copy-up publication parent no longer exists",
-                ));
-            };
-            (parent, name.clone())
+        // Extract-then-lock: the coordinate is extracted and owned by this
+        // frame before any overlay mutex is acquired, and the sole
+        // published-state fact is `upper` being set. The ancestor frame's
+        // origin is derived first, before the extraction consumes this
+        // frame's origin: an `Operation` frame propagates the publication
+        // parent's own dentry (the operation dentry's parent); a `Recorded`
+        // frame propagates its kind unchanged.
+        let parent_dentry;
+        let ancestor_origin = match &origin {
+            CopyUpOrigin::Operation(dentry) => {
+                parent_dentry = dentry.parent().ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EIO,
+                        "the copy-up operation dentry has no overlay parent",
+                    )
+                })?;
+                CopyUpOrigin::Operation(&parent_dentry)
+            }
+            CopyUpOrigin::Recorded => CopyUpOrigin::Recorded,
         };
+        let (publication_parent, name) = self.publication_coordinate(origin)?;
 
         if depth >= MAX_COPYUP_DEPTH {
             return_errno_with_message!(
@@ -113,37 +137,84 @@ impl OverlayInode {
                 "the copy-up ancestor chain exceeds the depth limit"
             );
         }
-        publication_parent.copy_up_inner(depth + 1)?;
+        // Ancestor recursion: every frame releases its own mutex between
+        // frames, so no child-to-parent `copyup` mutex edge exists.
+        match ancestor_origin {
+            CopyUpOrigin::Operation(dentry) => {
+                publication_parent.copy_up_via(CopyUpOrigin::Operation(dentry), depth + 1)?;
+            }
+            CopyUpOrigin::Recorded => {
+                publication_parent.copy_up_via(CopyUpOrigin::Recorded, depth + 1)?;
+            }
+        }
 
-        let mut published = self.lock_copyup();
+        let _winner_guard = self.lock_copyup();
 
         if self.upper.get().is_some() {
             return Ok(());
         }
 
-        // A retired coordinate with `upper` unset is structurally unreachable — retirement
-        // only follows publication, under this same guard — so fail closed defensively.
-        if published.is_none() {
-            return Err(Error::with_message(
+        // The ancestor walk left the publication parent upper-backed; the
+        // marker is persisted strictly before the object-kind dispatch and
+        // the physical upper commit.
+        let publication_upper = publication_parent.upper.get().ok_or_else(|| {
+            Error::with_message(
                 Errno::EIO,
-                "the overlay copy-up coordinate turned inconsistent during arbitration",
-            ));
-        }
-
-        // Every promoted object makes its publication parent impure: persist the marker
-        // strictly before the object-kind dispatch and the physical upper commit.
+                "the copy-up publication parent has no upper object",
+            )
+        })?;
         OverlayInode::set_impure_marker(
-            &publication_parent.select_real_inode(),
+            publication_upper.real_inode(),
+            publication_upper.dentry(),
             fs.policy().xattr_prefix(),
         )?;
 
         let staged = self.stage_in_workdir(&name)?;
         self.publish_by_rename(&publication_parent, &name, staged)?;
-        *published = None;
         Ok(())
     }
 
-    fn lock_copyup(&self) -> MutexGuard<'_, Option<String>> {
+    /// The per-frame extraction of the publication coordinate (first-bound
+    /// per frame): `Operation` reads (parent, name) from the operation's
+    /// overlay dentry; `Recorded` falls back to the recorded parent plus the
+    /// visible-source real dentry's name for the dentry-less entries. Both
+    /// arms fail closed with `EIO` instead of deriving a blind coordinate.
+    fn publication_coordinate(
+        &self,
+        origin: CopyUpOrigin<'_>,
+    ) -> Result<(Arc<OverlayInode>, String)> {
+        match origin {
+            CopyUpOrigin::Operation(dentry) => {
+                let parent_dentry = dentry.parent().ok_or_else(|| {
+                    Error::with_message(
+                        Errno::EIO,
+                        "the copy-up operation dentry has no overlay parent",
+                    )
+                })?;
+                let parent =
+                    Arc::downcast::<OverlayInode>(parent_dentry.inode().clone()).map_err(|_| {
+                        Error::with_message(
+                            Errno::EIO,
+                            "the copy-up publication parent is not an overlay inode",
+                        )
+                    })?;
+                Ok((parent, dentry.name()))
+            }
+            CopyUpOrigin::Recorded => {
+                // Leaf read: the guard is released before the ancestor walk,
+                // and the upgraded `Arc` outlives it.
+                let Some(parent) = self.recorded_parent.read().upgrade() else {
+                    return Err(Error::with_message(
+                        Errno::EIO,
+                        "the copy-up publication parent no longer exists",
+                    ));
+                };
+                Ok((parent, self.visible_source().dentry().name()))
+            }
+        }
+    }
+
+    fn lock_copyup(&self) -> MutexGuard<'_, ()> {
         self.copyup.lock()
     }
 
@@ -168,17 +239,17 @@ impl OverlayInode {
                     },
                 )?;
                 if let Err(err) = self
-                    .transfer_metadata(lower.real_inode(), temp.inode())
+                    .transfer_metadata(lower.real_inode(), &temp)
                     .and_then(|_| {
                         OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
-                            temp.inode(),
+                            &temp,
                             XattrCopyPolicy::Strict,
                             prefix,
                         )
                     })
-                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
-                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
+                    .and_then(|_| fs.store_lower_id(&temp, &lower))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), &temp))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
@@ -186,7 +257,7 @@ impl OverlayInode {
                 Ok(temp)
             }
             InodeType::File => {
-                // Data is streamed into the temp and `sync_all`-ed before the atomic rename, so the
+                // Data is streamed into the temp and fully synced before the atomic rename, so the
                 // published object is durable.
                 let mode = lower.real_inode().mode()?;
                 let temp = fs.create_workdir_temp(
@@ -197,19 +268,19 @@ impl OverlayInode {
                     },
                 )?;
                 if let Err(err) = self
-                    .transfer_metadata(lower.real_inode(), temp.inode())
+                    .transfer_metadata(lower.real_inode(), &temp)
                     .and_then(|_| {
                         OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
-                            temp.inode(),
+                            &temp,
                             XattrCopyPolicy::Strict,
                             prefix,
                         )
                     })
                     .and_then(|_| self.promote_regular_file(temp.inode()))
-                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
-                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
-                    .and_then(|_| temp.inode().sync_all())
+                    .and_then(|_| fs.store_lower_id(&temp, &lower))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), &temp))
+                    .and_then(|_| temp.inode().sync(SyncMode::Full))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
@@ -217,29 +288,32 @@ impl OverlayInode {
                 Ok(temp)
             }
             InodeType::SymLink => {
-                // The symlink is recreated from the lower target string; the target object
-                // itself is never promoted.
+                // The symlink is created atomically with its target at temp
+                // creation; the target object itself is never promoted.
                 let mode = lower.real_inode().mode()?;
-                let temp = fs.create_workdir_temp(
-                    name,
-                    WorkdirTempRequest::Create {
-                        kind: InodeType::SymLink,
-                        mode,
-                    },
-                )?;
+                let target = match lower.real_inode().read_link()? {
+                    SymbolicLink::Plain(target) => target,
+                    SymbolicLink::Path(_) => {
+                        return_errno_with_message!(
+                            Errno::EOPNOTSUPP,
+                            "a path-style symlink target cannot be copied up"
+                        );
+                    }
+                };
+                let temp =
+                    fs.create_workdir_temp(name, WorkdirTempRequest::Symlink { target, mode })?;
                 if let Err(err) = self
-                    .promote_symlink(temp.inode())
-                    .and_then(|_| self.transfer_metadata(lower.real_inode(), temp.inode()))
+                    .transfer_metadata(lower.real_inode(), &temp)
                     .and_then(|_| {
                         OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
-                            temp.inode(),
+                            &temp,
                             XattrCopyPolicy::Strict,
                             prefix,
                         )
                     })
-                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
-                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
+                    .and_then(|_| fs.store_lower_id(&temp, &lower))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), &temp))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
@@ -296,17 +370,17 @@ impl OverlayInode {
                     },
                 )?;
                 if let Err(err) = self
-                    .transfer_metadata(lower.real_inode(), temp.inode())
+                    .transfer_metadata(lower.real_inode(), &temp)
                     .and_then(|_| {
                         OverlayInode::copy_eligible_xattrs(
                             lower.real_inode(),
-                            temp.inode(),
+                            &temp,
                             XattrCopyPolicy::Strict,
                             prefix,
                         )
                     })
-                    .and_then(|_| fs.store_lower_id(temp.inode(), &lower))
-                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), temp.inode()))
+                    .and_then(|_| fs.store_lower_id(&temp, &lower))
+                    .and_then(|_| self.transfer_timestamps(lower.real_inode(), &temp))
                 {
                     let _ = fs.cleanup_workdir_temp(temp.name(), temp.kind());
                     return Err(err);
@@ -436,34 +510,22 @@ impl OverlayInode {
         Ok(())
     }
 
-    fn promote_symlink(&self, temp: &Arc<dyn Inode>) -> Result<()> {
-        let lower = self.lower_source()?;
-        let target = match lower.real_inode().read_link()? {
-            SymbolicLink::Plain(target) => target,
-            SymbolicLink::Path(_) => {
-                return_errno_with_message!(
-                    Errno::EOPNOTSUPP,
-                    "a path-style symlink target cannot be copied up"
-                );
-            }
-        };
-        temp.write_link(&target)
-    }
-
     /// Mode transfer skips symlinks: backing filesystems treat a symlink `set_mode` as a no-op
-    /// or reject it, and copy-up must not depend on that per-fs behavior.
+    /// or reject it, and copy-up must not depend on that per-fs behavior. The setters run on
+    /// the temp's own inode/dentry pair.
     pub(super) fn transfer_metadata(
         &self,
         source: &Arc<dyn Inode>,
-        temp: &Arc<dyn Inode>,
+        temp: &WorkdirTemp,
     ) -> Result<()> {
-        temp.set_owner(source.owner()?)?;
-        temp.set_group(source.group()?)?;
+        let (temp_inode, temp_dentry) = (temp.inode(), temp.dentry());
+        temp_inode.set_owner(temp_dentry, source.owner()?)?;
+        temp_inode.set_group(temp_dentry, source.group()?)?;
         if !matches!(source.type_(), InodeType::SymLink) {
-            temp.set_mode(source.mode()?)?;
+            temp_inode.set_mode(temp_dentry, source.mode()?)?;
         }
         if source.type_().is_regular_file() {
-            temp.resize(source.size())?;
+            temp_inode.resize(temp_dentry, source.size())?;
         }
         Ok(())
     }
@@ -473,11 +535,12 @@ impl OverlayInode {
     pub(super) fn transfer_timestamps(
         &self,
         source: &Arc<dyn Inode>,
-        temp: &Arc<dyn Inode>,
+        temp: &WorkdirTemp,
     ) -> Result<()> {
-        temp.set_atime(source.atime());
-        temp.set_mtime(source.mtime());
-        temp.set_ctime(source.ctime());
+        let (temp_inode, temp_dentry) = (temp.inode(), temp.dentry());
+        temp_inode.set_atime(temp_dentry, source.atime());
+        temp_inode.set_mtime(temp_dentry, source.mtime());
+        temp_inode.set_ctime(temp_dentry, source.ctime());
         Ok(())
     }
 

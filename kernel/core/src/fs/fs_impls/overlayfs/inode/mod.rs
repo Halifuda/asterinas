@@ -5,8 +5,8 @@
 //!
 //! [`OverlayInode`] is the published logical inode shared by every name bound
 //! to the same overlay object. It owns the per-object real-object facts, the
-//! recorded parent pointer, the per-inode transaction lock, the
-//! precomputed projected identity, and the copy-up coordinate.
+//! recorded parent pointer, the per-inode transaction lock, the precomputed
+//! projected identity, and the copy-up winner/waiter token.
 //!
 //! # Module structure
 //!
@@ -30,6 +30,15 @@
 //! serialization token. [`OverlayInode::append_write`] holds this lock across
 //! the underlying `size()` + `write_at` so concurrent appends serialize on the
 //! post-write size.
+//!
+//! The copy-up frame orders its locks strictly: the object's `copyup`
+//! winner/waiter mutex, then the publication parent's directory transaction
+//! lock, then the `InodeCache` write guard (the innermost leaf). Coordinate
+//! extraction precedes every overlay lock: the `recorded_parent` read guard
+//! is a leaf taken alone in `Recorded`-origin extraction and released before
+//! the ancestor walk — the former `copyup`-mutex → `recorded_parent`-read
+//! edge is removed. The `recorded_parent` write guard (the rename repoint)
+//! is taken only while both rename parent transaction locks are held.
 
 mod copyup;
 mod data;
@@ -60,7 +69,9 @@ use self::{
 };
 use crate::{
     fs::{
-        file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags},
+        file::{
+            AccessMode, InodeMode, InodeType, PerOpenFileOps, Permission, StatusFlags, SyncMode,
+        },
         fs_impls::overlayfs::{
             fs::OverlayFs,
             layer::RealObjectStack,
@@ -73,7 +84,7 @@ use crate::{
                 Extension, FallocMode, FileOps, Inode, Metadata, MknodType, RenameMode,
                 SymbolicLink,
             },
-            path::Path,
+            path::{Dentry, Path},
             xattr::{XattrName, XattrNamespace, XattrSetFlags},
         },
     },
@@ -88,10 +99,14 @@ pub(super) struct OverlayInode {
     upper: Once<RealObject>,
     object_id: ObjectId,
     lock: Mutex<Option<ReaddirIndex>>,
-    /// The mount root self-points through this `Weak`, which breaks the
-    /// parent/readdir-index ownership cycle.
+    /// The readdir `..` identity authority; the copy-up publication parent
+    /// only for the dentry-less `Recorded` frames. Repointed by a successful
+    /// cross-directory rename. The mount root self-points through this
+    /// `Weak`, which breaks the parent/readdir-index ownership cycle.
     recorded_parent: RwMutex<Weak<OverlayInode>>,
-    copyup: Mutex<Option<String>>,
+    /// The winner/waiter token serializing concurrent first copy-ups; it
+    /// carries no payload — the sole published-state fact is `upper`.
+    copyup: Mutex<()>,
     extension: Extension,
 }
 
@@ -214,12 +229,16 @@ impl OverlayInode {
         );
     }
 
+    /// Delegates one operation to the visible-source real authority, pairing
+    /// the real inode with its own dentry for the dentry-centric real-layer
+    /// setters.
     fn delegate_to_real<T>(
         &self,
-        operation_fn: impl FnOnce(&Arc<dyn Inode>) -> Result<T>,
+        operation_fn: impl FnOnce(&Arc<dyn Inode>, &Dentry) -> Result<T>,
     ) -> Result<T> {
-        let real = self.select_real_inode();
-        operation_fn(&real)
+        let visible_source = self.visible_source();
+        let real = visible_source.real_inode().clone();
+        operation_fn(&real, visible_source.dentry())
     }
 }
 
@@ -321,30 +340,27 @@ impl Inode for OverlayInode {
 
     fn open(
         &self,
+        self_dentry: &Dentry,
         access_mode: AccessMode,
         status_flags: StatusFlags,
     ) -> Option<Result<Box<dyn PerOpenFileOps>>> {
-        self.open_impl(access_mode, status_flags)
+        self.open_impl(self_dentry, access_mode, status_flags)
     }
 
     fn seek_end(&self) -> Option<usize> {
         self.seek_end_impl()
     }
 
-    fn resize(&self, new_size: usize) -> Result<()> {
-        self.resize_impl(new_size)
+    fn resize(&self, self_dentry: &Dentry, new_size: usize) -> Result<()> {
+        self.resize_impl(self_dentry, new_size)
     }
 
     fn fallocate(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
         self.fallocate_impl(mode, offset, len)
     }
 
-    fn sync_all(&self) -> Result<()> {
-        self.sync_all_impl()
-    }
-
-    fn sync_data(&self) -> Result<()> {
-        self.sync_data_impl()
+    fn sync(&self, mode: SyncMode) -> Result<()> {
+        self.sync_impl(mode)
     }
 
     fn read_link(&self) -> Result<SymbolicLink> {
@@ -355,28 +371,28 @@ impl Inode for OverlayInode {
         self.page_cache_impl()
     }
 
-    fn set_mode(&self, mode: InodeMode) -> Result<()> {
-        self.set_mode_impl(mode)
+    fn set_mode(&self, self_dentry: &Dentry, mode: InodeMode) -> Result<()> {
+        self.set_mode_impl(self_dentry, mode)
     }
 
-    fn set_owner(&self, uid: Uid) -> Result<()> {
-        self.set_owner_impl(uid)
+    fn set_owner(&self, self_dentry: &Dentry, uid: Uid) -> Result<()> {
+        self.set_owner_impl(self_dentry, uid)
     }
 
-    fn set_group(&self, gid: Gid) -> Result<()> {
-        self.set_group_impl(gid)
+    fn set_group(&self, self_dentry: &Dentry, gid: Gid) -> Result<()> {
+        self.set_group_impl(self_dentry, gid)
     }
 
-    fn set_atime(&self, time: Duration) {
-        self.set_atime_impl(time)
+    fn set_atime(&self, self_dentry: &Dentry, time: Duration) {
+        self.set_atime_impl(self_dentry, time)
     }
 
-    fn set_mtime(&self, time: Duration) {
-        self.set_mtime_impl(time)
+    fn set_mtime(&self, self_dentry: &Dentry, time: Duration) {
+        self.set_mtime_impl(self_dentry, time)
     }
 
-    fn set_ctime(&self, time: Duration) {
-        self.set_ctime_impl(time)
+    fn set_ctime(&self, self_dentry: &Dentry, time: Duration) {
+        self.set_ctime_impl(self_dentry, time)
     }
 
     fn check_permission(&self, perm: Permission) -> Result<()> {
@@ -389,19 +405,20 @@ impl Inode for OverlayInode {
 
     fn set_xattr(
         &self,
+        self_dentry: &Dentry,
         name: XattrName,
         value_reader: &mut VmReader,
         flags: XattrSetFlags,
     ) -> Result<()> {
-        self.set_xattr_impl(name, value_reader, flags)
+        self.set_xattr_impl(self_dentry, name, value_reader, flags)
     }
 
     fn list_xattr(&self, namespace: XattrNamespace, list_writer: &mut VmWriter) -> Result<usize> {
         self.list_xattr_impl(namespace, list_writer)
     }
 
-    fn remove_xattr(&self, name: XattrName) -> Result<()> {
-        self.remove_xattr_impl(name)
+    fn remove_xattr(&self, self_dentry: &Dentry, name: XattrName) -> Result<()> {
+        self.remove_xattr_impl(self_dentry, name)
     }
 
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>> {

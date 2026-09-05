@@ -35,6 +35,7 @@ use device_id::DeviceId;
 
 use super::{
     OverlayInode,
+    copyup::workdir::WorkdirTemp,
     xattr::{OverlayRecordName, overlay_record_name},
 };
 use crate::{
@@ -387,7 +388,7 @@ impl OverlayFs {
         }
     }
 
-    pub(super) fn store_lower_id(&self, upper: &Arc<dyn Inode>, lower: &RealObject) -> Result<()> {
+    pub(super) fn store_lower_id(&self, temp: &WorkdirTemp, lower: &RealObject) -> Result<()> {
         let layer = self.layer(lower.layer_index());
         let lower_layer_root_ino = self
             .layer_stack()
@@ -403,7 +404,8 @@ impl OverlayFs {
         let value = record.serialize();
         let mut reader = VmReader::from(value.as_slice()).to_fallible();
         match OverlayInode::set_overlay_xattr(
-            upper,
+            temp.inode(),
+            temp.dentry(),
             name,
             &mut reader,
             XattrSetFlags::CREATE_OR_REPLACE,

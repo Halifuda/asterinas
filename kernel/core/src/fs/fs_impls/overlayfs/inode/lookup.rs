@@ -57,7 +57,6 @@ pub(super) enum ProjectionBinding<'a> {
     Root,
     Child {
         parent: &'a Arc<OverlayInode>,
-        name: &'a str,
     },
 }
 
@@ -105,13 +104,13 @@ impl OverlayFs {
                     if !hit.real_inode().type_().is_directory() {
                         return Ok(Lookup::Positive(self.project_inode(
                             &RealObjectStack::upper_only(hit),
-                            ProjectionBinding::Child { parent, name },
+                            ProjectionBinding::Child { parent },
                         )));
                     }
                     if is_opaque_directory(&hit, prefix)? {
                         return Ok(Lookup::Positive(self.project_inode(
                             &RealObjectStack::upper_only(hit),
-                            ProjectionBinding::Child { parent, name },
+                            ProjectionBinding::Child { parent },
                         )));
                     }
                     dir_hits.push(hit);
@@ -141,7 +140,7 @@ impl OverlayFs {
                         if dir_hits.is_empty() {
                             return Ok(Lookup::Positive(self.project_inode(
                                 &RealObjectStack::lower_only(hit),
-                                ProjectionBinding::Child { parent, name },
+                                ProjectionBinding::Child { parent },
                             )));
                         }
                         break;
@@ -168,7 +167,7 @@ impl OverlayFs {
         };
         Ok(Lookup::Positive(self.project_inode(
             &RealObjectStack::new(upper, dir_hits),
-            ProjectionBinding::Child { parent, name },
+            ProjectionBinding::Child { parent },
         )))
     }
 
@@ -269,21 +268,17 @@ impl OverlayFs {
                         object_id,
                         lock,
                         recorded_parent: RwMutex::new(weak.clone()),
-                        copyup: Mutex::new(None),
+                        copyup: Mutex::new(()),
                         extension: Extension::new(),
                     }),
-                    ProjectionBinding::Child { parent, name } => Arc::new(OverlayInode {
+                    ProjectionBinding::Child { parent } => Arc::new(OverlayInode {
                         fs,
                         lowers,
                         upper,
                         object_id,
                         lock,
                         recorded_parent: RwMutex::new(Arc::downgrade(parent)),
-                        copyup: Mutex::new(if facts.upper.is_some() {
-                            None
-                        } else {
-                            Some(String::from(name))
-                        }),
+                        copyup: Mutex::new(()),
                         extension: Extension::new(),
                     }),
                 }
