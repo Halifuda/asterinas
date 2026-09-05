@@ -55,3 +55,18 @@ unlink("/tmp/test_file");
 See also:
 PR [#2926](https://github.com/asterinas/asterinas/pull/2926)
 and [#2969](https://github.com/asterinas/asterinas/pull/2969).
+
+### Run kernel-mode unit tests with `make ktest` (`run-kernel-unit-tests`)
+
+Kernel-mode unit tests (`#[cfg(ktest)]` modules) execute inside QEMU,
+not on the host, so a passing exit code alone is not evidence:
+a crate whose guest produces no output must be reported as
+not attributable instead of inferred passing.
+
+Run the whole suite with `make ktest`;
+CI runs it as `make ktest NETDEV=tap`.
+The target invokes `cargo osdk test` for every workspace
+default-member crate. With OSDK 0.18.x the only test selection is a
+name-substring filter (`cargo osdk test <TESTNAME>`); package-level
+flags such as `--package` or `--ktests` do not exist, so filter tests
+by name rather than by crate.
