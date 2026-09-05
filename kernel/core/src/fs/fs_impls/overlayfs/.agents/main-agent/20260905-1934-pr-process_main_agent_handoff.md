@@ -49,14 +49,17 @@ checker 收据与 run_evidence 在归档地
 
 ## 4. 工作区归档记录（本 handoff 之后的既成事实）
 
-- 归档地：`/home/ayd/overlayfs-agents/`（= 原
-  `kernel/core/src/fs/fs_impls/overlayfs/.agents/` 全量，含 protocol/
-  priors/designdoc/refactor 归档/main-agent 全部 handoff/components
-  证据/subagent-tasks packets）。
-- 工作树中 `.agents` 移除并 commit（tracked 117 文件删除入库；历史中
-  全部版本仍在 git）。
-- skill 更新：`ovfs-main`/`ovfs-subagent`/`ovfs-checker` 的路径引用改指
-  归档地。
+- **归档地：`/home/ayd/overlayfs-agents/`**（= 原
+  `kernel/core/src/fs/fs_impls/overlayfs/.agents/` 全量快照，2026-09-05
+  `cb262b729` 时点，`diff -r` 校验逐字节一致，43MB）。
+- **工作树 `.agents` 保留不删**（user 处置：从工作树删除不必；归档的意义
+  在于**跨分支访问**——归档地位于工作树外，分支无关，任何 checkout/rebase
+  下都可达；工作树内的 `.agents` 继续随分支正常演进）。
+- 后续机制：PR 进程的主代理记录继续写在活分支的工作树 `.agents/main-agent/`
+  （随分支 commit）；归档地作为冻结快照 + 跨分支兜底，不随分支演进。
+- skill 更新：`ovfs-main`/`ovfs-subagent`/`ovfs-checker` 的路径引用改为
+  双通道——活分支工作树 `.agents/`（默认）+ 归档地
+  `/home/ayd/overlayfs-agents/`（跨分支兜底，含全部历史证据）。
 
 ## 5. Prohibitions
 
