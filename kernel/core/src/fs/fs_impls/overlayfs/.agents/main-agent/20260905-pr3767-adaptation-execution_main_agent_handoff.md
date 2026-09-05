@@ -206,3 +206,10 @@ Checker lane，待 user 指令。`
   CARGO_OSDK_TEST_ARGS 命令行形态（已记入 CHECKER.md）。U-2/U-3 随
   ktest_04 全量执行通过：全 30 crate **453 passed / 0 failed**（aster-core
   145，含 U-2/U-3 16 例）——单测线就此闭环。
+- **最终树门背书（runs `g2_03`/`g3_02`，HEAD `0a5895b6e`）**：make check
+  —— rustfmt/clippy -Dwarnings/typos/nixos check 全 PASS，唯一 FAIL =
+  nixfmt 环境漂移（15+16 文件清单与 g2_02 逐字节相同，零新失败）；
+  rustdoc exit 0 / 0 警告（fs/mount/mod.rs:103 的 upstream 引用为纯文本
+  散文，无 intra-doc 告警）。g2_02 的"依赖未提交 dentry.rs hunks"偏离
+  经 `85708f9cd` 闭合，最终树 PASS 独立成立。历史手术（WIP amend）经
+  Checker 前置核验：`af52bb95f` 与 `5bca0d018` 间 kernel/ diff = 0 行。
