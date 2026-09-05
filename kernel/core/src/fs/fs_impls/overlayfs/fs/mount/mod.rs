@@ -97,6 +97,17 @@ impl OverlayFs {
             // The workdir is not a layer: building it on the upper view's
             // mount keeps every workdir↔upper rename/link on one mount.
             let upper_path = upper.root_path();
+            // An overlay view must not serve as another overlay's upper:
+            // upper writes would drive the backing overlay's state machine,
+            // and the in-use claim would land on the view inode instead of
+            // the backing mount's claimed root (upstream 76bc8e2843b6).
+            let upper_mount_fs = upper_path.mount_node().fs().clone();
+            if Arc::downcast::<OverlayFs>(upper_mount_fs).is_ok() {
+                return Err(Error::with_message(
+                    Errno::EINVAL,
+                    "the overlay upperdir must not be on an overlayfs",
+                ));
+            }
             let workdir_path = {
                 let workdir_dentry = resolve_root_path(work_dir)?.dentry().clone();
                 Path::new(upper_path.mount_node().clone(), workdir_dentry)
