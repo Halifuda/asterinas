@@ -230,11 +230,11 @@ impl OverlayInode {
         // The admission promotes the parent directory itself, sourcing its
         // publication coordinate from the removed entry's parent dentry; the
         // root case is structurally unreachable and falls back to the
-        // recorded parent.
+        // anchor origin.
         let parent_dentry = child_dentry.parent();
         let origin = match &parent_dentry {
             Some(parent) => CopyUpOrigin::Operation(parent),
-            None => CopyUpOrigin::Recorded,
+            None => CopyUpOrigin::Anchor,
         };
         self.check_mutating_permission(origin, Permission::MAY_WRITE)?;
         let mut dir_guard = self.lock_dir_transaction();
@@ -245,7 +245,7 @@ impl OverlayInode {
         let parent_dentry = child_dentry.parent();
         let origin = match &parent_dentry {
             Some(parent) => CopyUpOrigin::Operation(parent),
-            None => CopyUpOrigin::Recorded,
+            None => CopyUpOrigin::Anchor,
         };
         self.check_mutating_permission(origin, Permission::MAY_WRITE)?;
         let mut dir_guard = self.lock_dir_transaction();
@@ -266,7 +266,7 @@ impl OverlayInode {
         let parent_dentry = old_child_dentry.parent();
         let self_origin = match &parent_dentry {
             Some(parent) => CopyUpOrigin::Operation(parent),
-            None => CopyUpOrigin::Recorded,
+            None => CopyUpOrigin::Anchor,
         };
         self.check_mutating_permission(self_origin, Permission::MAY_WRITE)?;
         target_overlay.check_mutating_permission(

@@ -242,9 +242,6 @@ impl OverlayInode {
             }
         }
         if !same_parent {
-            *source_inode.recorded_parent.write() = Arc::downgrade(target);
-        }
-        if !same_parent {
             self.refresh_impure_marker_best_effort(locks.self_index, "rename: source parent");
             let Some(index) = locks.target_index.as_mut() else {
                 unreachable!("a different rename target parent has a lock");

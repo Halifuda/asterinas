@@ -16,7 +16,7 @@ use crate::{
         file::{InodeMode, InodeType, Permission},
         fs_impls::overlayfs::{
             inode::{
-                Lookup, NegativeLookup, OverlayInode, ProjectionBinding, ReaddirIndex,
+                Lookup, NegativeLookup, OverlayInode, ReaddirIndex,
                 copyup::workdir::WorkdirTempRequest,
                 permission::CopyUpOrigin,
             },
@@ -70,11 +70,7 @@ impl OverlayInode {
         };
         let upper_layer = fs.layer_stack().upper_layer()?;
         let new_facts = RealObjectStack::upper_only(upper_layer.child_real_object(&new_upper_path));
-        let parent_arc = self.cached_self_arc()?;
-        let inode = fs.project_inode(
-            &new_facts,
-            ProjectionBinding::Child { parent: &parent_arc },
-        );
+        let inode = fs.project_inode(&new_facts);
         self.readdir_index_insert(name, inode.clone(), object_type, index);
         Ok(inode)
     }
@@ -127,11 +123,7 @@ impl OverlayInode {
             let upper_layer = fs.layer_stack().upper_layer()?;
             let new_facts =
                 RealObjectStack::upper_only(upper_layer.child_real_object(&published_path));
-            let parent_arc = self.cached_self_arc()?;
-            let inode = fs.project_inode(
-                &new_facts,
-                ProjectionBinding::Child { parent: &parent_arc },
-            );
+            let inode = fs.project_inode(&new_facts);
             self.readdir_index_insert(name, inode.clone(), object_type, index);
             Ok(inode)
         })();
@@ -175,11 +167,7 @@ impl OverlayInode {
                 let upper_layer = fs.layer_stack().upper_layer()?;
                 let new_facts =
                     RealObjectStack::upper_only(upper_layer.child_real_object(&new_upper_path));
-                let parent_arc = self.cached_self_arc()?;
-                let inode = fs.project_inode(
-                    &new_facts,
-                    ProjectionBinding::Child { parent: &parent_arc },
-                );
+                let inode = fs.project_inode(&new_facts);
                 self.readdir_index_insert(
                     name,
                     inode.clone(),
@@ -206,11 +194,7 @@ impl OverlayInode {
                     let new_facts = RealObjectStack::upper_only(
                         upper_layer.child_real_object(&published_path),
                     );
-                    let parent_arc = self.cached_self_arc()?;
-                    let inode = fs.project_inode(
-                        &new_facts,
-                        ProjectionBinding::Child { parent: &parent_arc },
-                    );
+                    let inode = fs.project_inode(&new_facts);
                     self.readdir_index_insert(
                         name,
                         inode.clone(),

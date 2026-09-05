@@ -18,8 +18,9 @@
 //!
 //! ## `..` identity
 //!
-//! The `..` entry carries the resolved overlay-parent identity from
-//! [`OverlayInode::resolve_parent_object_id`].
+//! The `..` entry carries the overlay-parent identity re-derived from the
+//! object's anchor path ([`OverlayInode::resolve_parent_object_id`]); when
+//! the anchor no longer resolves, it degrades to the object's own identity.
 
 use hashbrown::HashSet;
 
@@ -254,11 +255,25 @@ impl OverlayInode {
 }
 
 impl OverlayInode {
+    /// The `..` identity: the exact parent id re-resolved at the object's
+    /// anchor path (everything but the last component); any failure — a
+    /// dead mount, a corrupt anchor, or anchor-path divergence — degrades
+    /// to the object's own id. An empty anchor is the mount root, which
+    /// reports itself. Never panics.
     fn resolve_parent_object_id(&self) -> ObjectId {
-        let Some(parent) = self.recorded_parent.read().upgrade() else {
+        let Ok(fs) = self.fs_arc() else {
             return self.object_id();
         };
-        parent.object_id()
+        let Ok(anchor) = self.anchor_path(&fs) else {
+            return self.object_id();
+        };
+        if anchor.is_empty() {
+            return self.object_id();
+        }
+        match fs.resolve_at_anchor(&anchor[..anchor.len() - 1]) {
+            Ok(parent) => parent.object_id(),
+            Err(_) => self.object_id(),
+        }
     }
 }
 

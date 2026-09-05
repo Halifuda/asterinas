@@ -112,7 +112,7 @@ impl OverlayInode {
     // dentry-less origin; the promotion behind it is a structural no-op for
     // every dispatched fallocate (writable opens always copy up first).
     pub(super) fn fallocate_impl(&self, mode: FallocMode, offset: usize, len: usize) -> Result<()> {
-        self.check_mutating_permission(CopyUpOrigin::Recorded, Permission::MAY_WRITE)?;
+        self.check_mutating_permission(CopyUpOrigin::Anchor, Permission::MAY_WRITE)?;
         self.select_real_inode().fallocate(mode, offset, len)
     }
 

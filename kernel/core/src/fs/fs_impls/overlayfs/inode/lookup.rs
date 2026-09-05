@@ -17,6 +17,17 @@
 //! directory — or an opaque upper parent, which leaves the absent upper
 //! name invisible in the whole overlay and stops the scan before the
 //! lowers.
+//!
+//! # Anchor re-resolution
+//!
+//! A dentry-less entry derives its namespace position from its **anchor
+//! path**: the layer-relative path of the visible-source real dentry,
+//! collected by walking `Dentry::parent` up to the layer root (pointer
+//! comparison — the clone view re-roots the same dentry `Arc`s, so the
+//! chain does not stop on a parentless dentry). Re-walking `lookup` from
+//! the mount root over that path re-resolves the current overlay objects;
+//! a failed walk is anchor-path divergence and every consumer fails closed
+//! or degrades, never publishes blind.
 
 use spin::Once;
 
@@ -35,7 +46,10 @@ use crate::{
             layer::RealObjectStack,
             real::RealObject,
         },
-        vfs::inode::{Extension, Inode},
+        vfs::{
+            file_system::FileSystem,
+            inode::{Extension, Inode},
+        },
     },
     prelude::*,
 };
@@ -50,14 +64,6 @@ pub(super) enum Lookup {
 pub(super) enum NegativeLookup {
     Absent,
     HiddenByWhiteout,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum ProjectionBinding<'a> {
-    Root,
-    Child {
-        parent: &'a Arc<OverlayInode>,
-    },
 }
 
 pub(super) fn is_whiteout_inode(
@@ -102,16 +108,14 @@ impl OverlayFs {
                         return Ok(Lookup::Negative(NegativeLookup::HiddenByWhiteout));
                     }
                     if !hit.real_inode().type_().is_directory() {
-                        return Ok(Lookup::Positive(self.project_inode(
-                            &RealObjectStack::upper_only(hit),
-                            ProjectionBinding::Child { parent },
-                        )));
+                        return Ok(Lookup::Positive(
+                            self.project_inode(&RealObjectStack::upper_only(hit)),
+                        ));
                     }
                     if is_opaque_directory(&hit, prefix)? {
-                        return Ok(Lookup::Positive(self.project_inode(
-                            &RealObjectStack::upper_only(hit),
-                            ProjectionBinding::Child { parent },
-                        )));
+                        return Ok(Lookup::Positive(
+                            self.project_inode(&RealObjectStack::upper_only(hit)),
+                        ));
                     }
                     dir_hits.push(hit);
                 }
@@ -138,10 +142,9 @@ impl OverlayFs {
                     }
                     if !hit.real_inode().type_().is_directory() {
                         if dir_hits.is_empty() {
-                            return Ok(Lookup::Positive(self.project_inode(
-                                &RealObjectStack::lower_only(hit),
-                                ProjectionBinding::Child { parent },
-                            )));
+                            return Ok(Lookup::Positive(
+                                self.project_inode(&RealObjectStack::lower_only(hit)),
+                            ));
                         }
                         break;
                     }
@@ -165,10 +168,9 @@ impl OverlayFs {
         } else {
             None
         };
-        Ok(Lookup::Positive(self.project_inode(
-            &RealObjectStack::new(upper, dir_hits),
-            ProjectionBinding::Child { parent },
-        )))
+        Ok(Lookup::Positive(
+            self.project_inode(&RealObjectStack::new(upper, dir_hits)),
+        ))
     }
 
     pub(super) fn lookup(&self, parent: &OverlayInode, name: &str) -> Result<Lookup> {
@@ -183,11 +185,7 @@ impl OverlayFs {
 
     /// A valid cache hit returns without the lower-id origin read; on a miss
     /// that read completes before the inode-cache write guard is taken.
-    pub(super) fn project_inode(
-        &self,
-        facts: &RealObjectStack,
-        binding: ProjectionBinding<'_>,
-    ) -> Arc<OverlayInode> {
+    pub(super) fn project_inode(&self, facts: &RealObjectStack) -> Arc<OverlayInode> {
         let source = facts.visible_source();
         let key = self.real_object_key(source);
         let is_directory = facts.is_merged() || source.real_inode().type_().is_directory();
@@ -260,29 +258,69 @@ impl OverlayFs {
                 } else {
                     None
                 });
-                match binding {
-                    ProjectionBinding::Root => Arc::new_cyclic(|weak| OverlayInode {
-                        fs,
-                        lowers,
-                        upper,
-                        object_id,
-                        lock,
-                        recorded_parent: RwMutex::new(weak.clone()),
-                        copyup: Mutex::new(()),
-                        extension: Extension::new(),
-                    }),
-                    ProjectionBinding::Child { parent } => Arc::new(OverlayInode {
-                        fs,
-                        lowers,
-                        upper,
-                        object_id,
-                        lock,
-                        recorded_parent: RwMutex::new(Arc::downgrade(parent)),
-                        copyup: Mutex::new(()),
-                        extension: Extension::new(),
-                    }),
-                }
+                Arc::new(OverlayInode {
+                    fs,
+                    lowers,
+                    upper,
+                    object_id,
+                    lock,
+                    copyup: Mutex::new(()),
+                    extension: Extension::new(),
+                })
             },
         )
+    }
+}
+
+impl OverlayInode {
+    /// Layer-relative anchor path of the visible source, for dentry-less
+    /// entries; fails closed (EIO) if the chain escapes the layer root.
+    ///
+    /// The clone-view layer re-roots the same dentry `Arc`s, so the walk
+    /// terminates by pointer comparison against the layer root, not by the
+    /// absence of a parent.
+    pub(super) fn anchor_path(&self, fs: &OverlayFs) -> Result<Vec<String>> {
+        let source = self.visible_source();
+        let layer_root = fs.layer(source.layer_index()).root_dentry();
+        let mut components = Vec::new();
+        let mut current = source.dentry().clone();
+        loop {
+            if Arc::ptr_eq(&current, layer_root) {
+                components.reverse();
+                return Ok(components);
+            }
+            let Some(parent) = current.parent() else {
+                return Err(Error::with_message(
+                    Errno::EIO,
+                    "the visible-source dentry chain does not reach its layer root",
+                ));
+            };
+            components.push(current.name());
+            current = parent;
+        }
+    }
+}
+
+impl OverlayFs {
+    /// Re-resolves the CURRENT overlay object at an anchor path by walking
+    /// `lookup` from the mount root (barrier semantics reused, not
+    /// reimplemented). `ENOENT` = anchor-path divergence.
+    pub(super) fn resolve_at_anchor(&self, anchor: &[String]) -> Result<Arc<OverlayInode>> {
+        let root = self.root_inode();
+        let mut current = Arc::downcast::<OverlayInode>(root).map_err(|_| {
+            Error::with_message(Errno::EIO, "the overlay mount root is not an overlay inode")
+        })?;
+        for name in anchor {
+            match self.lookup(&current, name)? {
+                Lookup::Positive(inode) => current = inode,
+                Lookup::Negative(_) => {
+                    return Err(Error::with_message(
+                        Errno::ENOENT,
+                        "the anchor path no longer resolves in the overlay",
+                    ));
+                }
+            }
+        }
+        Ok(current)
     }
 }

@@ -27,14 +27,17 @@ pub(super) enum AccessType {
     Mutating,
 }
 
-/// The dentry context a mutating admission uses to source the copy-up
-/// publication coordinate. `Operation` reads (parent, name) from the
-/// operation's overlay dentry at entry; `Recorded` falls back to the
-/// recorded parent and the visible-source real dentry's name for the
-/// dentry-less entries (fallocate, rename's new-parent admission).
+/// The context a mutating admission uses to source the copy-up publication
+/// coordinate. `Operation` carries the operation's overlay dentry and reads
+/// (parent, name) from it at entry — this is also the form of rename's
+/// new-parent admission. `Anchor` serves the dentry-less entries (fallocate,
+/// and the structurally unreachable parentless fallback of
+/// unlink/rmdir/rename): the parent is re-resolved at the object's anchor
+/// path and the name is the visible-source real dentry's name, failing
+/// closed on divergence.
 pub(super) enum CopyUpOrigin<'a> {
     Operation(&'a Dentry),
-    Recorded,
+    Anchor,
 }
 
 use super::OverlayInode;
@@ -112,7 +115,7 @@ impl OverlayInode {
         self.check_local_permission(AccessType::Mutating, perm)?;
         match origin {
             CopyUpOrigin::Operation(dentry) => self.copy_up_at(dentry)?,
-            CopyUpOrigin::Recorded => self.copy_up()?,
+            CopyUpOrigin::Anchor => self.copy_up()?,
         }
         if !self.fs_arc()?.policy().is_default_permissions() {
             self.check_real_permission(perm)?;

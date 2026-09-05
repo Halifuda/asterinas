@@ -5,8 +5,8 @@
 //!
 //! [`OverlayInode`] is the published logical inode shared by every name bound
 //! to the same overlay object. It owns the per-object real-object facts, the
-//! recorded parent pointer, the per-inode transaction lock, the precomputed
-//! projected identity, and the copy-up winner/waiter token.
+//! per-inode transaction lock, the precomputed projected identity, and the
+//! copy-up winner/waiter token.
 //!
 //! # Module structure
 //!
@@ -34,11 +34,11 @@
 //! The copy-up frame orders its locks strictly: the object's `copyup`
 //! winner/waiter mutex, then the publication parent's directory transaction
 //! lock, then the `InodeCache` write guard (the innermost leaf). Coordinate
-//! extraction precedes every overlay lock: the `recorded_parent` read guard
-//! is a leaf taken alone in `Recorded`-origin extraction and released before
-//! the ancestor walk — the former `copyup`-mutex → `recorded_parent`-read
-//! edge is removed. The `recorded_parent` write guard (the rename repoint)
-//! is taken only while both rename parent transaction locks are held.
+//! extraction precedes every overlay lock: the anchor re-derivation behind
+//! dentry-less extraction touches only the VFS dcache (NameAndParent leaf
+//! reads) and the `InodeCache` leaf guard. The former `recorded_parent` lock
+//! domain is gone together with its two edges — the extraction read-leaf and
+//! the `dir-transaction → recorded_parent-write` rename repoint edge.
 
 mod copyup;
 mod data;
@@ -63,7 +63,7 @@ pub(super) use self::{
 };
 use self::{
     identity::ObjectId,
-    lookup::{Lookup, NegativeLookup, ProjectionBinding, is_opaque_directory, is_whiteout_inode},
+    lookup::{Lookup, NegativeLookup, is_opaque_directory, is_whiteout_inode},
     permission::AccessType,
     readdir::ReaddirIndex,
 };
@@ -99,11 +99,6 @@ pub(super) struct OverlayInode {
     upper: Once<RealObject>,
     object_id: ObjectId,
     lock: Mutex<Option<ReaddirIndex>>,
-    /// The readdir `..` identity authority; the copy-up publication parent
-    /// only for the dentry-less `Recorded` frames. Repointed by a successful
-    /// cross-directory rename. The mount root self-points through this
-    /// `Weak`, which breaks the parent/readdir-index ownership cycle.
-    recorded_parent: RwMutex<Weak<OverlayInode>>,
     /// The winner/waiter token serializing concurrent first copy-ups; it
     /// carries no payload — the sole published-state fact is `upper`.
     copyup: Mutex<()>,
@@ -132,10 +127,7 @@ impl OverlayInode {
                 RealObject::new(layer_index + 1, layer.root_dentry().clone())
             })
             .collect();
-        fs.project_inode(
-            &RealObjectStack::new(upper, lowers),
-            ProjectionBinding::Root,
-        )
+        fs.project_inode(&RealObjectStack::new(upper, lowers))
     }
 
     fn key(&self, fs: &OverlayFs) -> RealObjectKey {

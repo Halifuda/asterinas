@@ -8,10 +8,9 @@
 //! - **publication coordinate**: the `(publication parent, name)` pair a
 //!   lower-backed object publishes at, extracted per frame at trigger time —
 //!   from the operation's overlay dentry ([`CopyUpOrigin::Operation`]) or,
-//!   for the dentry-less entries, from the recorded parent plus the
-//!   visible-source real dentry's name ([`CopyUpOrigin::Recorded`]). The
-//!   extraction completes before any overlay lock is acquired and the
-//!   extracted `Arc`/`String` are owned by the frame.
+//!   for the dentry-less entries, re-resolved at the object's anchor path
+//!   ([`CopyUpOrigin::Anchor`]). The extraction completes before any overlay
+//!   lock is acquired and the extracted `Arc`/`String` are owned by the frame.
 //! - **winner/waiter**: the tasks racing on one object's `copyup` mutex — a
 //!   pure token with no payload, because the sole published-state fact is
 //!   `upper: Once` being set. The winner performs the promotion; the waiters
@@ -20,7 +19,7 @@
 //!   coordinate extraction through commit.
 //!
 //! [`OverlayInode::copy_up_at`] (the `Operation` entry) and
-//! [`OverlayInode::copy_up`] (the `Recorded` entry) are the promotion
+//! [`OverlayInode::copy_up`] (the `Anchor` entry) are the promotion
 //! entries: ancestors promote before the child, and winners serialize
 //! through the `copyup` mutex.
 //!
@@ -40,11 +39,12 @@
 //! object's `copyup` mutex, then the publication parent's directory
 //! transaction lock, then the `InodeCache` write guard.
 //!
-//! - Coordinate extraction acquires no overlay mutex: the `recorded_parent`
-//!   read guard (`Recorded` origin) is a leaf taken alone and released before
-//!   the ancestor walk — the former `copyup`-mutex → `recorded_parent`-read
-//!   edge is removed. No child-to-parent `copyup` mutex edge exists: each
-//!   ancestor frame releases its own mutex between frames.
+//! - Coordinate extraction acquires no overlay mutex: the anchor
+//!   re-derivation behind the `Anchor` origin touches only the VFS dcache
+//!   (NameAndParent leaf reads) and the `InodeCache` leaf guard, and no
+//!   recorded-parent guard exists anymore. No child-to-parent `copyup`
+//!   mutex edge exists: each ancestor frame releases its own mutex between
+//!   frames.
 //! - The winner holds the `copyup` mutex continuously from acquisition after
 //!   the ancestor walk through the commit tail; `publish_by_rename` takes the
 //!   parent directory transaction lock inside that hold, and the cache write
@@ -95,11 +95,13 @@ impl OverlayInode {
         self.copy_up_via(CopyUpOrigin::Operation(self_dentry), 0)
     }
 
-    /// The dentry-less promotion entry (fallocate, rename's new-parent
-    /// admission): the coordinate falls back to the recorded parent and the
-    /// visible-source real dentry's name.
+    /// The dentry-less promotion entry (fallocate, and the structurally
+    /// unreachable parentless fallback of unlink/rmdir/rename): the
+    /// coordinate re-resolves the publication parent at the object's anchor
+    /// path and takes the visible-source real dentry's name; any divergence
+    /// fails closed instead of publishing blind.
     pub(super) fn copy_up(&self) -> Result<()> {
-        self.copy_up_via(CopyUpOrigin::Recorded, 0)
+        self.copy_up_via(CopyUpOrigin::Anchor, 0)
     }
 
     fn copy_up_via(&self, origin: CopyUpOrigin<'_>, depth: usize) -> Result<()> {
@@ -114,7 +116,7 @@ impl OverlayInode {
         // published-state fact is `upper` being set. The ancestor frame's
         // origin is derived first, before the extraction consumes this
         // frame's origin: an `Operation` frame propagates the publication
-        // parent's own dentry (the operation dentry's parent); a `Recorded`
+        // parent's own dentry (the operation dentry's parent); an `Anchor`
         // frame propagates its kind unchanged.
         let parent_dentry;
         let ancestor_origin = match &origin {
@@ -127,7 +129,7 @@ impl OverlayInode {
                 })?;
                 CopyUpOrigin::Operation(&parent_dentry)
             }
-            CopyUpOrigin::Recorded => CopyUpOrigin::Recorded,
+            CopyUpOrigin::Anchor => CopyUpOrigin::Anchor,
         };
         let (publication_parent, name) = self.publication_coordinate(origin)?;
 
@@ -143,8 +145,8 @@ impl OverlayInode {
             CopyUpOrigin::Operation(dentry) => {
                 publication_parent.copy_up_via(CopyUpOrigin::Operation(dentry), depth + 1)?;
             }
-            CopyUpOrigin::Recorded => {
-                publication_parent.copy_up_via(CopyUpOrigin::Recorded, depth + 1)?;
+            CopyUpOrigin::Anchor => {
+                publication_parent.copy_up_via(CopyUpOrigin::Anchor, depth + 1)?;
             }
         }
 
@@ -176,9 +178,10 @@ impl OverlayInode {
 
     /// The per-frame extraction of the publication coordinate (first-bound
     /// per frame): `Operation` reads (parent, name) from the operation's
-    /// overlay dentry; `Recorded` falls back to the recorded parent plus the
-    /// visible-source real dentry's name for the dentry-less entries. Both
-    /// arms fail closed with `EIO` instead of deriving a blind coordinate.
+    /// overlay dentry; `Anchor` re-resolves the publication parent at the
+    /// object's anchor path (everything but the last component) and takes
+    /// the anchor's last component as the name. Both arms fail closed with
+    /// `EIO` instead of deriving a blind coordinate.
     fn publication_coordinate(
         &self,
         origin: CopyUpOrigin<'_>,
@@ -200,16 +203,24 @@ impl OverlayInode {
                     })?;
                 Ok((parent, dentry.name()))
             }
-            CopyUpOrigin::Recorded => {
-                // Leaf read: the guard is released before the ancestor walk,
-                // and the upgraded `Arc` outlives it.
-                let Some(parent) = self.recorded_parent.read().upgrade() else {
-                    return Err(Error::with_message(
+            CopyUpOrigin::Anchor => {
+                let fs = self.fs_arc()?;
+                let anchor = self.anchor_path(&fs)?;
+                // An empty anchor is the mount root; its upper is always
+                // set, so this arm is structurally unreachable for it.
+                let (name, parent_components) = anchor.split_last().ok_or_else(|| {
+                    Error::with_message(
                         Errno::EIO,
-                        "the copy-up publication parent no longer exists",
-                    ));
-                };
-                Ok((parent, self.visible_source().dentry().name()))
+                        "the copy-up anchor of the overlay root is empty",
+                    )
+                })?;
+                let parent = fs.resolve_at_anchor(parent_components).map_err(|_| {
+                    Error::with_message(
+                        Errno::EIO,
+                        "the copy-up anchor path no longer resolves in the overlay",
+                    )
+                })?;
+                Ok((parent, name.clone()))
             }
         }
     }
@@ -394,9 +405,10 @@ impl OverlayInode {
         }
     }
 
-    /// `publication_parent` is passed explicitly rather than re-derived from `recorded_parent`:
-    /// a concurrent cross-parent rename may repoint `recorded_parent` before the commit lock, so
-    /// the commit must target the parent the ancestor walk promoted (first-bound coordinate rule).
+    /// `publication_parent` is passed explicitly rather than re-derived at
+    /// commit time: a concurrent rename may move the object's anchor path
+    /// before the commit lock, so the commit must target the parent the
+    /// ancestor walk promoted (first-bound coordinate rule).
     fn publish_by_rename(
         &self,
         publication_parent: &Arc<OverlayInode>,
