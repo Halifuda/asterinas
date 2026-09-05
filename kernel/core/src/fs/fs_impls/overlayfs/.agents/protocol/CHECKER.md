@@ -106,6 +106,27 @@ Required execution rules for this lane:
    inside `codex-asterinas-dev` from `/root/asterinas`; preserve its logs and
    result evidence under the packet-authorized component directory.
 
+## Kernel-Mode Unit-Test Validation Lane (Amended Rule 17)
+
+Executing pre-existing pure-logic unit tests is a packeted Validation Run
+(`make ktest`), never a license to create or modify ktest surfaces:
+
+1. **Verified command forms**: `make ktest` (runs `cargo osdk test` for every
+   workspace default-member crate) and the CI form `make ktest NETDEV=tap`
+   (`.github/actions/test/action.yml`).
+2. **Selection limits (OSDK 0.18.x, verified via `cargo osdk test --help`)**:
+   the only selection mechanism is the positional `[TESTNAME]` substring
+   filter. `--ktests` and `--package`/`-p` are not valid flags; attempts to
+   use them are recorded as command-lane deviations, not retried.
+3. **Attribution floor**: results are attributable per crate only from that
+   crate's guest output. A crate whose boot produces no guest output is
+   `not attributable` — record it and move on; the exit code alone is not
+   passing evidence. (Known instance: aster-core's ktest boot is silent in
+   the `codex-asterinas-dev` container; recorded in `pr3767-merge-20260904`
+   run `g4_01`.)
+4. **Evidence**: same `run_evidence/` discipline as any other Validation Run
+   (exact command, distinct `run_id`, preserved output).
+
 ## Allowed Edits
 
 - Creation or modification of your assigned `pass_XX_<component_name>_checker.md` artifact.
