@@ -100,3 +100,39 @@ Checker lane，待 user 指令。`
 - Reviewer loop 以一轮为限，仍败升级 user，不自动加轮（本轮未触发）。
 - runtime gates（回归/xfstests）未获 user 指令前不得自行触发。
 - 除各 pass 写集外不动任何生产代码；`.agents` 记录仅主代理改。
+
+## 6. 2026-09-05 追记：runtime-gate 轮（WIP）
+
+- **门序结果**：rg01 回归四例 4/4 PASS（含 V-1/V-3 根 `..` 稳定）；g3_01
+  rustdoc PASS；xfstests 全表 20 PASS / 1 FAIL（overlay/022）/ 0 HANG，
+  **0 新 FAIL**，026 FAIL→PASS（改善备注）；g2_01 make check FAIL → 修复
+  （P2b continuation：rename_impl 提取内迁 9→6 参消解 clippy
+  too_many_arguments，workspace `allow_attributes=warn` 堵死 allow 路线；
+  cargo fmt 17 hunks）→ g2_02 复验 rustfmt/clippy/typos/nixos 全绿，
+  nixfmt 残留 = 容器工具漂移环境项（文件清单与 g2_01 逐字节相同）。
+  Commits：`85708f9cd`（G-2 修复，含 amend 补入 dentry.rs 两个 fmt
+  hunks——首提交 git add 遗漏，Checker g2_02 抓出）。
+- **026 出列**（`795c32a22`）：2026-08-30 intentional-divergence 注记作废
+  （D1 坐标语义使 escape 场景对齐 golden）；附带记录 guest 侧 blocklist
+  handler `/dev/fd/63` 失效（打包 harness 既有缺陷，026 当时因失效而实际
+  执行到）。
+- **ktest lane 文档化**（`aef984dfd` + `c0dc4da6b`）：OSDK 0.18.x 仅支持
+  `[TESTNAME]` 子串过滤（无 `--package`/`--ktests`）；归因底线 = guest
+  输出而非 exit code；aster-core boot 静默记为已知实例（g4_01）。
+- **VB 义务**：VB-2 记录完成（B-2 latent 不可达 + 全表零 fallocate 覆盖）；
+  VB-3 本轮不可观察（唯一 `..` 证据 = rg01 根级）；**VB-1 gap**（全表无
+  目录改名）→ 022 重开调查后与 B-3 关系重估（见下）。
+- **022 重开（user 指令）**：考古修正——022 上次（`13cf4763a`，2026-08-30）
+  是**裁决延期非修复**（上游 = I_OVL_INUSE 打标两根 + ovl_check_layer
+  祖先链走查；当时 VFS 缺祖先访问能力 + 上游拒绝点未定位故暂不修）。
+  **前置 (a) 已被 P1 解除**（`Dentry::parent()` 加宽 `pub(in crate::fs)`）；
+  前置 (b) 有新线索（76bc8e2843b6 = `DCACHE_OP_REAL` 进
+  `ovl_dentry_remote()`，WebFetch 实取 diff）。延期裁决预授权的实验判别式
+  = `Arc::downcast::<OverlayFs>`（fs_arc() 先例）。下一步：Checker 诊断
+  （临时生产代码插桩，user 授权），机制定位后再定修法。
+
+## 7. Prohibitions（runtime-gate 轮）
+
+- 022 修复实现待诊断报告 + user 裁决，不得先行写码。
+- Checker 插桩属临时诊断授权：证据归档后必须恢复到已提交状态，插桩 diff
+  原样存档。
