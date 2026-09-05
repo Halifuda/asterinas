@@ -114,17 +114,32 @@ Executing pre-existing pure-logic unit tests is a packeted Validation Run
 1. **Verified command forms**: `make ktest` (runs `cargo osdk test` for every
    workspace default-member crate) and the CI form `make ktest NETDEV=tap`
    (`.github/actions/test/action.yml`).
-2. **Selection limits (OSDK 0.18.x, verified via `cargo osdk test --help`)**:
-   the only selection mechanism is the positional `[TESTNAME]` substring
-   filter. `--ktests` and `--package`/`-p` are not valid flags; attempts to
-   use them are recorded as command-lane deviations, not retried.
-3. **Attribution floor**: results are attributable per crate only from that
+2. **Guest output requires `earlycon` (verified 2026-09-05,
+   `pr3767-merge-20260904` runs ktest_01..05)**: `cargo osdk test` passes an
+   empty kernel command line; OSTD's early console is gated by
+   `EarlyCmdline::has_early_console`, whose provider is a weak symbol
+   defaulting to enabled but is overridden by a strong
+   `aster-cmdline` parser that keeps it off unless the command line carries
+   `earlycon`. Every transitively `aster-cmdline`-linked crate (aster-core,
+   asterinas, aster-cmdline, aster-i8042, aster-virtio) therefore runs its
+   tests **silently** (the kernel still executes and exits cleanly, and the
+   aggregate exit code hides it). The verified attributable form:
+   `make ktest CARGO_OSDK_TEST_ARGS='--kcmd-args=earlycon --qemu-args="-accel kvm"'`
+   (the override drops the Makefile's common args, so `-accel kvm` must be
+   re-added).
+3. **Selection limits (OSDK 0.18.x)**: the positional `[TESTNAME]` filter is
+   a **test-path suffix match** — its last `::`-segment must equal the
+   test function's name (optionally with module segments for
+   disambiguation); it is not a free substring search, and per-crate
+   selection flags (`--package`/`-p`, `--ktests`) do not exist. osdk still
+   builds and boots every workspace default-member crate per invocation;
+   non-matching tests are filtered inside the guest. Name-prefix renaming
+   of test functions therefore buys no group filtering.
+4. **Attribution floor**: results are attributable per crate only from that
    crate's guest output. A crate whose boot produces no guest output is
    `not attributable` — record it and move on; the exit code alone is not
-   passing evidence. (Known instance: aster-core's ktest boot is silent in
-   the `codex-asterinas-dev` container; recorded in `pr3767-merge-20260904`
-   run `g4_01`.)
-4. **Evidence**: same `run_evidence/` discipline as any other Validation Run
+   passing evidence.
+5. **Evidence**: same `run_evidence/` discipline as any other Validation Run
    (exact command, distinct `run_id`, preserved output).
 
 ## Allowed Edits

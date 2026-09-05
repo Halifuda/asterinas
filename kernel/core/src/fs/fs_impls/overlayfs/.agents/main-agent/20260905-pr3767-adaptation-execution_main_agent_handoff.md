@@ -172,3 +172,35 @@ Checker lane，待 user 指令。`
   日志在调度热路径自饱和（022fix_00 归档，110s guest 零进展活锁）；
   guest 侧打包 check 的 blocklist handler `/dev/fd/63` 失效（上游 harness
   既有缺陷）。均记录不急修。
+
+## 9. 2026-09-05 追记：ktest U-2/U-3 首次运行时执行（CLOSED）
+
+- **任务**：`task_checker_ktest_u2u3_execution_20260905`（user 指令：单测
+  须实际跑一次；同时确认逐个跑的机制）。
+- **根因闭合（aster-core ktest boot 静默）**：非内存/loader/崩溃——
+  `cargo osdk test` 传空内核命令行，OSTD early console 受
+  `EarlyCmdline::has_early_console` 门控；weak 符号默认 true，但
+  aster-cmdline 以宏提供强符号覆盖（`kernel/core/comps/cmdline/src/
+  early.rs:46-47`），`has_early_console` 起步 false、仅认 `earlycon` 键。
+  静默的 5 个 crate 恰为传递链接 aster-cmdline 者；内核照常跑完测试、
+  isa-debug-exit 干净关机，OSDK 丢弃逐-crate 分类（test.rs:119）→
+  "silent but green"。
+- **可用形态**（纯命令行）：`make ktest CARGO_OSDK_TEST_ARGS='--kcmd-args=
+  earlycon --qemu-args="-accel kvm"'`（CARGO_OSDK_TEST_ARGS 覆盖会丢
+  Makefile 公共参数，须手工补 `-accel kvm`）——ktest_04 实测 30/30 crate
+  全部出结果，aster-core 145 passed / 0 failed。
+- **U-2/U-3 首次运行时记录：16/16 PASS**（U-2 8 例 + U-3 8 例逐例 ok；
+  crate 级 `145 passed; 0 failed; 0 filtered out`）。此前从未有过执行
+  记录（2026-08-31 创建轮为类型检查授权、G-4 恒为 optional）。
+- **过滤语义实证（双向）**：TESTNAME=完整 fn 名 → 其余 13 含测 crate 全部
+  `0 passed; N filtered out`；aster-core 窗口 `1 passed; 144 filtered out`。
+  机制 = test-path **后缀匹配**（最后 `::` 段须等于 fn 名，非任意子串；
+  `osdk/deps/test-kernel/src/path.rs` SuffixTrie + `commands/test.rs:69-77`）；
+  名字前缀改名换不来组过滤。per-crate 旗标不存在，osdk 逐 crate boot
+  全体 default members。CHECKER.md lane 节与 book testing.md 条目已按实测
+  修正（`--kcmd-args=earlycon` 告警 + 后缀匹配语义）。
+- **附带**：g4_01 的 `qemu-serial.last_ktest_boot_only.log` 识别为误归档
+  工件（疑邻道 xfstests 产物）；g4_01 流内分类本身准确。
+- **待 user 裁决**：是否将 `--kcmd-args=earlycon` 固化进 `make ktest`
+  （Makefile 一行或 OSDK.toml `[test.boot]`）——固化后 lane 默认可归因；
+  属 build-infra repo 修改，Checker 权限外，未执行。

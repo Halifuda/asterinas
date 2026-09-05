@@ -1940,3 +1940,26 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
   - **Infra 台账**：`LOG_LEVEL=debug` guest 活锁（FPU 日志饱和，
     022fix_00）；guest 打包 check blocklist handler `/dev/fd/63` 失效。
     均记录不急修。
+
+- **`ktest_u2u3_execution_20260905`**（2026-09-05，user 指令：单测须实际
+  跑一次 + 确认逐个跑机制；CLOSED；handoff §9）
+  - **Kind**: Validation Run + diagnosis（amended rule 17 lane 首次运行时
+    执行；U-2 8 例 / U-3 8 例——2026-08-31 创建以来从未有过执行记录）。
+  - **根因闭合**：aster-core ktest boot 静默 = aster-cmdline 强符号
+    `__early_cmdline_parser` 覆盖弱默认，空命令行下 early console 关闭；
+    内核照常跑完测试干净关机，OSDK 丢弃逐-crate 分类 → "silent but
+    green"。可用形态（纯命令行）= `make ktest CARGO_OSDK_TEST_ARGS=
+    '--kcmd-args=earlycon --qemu-args="-accel kvm"'`。
+  - **执行**：run ktest_04 —— U-2 8 例 + U-3 8 例 **16/16 PASS**；
+    aster-core `145 passed; 0 failed; 0 filtered out`；30/30 crate 输出
+    可归因。
+  - **机制实证**：TESTNAME = test-path **后缀匹配**（最后 `::` 段须等于
+    fn 名；非子串、非前缀）——双向实测（ktest_01 负向全滤除 / ktest_05
+    正向 1 passed + 144 filtered）；名字前缀改名无组过滤收益，不改名。
+    per-crate 旗标不存在；osdk 逐 crate boot 全体 default members。
+  - **文档落地**：CHECKER.md lane 节 + book testing.md 条目按实测修正
+    （earlycon 告警 + 后缀匹配语义）。
+  - **待裁决**：`--kcmd-args=earlycon` 是否固化进 `make ktest`
+    （build-infra 一行改动，user 决定）。
+  - **附带**：g4_01 的 last_ktest_boot_only.log 识别为误归档工件（g4_01
+    流内分类本身准确）。

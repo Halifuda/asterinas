@@ -66,7 +66,16 @@ not attributable instead of inferred passing.
 Run the whole suite with `make ktest`;
 CI runs it as `make ktest NETDEV=tap`.
 The target invokes `cargo osdk test` for every workspace
-default-member crate. With OSDK 0.18.x the only test selection is a
-name-substring filter (`cargo osdk test <TESTNAME>`); package-level
-flags such as `--package` or `--ktests` do not exist, so filter tests
-by name rather than by crate.
+default-member crate. With OSDK 0.18.x the only test selection is the
+positional `TESTNAME`, which matches a test-path suffix: its last
+`::`-segment must equal the test function's name, and `--package` or
+`--ktests` flags do not exist, so tests are selected by exact name
+rather than by crate.
+
+Note that a crate linking the kernel command-line parser keeps its
+early console disabled unless the guest command line carries
+`earlycon`. Since `cargo osdk test` passes an empty command line,
+such crates run their tests silently — pass the console key
+explicitly (for example
+`make ktest CARGO_OSDK_TEST_ARGS='--kcmd-args=earlycon ...'`)
+whenever per-test output is the evidence you need.
