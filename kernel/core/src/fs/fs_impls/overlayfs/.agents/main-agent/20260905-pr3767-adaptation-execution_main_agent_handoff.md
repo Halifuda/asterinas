@@ -136,3 +136,39 @@ Checker lane，待 user 指令。`
 - 022 修复实现待诊断报告 + user 裁决，不得先行写码。
 - Checker 插桩属临时诊断授权：证据归档后必须恢复到已提交状态，插桩 diff
   原样存档。
+
+## 8. 2026-09-05 追记：022 修复轮（诊断 → 修复 → 转绿，CLOSED）
+
+- **诊断**（`task_checker_022_mechanism_diagnosis_20260905`，user 授权临时
+  插桩，树已恢复净态 + 编译复验绿）：H1-H3 全证实——失败子场景 = upperdir
+  路径解析**穿过另一个 overlay mount**（upperdir=`$SCRATCH_MNT/...`，落点
+  为 overlay #1 的 view dentry）；我们 mount admission 对此无判别，claim
+  落在 view inode 上绕过 inuse 轴；判别式
+  `upper_path.mount_node().fs()` → `Arc::downcast::<OverlayFs>` 实测可行
+  （失败尝试 true、5 次合法 ext2-upper 全 false）。上游机制闭合：
+  76bc8e2843b6（`DCACHE_OP_REAL` 进 `ovl_dentry_remote`）在当前上游树显式
+  化为 `ovl_mount_dir_check()`（params.c:326-331，per-dentry，parse 期，
+  `is_upper_layer` 同时覆盖 upperdir/workdir）；旧裁决"祖先走查是否覆盖
+  022"定论 = 从未覆盖也从未用于 022，inuse 轴与 022 正交。
+- **修复**（`task_creator_022_upper_rejection_20260905`，commit
+  `5bca0d018`）：`OverlayFs::new` mount admission 单点检查——upper_path
+  材料化后、validate_pair/claim 前，downcast 到 OverlayFs 即 EINVAL；
+  workdir 构建于 upper 同 mount，单点覆盖 upper+workdir（对应上游
+  `is_upper_layer` 分支）；lower 不查（overlay-as-lower 嵌套合法）。语义
+  说明见 handoff 对话记录：禁的是"解析穿过 overlay mount 的 upper/work
+  路径"，非"overlay layer root 一律不得复用"——真实路径引用走 inuse/claim
+  轴，lower 轴只读委托照常。
+- **验证**（run `022fix_01`）：三项冻结预期全证实——mount #1（合法
+  ext2 upper）照常成功；mount #2 被拒（syscall 形状对照：FSCONFIG×5 后
+  无 FSMOUNT/MOVE_MOUNT，修复前同一尝试全成功）；**022 转绿**
+  （`Passed all 1 tests`，golden `Silence is golden` 达成，make exit 0）。
+  EINVAL 消息文本仅 debug 级可见（syscall/mod.rs:395）且 case 将 mount
+  stderr 重定向 /dev/null，任何可用 lane 都无法捕获——拒绝实质由形状对照
+  + commit 源码证明（收据注明）。
+- **全表状态**：有效面 = 21/21（022 修复 + 026 已出列并实测 PASS）；
+  按 user 指令未重跑全表，零影响论证（检查仅 upper 落 overlay mount 时
+  触发，其余 case upper 全在 ext2）已记收据，未来全表 gate 为最终仲裁。
+- **Infra 台账新项**：`LOG_LEVEL=debug` 在本内核不可用——FPU 上下文切换
+  日志在调度热路径自饱和（022fix_00 归档，110s guest 零进展活锁）；
+  guest 侧打包 check 的 blocklist handler `/dev/fd/63` 失效（上游 harness
+  既有缺陷）。均记录不急修。

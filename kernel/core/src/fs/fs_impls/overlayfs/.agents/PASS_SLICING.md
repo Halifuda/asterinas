@@ -1912,3 +1912,31 @@ This file is the durable main-agent-owned record of how meso-level Architect / D
     doc fold-in 并入 P3 落地）、**R2 PASS**（0B/0M/0 MINOR/3 LINE，
     全为文档措辞级；loop 未触发）。树终态全绿。运行时 gates 未跑
     （后置 Checker lane）。
+
+- **`overlay_022_upper_rejection_20260905`**（2026-09-05，user 开线：
+  022 诊断 → 修复 → 转绿，CLOSED；handoff §8）
+  - **Kind**: 三段小轮（诊断 → 冻结修复 → 单 case 验证）。
+  - **考古**：022 上次（`13cf4763a`，2026-08-30）是**裁决延期非修复**——
+    上游 = `I_OVL_INUSE` 打标两根 + `ovl_check_layer` 祖先链走查；当时
+    VFS 缺祖先访问能力 + 上游拒绝点未定位。**前置 (a) 已被本波 P1 解除**
+    （`Dentry::parent()` 加宽）；前置 (b) 由诊断闭合（76bc8e2843b6 =
+    `DCACHE_OP_REAL` 进 `ovl_dentry_remote`，当前上游树显式化为
+    `ovl_mount_dir_check()` per-dentry 检查）。
+  - **诊断**：`task_checker_022_mechanism_diagnosis_20260905`（user 授权
+    临时插桩，树恢复净态已验证）——H1-H3 全证实：失败子场景 = upperdir
+    路径解析穿过另一个 overlay mount、admission 无判别、
+    `Arc::downcast::<OverlayFs>`（经 `upper_path.mount_node().fs()`）
+    判别式实测可行。user 指令：只跑 022 单 case，不重跑全表。
+  - **修复**：`task_creator_022_upper_rejection_20260905`（主代理冻结
+    diff 逐字）——commit `5bca0d018`：`OverlayFs::new` mount admission
+    单点检查（upper_path 材料化后、validate_pair/claim 前，downcast 到
+    OverlayFs → EINVAL），单点覆盖 upper+workdir，lower 不查。022fix_run01
+    exit 0 / clippy 干净；census 零新实体。
+  - **验证**：run `022fix_01`（单 case）——三项冻结预期全证实，**022
+    转绿**（golden `Silence is golden` 达成）；EINVAL 消息文本不可捕获
+    （debug 级不可用 + case 重定向 stderr），拒绝实质由 syscall 形状对照
+    + 源码证明。有效全表面 = 21/21（022 + 026）；未重跑全表（user 指令），
+    零影响论证记收据，未来全表 gate 最终仲裁。
+  - **Infra 台账**：`LOG_LEVEL=debug` guest 活锁（FPU 日志饱和，
+    022fix_00）；guest 打包 check blocklist handler `/dev/fd/63` 失效。
+    均记录不急修。
