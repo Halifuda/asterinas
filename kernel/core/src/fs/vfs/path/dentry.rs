@@ -280,7 +280,7 @@ impl Dentry {
     /// Gets the parent `Dentry`.
     ///
     /// Returns `None` if it is a root or pseudo `Dentry`.
-    pub(super) fn parent(&self) -> Option<Arc<Self>> {
+    pub(in crate::fs) fn parent(&self) -> Option<Arc<Self>> {
         self.name_and_parent.parent()
     }
 
@@ -781,7 +781,6 @@ impl DirDentry<'_> {
         }
 
         let old_dir_inode = self.inode();
-        let new_dir_inode = new_dir.inode();
 
         let max_namelen = old_dir_inode.fs().sb().namelen;
         if old_name.len() > max_namelen || new_name.len() > max_namelen {
@@ -827,7 +826,7 @@ impl DirDentry<'_> {
 
             old_dir_inode.rename(
                 &old_dentry,
-                old_dir_inode,
+                self,
                 new_name,
                 new_dentry.as_deref(),
                 mode,
@@ -890,7 +889,7 @@ impl DirDentry<'_> {
 
             old_dir_inode.rename(
                 &old_dentry,
-                new_dir_inode,
+                new_dir,
                 new_name,
                 new_dentry.as_deref(),
                 mode,
