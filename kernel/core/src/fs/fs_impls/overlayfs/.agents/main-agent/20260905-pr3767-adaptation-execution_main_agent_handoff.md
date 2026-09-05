@@ -201,6 +201,8 @@ Checker lane，待 user 指令。`
   修正（`--kcmd-args=earlycon` 告警 + 后缀匹配语义）。
 - **附带**：g4_01 的 `qemu-serial.last_ktest_boot_only.log` 识别为误归档
   工件（疑邻道 xfstests 产物）；g4_01 流内分类本身准确。
-- **待 user 裁决**：是否将 `--kcmd-args=earlycon` 固化进 `make ktest`
-  （Makefile 一行或 OSDK.toml `[test.boot]`）——固化后 lane 默认可归因；
-  属 build-infra repo 修改，Checker 权限外，未执行。
+- **user 处置（2026-09-05，终态）**：不改任何测试脚手架——`earlycon`
+  固化提案否决，Makefile/OSDK.toml/qemu_args.sh 保持原样，lane 按需走
+  CARGO_OSDK_TEST_ARGS 命令行形态（已记入 CHECKER.md）。U-2/U-3 随
+  ktest_04 全量执行通过：全 30 crate **453 passed / 0 failed**（aster-core
+  145，含 U-2/U-3 16 例）——单测线就此闭环。
