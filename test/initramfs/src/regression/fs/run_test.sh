@@ -139,9 +139,12 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 
 ./overlayfs/lchown_lower_symlink
 ./overlayfs/link_lower_file
+./overlayfs/metacopy
 ./overlayfs/mknod_whiteout_rejected
 ./overlayfs/ovl_test
 ./overlayfs/readdir_small_buffer
+./overlayfs/redirect_follow
+./overlayfs/redirect_rename
 ./overlayfs/rmdir_lower_only_nonempty
 ./overlayfs/sparse_copyup_consistency
 ./overlayfs/xino_dino_identity
