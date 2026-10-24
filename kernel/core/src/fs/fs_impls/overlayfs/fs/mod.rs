@@ -8,6 +8,8 @@
 //! The `overlay` registration and the mount requests answered under it live in
 //! [`fs_type`].
 
+#![short_vis_path::add(overlayfs)]
+
 mod fs_type;
 pub(super) mod mount;
 
@@ -21,7 +23,7 @@ use crate::{
         fs_impls::overlayfs::{
             fs::fs_type::OVERLAY_FS_NAME,
             inode::{IdentityPolicy, InodeCache, WhiteoutCache},
-            layer::LayerStack,
+            layer::{Layer, LayerStack},
             real::{RealObject, RealObjectStack},
         },
         vfs::{
@@ -40,6 +42,8 @@ pub(super) struct OverlayFs {
     upper_workdir_inuse: Option<UpperWorkdirInuse>,
     whiteout_cache: WhiteoutCache,
     inodes: InodeCache,
+    /// Serializes the moves that compose or rewrite redirect records mount-wide.
+    rename_lock: Mutex<()>,
     fs_event_stats: FsEventSubscriberStats,
     self_weak: Weak<OverlayFs>,
 }
@@ -71,6 +75,16 @@ impl OverlayFs {
     pub(super) fn whiteout_cache(&self) -> &WhiteoutCache {
         &self.whiteout_cache
     }
+
+    /// Returns the mount's lower layers in merge order, topmost first.
+    pub(in overlayfs) fn lower_layers(&self) -> &[Layer] {
+        self.layer_stack.lower_layers()
+    }
+
+    /// Takes the lock that serializes the moves composing or rewriting redirect records.
+    pub(in overlayfs) fn lock_renames(&self) -> MutexGuard<'_, ()> {
+        self.rename_lock.lock()
+    }
 }
 
 impl FileSystem for OverlayFs {
@@ -101,7 +115,8 @@ impl FileSystem for OverlayFs {
                 RealObject::new_lower(layer_index + 1, layer.root_dentry().clone())
             })
             .collect();
-        let facts = RealObjectStack::new(upper, lowers);
+        let upper_has_data = upper.is_some();
+        let facts = RealObjectStack::new(upper, lowers, upper_has_data);
         // A mount root is a directory, so its projection reads no hard-link count and cannot fail.
         self.project_inode(facts)
             .expect("the mount root is a directory, so its projection reads no hard-link count")

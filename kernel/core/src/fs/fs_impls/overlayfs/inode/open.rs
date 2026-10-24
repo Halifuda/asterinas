@@ -53,7 +53,7 @@ impl OverlayInode {
         if !access_mode.is_writable() {
             return None;
         }
-        match self.writable_real_object(self_dentry) {
+        match self.writable_data_object(self_dentry) {
             Ok(_) => None,
             Err(err) => Some(Err(err)),
         }

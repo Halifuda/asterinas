@@ -166,18 +166,30 @@ impl RealObject {
 pub(super) struct RealObjectStack {
     pub(super) upper: Option<RealObject>,
     pub(super) lowers: Vec<RealObject>,
+    /// Reports whether the upper entry holds this object's data.
+    pub(super) upper_has_data: bool,
 }
 
 impl RealObjectStack {
-    pub(super) fn new(upper: Option<RealObject>, lowers: Vec<RealObject>) -> Self {
+    pub(super) fn new(
+        upper: Option<RealObject>,
+        lowers: Vec<RealObject>,
+        upper_has_data: bool,
+    ) -> Self {
         debug_assert!(upper.is_some() || !lowers.is_empty());
-        Self { upper, lowers }
+        debug_assert!(upper.is_some() || !upper_has_data);
+        Self {
+            upper,
+            lowers,
+            upper_has_data,
+        }
     }
 
     pub(super) fn upper_only(upper: RealObject) -> Self {
         Self {
             upper: Some(upper),
             lowers: Vec::new(),
+            upper_has_data: true,
         }
     }
 
@@ -185,6 +197,7 @@ impl RealObjectStack {
         Self {
             upper: None,
             lowers: vec![lower],
+            upper_has_data: false,
         }
     }
 

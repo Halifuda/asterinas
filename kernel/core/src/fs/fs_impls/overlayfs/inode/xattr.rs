@@ -32,6 +32,15 @@ use crate::{
 /// The infix the passthrough path inserts after the selected prefix.
 const ESCAPE_INFIX: &str = "overlay.";
 
+/// The redirect value limit in bytes, excluding any terminating NUL.
+pub(super) const REDIRECT_MAX_BYTES: usize = 256;
+
+/// The v0 metacopy record: version 0, length 4, no flags, no digest.
+pub(super) const METACOPY_V0_RECORD: [u8; 4] = [0, 4, 0, 0];
+
+/// The largest metacopy record this mount reads: the 4-byte header plus a 64-byte digest.
+pub(super) const METACOPY_MAX_BYTES: usize = 68;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// The kinds of overlay-owned record that a mount stores on upper objects as private xattrs.
 pub(in overlayfs) enum OverlayXattrType {
@@ -45,6 +54,10 @@ pub(in overlayfs) enum OverlayXattrType {
     Impure,
     /// The uuid record: the identifier of the mount instance that wrote this inode.
     Uuid,
+    /// The redirect record: the lower name this upper directory's content lives under.
+    Redirect,
+    /// The metacopy record: this upper entry carries metadata only, and its data stays below.
+    Metacopy,
 }
 
 impl OverlayXattrType {
@@ -56,11 +69,15 @@ impl OverlayXattrType {
             (XattrNamespace::Trusted, Self::Whiteout) => "trusted.overlay.whiteout",
             (XattrNamespace::Trusted, Self::Impure) => "trusted.overlay.impure",
             (XattrNamespace::Trusted, Self::Uuid) => "trusted.overlay.uuid",
+            (XattrNamespace::Trusted, Self::Redirect) => "trusted.overlay.redirect",
+            (XattrNamespace::Trusted, Self::Metacopy) => "trusted.overlay.metacopy",
             (XattrNamespace::User, Self::Origin) => "user.overlay.origin",
             (XattrNamespace::User, Self::Opaque) => "user.overlay.opaque",
             (XattrNamespace::User, Self::Whiteout) => "user.overlay.whiteout",
             (XattrNamespace::User, Self::Impure) => "user.overlay.impure",
             (XattrNamespace::User, Self::Uuid) => "user.overlay.uuid",
+            (XattrNamespace::User, Self::Redirect) => "user.overlay.redirect",
+            (XattrNamespace::User, Self::Metacopy) => "user.overlay.metacopy",
             _ => unreachable!("the mount stores only the trusted or user xattr namespace"),
         };
         XattrName::try_from_full_name(full_name)
@@ -69,12 +86,11 @@ impl OverlayXattrType {
 
     /// Returns the value a write stores when the write site supplies none.
     ///
-    /// The whiteout, opaque, and impure markers write `y`; origin and uuid always take the caller's
-    /// value instead.
+    /// The whiteout, opaque, and impure markers write `y`; the other records take the caller's value.
     fn default_value(&self) -> Option<&'static [u8]> {
         match self {
             Self::Opaque | Self::Whiteout | Self::Impure => Some(b"y"),
-            Self::Origin | Self::Uuid => None,
+            Self::Origin | Self::Uuid | Self::Redirect | Self::Metacopy => None,
         }
     }
 
@@ -114,6 +130,66 @@ impl OverlayXattrType {
         real_dentry.inode().get_xattr(name, &mut value_writer)
     }
 
+    /// Returns this record's validated value, or `None` when the record is absent or zero-length.
+    pub(in overlayfs) fn read_redirect(
+        &self,
+        real_dentry: &Dentry,
+        namespace: XattrNamespace,
+    ) -> Result<Option<String>> {
+        let mut value = [0u8; REDIRECT_MAX_BYTES + 1];
+        let written = match self.get_value_from(real_dentry, namespace, &mut value) {
+            Ok(written) => written,
+            Err(err) if matches!(err.error(), Errno::ENODATA | Errno::EOPNOTSUPP) => {
+                return Ok(None);
+            }
+            Err(err) if err.error() == Errno::ERANGE => {
+                return_errno_with_message!(Errno::EINVAL, "the redirect record is too long");
+            }
+            Err(err) => return Err(err),
+        };
+        if written == 0 {
+            return Ok(None);
+        }
+        if written > REDIRECT_MAX_BYTES {
+            return_errno_with_message!(Errno::EINVAL, "the redirect record is too long");
+        }
+        let value = Self::decode_redirect(&value[..written])?;
+        Ok(Some(String::from(value)))
+    }
+
+    /// Validates one redirect value and returns it as a borrowed string.
+    fn decode_redirect(value: &[u8]) -> Result<&str> {
+        if value.contains(&0) {
+            return_errno_with_message!(Errno::EINVAL, "the redirect record contains a NUL byte");
+        }
+        let Ok(value) = core::str::from_utf8(value) else {
+            return_errno_with_message!(Errno::EINVAL, "the redirect record is not valid UTF-8");
+        };
+        if value.is_empty() {
+            return_errno_with_message!(Errno::EINVAL, "the redirect record is empty");
+        }
+        if let Some(absolute_path) = value.strip_prefix('/') {
+            if absolute_path.is_empty() || absolute_path.ends_with('/') {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "the absolute redirect path is malformed"
+                );
+            }
+            if absolute_path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+            {
+                return_errno_with_message!(
+                    Errno::EINVAL,
+                    "the absolute redirect path is malformed"
+                );
+            }
+        } else if value.contains('/') || value == "." || value == ".." {
+            return_errno_with_message!(Errno::EINVAL, "the relative redirect name is malformed");
+        }
+        Ok(value)
+    }
+
     /// Returns whether `value` counts as positive for this record.
     ///
     /// Only opaque and impure compare the bytes; a whiteout is positive by carrying any value at all.
@@ -121,6 +197,8 @@ impl OverlayXattrType {
         match self {
             Self::Opaque | Self::Impure => value == self.default_value().unwrap_or_default(),
             Self::Whiteout | Self::Origin | Self::Uuid => true,
+            Self::Redirect => unreachable!("the redirect record is decoded by read_redirect"),
+            Self::Metacopy => unreachable!("the metacopy record is validated by check_metacopy"),
         }
     }
 
@@ -149,7 +227,50 @@ impl OverlayXattrType {
             Self::Origin | Self::Uuid => {
                 unreachable!("the two owner-decoded records carry no marker value to call positive")
             }
+            Self::Redirect => unreachable!("the redirect record is decoded by read_redirect"),
+            Self::Metacopy => unreachable!("the metacopy record is validated by check_metacopy"),
         }
+    }
+
+    /// Reads and validates the metacopy record, returning its length when the record is present.
+    pub(super) fn check_metacopy(
+        real_dentry: &Dentry,
+        namespace: XattrNamespace,
+    ) -> Result<Option<u32>> {
+        if !real_dentry.inode().type_().is_regular_file() {
+            return Ok(None);
+        }
+        let mut value = [0u8; METACOPY_MAX_BYTES];
+        let written = match Self::Metacopy.get_value_from(real_dentry, namespace, &mut value) {
+            Ok(written) => written,
+            Err(err) if matches!(err.error(), Errno::ENODATA | Errno::EOPNOTSUPP) => {
+                return Ok(None);
+            }
+            Err(err) if namespace == XattrNamespace::User && err.error() == Errno::EACCES => {
+                return Ok(None);
+            }
+            // An oversized record arrives as ERANGE from the bounded buffer.
+            Err(err) => return Err(err),
+        };
+        if written == 0 {
+            return Ok(Some(METACOPY_V0_RECORD.len() as u32));
+        }
+        if written < METACOPY_V0_RECORD.len() {
+            return_errno_with_message!(Errno::EIO, "the metacopy record is too short");
+        }
+        if value[0] != METACOPY_V0_RECORD[0] {
+            return_errno_with_message!(
+                Errno::EIO,
+                "the metacopy record has an unsupported version"
+            );
+        }
+        if value[1] as usize != written {
+            return_errno_with_message!(
+                Errno::EIO,
+                "the metacopy record has an inconsistent length"
+            );
+        }
+        Ok(Some(written as u32))
     }
 
     /// Removes this record, reporting `ENODATA` if the record is not there.

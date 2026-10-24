@@ -29,7 +29,9 @@
 //! snapshot — a [`readdir::ReaddirCache`], the merged entry table one merge
 //! produced; a non-directory uses the lock as a plain serialization token. The
 //! lock also serializes an object's promotion against the removal or
-//! displacement of its name.
+//! displacement of its name. The lock is also held across the in-place
+//! completion of a metadata-only copy-up, which copies the lower data into the
+//! upper before the record is removed.
 //! [`OverlayInode::append_write`] holds this lock across the underlying `size()` +
 //! `write_at` so concurrent appends serialize on the post-write size.
 //!
@@ -38,10 +40,12 @@
 //! what orders a name removal against a promotion round, so the latch needs no
 //! ordering of its own.
 //!
-//! Two overlay-internal locks exist: the per-inode transaction lock and the
-//! [`InodeCache`] guard. A per-open snapshot slot sits outside both of them and
-//! is the outer lock of its pair: the directory transaction lock is taken and
-//! released inside its guard.
+//! Three overlay-internal locks exist: the per-inode transaction lock, the
+//! [`InodeCache`] guard, and the mount's rename lock, which serializes the
+//! moves that compose or rewrite redirect records and is taken inside the VFS
+//! caller's children guards, outside every per-inode lock. A per-open snapshot
+//! slot sits outside all of them and is the outer lock of its pair: the
+//! directory transaction lock is taken and released inside its guard.
 
 mod copyup;
 mod data;
@@ -61,14 +65,16 @@ use core::{
 
 use spin::Once;
 
-pub(super) use self::{
-    dir::whiteout::WhiteoutCache, identity::IdentityPolicy, inode_cache::InodeCache,
-    xattr::OverlayXattrType,
-};
 use self::{
+    copyup::CopyUpIntent,
     identity::ObjectVisibleId,
     lookup::{Lookup, NegativeLookup},
     readdir::{OverlayInodeLockGuard, OverlayInodeLockPayload},
+    xattr::REDIRECT_MAX_BYTES,
+};
+pub(super) use self::{
+    dir::whiteout::WhiteoutCache, identity::IdentityPolicy, inode_cache::InodeCache,
+    xattr::OverlayXattrType,
 };
 use crate::{
     fs::{
@@ -91,9 +97,11 @@ use crate::{
 
 pub(super) struct OverlayInode {
     fs: Weak<OverlayFs>,
-    /// A directory keeps its whole merge stack; a non-directory only its visible topmost lower.
+    /// A directory keeps its whole merge stack; a non-directory only the lower its data comes from.
     lowers: Vec<RealObject>,
     upper: Once<RealObject>,
+    /// Reports whether the upper entry holds this object's data.
+    upper_has_data: AtomicBool,
     /// One-way name-taken latch, set under this object's lock: its name binding was taken away.
     name_taken: AtomicBool,
     object_id: ObjectVisibleId,
@@ -112,9 +120,9 @@ impl OverlayInode {
 
     /// Returns the read-only take point: the real object this logical object currently shows.
     ///
-    /// It is the upper when there is one, else the topmost lower, and reads go through the returned
-    /// object's real inode. The object may be a lower: handing it to a write method breaks the write
-    /// paths' discipline, which the type does not prevent.
+    /// It is the upper when there is one, else the topmost lower, and it carries the object's
+    /// metadata authority. The object may be a lower: handing it to a write method breaks the
+    /// write paths' discipline, which the type does not prevent.
     fn real_object(&self) -> &RealObject {
         match self.upper.get() {
             Some(upper) => upper,
@@ -126,20 +134,62 @@ impl OverlayInode {
         }
     }
 
-    /// Returns the real object a write may land on.
+    /// Returns the real object that holds this object's data.
     ///
-    /// Refuses an effectively read-only mount, returns the receiver's own upper when it has one, and
-    /// otherwise promotes the receiver into `copyup_dentry` first — so the answer is always an upper.
+    /// An upper holding the data answers; otherwise the data still lives in the topmost lower.
+    fn data_object(&self) -> &RealObject {
+        if let Some(upper) = self.upper.get()
+            && self.has_upper_data()
+        {
+            return upper;
+        }
+        self.lowers
+            .first()
+            .expect("a metadata-only upper keeps its lower data")
+    }
+
+    /// Returns whether the upper entry holds this object's data.
+    fn has_upper_data(&self) -> bool {
+        self.upper_has_data.load(Ordering::Acquire)
+    }
+
+    /// Publishes whether the upper entry now holds this object's data.
+    fn mark_upper_data(&self, has_data: bool) {
+        self.upper_has_data.store(has_data, Ordering::Release);
+    }
+
+    /// Runs the metadata-intent writable take point.
     fn writable_real_object(&self, copyup_dentry: &Dentry) -> Result<&RealObject> {
+        self.writable_object_with_intent(copyup_dentry, CopyUpIntent::Metadata)
+    }
+
+    /// Runs the data-intent writable take point, completing a metadata-only copy-up first.
+    fn writable_data_object(&self, copyup_dentry: &Dentry) -> Result<&RealObject> {
+        self.writable_object_with_intent(copyup_dentry, CopyUpIntent::Data)
+    }
+
+    /// Runs one writable take point with an explicit copy-up intent.
+    fn writable_object_with_intent(
+        &self,
+        copyup_dentry: &Dentry,
+        intent: CopyUpIntent,
+    ) -> Result<&RealObject> {
         let fs = self.fs_arc();
         if fs.policy().is_effective_read_only() {
             return_errno_with_message!(Errno::EROFS, "the overlay mount is read-only");
         }
         if let Some(upper) = self.upper.get() {
+            if intent == CopyUpIntent::Data && !self.has_upper_data() {
+                self.complete_data_copy_up(upper)?;
+            }
             return Ok(upper);
         }
-        fs.copy_up_at(copyup_dentry)?;
-        Ok(self.writable_upper())
+        fs.copy_up_at(copyup_dentry, intent)?;
+        let upper = self.writable_upper();
+        if intent == CopyUpIntent::Data && !self.has_upper_data() {
+            self.complete_data_copy_up(upper)?;
+        }
+        Ok(upper)
     }
 
     /// Sets the name-taken latch; the caller must hold this object's transaction lock.
@@ -161,6 +211,106 @@ impl OverlayInode {
         self.upper
             .get()
             .expect("an overlay object on a write path has an upper real object")
+    }
+
+    /// Returns this object's redirect record, read from its upper entry alone.
+    fn redirect_record(&self, namespace: XattrNamespace) -> Result<Option<String>> {
+        let Some(upper) = self.upper.get() else {
+            return Ok(None);
+        };
+        OverlayXattrType::Redirect.read_redirect(upper.dentry(), namespace)
+    }
+
+    /// Returns the redirect value a move of this object must record, or `None` when none is needed.
+    fn redirect_value_for(
+        &self,
+        fs: &OverlayFs,
+        name: &str,
+        parent_dentry: &Dentry,
+        is_absolute: bool,
+    ) -> Result<Option<String>> {
+        let namespace = fs.policy().xattr_namespace();
+        let own_record = self.redirect_record(namespace)?;
+        if let Some(existing) = &own_record
+            && (!is_absolute || existing.starts_with('/'))
+        {
+            return Ok(None);
+        }
+        if !is_absolute {
+            if name.len() > REDIRECT_MAX_BYTES {
+                return_errno_with_message!(
+                    Errno::EXDEV,
+                    "the redirect path for the moved object exceeds the 256-byte limit"
+                );
+            }
+            return Ok(Some(String::from(name)));
+        }
+
+        // The absolute value is the moved object's path from the overlay root, with each
+        // level's redirect replacing that level's disk name when one exists.
+        let mut components = vec![String::from(own_record.as_deref().unwrap_or(name))];
+        let mut prefix: Option<String> = None;
+
+        #[expect(
+            unused_assignments,
+            reason = "the loop always overwrites this placeholder before reading it"
+        )]
+        let mut owned_ancestor: Option<Arc<Dentry>> = None;
+        let mut ancestor: Option<&Dentry> = Some(parent_dentry);
+        while prefix.is_none() {
+            let Some(dentry) = ancestor else {
+                break;
+            };
+            let Some(parent) = dentry.parent() else {
+                // The overlay root's name is not part of the value.
+                break;
+            };
+            let ancestor_inode =
+                dentry
+                    .inode()
+                    .downcast_ref::<OverlayInode>()
+                    .ok_or_else(|| {
+                        Error::with_message(
+                            Errno::EIO,
+                            "the redirect path left the overlay namespace",
+                        )
+                    })?;
+            let record = ancestor_inode.redirect_record(namespace)?;
+            let disk_name = dentry.name();
+            let component = record.as_deref().unwrap_or(disk_name.as_str());
+            if component.starts_with('/') {
+                prefix = Some(String::from(component));
+                break;
+            }
+            components.push(String::from(component));
+            owned_ancestor = Some(parent);
+            ancestor = owned_ancestor.as_deref();
+        }
+
+        let mut value = prefix.unwrap_or_default();
+        for component in components.iter().rev() {
+            let added = component.len().checked_add(1).ok_or_else(|| {
+                Error::with_message(
+                    Errno::EXDEV,
+                    "the redirect path for the moved object exceeds the 256-byte limit",
+                )
+            })?;
+            let new_len = value.len().checked_add(added).ok_or_else(|| {
+                Error::with_message(
+                    Errno::EXDEV,
+                    "the redirect path for the moved object exceeds the 256-byte limit",
+                )
+            })?;
+            if new_len > REDIRECT_MAX_BYTES {
+                return_errno_with_message!(
+                    Errno::EXDEV,
+                    "the redirect path for the moved object exceeds the 256-byte limit"
+                );
+            }
+            value.push('/');
+            value.push_str(component);
+        }
+        Ok(Some(value))
     }
 
     /// Takes the per-inode transaction lock.
