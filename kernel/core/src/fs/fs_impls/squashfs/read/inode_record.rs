@@ -31,47 +31,31 @@ use super::{
 };
 use crate::prelude::*;
 
-/// The body of an inode record, as the record's type word selects it.
-///
-/// This module reads the two bodies a mount, a directory listing, and a small
-/// file need. The bodies of the remaining kinds have widths of their own, so a
-/// record of one of those kinds cannot be finished here yet; its type word is
-/// still named, which is what keeps a known-but-unread kind apart from an
-/// unknown one.
+/// Produced by: InodeRecord::read. Users: SquashfsInode, fs::Squashfs.
 pub(in squashfs) enum InodeBody {
-    /// A basic regular file, whose block list starts right after the body.
+    /// Owner: InodeBody. Users: InodeRecord::file.
     File {
-        /// The fixed body of the record.
+        /// Owner: InodeBody. Users: InodeRecord::file.
         inode: RegInode,
-        /// The position the record's block list starts at.
+        /// Owner: InodeBody. Users: InodeRecord::file.
         block_list: MetadataPosition,
     },
-    /// A basic directory, whose content starts at its own stated position.
+    /// Owner: InodeBody. Users: InodeRecord::body.
     Dir {
-        /// The fixed body of the record.
+        /// Owner: InodeBody. Users: InodeRecord::body.
         inode: DirInode,
     },
 }
 
-/// One inode record, header and body, as the inode table states it.
-///
-/// The value is already checked against the mount, so a reader may take the
-/// owner's index and the record's size without re-validating either against the
-/// image. It is not yet the owner's number: the id index still has to be resolved
-/// through the id table, which only a holder of that table can do.
+/// Produced by: InodeRecord::read. Users: SquashfsInode, fs::Squashfs.
 pub(in squashfs) struct InodeRecord {
     base: BaseInode,
     body: InodeBody,
 }
 
 impl InodeRecord {
-    /// Reads the record a cursor is positioned at and advances past it.
-    ///
-    /// Fails with an I/O error when the record's bytes cannot be read or its
-    /// in-block offset leaves the block, when its permission bits carry a type
-    /// nibble, and with an invalid argument when the type word names no kind, the
-    /// inode number is zero, or an id index reaches past the id count the
-    /// superblock states.
+    /// Caller: fs::Squashfs::open, SquashfsInode::lookup_impl. Callee: BaseInode::decode,
+    /// RegInode::decode, DirInode::decode, InodeKind::from_inode_type.
     pub(in squashfs) fn read(
         cursor: &mut MetadataCursor<'_>,
         super_block: &SuperBlock,
@@ -79,33 +63,29 @@ impl InodeRecord {
         todo!()
     }
 
-    /// Returns the header every inode record starts with.
+    /// Caller: SquashfsInode::metadata_impl, mode_impl, atime_impl, mtime_impl,
+    /// ctime_impl. Callee: none.
     pub(in squashfs) fn base(&self) -> &BaseInode {
         todo!()
     }
 
-    /// Returns the body the record's type word selected.
+    /// Caller: SquashfsInode::type_impl. Callee: none.
     pub(in squashfs) fn body(&self) -> &InodeBody {
         todo!()
     }
 
-    /// Returns the regular file's body and the position its block list starts at.
-    ///
-    /// Only a regular file record states a block list, and only a regular file gets a
-    /// page cache, so a caller reached through a page fill holds such a record. The
-    /// accessor states that once instead of a match in every reader of the block list,
-    /// and the body asserts the kind rather than answering for one the record does not
-    /// carry.
+    /// Caller: SquashfsInode::read_page_async, size_impl. Callee: none.
     pub(in squashfs) fn file(&self) -> (&RegInode, MetadataPosition) {
         todo!()
     }
 
-    /// Returns the kind the record's type word names.
+    /// Caller: SquashfsInode::type_impl. Callee: BaseInode::inode_type.
     pub(in squashfs) fn kind(&self) -> InodeKind {
         todo!()
     }
 
-    /// Returns the inode number this record answers to.
+    /// Caller: SquashfsInode::ino_impl, fs::Squashfs::root_inode_impl.
+    /// Callee: BaseInode::inode_number.
     pub(in squashfs) fn inode_number(&self) -> u64 {
         todo!()
     }

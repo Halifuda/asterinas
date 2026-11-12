@@ -21,311 +21,248 @@
 #![expect(unused_variables, reason = "every body here is still `todo!()`")]
 #![short_vis_path::add(squashfs)]
 
-/// The inode type word of an inode record.
-///
-/// The word is one of fourteen values; anything else leaves an inode record
-/// without a type, which no reader can interpret.
+/// Produced by: InodeKind::from_inode_type, from_dir_entry_type. Users: read::inode_record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in squashfs) enum InodeKind {
-    /// A directory whose content fits the basic record.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     Dir,
-    /// A regular file whose content fits the basic record.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     File,
-    /// A symbolic link whose target fits the basic record.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     Symlink,
-    /// A block device node whose numbers fit the basic record.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     BlockDevice,
-    /// A character device node whose numbers fit the basic record.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     CharDevice,
-    /// A named pipe.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     Fifo,
-    /// A socket.
+    /// Owner: InodeKind. Users: from_inode_type, from_dir_entry_type.
     Socket,
-    /// A directory, with a 64-bit size and an optional directory index.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedDir,
-    /// A regular file, with a 64-bit size and a sparse-byte count.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedFile,
-    /// A symbolic link, with a 64-bit target length.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedSymlink,
-    /// A block device node that needs the extended number layout.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedBlockDevice,
-    /// A character device node that needs the extended number layout.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedCharDevice,
-    /// A named pipe, in the extended layout.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedFifo,
-    /// A socket, in the extended layout.
+    /// Owner: InodeKind. Users: from_inode_type.
     ExtendedSocket,
 }
 
 impl InodeKind {
-    /// Returns the kind named by an inode record's type word.
-    ///
-    /// A word outside the fourteen defined values names no kind, which the
-    /// caller reports as a malformed inode.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn from_inode_type(word: u16) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the kind named by a directory entry's type word.
-    ///
-    /// Directory entries carry only the seven basic kinds, so a word outside
-    /// them names no kind even when it would be valid in an inode record. The
-    /// two callers answer such a word differently, which is why this rule is
-    /// not folded into [`InodeKind::from_inode_type`].
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn from_dir_entry_type(word: u16) -> Option<Self> {
         todo!()
     }
 }
 
-/// The 8-byte reference that names one inode.
-///
-/// The reference is a 48-bit byte offset relative to the table the inode lives
-/// in, followed by a 16-bit offset inside the decompressed metadata block at
-/// that position. The block offset is a byte offset, not a block number, because
-/// metadata blocks vary in stored length. `decode` accepts a reference only when
-/// the in-block offset can address a metadata block at all; a larger offset
-/// cannot be resolved by any reader and is reported as a malformed image.
+/// Produced by: InodeRef::decode, InodeRef::from_parts. Users: SuperBlock, DirEntry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct InodeRef {
-    /// The low six bytes of the table-relative block offset.
+    /// Owner: InodeRef. Users: block_start.
     block_start: [u8; 6],
-    /// The byte offset inside the decompressed metadata block.
+    /// Owner: InodeRef. Users: offset.
     offset: u16,
 }
 
 impl InodeRef {
-    /// The width this reference occupies on the image, in bytes.
+    /// Users: read::inode_record::InodeRecord::read.
     pub(in squashfs) const SIZE: usize = 8;
 
-    /// Decodes the reference a superblock or an index table states.
+    /// Caller: SuperBlock::decode. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Builds a reference from the two parts a directory walk already holds.
-    ///
-    /// Returns `None` when the block start does not fit the six bytes the
-    /// reference holds, or when the in-block offset reaches
-    /// [`METADATA_BLOCK_SIZE`](super::block::METADATA_BLOCK_SIZE), because no
-    /// metadata block is that long and no reader could resolve it.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn from_parts(block_start: u64, offset: u16) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the byte offset relative to the table's first metadata block.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn block_start(&self) -> u64 {
         todo!()
     }
 
-    /// Returns the byte offset inside the decompressed metadata block.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn offset(&self) -> u16 {
         todo!()
     }
 }
 
-/// The 16-byte header shared by every inode record.
-///
-/// The header fixes what every inode has: a type, permission bits, the two id
-/// table indexes that name its owner and group, a modification time, and the
-/// inode number. Its `uid` and `gid` are table indexes, not values, so the
-/// header alone cannot say who owns the inode; only a reader holding the id table
-/// can.
-///
-/// `decode` rejects the two field values that leave no inode to build: a type
-/// word outside the fourteen defined kinds and an inode number of zero. The
-/// permission bits' type nibble and the id indexes are checked against the mount's
-/// own facts by the reader, because those failures are reported differently.
+/// Produced by: BaseInode::decode. Users: read::inode_record::InodeRecord.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct BaseInode {
-    /// The inode type word.
+    /// Owner: BaseInode. Users: inode_type.
     inode_type: u16,
-    /// The permission bits, without the type nibble.
+    /// Owner: BaseInode. Users: mode.
     mode: u16,
-    /// The index of the owner's id in the id table.
+    /// Owner: BaseInode. Users: uid.
     uid: u16,
-    /// The index of the group's id in the id table.
+    /// Owner: BaseInode. Users: gid.
     gid: u16,
-    /// The modification time, in seconds since the epoch.
+    /// Owner: BaseInode. Users: mtime.
     mtime: u32,
-    /// The inode number this record answers to.
+    /// Owner: BaseInode. Users: inode_number.
     inode_number: u32,
 }
 
 impl BaseInode {
-    /// The width of this header, in bytes.
+    /// Users: read::inode_record::InodeRecord::read.
     pub(in squashfs) const SIZE: usize = 16;
 
-    /// Decodes the header in front of an inode body.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the record's type word, already known to name a defined kind.
+    /// Caller: read::inode_record::InodeRecord::kind. Callee: none.
     pub(in squashfs) fn inode_type(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the permission bits, without the type nibble.
+    /// Caller: inode::SquashfsInode::mode_impl. Callee: none.
     pub(in squashfs) fn mode(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the index of the owner's id in the id table.
+    /// Caller: inode::SquashfsInode::owner_impl. Callee: none.
     pub(in squashfs) fn uid(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the index of the group's id in the id table.
+    /// Caller: inode::SquashfsInode::group_impl. Callee: none.
     pub(in squashfs) fn gid(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the modification time, in seconds since the epoch.
+    /// Caller: inode::SquashfsInode::metadata_impl. Callee: none.
     pub(in squashfs) fn mtime(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the inode number this record answers to.
+    /// Caller: read::inode_record::InodeRecord::inode_number. Callee: none.
     pub(in squashfs) fn inode_number(&self) -> u32 {
         todo!()
     }
 }
 
-/// The 16 bytes that follow the header of a basic regular file.
-///
-/// The record's block list follows these bytes without a gap, so a reader that
-/// stops here knows where the list starts. Every field is a plain number; the
-/// constraints that involve other records, such as the fragment index bound or
-/// the file size the mount's block size allows, are the reader's to enforce.
+/// Produced by: RegInode::decode. Users: read::inode_record, read::block_list.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct RegInode {
-    /// The image position of the file's first data block.
+    /// Owner: RegInode. Users: start_block.
     start_block: u32,
-    /// The fragment holding the file's tail, or the no-fragment marker.
+    /// Owner: RegInode. Users: fragment.
     fragment: u32,
-    /// The tail's byte offset inside that fragment block.
+    /// Owner: RegInode. Users: offset.
     offset: u32,
-    /// The file's length in bytes.
+    /// Owner: RegInode. Users: file_size.
     file_size: u32,
 }
 
 impl RegInode {
-    /// The width of this body, in bytes.
+    /// Users: read::inode_record::InodeRecord::read.
     pub(in squashfs) const SIZE: usize = 16;
 
-    /// The value of the fragment field that states the file keeps its whole content
-    /// in the data area.
+    /// Users: RegInode::data_block_count, inode::read_page_async.
     pub(in squashfs) const NO_FRAGMENT_MARKER: u32 = 0xffff_ffff;
 
-    /// Decodes the body of a basic regular file.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the image position of the file's first data block.
+    /// Caller: read::block_list::BlockListCursor::new. Callee: none.
     pub(in squashfs) fn start_block(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the index of the fragment holding the file's tail, or the
-    /// no-fragment marker.
+    /// Caller: RegInode::data_block_count, last_block_expected_len,
+    /// inode::read_page_async. Callee: none.
     pub(in squashfs) fn fragment(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the tail's byte offset inside the fragment block.
+    /// Caller: read::block_list::BlockListCursor::new. Callee: none.
     pub(in squashfs) fn offset(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the file's length in bytes.
+    /// Caller: RegInode::data_block_count, last_block_expected_len. Callee: none.
     pub(in squashfs) fn file_size(&self) -> u32 {
         todo!()
     }
 
-    /// Returns how many four-byte entries the file's block list holds.
-    ///
-    /// The count is one entry per listed data block. A file whose tail lives in a
-    /// fragment block lists only the full blocks before that tail, so its count is
-    /// the size divided by the block size and rounded down; a file whose tail is in
-    /// the data area lists every block it has, so its count is the same division
-    /// rounded up.
-    /// This is the only place the count is derived, so no caller rounds a size its
-    /// own way: the block list the walk reads and the tail a page fill may have to
-    /// reach are counted alike.
+    /// Caller: read::block_list::BlockListCursor::new. Callee: file_size, fragment.
     pub(in squashfs) fn data_block_count(&self, block_size: usize) -> usize {
         todo!()
     }
 
-    /// Returns the length the file's last listed data block must decode to.
-    ///
-    /// Only the last listed block of a file whose tail lives in the data area can
-    /// be short, and it holds the file's remainder; a file whose size is a whole
-    /// number of blocks has no remainder, so even its last listed block is full. A
-    /// file whose tail lives in a fragment block lists only full blocks, since the
-    /// partial tail is not a list entry.
-    /// This is the only place the length is derived, so a last block is never
-    /// expected to decode to nothing.
+    /// Caller: read::block_list::BlockListCursor::new. Callee: file_size, fragment.
     pub(in squashfs) fn last_block_expected_len(&self, block_size: usize) -> usize {
         todo!()
     }
 }
 
-/// The 16 bytes that follow the header of a basic directory.
-///
-/// The directory's content is a byte range of the directory table, not a block
-/// list: `start_block` is relative to the directory table's first metadata block
-/// and `offset` locates the first byte inside that block. The record's length
-/// counts three bytes that are not stored, because the entries `.` and `..` are
-/// synthesized by the reader instead of encoded.
+/// Produced by: DirInode::decode. Users: read::dir::DirCursor::new, inode::metadata_impl.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct DirInode {
-    /// The byte offset of the content relative to the directory table.
+    /// Owner: DirInode. Users: start_block.
     start_block: u32,
-    /// The number of links to this directory, including the parent's entry.
+    /// Owner: DirInode. Users: nlink.
     nlink: u32,
-    /// The content's length, counted with the three synthesized bytes.
+    /// Owner: DirInode. Users: file_size.
     file_size: u16,
-    /// The byte offset of the content inside its first metadata block.
+    /// Owner: DirInode. Users: offset.
     offset: u16,
-    /// The inode number the synthesized `..` entry resolves to.
+    /// Owner: DirInode. Users: parent_inode.
     parent_inode: u32,
 }
 
 impl DirInode {
-    /// The width of this body, in bytes.
+    /// Users: read::inode_record::InodeRecord::read.
     pub(in squashfs) const SIZE: usize = 16;
 
-    /// Decodes the body of a basic directory.
+    /// Caller: read::inode_record::InodeRecord::read. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the byte offset of the content relative to the directory table.
+    /// Caller: read::dir::DirCursor::new. Callee: none.
     pub(in squashfs) fn start_block(&self) -> u32 {
         todo!()
     }
 
-    /// Returns how many links the directory has, including the parent's entry.
+    /// Caller: inode::SquashfsInode::metadata_impl. Callee: none.
     pub(in squashfs) fn nlink(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the content's length, counted with the three synthesized bytes.
+    /// Caller: read::dir::DirCursor::new. Callee: none.
     pub(in squashfs) fn file_size(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the byte offset of the content inside its first metadata block.
+    /// Caller: read::dir::DirCursor::new. Callee: none.
     pub(in squashfs) fn offset(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the inode number the synthesized `..` entry resolves to.
+    /// Caller: inode::SquashfsInode::lookup_impl. Callee: none.
     pub(in squashfs) fn parent_inode(&self) -> u32 {
         todo!()
     }

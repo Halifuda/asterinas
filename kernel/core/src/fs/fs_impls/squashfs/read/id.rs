@@ -20,50 +20,31 @@
 use alloc::vec::Vec;
 
 use super::{
-    super::format::superblock::ImageOffset, block::Image, cache::MetadataCache,
-    decompress::Decompressor,
+    super::format::superblock::ImageOffset, decompress::Decompressor, image::Image,
+    metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
 
-/// The width of one id value, in bytes.
+/// Users: IdTable::value.
 const ID_VALUE_SIZE: usize = 4;
 
-/// The width of one entry of the id index table, in bytes.
+/// Users: IdTable::load.
 const ID_INDEX_ENTRY_SIZE: usize = 8;
 
-/// The mount's id table: the index of the value blocks plus what it was loaded for.
-///
-/// The index is the table's only mutable-looking part, and it is fixed at mount:
-/// the entries strictly increase, each names a metadata block that starts before
-/// the id index table, and consecutive entries are close enough that no block
-/// between them could hold a full payload. Those are the facts that make an index
-/// safe to resolve; a table that breaks any of them describes no readable table
-/// and fails the mount.
+/// Owner: fs::Squashfs. Users: SquashfsInode::owner_impl, group_impl, metadata_impl.
 pub(in squashfs) struct IdTable {
     index: Vec<ImageOffset>,
     count: u16,
 }
 
 impl IdTable {
-    /// Loads the id index table of an image.
-    ///
-    /// Fails with an invalid argument when the index table's length disagrees
-    /// with the id count, when its entries do not increase, or when they are
-    /// spaced further apart than one metadata block; fails with an I/O error when
-    /// the table's bytes cannot be read.
-    ///
-    /// The count and the table's position come from the image's own superblock, so a
-    /// caller cannot hand this table a count that belongs to another image.
+    /// Caller: fs::Squashfs::open. Callee: Image::read_exact_at.
     pub(in squashfs) fn load(image: &Image) -> Result<Self> {
         todo!()
     }
 
-    /// Returns the id value at an index of the table.
-    ///
-    /// Fails with an invalid argument for an index the image does not have and
-    /// with an I/O error when the value's block cannot be read. The image is
-    /// borrowed for this call rather than kept: the cache that resolves the
-    /// block holds no image of its own.
+    /// Caller: SquashfsInode::owner_impl, group_impl, metadata_impl.
+    /// Callee: MetadataCache::fetch.
     pub(in squashfs) fn value(
         &self,
         index: u16,

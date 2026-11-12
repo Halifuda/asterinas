@@ -14,17 +14,12 @@
 #![short_vis_path::add(squashfs)]
 
 use super::{
-    super::format::superblock::ImageOffset, block::Image, cache::MetadataCache,
-    decompress::Decompressor,
+    super::format::superblock::ImageOffset, decompress::Decompressor, image::Image,
+    metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
 
-/// A position in one metadata stream.
-///
-/// The in-block offset addresses bytes of a decompressed block, so a value that
-/// reaches the block's size names nothing: no metadata block is that long. That
-/// is the one thing a position can be wrong about on its own, and it is what
-/// [`MetadataPosition::new`] refuses.
+/// Produced by: MetadataPosition::new. Users: MetadataCursor, BlockListStart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in squashfs) struct MetadataPosition {
     block_start: ImageOffset,
@@ -32,32 +27,23 @@ pub(in squashfs) struct MetadataPosition {
 }
 
 impl MetadataPosition {
-    /// Builds a position, or `None` when the in-block offset leaves any block.
+    /// Caller: InodeRecord::read, DirCursor::new, MetaEntry::position. Callee: none.
     pub(in squashfs) fn new(block_start: ImageOffset, offset: usize) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the image position of the block this position is inside.
+    /// Caller: MetadataCursor::read_exact, MetaEntry::record. Callee: none.
     pub(in squashfs) fn block_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the byte offset inside the block's decompressed payload.
+    /// Caller: MetadataCursor::read_exact, MetaEntry::record. Callee: none.
     pub(in squashfs) fn offset(&self) -> usize {
         todo!()
     }
 }
 
-/// A cursor that reads bytes from a metadata stream, crossing block boundaries
-/// as needed.
-///
-/// A cursor always holds a position the format can resolve, so a read either
-/// returns the bytes asked for or fails because the stream ended early or a block
-/// on the way could not be read. Both of those mean the image is malformed, which
-/// is why they surface as I/O errors rather than as a short read.
-///
-/// The cursor borrows the image it reads: the metadata cache keeps no image, so
-/// every block a cursor needs is fetched from the image the cursor was built on.
+/// Produced by: MetadataCursor::new. Users: InodeRecord::read, DirCursor, BlockListCursor.
 pub(in squashfs) struct MetadataCursor<'a> {
     image: &'a Image,
     cache: &'a MetadataCache,
@@ -66,7 +52,7 @@ pub(in squashfs) struct MetadataCursor<'a> {
 }
 
 impl<'a> MetadataCursor<'a> {
-    /// Starts a cursor at a position of a stream read from `image`.
+    /// Caller: InodeRecord::read, DirCursor::new, BlockListCursor::new. Callee: none.
     pub(in squashfs) fn new(
         image: &'a Image,
         cache: &'a MetadataCache,
@@ -76,15 +62,13 @@ impl<'a> MetadataCursor<'a> {
         todo!()
     }
 
-    /// Returns the position the next read starts at.
+    /// Caller: DirCursor::position, BlockListCursor::new. Callee: none.
     pub(super) fn position(&self) -> MetadataPosition {
         todo!()
     }
 
-    /// Fills `out` and advances past its bytes.
-    ///
-    /// A record is a fixed number of bytes for all but its variable tail, so the
-    /// caller sizes `out` and this needs no growth.
+    /// Caller: InodeRecord::read, DirCursor::next_entry, MetaIndexClaim::fill.
+    /// Callee: MetadataCache::fetch.
     pub(super) fn read_exact(&mut self, out: &mut [u8]) -> Result<()> {
         // A block that runs out continues at the next stored block; there is no padding.
         todo!()

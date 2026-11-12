@@ -23,182 +23,126 @@
 
 use super::inode::InodeRef;
 
-/// A byte position in the image, counted from the image's first byte, where a
-/// reader seeks: a table's start or the start of a stored block.
-///
-/// The superblock states the image positions of its tables, and every reader that
-/// seeks the image uses them. A position is not a length: `bytes_used` bounds how
-/// many bytes exist, while a position may be anywhere below that bound, and both
-/// are a `u64` on the image. Naming the position keeps the two apart where a bare
-/// width would not.
-///
-/// A position a record states in a 32-bit field keeps the record's own width and
-/// is not this type; its reader widens it when it starts seeking.
+/// Users: Image, MetadataPosition, StoredBlock, MetaEntry, IdTable.
 pub(in squashfs) type ImageOffset = u64;
 
-/// The 96-byte record at the start of every Squashfs image, holding the geometry
-/// it states.
-///
-/// `decode` verifies the length, the magic word, the version, and every relation
-/// among the geometry fields that the format fixes: the block size is
-/// `1 << block_log`, it is no larger than 1 MiB and no smaller than a page, the
-/// id count is at least one, the image claims at least the superblock's own
-/// bytes, the root inode's offset can address a metadata block, and the tables
-/// appear in the order the format requires. A record that fails any of them
-/// describes no mountable image and is rejected as a whole.
-///
-/// The value is kept for the life of the mount, so every number a reader needs is
-/// still here; the fields no reader asks for, the creation time and the writer's
-/// flags, are decoded but not exposed. The one relation the record cannot state
-/// about itself is how many bytes the device holds; the reader that opens the
-/// image checks it and refuses an image that reaches past the device.
+/// Produced by: SuperBlock::decode. Users: Image, IdTable::load, InodeRecord::read.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct SuperBlock {
-    /// The magic word that marks the image as Squashfs.
+    /// Owner: SuperBlock. Users: decode.
     magic: u32,
-    /// The number of inodes in the image.
+    /// Owner: SuperBlock. Users: inodes.
     inodes: u32,
-    /// The creation time, in seconds since the epoch.
+    /// Owner: SuperBlock. Users: none.
     mkfs_time: u32,
-    /// The uncompressed size of a data block, in bytes.
+    /// Owner: SuperBlock. Users: block_size.
     block_size: u32,
-    /// The number of fragment entries, or zero when the image has no fragment table.
+    /// Owner: SuperBlock. Users: fragments.
     fragments: u32,
-    /// The compression id, which names the codec the image was written with.
+    /// Owner: SuperBlock. Users: compression_id.
     compression: u16,
-    /// The base-2 logarithm of `block_size`.
+    /// Owner: SuperBlock. Users: SuperBlock::decode.
     block_log: u16,
-    /// The image's flags, which only describe how the writer chose to compress.
+    /// Owner: SuperBlock. Users: none.
     flags: u16,
-    /// The number of entries in the id table.
+    /// Owner: SuperBlock. Users: no_ids.
     no_ids: u16,
-    /// The major format version.
+    /// Owner: SuperBlock. Users: decode.
     major: u16,
-    /// The minor format version.
+    /// Owner: SuperBlock. Users: decode.
     minor: u16,
-    /// The reference to the root directory's inode.
+    /// Owner: SuperBlock. Users: root_inode.
     root_inode: InodeRef,
-    /// The number of bytes of the device the image occupies.
+    /// Owner: SuperBlock. Users: bytes_used.
     bytes_used: u64,
-    /// The image position of the id index table.
+    /// Owner: SuperBlock. Users: id_table_start.
     id_table_start: ImageOffset,
-    /// The image position of the xattr id index table, or an all-ones marker.
+    /// Owner: SuperBlock. Users: xattr_id_table_start.
     xattr_id_table_start: ImageOffset,
-    /// The image position of the inode table's first metadata block.
+    /// Owner: SuperBlock. Users: inode_table_start.
     inode_table_start: ImageOffset,
-    /// The image position of the directory table's first metadata block.
+    /// Owner: SuperBlock. Users: directory_table_start.
     directory_table_start: ImageOffset,
-    /// The image position of the fragment index table.
+    /// Owner: SuperBlock. Users: fragment_table_start.
     fragment_table_start: ImageOffset,
-    /// The image position of the export table, or an all-ones marker.
+    /// Owner: SuperBlock. Users: lookup_table_start.
     lookup_table_start: ImageOffset,
 }
 
 impl SuperBlock {
-    /// The width of this record, in bytes.
+    /// Users: read::image::Image::open.
     pub(in squashfs) const SIZE: usize = 96;
 
-    /// The word that marks a Squashfs image.
+    /// Users: SuperBlock::decode.
     const MAGIC: u32 = 0x7371_7368;
 
-    /// Decodes a superblock record.
+    /// Caller: read::image::Image::open. Callee: InodeRef::decode.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns how many inodes the image states.
-    ///
-    /// A directory walk bounds every inode number it reports by this count, so an
-    /// entry whose number falls outside it is a malformed directory.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn inodes(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the uncompressed size of a data block, in bytes.
-    ///
-    /// The record states the value as a `u32`; decoding has already proved that it
-    /// equals `1 << block_log` and does not exceed 1 MiB, so widening it to
-    /// `usize` cannot truncate on any supported target.
+    /// Caller: fs::Squashfs::open, BlockListCursor::new. Callee: none.
     pub(in squashfs) fn block_size(&self) -> usize {
         todo!()
     }
 
-    /// Returns the base-2 logarithm of the data block size, as the record states
-    /// it.
-    ///
-    /// The field keeps the record's own `u16`; [`SuperBlock::block_size`] is the
-    /// shifted value a reader uses, so no reader needs the logarithm.
-    pub(in squashfs) fn block_log(&self) -> u16 {
-        todo!()
-    }
-
-    /// Returns how many bytes of the device the image occupies.
+    /// Caller: read::image::Image::read_exact_at. Callee: none.
     pub(in squashfs) fn bytes_used(&self) -> u64 {
         todo!()
     }
 
-    /// Returns the image position of the inode table.
+    /// Caller: fs::Squashfs::open. Callee: none.
     pub(in squashfs) fn inode_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the image position of the directory table.
+    /// Caller: read::dir::DirCursor::new. Callee: none.
     pub(in squashfs) fn directory_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the image position of the fragment index table.
-    ///
-    /// The fragment code reads it, to locate the table the mount then keeps; no
-    /// reader in this build opens fragments, so the accessor has no caller yet.
+    /// Caller: none. Callee: none.
     pub(in squashfs) fn fragment_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the image position of the id index table.
+    /// Caller: read::id::IdTable::load. Callee: none.
     pub(in squashfs) fn id_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the image position of the xattr id index table, or the all-ones
-    /// marker when the image has none.
-    ///
-    /// The xattr code reads it, to find the table whose entries it resolves
-    /// attribute names through; no reader in this build opens xattrs.
+    /// Caller: none. Callee: none.
     pub(in squashfs) fn xattr_id_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns the image position of the export table, or the all-ones marker
-    /// when the image has none.
-    ///
-    /// The export code reads it, to resolve an inode number to an inode; no
-    /// reader in this build exports anything.
+    /// Caller: none. Callee: none.
     pub(in squashfs) fn lookup_table_start(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Returns how many fragment entries the image states.
-    ///
-    /// The fragment code reads it, to size the table it loads; no reader in this
-    /// build reads a fragment, because the files this build reads are stored in
-    /// whole blocks.
+    /// Caller: none. Callee: none.
     pub(in squashfs) fn fragments(&self) -> u32 {
         todo!()
     }
 
-    /// Returns how many id table entries the image states.
+    /// Caller: read::id::IdTable::load, InodeRecord::read. Callee: none.
     pub(in squashfs) fn no_ids(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the compression id the image was written with.
+    /// Caller: fs::Squashfs::open. Callee: none.
     pub(in squashfs) fn compression_id(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the reference to the root directory's inode.
+    /// Caller: fs::Squashfs::open. Callee: none.
     pub(in squashfs) fn root_inode(&self) -> &InodeRef {
         todo!()
     }

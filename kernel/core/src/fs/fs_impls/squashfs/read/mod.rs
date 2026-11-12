@@ -90,37 +90,37 @@
 //!
 //! | Submodule | Responsibility |
 //! |---|---|
-//! | `block` | [`Image`](block::Image), the opened image and the bound every read obeys |
-//! | `cache` | The cache of decompressed metadata blocks |
-//! | `data` | A regular file's block list and the data blocks it names |
+//! | `block_list` | A regular file's block list and the data blocks it names |
 //! | `data_cache` | The bounded cache of decompressed data and fragment blocks |
 //! | `decompress` | The mount's handle on decompression |
 //! | `dir` | Walking a directory's content into entries |
 //! | `id` | The id table that names owners and groups |
+//! | `image` | [`Image`](image::Image), the opened image and the bound every read obeys |
 //! | `inode_record` | Reading an inode record out of the metadata stream |
 //! | `meta_index` | The index of a large file's block list, which shortens the walk to one block |
 //! | `metadata` | Positions in a metadata stream and reads that cross blocks |
+//! | `metadata_cache` | The cache of decompressed metadata blocks |
 //!
 //! The dependency direction inside the layer is one way.
-//! `inode_record`, `dir`, and `id` are built on `metadata`,
-//! `metadata` is built on `cache`, `decompress`, and the opened image in `block`,
-//! and `data` is built on `metadata`, `data_cache`, and the resolved points of
+//! `inode_record` and `dir` are built on `metadata`, `id` on `metadata_cache`,
+//! and `metadata` is built on `metadata_cache`, `decompress`, and the opened image in `image`,
+//! and `block_list` is built on `metadata`, `data_cache`, and the resolved points of
 //! `meta_index`.
-//! Both caches are built on `decompress` and the opened image in `block`,
+//! Both caches are built on `decompress` and the opened image in `image`,
 //! and `meta_index` is built on `metadata`, the block list entries in `format`,
-//! and the opened image in `block`.
+//! and the opened image in `image`.
 //! Nothing here refers to a VFS type,
 //! so the VFS layer above can be replaced without touching this one.
 
 #![short_vis_path::add(squashfs)]
 
-pub(in squashfs) mod block;
-pub(in squashfs) mod cache;
-pub(in squashfs) mod data;
+pub(in squashfs) mod block_list;
 pub(in squashfs) mod data_cache;
 pub(in squashfs) mod decompress;
 pub(in squashfs) mod dir;
 pub(in squashfs) mod id;
+pub(in squashfs) mod image;
 pub(in squashfs) mod inode_record;
 pub(in squashfs) mod meta_index;
 pub(in squashfs) mod metadata;
+pub(in squashfs) mod metadata_cache;

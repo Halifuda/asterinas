@@ -80,23 +80,7 @@ use crate::{
     vm::page_cache::{LockedCachePage, PageCache, PageCacheBackend, Vmo},
 };
 
-/// One inode of a mounted image.
-///
-/// The record it holds is the whole of its persistent state. The page cache is the
-/// only part with a lifetime of its own, and it is created with the inode and
-/// dropped with it.
-///
-/// Two inodes of one record are not interchangeable. The VFS attaches the flock
-/// list, the range locks, and the fsnotify publisher to the inode object, so a
-/// second object for one record would split them; the mount's inode cache
-/// therefore keeps at most one live instance per inode number. Every construction
-/// registers its result through that cache, and the instance the cache returns is
-/// the one handed to the VFS.
-///
-/// The methods that would change an inode (a resize, a mode or an owner change,
-/// a timestamp, a write) are part of the VFS surface but not of this type's
-/// abilities: the image cannot record such a change, so each of them answers in
-/// the form its signature demands and never reads its argument.
+/// Produced by: SquashfsInode::new. Users: InodeCache, impl_for_vfs.
 pub(in squashfs) struct SquashfsInode {
     record: InodeRecord,
     page_cache: Option<RwMutex<PageCache>>,
@@ -105,12 +89,7 @@ pub(in squashfs) struct SquashfsInode {
 }
 
 impl SquashfsInode {
-    /// Builds an inode from a record and the mount that read it.
-    ///
-    /// Takes the inode's own weak reference because a regular file's page cache
-    /// must point back at the inode it fills, and the inode therefore has to be
-    /// constructed inside `Arc::new_cyclic`. Fails with the allocation error of
-    /// the page cache; a directory's content needs none, so only a file can fail.
+    /// Caller: fs::Squashfs::root_inode_impl, lookup_impl. Callee: PageCache::new_with_backend.
     pub(in squashfs) fn new(
         record: InodeRecord,
         fs: Weak<Squashfs>,
@@ -119,126 +98,116 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Returns the record this inode was decoded from.
+    /// Caller: SquashfsInode::read_page_async, size_impl. Callee: none.
     fn record(&self) -> &InodeRecord {
         todo!()
     }
 
-    /// Returns the mount this inode belongs to.
-    ///
-    /// The upgrade cannot fail: the VFS holds a mount for as long as it can reach
-    /// an inode of that mount, so every inode of a mount is dropped before the
-    /// mount is.
+    /// Caller: SquashfsInode::fs_impl, owner_impl, group_impl, metadata_impl.
+    /// Callee: Weak::upgrade.
     fn mount(&self) -> Arc<Squashfs> {
         self.fs
             .upgrade()
             .expect("the mount outlives every inode of it")
     }
 
-    /// Returns how many bytes of the file's content exist.
+    /// Caller: Inode::size via impl_for_vfs. Callee: InodeRecord::file.
     pub(in squashfs) fn size_impl(&self) -> usize {
         todo!()
     }
 
-    /// Rejects a size change.
+    /// Caller: Inode::resize via impl_for_vfs. Callee: none.
     pub(in squashfs) fn resize_impl(&self, _new_size: usize) -> Result<()> {
         todo!()
     }
 
-    /// Builds the metadata the VFS reports for this inode.
+    /// Caller: Inode::metadata via impl_for_vfs. Callee: InodeRecord::base, IdTable::value.
     pub(in squashfs) fn metadata_impl(&self) -> Result<Metadata> {
         todo!()
     }
 
-    /// Returns the inode number the record states.
+    /// Caller: Inode::ino via impl_for_vfs. Callee: InodeRecord::inode_number.
     pub(in squashfs) fn ino_impl(&self) -> u64 {
         todo!()
     }
 
-    /// Returns the kind of object this inode is.
+    /// Caller: Inode::type_ via impl_for_vfs. Callee: InodeRecord::kind.
     pub(in squashfs) fn type_impl(&self) -> InodeType {
         todo!()
     }
 
-    /// Returns the permission bits the record states.
+    /// Caller: Inode::mode via impl_for_vfs. Callee: InodeRecord::base.
     pub(in squashfs) fn mode_impl(&self) -> Result<InodeMode> {
         todo!()
     }
 
-    /// Rejects a permission change.
+    /// Caller: Inode::set_mode via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_mode_impl(&self, _mode: InodeMode) -> Result<()> {
         todo!()
     }
 
-    /// Resolves the owner's id through the mount's id table.
+    /// Caller: Inode::owner via impl_for_vfs. Callee: IdTable::value.
     pub(in squashfs) fn owner_impl(&self) -> Result<Uid> {
         todo!()
     }
 
-    /// Rejects an owner change.
+    /// Caller: Inode::set_owner via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_owner_impl(&self, _uid: Uid) -> Result<()> {
         todo!()
     }
 
-    /// Resolves the group's id through the mount's id table.
+    /// Caller: Inode::group via impl_for_vfs. Callee: IdTable::value.
     pub(in squashfs) fn group_impl(&self) -> Result<Gid> {
         todo!()
     }
 
-    /// Rejects a group change.
+    /// Caller: Inode::set_group via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_group_impl(&self, _gid: Gid) -> Result<()> {
         todo!()
     }
 
-    /// Returns the access time, which the record states as the modification time.
+    /// Caller: Inode::atime via impl_for_vfs. Callee: InodeRecord::base.
     pub(in squashfs) fn atime_impl(&self) -> Duration {
         todo!()
     }
 
-    /// Ignores an access-time change.
+    /// Caller: Inode::set_atime via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_atime_impl(&self, _time: Duration) {
         todo!()
     }
 
-    /// Returns the modification time the record states.
+    /// Caller: Inode::mtime via impl_for_vfs. Callee: InodeRecord::base.
     pub(in squashfs) fn mtime_impl(&self) -> Duration {
         todo!()
     }
 
-    /// Ignores a modification-time change.
+    /// Caller: Inode::set_mtime via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_mtime_impl(&self, _time: Duration) {
         todo!()
     }
 
-    /// Returns the metadata-change time, which equals the modification time.
+    /// Caller: Inode::ctime via impl_for_vfs. Callee: InodeRecord::base.
     pub(in squashfs) fn ctime_impl(&self) -> Duration {
         todo!()
     }
 
-    /// Ignores a metadata-change-time change.
+    /// Caller: Inode::set_ctime via impl_for_vfs. Callee: none.
     pub(in squashfs) fn set_ctime_impl(&self, _time: Duration) {
         todo!()
     }
 
-    /// Returns the page cache of a regular file, or none for a directory.
+    /// Caller: Inode::page_cache via impl_for_vfs. Callee: PageCache::as_vmo.
     pub(in squashfs) fn page_cache_impl(&self) -> Option<Arc<Vmo>> {
         todo!()
     }
 
-    /// Finds a child by name in this directory.
-    ///
-    /// Asks the mount's inode cache before reading the child's record, and
-    /// registers a newly built inode through that cache, so a name lookup and any
-    /// later lookup of the same record return one object.
+    /// Caller: Inode::lookup via impl_for_vfs. Callee: DirCursor::new, next_entry,
+    /// InodeCache::lookup, insert, InodeRecord::read.
     pub(in squashfs) fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
         todo!()
     }
 
-    /// Feeds this directory's entries to a visitor from a reported position.
-    ///
-    /// Returns how far the visitor's position advanced. A malformed entry ends the
-    /// listing there, because a listing reports what it could read rather than
-    /// failing as a whole.
+    /// Caller: FileOps::readdir_at via impl_for_vfs. Callee: DirCursor::new, next_entry.
     pub(in squashfs) fn readdir_impl(
         &self,
         offset: usize,
@@ -247,7 +216,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Copies bytes of a regular file's content into a writer.
+    /// Caller: FileOps::read_at via impl_for_vfs. Callee: none.
     pub(in squashfs) fn read_at_impl(
         &self,
         offset: usize,
@@ -257,7 +226,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Rejects a write.
+    /// Caller: FileOps::write_at via impl_for_vfs. Callee: none.
     pub(in squashfs) fn write_at_impl(
         &self,
         _offset: usize,
@@ -267,44 +236,20 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Returns the mount as the filesystem of this inode.
-    ///
-    /// Infallible for the reason the mount accessor above states.
+    /// Caller: Inode::fs via impl_for_vfs. Callee: SquashfsInode::mount.
     pub(in squashfs) fn fs_impl(&self) -> Arc<dyn FileSystem> {
         todo!()
     }
 
-    /// Returns the inode's extension slot.
+    /// Caller: Inode::extension via impl_for_vfs. Callee: none.
     pub(in squashfs) fn extension_impl(&self) -> &Extension {
         todo!()
     }
 }
 
 impl PageCacheBackend for SquashfsInode {
-    /// Fills a page of a regular file from the data block that covers it.
-    ///
-    /// A mount's block size is at least a page, so a page never spans two blocks.
-    /// The block's bytes come from the mount's data cache and from nowhere else.
-    /// The bytes the block does not supply are zero, including every byte of the
-    /// file's last page past the file's end; a sparse block supplies no bytes and
-    /// is not loaded at all.
-    /// A block that decodes to fewer bytes than its expected length is refused with
-    /// an I/O error, because only the list's last block may be expected to decode to
-    /// less than the block size.
-    ///
-    /// A page at or past `ceil(size / PAGE_SIZE)` is refused with `EINVAL`, since
-    /// the page cache never asks for one.
-    ///
-    /// The fill serves files whose tail lives in the data area only: their block list
-    /// has an entry for every block a page can ask for. A file whose tail lives in a
-    /// fragment block lists one block fewer, so a tail page of it would find no entry
-    /// and could be zeroed as if the file ended; the fill therefore asserts that
-    /// premise before it reaches the block list, and reading such a tail reaches the
-    /// page cache through a path that a later increment adds.
-    ///
-    /// The page is marked up to date only after all of its bytes are populated;
-    /// every failure before that leaves it out of date, so a later attempt retries
-    /// instead of exposing a partly filled page.
+    /// Caller: the page cache. Callee: SquashfsInode::record, InodeRecord::file,
+    /// RegInode::fragment, MetaIndex::position, BlockListCursor::new, StoredBlock::load.
     fn read_page_async(
         &self,
         idx: usize,
@@ -318,11 +263,10 @@ impl PageCacheBackend for SquashfsInode {
             "a page is filled only for a file whose tail is in the data area"
         );
         // Block = idx * PAGE_SIZE / block_size; the page starts at the remainder.
-        // Copy the block's bytes there, zero the rest, and mark the page up to date.
         todo!()
     }
 
-    /// Rejects a write-back.
+    /// Caller: the page cache. Callee: none.
     fn write_page_async(
         &self,
         _idx: usize,

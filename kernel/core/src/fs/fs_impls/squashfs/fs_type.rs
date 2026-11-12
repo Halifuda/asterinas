@@ -18,16 +18,13 @@ use crate::{
     prelude::*,
 };
 
-/// The name a Squashfs mount registers under.
+/// Users: SquashfsType::name.
 pub(super) const SQUASHFS_NAME: &str = "squashfs";
 
-/// The VFS descriptor of the Squashfs filesystem type.
+/// Produced by: SQUASHFS_TYPE. Users: registry::register.
 pub(super) struct SquashfsType;
 
-/// The descriptor [`init`] registers.
-///
-/// The registry keeps the descriptor for the kernel's lifetime, so it is a
-/// named static.
+/// Users: fs_type::init.
 pub(super) static SQUASHFS_TYPE: SquashfsType = SquashfsType;
 
 impl FsType for SquashfsType {
@@ -54,7 +51,7 @@ impl FsType for SquashfsType {
     }
 }
 
-/// Registers the Squashfs filesystem type with the VFS registry.
+/// Caller: fs_impls::init. Callee: registry::register.
 pub(in crate::fs::fs_impls) fn init() {
     registry::register(&SQUASHFS_TYPE).unwrap();
 }

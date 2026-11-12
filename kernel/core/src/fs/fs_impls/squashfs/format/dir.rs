@@ -18,106 +18,88 @@
 #![expect(unused_variables, reason = "every body here is still `todo!()`")]
 #![short_vis_path::add(squashfs)]
 
-/// The most entries one directory header can cover.
+/// Users: read::dir::DirCursor::next_entry.
 pub(in squashfs) const MAX_ENTRIES_PER_HEADER: u32 = 256;
 
-/// The longest name a directory entry can state, in bytes.
+/// Users: read::dir::DirCursor::next_entry.
 pub(in squashfs) const MAX_NAME_LEN: usize = 256;
 
-/// The 12-byte header that opens a run of directory entries.
-///
-/// `start_block` is a byte offset relative to the directory table's first
-/// metadata block, not a block number, and `inode_number` is the base the run's
-/// entries count from; neither can be resolved without the directory's own
-/// content, so `decode` checks only the width.
+/// Produced by: DirHeader::decode. Users: read::dir::DirCursor::new, next_entry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct DirHeader {
-    /// One less than the number of entries in this run.
+    /// Owner: DirHeader. Users: entry_count.
     count: u32,
-    /// The byte offset of the run's first inode relative to the inode table.
+    /// Owner: DirHeader. Users: start_block.
     start_block: u32,
-    /// The inode number the run's first entry answers to.
+    /// Owner: DirHeader. Users: inode_number.
     inode_number: u32,
 }
 
 impl DirHeader {
-    /// The width of this header, in bytes.
+    /// Users: read::dir::DirCursor::new.
     pub(in squashfs) const SIZE: usize = 12;
 
-    /// Decodes one run header of a directory's content.
+    /// Caller: read::dir::DirCursor::new, next_entry. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns how many entries this run covers, as the header states it.
-    ///
-    /// The record stores one less than the count, so every caller that sizes a
-    /// run reads the count through here rather than adding one itself.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn entry_count(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the byte offset of the run's first inode relative to the inode
-    /// table.
+    /// Caller: read::dir::DirCursor::new. Callee: none.
     pub(in squashfs) fn start_block(&self) -> u32 {
         todo!()
     }
 
-    /// Returns the inode number the run's first entry answers to.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn inode_number(&self) -> u32 {
         todo!()
     }
 }
 
-/// The 8-byte fixed prefix of a directory entry, before the name.
-///
-/// The name's bytes follow the prefix without a gap and are not terminated, so
-/// the prefix alone is not the entry. `inode_number` is a signed increment from
-/// the run header's base, which lets a run name inodes out of ascending order.
+/// Produced by: DirEntryPrefix::decode. Users: read::dir::DirCursor::next_entry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct DirEntryPrefix {
-    /// The byte offset of the entry's inode inside the header's metadata block.
+    /// Owner: DirEntryPrefix. Users: offset.
     offset: u16,
-    /// The increment to add to the run header's inode number base.
+    /// Owner: DirEntryPrefix. Users: inode_number.
     inode_number: i16,
-    /// The entry's kind, which never names an extended kind.
+    /// Owner: DirEntryPrefix. Users: entry_type.
     entry_type: u16,
-    /// One less than the name's length in bytes.
+    /// Owner: DirEntryPrefix. Users: name_len.
     name_len_minus_one: u16,
 }
 
 impl DirEntryPrefix {
-    /// The width of this prefix, in bytes.
+    /// Users: read::dir::DirCursor::next_entry.
     pub(in squashfs) const SIZE: usize = 8;
 
-    /// Decodes the fixed prefix of one directory entry.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
 
-    /// Returns the name's length in bytes, as the prefix states it.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn name_len(&self) -> usize {
         todo!()
     }
 
-    /// Returns the byte offset of the entry's inode inside the header's metadata
-    /// block.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn offset(&self) -> u16 {
         todo!()
     }
 
-    /// Returns the entry's signed increment from the run header's inode number.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn inode_number(&self) -> i16 {
         todo!()
     }
 
-    /// Returns the entry's type word.
-    ///
-    /// The word names one of the seven basic kinds; the caller maps it through
-    /// [`InodeKind::from_dir_entry_type`](super::inode::InodeKind::from_dir_entry_type),
-    /// which refuses a word outside them.
+    /// Caller: read::dir::DirCursor::next_entry. Callee: none.
     pub(in squashfs) fn entry_type(&self) -> u16 {
         todo!()
     }

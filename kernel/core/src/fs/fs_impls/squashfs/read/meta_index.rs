@@ -71,98 +71,48 @@ use super::{
         block::{BlockListEntry, METADATA_BLOCK_SIZE},
         superblock::ImageOffset,
     },
-    block::Image,
-    cache::MetadataCache,
     decompress::Decompressor,
+    image::Image,
     metadata::MetadataPosition,
+    metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
 
-/// The number of block list entries one metadata block holds.
-///
-/// Every entry is four bytes and a metadata block decodes to at most eight
-/// kilobytes, so a step counted in this unit is a whole number of metadata blocks,
-/// which is what makes a point reachable by reading blocks the cache already holds.
+/// Users: MetaIndex::skip.
 const ITEMS_PER_METADATA_BLOCK: usize = METADATA_BLOCK_SIZE / BlockListEntry::SIZE;
 
-/// The number of points one slot records.
-///
-/// The points are what a later reader chooses from, so this is the depth of the
-/// index.
+/// Users: MetaIndex::skip, MetaIndexClaim::push.
 const ENTRIES_PER_SLOT: usize = 127;
 
-/// The number of slots one mount keeps.
-///
-/// Eight slots hold at most 16 KiB of points and let eight large files be indexed
-/// at once. A ninth file takes the slot that has gone longest without a read, and
-/// the file that loses it walks its list until it takes one back.
+/// Users: MetaIndexState, MetaIndex::acquire.
 const SLOT_COUNT: usize = 8;
 
-/// The largest step a slot records.
-///
-/// The walk between two points reads fewer than one step of entries, so a step of
-/// seven keeps that walk inside seven metadata blocks, which the metadata cache
-/// holds. A larger step would make a point cost more metadata reads than the walk
-/// it replaced.
+/// Users: MetaIndex::skip.
 const MAX_SKIP: usize = 7;
 
-/// The mount's index of large files' block lists.
-///
-/// One value per mount. It holds the inode table's image position, which every
-/// recorded point is resolved against, and the slots, which appear when a file is
-/// first indexed and live until the mount is gone.
-///
-/// The index outlives the inodes it describes: a slot holds an inode number and
-/// two image positions, so an inode that is dropped leaves nothing behind, and a
-/// recorded point stays resolvable because no byte of the image can change.
+/// Owner: fs::Squashfs. Users: inode::read_page_async.
 pub(in squashfs) struct MetaIndex {
-    /// The image position the inode table starts at, which entry positions are
-    /// counted from.
+    /// Owner: MetaIndex. Users: MetaEntry::record, position.
     inode_table_start: ImageOffset,
-    /// The slots and the rotation pointer, behind the mount's lock.
+    /// Owner: MetaIndex. Users: MetaIndex::position, acquire.
     state: Mutex<MetaIndexState>,
 }
 
 impl MetaIndex {
-    /// Creates the mount's index over an inode table that starts at
-    /// `inode_table_start`.
-    ///
-    /// Allocates no slot: the table appears when the first file long enough to
-    /// index is read, so a mount that reads only small files never holds one.
+    /// Caller: fs::Squashfs::open. Callee: none.
     pub(in squashfs) fn new(inode_table_start: ImageOffset) -> Self {
         todo!()
     }
 
-    /// Returns the point a walk to `target_block` can resume from, or `None` when
-    /// the index cannot shorten that walk.
-    ///
-    /// `block_list` names the file's list and `target_block` is the block number
-    /// the caller wants, counted in blocks rather than in the steps a slot records.
-    /// The division between the two units happens here and nowhere else: the point
-    /// returned names a block at or before the target together with the two
-    /// positions that block's entry sits at, so the caller walks only the entries in
-    /// between.
-    ///
-    /// A target inside the list's first step needs no slot, because the walk that
-    /// would start there is the walk the caller makes anyway.
-    /// The result is the last point at or before the target, which is the one a walk
-    /// resumes from; a point past the target is never returned, because the walk can
-    /// only move forward from where it starts.
-    ///
-    /// Returns `None` when the index can record no point for the target, which is a
-    /// target inside the first step and a mount whose slots are all held by other
-    /// readers. A caller that gets it walks the list from its first entry, as it
-    /// would without an index, and has nothing to report.
-    ///
-    /// Fails only when the block list cannot be read while a slot grows, which the
-    /// caller reports as it reports that failure without an index.
+    /// Caller: inode::read_page_async. Callee: MetaIndex::acquire, MetaIndexClaim::fill,
+    /// MetaIndex::skip.
     pub(in squashfs) fn position(
         &self,
         inode_number: u32,
         block_list: &BlockListStart,
         target_block: usize,
         image: &Image,
-        metadata: &MetadataCache,
+        cache: &MetadataCache,
         decompressor: &Decompressor,
     ) -> Result<Option<MetaIndexPosition>> {
         // Take slots in rounds: acquire, clear, fill; stop when a point reaches the
@@ -170,39 +120,14 @@ impl MetaIndex {
         todo!()
     }
 
-    /// Returns the step between two points for a list of `blocks` entries.
-    ///
-    /// The step is at least one and at most `MAX_SKIP`: one keeps every block
-    /// number divisible, and seven keeps the walk between two points inside the
-    /// metadata blocks the cache holds.
+    /// Caller: MetaIndex::position. Callee: none.
     fn skip(blocks: usize) -> usize {
         // min(MAX_SKIP, blocks / ((ENTRIES_PER_SLOT + 1) * ITEMS_PER_METADATA_BLOCK) + 1);
         // the divisor counts one point more than a slot holds.
         todo!()
     }
 
-    /// Takes a slot for a file and returns the hold on it.
-    ///
-    /// The slot is taken in two steps that take their locks in turn rather than
-    /// together.
-    /// The mount's lock is released before the slot's own lock is taken: the hold
-    /// carries a handle to the points and the header values it needs, so it empties
-    /// the points after the mount's lock is gone, and no search can observe the
-    /// half-taken slot because its held mark is already set. A reused slot has no
-    /// points to empty.
-    ///
-    /// A reused slot states the step this call states: one inode number names one
-    /// record and therefore one list, so the slot was sized by the same division, and
-    /// reusing it asserts the header's step equals `skip` instead of writing it.
-    ///
-    /// `lower_scaled` is one step past the progress the caller has already walked,
-    /// so a reused slot never sends the walk back to an entry it has read.
-    ///
-    /// Returns `None` when every slot is held by another reader, which costs the
-    /// caller a walk and nothing else.
-    ///
-    /// The hold marks the slot and dropping it clears the mark, so no way out of
-    /// this call leaves a slot held.
+    /// Caller: MetaIndex::position. Callee: MetaIndexState::locate.
     fn acquire(
         &self,
         inode_number: u32,
@@ -216,26 +141,16 @@ impl MetaIndex {
     }
 }
 
-/// The slots of one mount and the pointer that chooses the next one.
-///
-/// The slots are absent until a file is indexed and never shrink once present.
-/// The pointer only moves forward, so the slot a new file takes is the one that has
-/// gone longest without being chosen.
+/// Owner: MetaIndex. Users: MetaIndex::position, acquire.
 struct MetaIndexState {
-    /// The slots, in the order they were created; absent until first use.
+    /// Owner: MetaIndexState. Users: acquire, locate.
     slots: Option<Box<[MetaSlot; SLOT_COUNT]>>,
-    /// The slot a new series of points starts its rotation from.
+    /// Owner: MetaIndexState. Users: acquire.
     next: usize,
 }
 
 impl MetaIndexState {
-    /// Returns the slot a point for `scaled_target` should come from.
-    ///
-    /// A match's first point lies in `[lower_scaled, scaled_target]`, so a reused
-    /// slot never sends the walk back to an entry already read or forward past the
-    /// target.
-    ///
-    /// The caller holds the mount's lock; this state exists only behind it.
+    /// Caller: MetaIndex::acquire. Callee: none.
     fn locate(
         &self,
         inode_number: u32,
@@ -248,75 +163,40 @@ impl MetaIndexState {
     }
 }
 
-/// One slot: the file it holds points for, the step between them, and the points.
-///
-/// The header is guarded by the mount's lock and the points by the slot's own, so a
-/// search can visit the slots without touching a point.
-/// The points sit behind a handle the mount's lock hands out, because a hold must
-/// record them after that lock is released: reaching them through the state the
-/// mount's lock guards would mean holding both locks at once.
-/// The held marker is what makes its holder a slot's only writer: a search never
-/// chooses a held slot, and the marker returns when the hold drops.
-/// The inode number and the points agree in the direction a search relies on: a
-/// slot that is not held and names a file holds at least one point, because a hold
-/// that recorded none clears the number when it ends.
+/// Owner: MetaIndexState. Users: acquire, locate, MetaIndexClaim.
 struct MetaSlot {
-    /// The inode number of the file the points describe; zero means empty.
+    /// Owner: MetaSlot. Users: locate, MetaIndexClaim::release.
     inode_number: u32,
-    /// The scaled block number of the slot's first point.
-    ///
-    /// Written when the slot is taken, before the first point exists, so a held slot
-    /// already states where its points begin; a search cannot see the value until
-    /// the slot is returned with at least that point recorded.
+    /// Owner: MetaSlot. Users: locate.
     offset: usize,
-    /// The step between two of the slot's points, counted in metadata blocks.
+    /// Owner: MetaSlot. Users: MetaIndexClaim::push, fill.
     skip: usize,
-    /// Whether a reader holds the slot; the mount's lock guards it.
+    /// Owner: MetaSlot. Users: locate, acquire, MetaIndexClaim::release.
     locked: bool,
-    /// The points, guarded by the slot's own lock and shared with the hold on it.
+    /// Owner: MetaSlot. Users: MetaIndexClaim::push, fill, release.
     points: Arc<Mutex<MetaSlotPoints>>,
 }
 
-/// The points one slot has recorded and how many of them are live.
-///
-/// The count is the whole truth about which elements are live: an element past it
-/// is left from an earlier file and is never read, which is what lets a slot be
-/// given to another file without clearing its points.
+/// Produced by: MetaIndex::acquire. Users: MetaIndexClaim::push, fill, release.
 struct MetaSlotPoints {
-    /// How many points are live, counted from the first element.
+    /// Owner: MetaSlotPoints. Users: MetaIndexClaim::push, fill, release.
     entries: usize,
-    /// The recorded points, the live ones first.
+    /// Owner: MetaSlotPoints. Users: MetaIndexClaim::push, fill.
     points: [MetaEntry; ENTRIES_PER_SLOT],
 }
 
-/// One recorded point, in the two positions an entry states.
-///
-/// The block list position is relative to the inode table because the format states
-/// both the table's position and such an entry's as 32-bit values, while the data
-/// position is absolute because a data block's position is relative to nothing.
-/// Resolving a point therefore adds the inode table's position back, and a point
-/// never carries that position of its own.
-///
-/// A position that does not fit the entry's fields is not recorded at all, which
-/// keeps an entry from naming a place other than the one that was computed.
+/// Produced by: MetaEntry::record. Users: MetaIndexClaim::push, fill.
 struct MetaEntry {
-    /// The image position the point's data block starts at.
+    /// Owner: MetaEntry. Users: MetaIndexClaim::fill.
     data_block: ImageOffset,
-    /// The byte distance from the inode table's start to the metadata block the
-    /// point's entry sits in.
+    /// Owner: MetaEntry. Users: MetaEntry::position.
     index_block: u32,
-    /// The byte offset of the point's entry inside that metadata block.
+    /// Owner: MetaEntry. Users: MetaEntry::position.
     offset: u16,
 }
 
 impl MetaEntry {
-    /// Records the point at `position` whose data starts at `data_block`.
-    ///
-    /// The position is at or after the inode table's, because it is one the walk
-    /// reached by reading the list that starts there, and the body asserts it.
-    /// Returns `None` when the distance to the inode table does not fit the entry's
-    /// 32-bit field, since such a point has no entry that names it; the caller then
-    /// walks on without recording it.
+    /// Caller: MetaIndexClaim::fill, MetaIndexClaim::push. Callee: MetadataPosition::block_start.
     fn record(
         position: MetadataPosition,
         data_block: ImageOffset,
@@ -326,75 +206,53 @@ impl MetaEntry {
         todo!()
     }
 
-    /// Returns the position in the block list that the point names.
-    ///
-    /// The block start is the inode table's start plus `index_block`, which is a byte
-    /// distance, and the in-block `offset` was checked when the point was recorded, so
-    /// this cannot fail.
+    /// Caller: MetaIndexClaim::fill. Callee: MetadataPosition::new.
     fn position(&self, inode_table_start: ImageOffset) -> MetadataPosition {
         todo!()
     }
 }
 
-/// A point of a block list, resolved.
-///
-/// It names the block the point stands for, the position of that block's entry in
-/// the list, and the image position the block's data starts at.
-/// A reader positions its cursor at the entry and its data position at the block,
-/// then walks to the block it wants, so a point is usable only for a block at or
-/// after its own.
+/// Produced by: MetaIndex::position, MetaIndexClaim::fill. Users: BlockListCursor::new.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct MetaIndexPosition {
-    /// The block number the point stands for, counted in blocks.
+    /// Owner: MetaIndexPosition. Users: block.
     block: usize,
-    /// The position of that block's entry in the block list.
+    /// Owner: MetaIndexPosition. Users: block_list.
     block_list: MetadataPosition,
-    /// The image position that block's data starts at.
+    /// Owner: MetaIndexPosition. Users: data_block.
     data_block: ImageOffset,
 }
 
 impl MetaIndexPosition {
-    /// Returns the block number the point stands for, counted in blocks.
+    /// Caller: BlockListCursor::new. Callee: none.
     pub(in squashfs) fn block(&self) -> usize {
         todo!()
     }
 
-    /// Returns the position of the block's entry in the block list.
+    /// Caller: BlockListCursor::new. Callee: none.
     pub(in squashfs) fn block_list(&self) -> MetadataPosition {
         todo!()
     }
 
-    /// Returns the image position the block's data starts at.
+    /// Caller: BlockListCursor::new. Callee: none.
     pub(in squashfs) fn data_block(&self) -> ImageOffset {
         todo!()
     }
 }
 
-/// The start of one file's block list, as a point is computed from it.
-///
-/// The three facts are the number of entries the list holds, the position of its
-/// first entry, and the image position of its first data block.
-/// The count leaves out a tail the file keeps in a fragment block, because that tail
-/// has no list entry; counting it would size the step for a longer list than the one
-/// stored and put the last points past the list's end.
+/// Produced by: BlockListStart::new. Users: MetaIndex::position, BlockListCursor::new.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct BlockListStart {
-    /// The number of four-byte entries the list holds.
+    /// Owner: BlockListStart. Users: blocks.
     blocks: usize,
-    /// The position of the list's first entry.
+    /// Owner: BlockListStart. Users: position.
     position: MetadataPosition,
-    /// The image position of the first data block the list describes.
+    /// Owner: BlockListStart. Users: data_block.
     data_block: ImageOffset,
 }
 
 impl BlockListStart {
-    /// Names a block list of `blocks` entries whose first entry is at `position` and
-    /// whose first data block is at `data_block`.
-    ///
-    /// `blocks` is the count the record derives from its own fields, one entry per
-    /// listed data block; a tail kept in a fragment block has no entry and is not
-    /// counted. The derivation has one home, on the record, so no caller counts the
-    /// list a second way.
+    /// Caller: inode::read_page_async. Callee: none.
     pub(in squashfs) fn new(
         blocks: usize,
         position: MetadataPosition,
@@ -403,95 +261,49 @@ impl BlockListStart {
         todo!()
     }
 
-    /// Returns the number of four-byte entries the list holds.
+    /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
     pub(in squashfs) fn blocks(&self) -> usize {
         todo!()
     }
 
-    /// Returns the position of the list's first entry.
+    /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
     pub(in squashfs) fn position(&self) -> MetadataPosition {
         todo!()
     }
 
-    /// Returns the image position of the list's first data block.
+    /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
     pub(in squashfs) fn data_block(&self) -> ImageOffset {
         todo!()
     }
 }
 
-/// One reader's hold on one slot.
-///
-/// The hold is what makes its holder the slot's only writer: while it lives no
-/// search chooses the slot, so the holder may grow the points and read them back
-/// without another reader changing them.
-///
-/// The hold is a marker and not a lock: it is set and returned under the mount's
-/// lock, and no lock of the index is held between one operation of the holder and
-/// the next, which is what lets the holder read the block list in between.
-/// The two things a hold needs while it grows a slot are copied into it when the
-/// slot is taken: the slot's number for returning the marker, and the step between
-/// its points. The points themselves are shared with the hold through a handle of
-/// their own, so recording one needs no lock but theirs.
-/// Dropping the hold returns the marker, so a holder that leaves by a failing read
-/// cannot strand a slot.
+/// Produced by: MetaIndex::acquire. Users: MetaIndex::position.
 struct MetaIndexClaim<'a> {
-    /// The index the slot belongs to, which states the inode table's position.
+    /// Owner: MetaIndexClaim. Users: MetaEntry::record, push.
     index: &'a MetaIndex,
-    /// The slot the hold names.
+    /// Owner: MetaIndexClaim. Users: MetaIndexClaim::release.
     slot: usize,
-    /// The slot's points, taken out from under the mount's lock when the slot was.
+    /// Owner: MetaIndexClaim. Users: push, fill.
     points: Arc<Mutex<MetaSlotPoints>>,
-    /// The step between two of the slot's points, copied when the slot was taken.
+    /// Owner: MetaIndexClaim. Users: fill.
     skip: usize,
 }
 
 impl MetaIndexClaim<'_> {
-    /// Records the point the slot's points have grown to and reports whether the
-    /// slot had room for it.
-    ///
-    /// The point is written to the points array only, under the slot's lock. The
-    /// header states where the points begin and is written when the slot is taken,
-    /// so the first point is recorded here like every later one and no point is ever
-    /// written by a path that needs the mount's lock.
-    ///
-    /// Reports no room when the slot already holds 127 points and when the point's
-    /// block list position does not fit the entry's 32-bit field: the entry would
-    /// name a different place, so nothing is recorded and the caller stops growing
-    /// the slot.
+    /// Caller: MetaIndexClaim::fill. Callee: MetaEntry::record.
     fn push(&self, point: &MetaIndexPosition) -> bool {
         todo!()
     }
 
-    /// Grows the slot the hold names until a point reaches `target_block` and
-    /// returns the last point at or before the target.
-    ///
-    /// A slot that holds no point starts from `from`, the point the previous round
-    /// recorded, or from the list's own first entry when there is no such point:
-    /// a second slot therefore starts where the first stopped, instead of naming the
-    /// list's first block's data position as the position of a later block.
-    /// `from` is used only when the slot has no point.
-    ///
-    /// No point names a place the walk has not read up to.
-    ///
-    /// Stops at `target_block`, when the slot holds 127 points, and at a point whose
-    /// block list position does not fit the entry's 32-bit field, which is the one
-    /// position an entry cannot state. A point that does not fit is not recorded, and
-    /// the walk continues from the last point that did.
-    /// Returns the slot's last point at or before `target_block`: a slot reused for a
-    /// later target can hold points past this one, and a point past the target would
-    /// place the caller's walk after the block it wants. It is `None` only when the
-    /// slot holds no point at all, since a slot the hold took starts at or before the
-    /// target.
-    ///
-    /// Fails with an I/O error when the list cannot be read or an entry's reserved
-    /// bits are set, which are the failures the same walk reports without an index.
+    /// Caller: MetaIndex::position. Callee: MetaEntry::record, position,
+    /// MetadataCursor::read_exact.
     fn fill(
         &self,
         block_list: &BlockListStart,
         from: Option<MetaIndexPosition>,
         target_block: usize,
         image: &Image,
-        metadata: &MetadataCache,
+        cache: &MetadataCache,
         decompressor: &Decompressor,
     ) -> Result<Option<MetaIndexPosition>> {
         // Continue from the slot's last point, or from `from` when it has none; each
@@ -499,15 +311,7 @@ impl MetaIndexClaim<'_> {
         todo!()
     }
 
-    /// Returns the slot to the index.
-    ///
-    /// The two locks are taken one after the other, never together: the slot's lock
-    /// reads how many points the slot holds and releases, then the mount's lock
-    /// clears the held mark and, when no point was recorded, the inode number,
-    /// because a slot that names a file but holds no point would be chosen by a
-    /// later search and asked for a last point it does not have.
-    /// Dropping the hold applies this, and dropping is the only way out of a hold,
-    /// so no path can skip it.
+    /// Caller: MetaIndexClaim::drop. Callee: none.
     fn release(&self) {
         todo!()
     }
