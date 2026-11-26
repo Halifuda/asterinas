@@ -64,19 +64,19 @@ const CACHED_BLOCK_LIMIT: usize = 8;
 /// Produced by: BlockKey::new. Users: DataCache::fetch, release.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(in squashfs) struct BlockKey {
-    position: ImageOffset,
+    block_position: ImageOffset,
     expected_len: usize,
 }
 
 impl BlockKey {
     /// Caller: StoredBlock::load. Callee: none.
-    pub(in squashfs) fn new(position: ImageOffset, expected_len: usize) -> Self {
+    pub(in squashfs) fn new(block_position: ImageOffset, expected_len: usize) -> Self {
         debug_assert!(expected_len > 0, "every block states a length of its own");
         todo!()
     }
 
     /// Caller: DataCache::fetch. Callee: none.
-    pub(in squashfs) fn position(&self) -> ImageOffset {
+    pub(in squashfs) fn block_position(&self) -> ImageOffset {
         todo!()
     }
 
@@ -86,10 +86,10 @@ impl BlockKey {
     }
 }
 
-/// Produced by: DataCache::fetch. Users: BlockHold::bytes.
+/// Produced by: DataCache::fetch. Users: BlockHold::decoded_bytes.
 struct CachedBlock {
     key: BlockKey,
-    bytes: Vec<u8>,
+    decoded_bytes: Vec<u8>,
 }
 
 impl CachedBlock {
@@ -98,8 +98,8 @@ impl CachedBlock {
         todo!()
     }
 
-    /// Caller: BlockHold::bytes. Callee: none.
-    fn bytes(&self) -> &[u8] {
+    /// Caller: BlockHold::decoded_bytes. Callee: none.
+    fn decoded_bytes(&self) -> &[u8] {
         todo!()
     }
 }
@@ -111,8 +111,8 @@ pub(in squashfs) struct BlockHold<'a> {
 }
 
 impl BlockHold<'_> {
-    /// Caller: inode::read_page_async. Callee: CachedBlock::bytes.
-    pub(in squashfs) fn bytes(&self) -> &[u8] {
+    /// Caller: inode::read_page_async. Callee: CachedBlock::decoded_bytes.
+    pub(in squashfs) fn decoded_bytes(&self) -> &[u8] {
         todo!()
     }
 }
@@ -169,7 +169,7 @@ impl DataCache {
         todo!()
     }
 
-    /// Caller: StoredBlock::load. Callee: Image::read_exact_at, BlockKey::position,
+    /// Caller: StoredBlock::load. Callee: Image::read_exact_at, BlockKey::block_position,
     /// expected_len, CachedBlock::key, Decompressor::decompress.
     pub(in squashfs) fn fetch(
         &self,

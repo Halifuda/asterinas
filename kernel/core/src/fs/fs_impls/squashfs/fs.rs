@@ -38,7 +38,7 @@
 //!   |
 //!   +-> Image::open -- read_exact_at(0, 96) --> SuperBlock::decode
 //!   |        |                                  length -> magic -> version -> geometry
-//!   |        +- bytes_used <= device length ----+
+//!   |        +- stored_bytes <= device length --+
 //!   |
 //!   +-> Decompressor::new(compression_id)
 //!   |        ... side: codec backend is bound here once chosen
@@ -52,8 +52,8 @@
 //!   |        +- 8-byte index entries: length / strict increase / gap <= 8192 + 2
 //!   |        ... side: value blocks are not preloaded
 //!   |
-//!   +-> InodeRecord::read(root)      <-- proves the root is readable
-//!            +- MetadataCursor -> MetadataCache (decompress on demand)
+//!   +-> InodeRecord::read(root)      <-- resolves the root ref, proves it readable
+//!            +- MetadataReader -> MetadataCache (decompress on demand)
 //!   |
 //!   v
 //! Arc<Squashfs> (new_cyclic provides self_weak)
@@ -113,8 +113,8 @@ pub(in squashfs) struct Squashfs {
 }
 
 impl Squashfs {
-    /// Caller: fs_type::SquashfsType::create. Callee: Image::open, DataCache::new, IdTable::load,
-    /// Decompressor::new, MetadataCache::new, InodeCache::new, MetaIndex::new, InodeRecord::read.
+    /// Caller: SquashfsType::create. Callee: Image::open, Decompressor::new, MetadataCache::new,
+    /// DataCache::new, InodeCache::new, InodeRecord::read, MetadataRef::from_inode_ref.
     pub(in squashfs) fn open(device: Arc<dyn BlockDevice>) -> Result<Arc<Self>> {
         todo!()
     }

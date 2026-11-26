@@ -4,7 +4,9 @@
 //!
 //! A directory's content is a byte range of the directory table,
 //! opened with a run header and holding entries back to back.
-//! The range's length is the inode's record of it,
+//! The range starts at the position the directory inode states,
+//! resolved against the directory table's image position,
+//! and its length is the inode's record of it,
 //! and the walk ends there rather than at a terminator,
 //! so a truncated image shows up as a walk that cannot finish a record.
 //!
@@ -24,7 +26,7 @@ use super::{
     super::format::inode::{DirInode, InodeKind, InodeRef},
     decompress::Decompressor,
     image::Image,
-    metadata::MetadataCursor,
+    metadata::MetadataReader,
     metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
@@ -61,13 +63,14 @@ impl DirEntry {
 
 /// Produced by: DirCursor::new. Users: SquashfsInode::lookup_impl, readdir_impl.
 pub(in squashfs) struct DirCursor<'a> {
-    cursor: MetadataCursor<'a>,
+    reader: MetadataReader<'a>,
     remaining: usize,
     consumed: usize,
 }
 
 impl<'a> DirCursor<'a> {
-    /// Caller: SquashfsInode::lookup_impl, readdir_impl. Callee: DirHeader::decode.
+    /// Caller: SquashfsInode::lookup_impl, readdir_impl. Callee: DirHeader::decode,
+    /// MetadataRef::from_table_offset, MetadataReader::new.
     pub(in squashfs) fn new(
         image: &'a Image,
         cache: &'a MetadataCache,
@@ -78,13 +81,13 @@ impl<'a> DirCursor<'a> {
         todo!()
     }
 
-    /// Caller: SquashfsInode::readdir_impl. Callee: MetadataCursor::position.
+    /// Caller: SquashfsInode::readdir_impl. Callee: MetadataReader::position.
     pub(in squashfs) fn position(&self) -> usize {
         todo!()
     }
 
-    /// Caller: SquashfsInode::lookup_impl, readdir_impl. Callee: DirHeader::decode,
-    /// DirEntryPrefix::decode, MetadataCursor::read_exact, InodeKind::from_dir_entry_type.
+    /// Caller: lookup_impl, readdir_impl. Callee: DirHeader::decode, DirEntryHeader::decode,
+    /// InodeRef::from_parts, MetadataReader::read_exact, InodeKind::from_dir_entry_type.
     pub(in squashfs) fn next_entry(&mut self) -> Result<Option<DirEntry>> {
         todo!()
     }

@@ -15,7 +15,7 @@
 //!   |
 //!   v
 //! record().file() -> (&RegInode, block list start)
-//!   |  assert fragment == NO_FRAGMENT_MARKER (this build's boundary)
+//!   |  assert fragment_index == NO_FRAGMENT_MARKER (this build's boundary)
 //!   v
 //! block = idx * PAGE_SIZE / block_size ; in_page = idx * PAGE_SIZE % block_size
 //!   |  (mount guarantees PAGE_SIZE <= block_size, so a page never spans two blocks)
@@ -65,14 +65,14 @@
 //! # Where this layer sits
 //!
 //! ```text
-//!   image bytes          bounded by bytes_used
+//!   image bytes          bounded by stored_bytes
 //!        |  Image::read_exact_at
 //!        v
 //!   metadata block       decompressed once, then cached
-//!        |  MetadataCursor
+//!        |  MetadataReader
 //!        v
-//!   metadata stream      a position plus bytes crossing block boundaries
-//!        |  InodeRecord, DirCursor, BlockListCursor, IdTable
+//!   metadata stream      a ref plus bytes crossing block boundaries
+//!        |  InodeRecord, DirCursor, BlockListCursor, IdTable, XattrIdTable
 //!        v
 //!   validated value      record, entry, data block, or id
 //!        |  super::impl_for_vfs
@@ -98,14 +98,17 @@
 //! | `image` | [`Image`](image::Image), the opened image and the bound every read obeys |
 //! | `inode_record` | Reading an inode record out of the metadata stream |
 //! | `meta_index` | The index of a large file's block list, which shortens the walk to one block |
-//! | `metadata` | Positions in a metadata stream and reads that cross blocks |
+//! | `metadata` | Metadata refs and reads that cross block boundaries |
 //! | `metadata_cache` | The cache of decompressed metadata blocks |
+//! | `xattr_id` | The xattr id table that names an inode's group of attributes |
 //!
 //! The dependency direction inside the layer is one way.
 //! `inode_record` and `dir` are built on `metadata`, `id` on `metadata_cache`,
 //! and `metadata` is built on `metadata_cache`, `decompress`, and the opened image in `image`,
 //! and `block_list` is built on `metadata`, `data_cache`, and the resolved points of
 //! `meta_index`.
+//! `xattr_id` is built on `metadata`, `metadata_cache`, the xattr records in `format`,
+//! and the opened image in `image`.
 //! Both caches are built on `decompress` and the opened image in `image`,
 //! and `meta_index` is built on `metadata`, the block list entries in `format`,
 //! and the opened image in `image`.
@@ -124,3 +127,4 @@ pub(in squashfs) mod inode_record;
 pub(in squashfs) mod meta_index;
 pub(in squashfs) mod metadata;
 pub(in squashfs) mod metadata_cache;
+pub(in squashfs) mod xattr_id;

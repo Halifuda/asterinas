@@ -15,8 +15,9 @@
 //! between the two.
 //!
 //! An entry states its two positions in different spaces: the list position is
-//! counted from the inode table and is resolved against the table's own image
-//! position, while the data position is absolute. That asymmetry is the format's.
+//! stored as a byte offset counted from the inode table and is resolved against
+//! the table's own image position when it is read back, while the data position
+//! is absolute. That asymmetry is the format's.
 //! The index stores numbers and image positions only, never an inode, an image, or
 //! a block list, so no slot can prolong the mount's life or close a cycle.
 //!
@@ -73,7 +74,7 @@ use super::{
     },
     decompress::Decompressor,
     image::Image,
-    metadata::MetadataPosition,
+    metadata::MetadataRef,
     metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
@@ -168,7 +169,7 @@ struct MetaSlot {
     /// Owner: MetaSlot. Users: locate, MetaIndexClaim::release.
     inode_number: u32,
     /// Owner: MetaSlot. Users: locate.
-    offset: usize,
+    first_scaled_block: usize,
     /// Owner: MetaSlot. Users: MetaIndexClaim::push, fill.
     skip: usize,
     /// Owner: MetaSlot. Users: locate, acquire, MetaIndexClaim::release.
@@ -188,26 +189,26 @@ struct MetaSlotPoints {
 /// Produced by: MetaEntry::record. Users: MetaIndexClaim::push, fill.
 struct MetaEntry {
     /// Owner: MetaEntry. Users: MetaIndexClaim::fill.
-    data_block: ImageOffset,
+    data_block_start: ImageOffset,
     /// Owner: MetaEntry. Users: MetaEntry::position.
-    index_block: u32,
+    inode_table_offset: u32,
     /// Owner: MetaEntry. Users: MetaEntry::position.
-    offset: u16,
+    in_block_offset: u16,
 }
 
 impl MetaEntry {
-    /// Caller: MetaIndexClaim::fill, MetaIndexClaim::push. Callee: MetadataPosition::block_start.
+    /// Caller: MetaIndexClaim::fill, MetaIndexClaim::push. Callee: MetadataRef::block_position.
     fn record(
-        position: MetadataPosition,
-        data_block: ImageOffset,
+        position: MetadataRef,
+        data_block_start: ImageOffset,
         inode_table_start: ImageOffset,
     ) -> Option<Self> {
-        debug_assert!(position.block_start() >= inode_table_start);
+        debug_assert!(position.block_position() >= inode_table_start);
         todo!()
     }
 
-    /// Caller: MetaIndexClaim::fill. Callee: MetadataPosition::new.
-    fn position(&self, inode_table_start: ImageOffset) -> MetadataPosition {
+    /// Caller: MetaIndexClaim::fill. Callee: MetadataRef::from_table_offset.
+    fn position(&self, inode_table_start: ImageOffset) -> MetadataRef {
         todo!()
     }
 }
@@ -215,27 +216,27 @@ impl MetaEntry {
 /// Produced by: MetaIndex::position, MetaIndexClaim::fill. Users: BlockListCursor::new.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct MetaIndexPosition {
-    /// Owner: MetaIndexPosition. Users: block.
-    block: usize,
-    /// Owner: MetaIndexPosition. Users: block_list.
-    block_list: MetadataPosition,
-    /// Owner: MetaIndexPosition. Users: data_block.
-    data_block: ImageOffset,
+    /// Owner: MetaIndexPosition. Users: data_block_index.
+    data_block_index: usize,
+    /// Owner: MetaIndexPosition. Users: block_list_position.
+    block_list_position: MetadataRef,
+    /// Owner: MetaIndexPosition. Users: data_block_start.
+    data_block_start: ImageOffset,
 }
 
 impl MetaIndexPosition {
     /// Caller: BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn block(&self) -> usize {
+    pub(in squashfs) fn data_block_index(&self) -> usize {
         todo!()
     }
 
     /// Caller: BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn block_list(&self) -> MetadataPosition {
+    pub(in squashfs) fn block_list_position(&self) -> MetadataRef {
         todo!()
     }
 
     /// Caller: BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn data_block(&self) -> ImageOffset {
+    pub(in squashfs) fn data_block_start(&self) -> ImageOffset {
         todo!()
     }
 }
@@ -243,36 +244,36 @@ impl MetaIndexPosition {
 /// Produced by: BlockListStart::new. Users: MetaIndex::position, BlockListCursor::new.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct BlockListStart {
-    /// Owner: BlockListStart. Users: blocks.
-    blocks: usize,
-    /// Owner: BlockListStart. Users: position.
-    position: MetadataPosition,
-    /// Owner: BlockListStart. Users: data_block.
-    data_block: ImageOffset,
+    /// Owner: BlockListStart. Users: block_count.
+    block_count: usize,
+    /// Owner: BlockListStart. Users: block_list_position.
+    block_list_position: MetadataRef,
+    /// Owner: BlockListStart. Users: data_block_start.
+    data_block_start: ImageOffset,
 }
 
 impl BlockListStart {
     /// Caller: inode::read_page_async. Callee: none.
     pub(in squashfs) fn new(
-        blocks: usize,
-        position: MetadataPosition,
-        data_block: ImageOffset,
+        block_count: usize,
+        block_list_position: MetadataRef,
+        data_block_start: ImageOffset,
     ) -> Self {
         todo!()
     }
 
     /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn blocks(&self) -> usize {
+    pub(in squashfs) fn block_count(&self) -> usize {
         todo!()
     }
 
     /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn position(&self) -> MetadataPosition {
+    pub(in squashfs) fn block_list_position(&self) -> MetadataRef {
         todo!()
     }
 
     /// Caller: MetaIndex::position, BlockListCursor::new. Callee: none.
-    pub(in squashfs) fn data_block(&self) -> ImageOffset {
+    pub(in squashfs) fn data_block_start(&self) -> ImageOffset {
         todo!()
     }
 }
@@ -296,7 +297,7 @@ impl MetaIndexClaim<'_> {
     }
 
     /// Caller: MetaIndex::position. Callee: MetaEntry::record, position,
-    /// MetadataCursor::read_exact.
+    /// MetadataReader::read_exact.
     fn fill(
         &self,
         block_list: &BlockListStart,

@@ -24,30 +24,30 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use super::{super::format::superblock::ImageOffset, decompress::Decompressor, image::Image};
 use crate::prelude::*;
 
-/// Produced by: MetadataCache::fetch. Users: MetadataCursor::read_exact.
+/// Produced by: MetadataCache::fetch. Users: MetadataReader::read_exact.
 pub(super) struct MetadataBlock {
-    position: ImageOffset,
-    bytes: Vec<u8>,
+    block_position: ImageOffset,
+    decoded_bytes: Vec<u8>,
 }
 
 impl MetadataBlock {
-    /// Caller: MetadataCursor::read_exact. Callee: none.
-    pub(super) fn position(&self) -> ImageOffset {
+    /// Caller: MetadataReader::read_exact. Callee: none.
+    pub(super) fn block_position(&self) -> ImageOffset {
         todo!()
     }
 
-    /// Caller: MetadataCursor::read_exact. Callee: none.
-    pub(super) fn bytes(&self) -> &[u8] {
+    /// Caller: MetadataReader::read_exact. Callee: none.
+    pub(super) fn decoded_bytes(&self) -> &[u8] {
         todo!()
     }
 
-    /// Caller: MetadataCursor::read_exact. Callee: none.
-    pub(super) fn contains_offset(&self, offset: usize) -> bool {
+    /// Caller: MetadataReader::read_exact. Callee: none.
+    pub(super) fn contains_offset(&self, in_block_offset: usize) -> bool {
         todo!()
     }
 }
 
-/// Owner: fs::Squashfs. Users: MetadataCursor, DirCursor, BlockListCursor.
+/// Owner: fs::Squashfs. Users: MetadataReader, DirCursor, BlockListCursor.
 pub(in squashfs) struct MetadataCache {
     blocks: Mutex<BTreeMap<ImageOffset, Arc<MetadataBlock>>>,
 }
@@ -58,12 +58,12 @@ impl MetadataCache {
         todo!()
     }
 
-    /// Caller: MetadataCursor::read_exact, IdTable::value. Callee: Decompressor::decompress,
+    /// Caller: MetadataReader::read_exact, IdTable::value. Callee: Decompressor::decompress,
     /// MetadataBlockHeader::decode.
     pub(super) fn fetch(
         &self,
         image: &Image,
-        position: ImageOffset,
+        block_position: ImageOffset,
         decompressor: &Decompressor,
     ) -> Result<Arc<MetadataBlock>> {
         todo!()

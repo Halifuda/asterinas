@@ -5,6 +5,7 @@
 //! The superblock is the only record a mount reads before it trusts anything else.
 //! It states the magic word, the version, the block size and its logarithm,
 //! the position and length of every table, and the reference to the root inode.
+//! The root reference is counted from the inode table's image position, not from zero.
 //! Those fields constrain each other:
 //! the block size is a power of two that its own logarithm states,
 //! no block may be smaller than a page, the tables must not overlap,
@@ -17,18 +18,23 @@
 //! The one relation the record cannot state about itself,
 //! that the image claims no more bytes than the device holds,
 //! is checked when the image is opened.
+//!
+//! The record is decoded field by field, and the root reference becomes two integers,
+//! so this type carries no `repr(C)` or `Pod`.
 
 #![expect(unused_variables, reason = "every body here is still `todo!()`")]
 #![short_vis_path::add(squashfs)]
 
 use super::inode::InodeRef;
 
-/// Users: Image, MetadataPosition, StoredBlock, MetaEntry, IdTable.
+/// Users: Image, MetadataRef, StoredBlock, MetaEntry, IdTable.
 pub(in squashfs) type ImageOffset = u64;
 
+/// Users: read::xattr_id::XattrIdTable::load.
+pub(in squashfs) const NO_TABLE_START: ImageOffset = ImageOffset::MAX;
+
 /// Produced by: SuperBlock::decode. Users: Image, IdTable::load, InodeRecord::read.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod)]
+#[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct SuperBlock {
     /// Owner: SuperBlock. Users: decode.
     magic: u32,
@@ -54,8 +60,8 @@ pub(in squashfs) struct SuperBlock {
     minor: u16,
     /// Owner: SuperBlock. Users: root_inode.
     root_inode: InodeRef,
-    /// Owner: SuperBlock. Users: bytes_used.
-    bytes_used: u64,
+    /// Owner: SuperBlock. Users: stored_bytes.
+    stored_bytes: u64,
     /// Owner: SuperBlock. Users: id_table_start.
     id_table_start: ImageOffset,
     /// Owner: SuperBlock. Users: xattr_id_table_start.
@@ -93,7 +99,7 @@ impl SuperBlock {
     }
 
     /// Caller: read::image::Image::read_exact_at. Callee: none.
-    pub(in squashfs) fn bytes_used(&self) -> u64 {
+    pub(in squashfs) fn stored_bytes(&self) -> u64 {
         todo!()
     }
 

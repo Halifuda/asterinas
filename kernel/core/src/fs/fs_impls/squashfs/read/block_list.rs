@@ -35,14 +35,14 @@ use super::{
     decompress::Decompressor,
     image::Image,
     meta_index::{BlockListStart, MetaIndexPosition},
-    metadata::MetadataCursor,
+    metadata::MetadataReader,
     metadata_cache::MetadataCache,
 };
 use crate::prelude::*;
 
 /// Produced by: BlockListCursor::next_block. Users: inode::read_page_async.
 pub(in squashfs) struct StoredBlock {
-    image_position: ImageOffset,
+    data_block_start: ImageOffset,
     stored_len: usize,
     expected_len: usize,
     is_uncompressed: bool,
@@ -50,7 +50,7 @@ pub(in squashfs) struct StoredBlock {
 
 impl StoredBlock {
     /// Caller: StoredBlock::load. Callee: none.
-    pub(in squashfs) fn image_position(&self) -> ImageOffset {
+    pub(in squashfs) fn data_block_start(&self) -> ImageOffset {
         todo!()
     }
 
@@ -82,8 +82,8 @@ impl StoredBlock {
 
 /// Produced by: BlockListCursor::new. Users: inode::read_page_async.
 pub(in squashfs) struct BlockListCursor<'a> {
-    cursor: MetadataCursor<'a>,
-    image_position: ImageOffset,
+    reader: MetadataReader<'a>,
+    data_block_position: ImageOffset,
     blocks_left: usize,
     block_size: usize,
     last_expected_len: usize,
@@ -91,7 +91,7 @@ pub(in squashfs) struct BlockListCursor<'a> {
 
 impl<'a> BlockListCursor<'a> {
     /// Caller: inode::read_page_async. Callee: RegInode::data_block_count,
-    /// last_block_expected_len.
+    /// last_block_expected_len, MetaIndexPosition::block_list_position, MetadataReader::new.
     pub(in squashfs) fn new(
         image: &'a Image,
         cache: &'a MetadataCache,
@@ -105,7 +105,7 @@ impl<'a> BlockListCursor<'a> {
 
     /// Caller: inode::read_page_async. Callee: BlockListEntry::decode.
     pub(in squashfs) fn next_block(&mut self) -> Result<Option<StoredBlock>> {
-        // Advance the running position by the stored length; the last entry uses
+        // Advance `data_block_position` by the stored length; the last entry uses
         // the record's derived length, every earlier one the block size.
         todo!()
     }

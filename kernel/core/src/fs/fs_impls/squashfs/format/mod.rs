@@ -20,15 +20,27 @@
 //! a decode either hands back a checked value or returns `None`,
 //! so an image's bytes never reach a reader as a half-valid structure.
 //!
-//! Multi-byte fields are little endian on the image,
-//! and are converted with `from_le_bytes` on the way in.
+//! Multi-byte fields are little endian on the image.
+//! A record that transforms its fields converts them with `from_le_bytes` on the way in;
+//! a `Pod` record's bytes are already its fields, so it also relies on the host being
+//! little endian, which every supported target is.
 //! A record's `decode` compares the length first,
 //! then the record's own magic word if it has one,
 //! then the field ranges the format fixes.
 //!
+//! A record whose fields need no transformation keeps a memory layout equal to the image's,
+//! so it carries `repr(C)` and `Pod` and its bytes are the record.
+//! A record whose fields do need one (such as `InodeRef`, `XattrRef`, `SuperBlock`,
+//! `XattrIdEntry`, `MetadataBlockHeader`, or `BlockListEntry`) decodes field by
+//! field and has no byte-identical form of its own.
+//! A record's byte layout is stated once:
+//! a `Pod` record's by its field declarations,
+//! a transforming record's by the named layout constants its `decode` uses,
+//! and no second struct restates the same offsets.
+//!
 //! Every caller hands `decode` a byte range of exactly the record's width.
 //! The readers guarantee that by fetching a record's bytes whole,
-//! through the metadata cursor or from the image,
+//! through the metadata reader or from the image,
 //! so a range too short to hold the record never reaches a `decode`,
 //! and the `None` a `decode` returns is always the record's own invalidity.
 //! That is what lets a short read be reported as an I/O error,
@@ -49,8 +61,9 @@
 //! |---|---|
 //! | `block` | The length-and-compression word in front of every stored block |
 //! | `dir` | Directory headers and directory entries |
-//! | `inode` | The 48-bit inode reference and the inode record bodies |
+//! | `inode` | The inode reference, the record header, and the inode record bodies |
 //! | `superblock` | The 96-byte superblock and the geometry it states |
+//! | `xattr` | The xattr id table, its id entries, and the attribute entries and values |
 
 #![short_vis_path::add(squashfs)]
 
@@ -58,3 +71,4 @@ pub(in squashfs) mod block;
 pub(in squashfs) mod dir;
 pub(in squashfs) mod inode;
 pub(in squashfs) mod superblock;
+pub(in squashfs) mod xattr;

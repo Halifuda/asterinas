@@ -5,7 +5,7 @@
 //! A directory's content is a sequence of runs.
 //! Each run opens with a header that names at most 256 entries,
 //! the inode each entry's number is counted from,
-//! and the metadata position where that first inode lives.
+//! and the inode table offset of the block that holds that first inode.
 //! The entries follow the header back to back,
 //! each a fixed prefix plus a name of its own length, with no padding and no terminator.
 //!
@@ -29,11 +29,11 @@ pub(in squashfs) const MAX_NAME_LEN: usize = 256;
 #[derive(Clone, Copy, Debug, Pod)]
 pub(in squashfs) struct DirHeader {
     /// Owner: DirHeader. Users: entry_count.
-    count: u32,
-    /// Owner: DirHeader. Users: start_block.
-    start_block: u32,
-    /// Owner: DirHeader. Users: inode_number.
-    inode_number: u32,
+    count_minus_one: u32,
+    /// Owner: DirHeader. Users: inode_table_offset.
+    inode_table_offset: u32,
+    /// Owner: DirHeader. Users: first_entry_inode_number.
+    first_entry_inode_number: u32,
 }
 
 impl DirHeader {
@@ -50,32 +50,34 @@ impl DirHeader {
         todo!()
     }
 
-    /// Caller: read::dir::DirCursor::new. Callee: none.
-    pub(in squashfs) fn start_block(&self) -> u32 {
+    /// Caller: read::dir::DirCursor::new, next_entry. Callee: none.
+    pub(in squashfs) fn inode_table_offset(&self) -> u32 {
         todo!()
     }
 
     /// Caller: read::dir::DirCursor::next_entry. Callee: none.
-    pub(in squashfs) fn inode_number(&self) -> u32 {
+    pub(in squashfs) fn first_entry_inode_number(&self) -> u32 {
         todo!()
     }
 }
 
-/// Produced by: DirEntryPrefix::decode. Users: read::dir::DirCursor::next_entry.
+const _: () = assert!(size_of::<DirHeader>() == DirHeader::SIZE);
+
+/// Produced by: DirEntryHeader::decode. Users: read::dir::DirCursor::next_entry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod)]
-pub(in squashfs) struct DirEntryPrefix {
-    /// Owner: DirEntryPrefix. Users: offset.
-    offset: u16,
-    /// Owner: DirEntryPrefix. Users: inode_number.
-    inode_number: i16,
-    /// Owner: DirEntryPrefix. Users: entry_type.
+pub(in squashfs) struct DirEntryHeader {
+    /// Owner: DirEntryHeader. Users: in_block_offset.
+    in_block_offset: u16,
+    /// Owner: DirEntryHeader. Users: inode_number_delta.
+    inode_number_delta: i16,
+    /// Owner: DirEntryHeader. Users: entry_type.
     entry_type: u16,
-    /// Owner: DirEntryPrefix. Users: name_len.
+    /// Owner: DirEntryHeader. Users: name_len.
     name_len_minus_one: u16,
 }
 
-impl DirEntryPrefix {
+impl DirEntryHeader {
     /// Users: read::dir::DirCursor::next_entry.
     pub(in squashfs) const SIZE: usize = 8;
 
@@ -90,12 +92,12 @@ impl DirEntryPrefix {
     }
 
     /// Caller: read::dir::DirCursor::next_entry. Callee: none.
-    pub(in squashfs) fn offset(&self) -> u16 {
+    pub(in squashfs) fn in_block_offset(&self) -> u16 {
         todo!()
     }
 
     /// Caller: read::dir::DirCursor::next_entry. Callee: none.
-    pub(in squashfs) fn inode_number(&self) -> i16 {
+    pub(in squashfs) fn inode_number_delta(&self) -> i16 {
         todo!()
     }
 
@@ -104,3 +106,5 @@ impl DirEntryPrefix {
         todo!()
     }
 }
+
+const _: () = assert!(size_of::<DirEntryHeader>() == DirEntryHeader::SIZE);

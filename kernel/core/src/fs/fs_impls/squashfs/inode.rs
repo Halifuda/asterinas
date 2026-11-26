@@ -26,7 +26,8 @@
 //!   +- ... side: bad entry -> lookup fails with EIO, a listing truncates silently
 //!   |
 //!   v
-//! entry matched: InodeRef = <start_block, offset>, ino = base + i16 delta, kind
+//! entry matched: InodeRef = <inode_table_offset, in_block_offset>, ino, kind
+//!   |  ino = the run header's first inode number + the entry's signed delta
 //!   |
 //!   v
 //! InodeCache::lookup(ino)
@@ -34,7 +35,10 @@
 //!   +- ... side: hit -> reuse the same inode object (flock and fsnotify state stay whole)
 //!   |
 //!   v
-//! InodeRecord::read(MetadataCursor, &super_block)
+//! MetadataRef::from_inode_ref(entry.inode_ref(), inode_table_start) -> MetadataReader::new
+//!   |
+//!   v
+//! InodeRecord::read(reader, &super_block)
 //!   |      +- inode table blocks come from MetadataCache (decompressed once)
 //!   v
 //! Arc::new_cyclic(SquashfsInode)
@@ -121,7 +125,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Caller: Inode::metadata via impl_for_vfs. Callee: InodeRecord::base, IdTable::value.
+    /// Caller: Inode::metadata via impl_for_vfs. Callee: InodeRecord::header, IdTable::value.
     pub(in squashfs) fn metadata_impl(&self) -> Result<Metadata> {
         todo!()
     }
@@ -136,7 +140,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Caller: Inode::mode via impl_for_vfs. Callee: InodeRecord::base.
+    /// Caller: Inode::mode via impl_for_vfs. Callee: InodeRecord::header.
     pub(in squashfs) fn mode_impl(&self) -> Result<InodeMode> {
         todo!()
     }
@@ -166,7 +170,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Caller: Inode::atime via impl_for_vfs. Callee: InodeRecord::base.
+    /// Caller: Inode::atime via impl_for_vfs. Callee: InodeRecord::header.
     pub(in squashfs) fn atime_impl(&self) -> Duration {
         todo!()
     }
@@ -176,7 +180,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Caller: Inode::mtime via impl_for_vfs. Callee: InodeRecord::base.
+    /// Caller: Inode::mtime via impl_for_vfs. Callee: InodeRecord::header.
     pub(in squashfs) fn mtime_impl(&self) -> Duration {
         todo!()
     }
@@ -186,7 +190,7 @@ impl SquashfsInode {
         todo!()
     }
 
-    /// Caller: Inode::ctime via impl_for_vfs. Callee: InodeRecord::base.
+    /// Caller: Inode::ctime via impl_for_vfs. Callee: InodeRecord::header.
     pub(in squashfs) fn ctime_impl(&self) -> Duration {
         todo!()
     }
@@ -202,7 +206,7 @@ impl SquashfsInode {
     }
 
     /// Caller: Inode::lookup via impl_for_vfs. Callee: DirCursor::new, next_entry,
-    /// InodeCache::lookup, insert, InodeRecord::read.
+    /// InodeRecord::read, InodeCache::lookup, insert, MetadataRef::from_inode_ref.
     pub(in squashfs) fn lookup_impl(&self, name: &str) -> Result<Arc<dyn Inode>> {
         todo!()
     }
@@ -249,16 +253,16 @@ impl SquashfsInode {
 
 impl PageCacheBackend for SquashfsInode {
     /// Caller: the page cache. Callee: SquashfsInode::record, InodeRecord::file,
-    /// RegInode::fragment, MetaIndex::position, BlockListCursor::new, StoredBlock::load.
+    /// RegInode::fragment_index, MetaIndex::position, BlockListCursor::new, StoredBlock::load.
     fn read_page_async(
         &self,
         idx: usize,
         locked_page: LockedCachePage,
         io_batch: &mut IoBatch,
     ) -> Result<()> {
-        let (file, _block_list) = self.record().file();
+        let (file, _block_list_position) = self.record().file();
         debug_assert_eq!(
-            file.fragment(),
+            file.fragment_index(),
             RegInode::NO_FRAGMENT_MARKER,
             "a page is filled only for a file whose tail is in the data area"
         );

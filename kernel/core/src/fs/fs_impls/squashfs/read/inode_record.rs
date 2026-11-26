@@ -7,7 +7,7 @@
 //! it turns the bytes of a header or a body into a value,
 //! and knows nothing of the stream around them.
 //! This module assembles those records into one [`InodeRecord`]:
-//! it follows the metadata stream from an inode reference,
+//! it follows the metadata stream from the position its caller resolved,
 //! reads the 16-byte header every inode has,
 //! and then reads the body the header's type word selects.
 //! The body's width is what decides where the record's variable-length tail,
@@ -24,10 +24,10 @@
 
 use super::{
     super::format::{
-        inode::{BaseInode, DirInode, InodeKind, RegInode},
+        inode::{DirInode, InodeHeader, InodeKind, RegInode},
         superblock::SuperBlock,
     },
-    metadata::{MetadataCursor, MetadataPosition},
+    metadata::{MetadataReader, MetadataRef},
 };
 use crate::prelude::*;
 
@@ -36,28 +36,28 @@ pub(in squashfs) enum InodeBody {
     /// Owner: InodeBody. Users: InodeRecord::file.
     File {
         /// Owner: InodeBody. Users: InodeRecord::file.
-        inode: RegInode,
+        reg_inode: RegInode,
         /// Owner: InodeBody. Users: InodeRecord::file.
-        block_list: MetadataPosition,
+        block_list_position: MetadataRef,
     },
     /// Owner: InodeBody. Users: InodeRecord::body.
     Dir {
         /// Owner: InodeBody. Users: InodeRecord::body.
-        inode: DirInode,
+        dir_inode: DirInode,
     },
 }
 
 /// Produced by: InodeRecord::read. Users: SquashfsInode, fs::Squashfs.
 pub(in squashfs) struct InodeRecord {
-    base: BaseInode,
+    header: InodeHeader,
     body: InodeBody,
 }
 
 impl InodeRecord {
-    /// Caller: fs::Squashfs::open, SquashfsInode::lookup_impl. Callee: BaseInode::decode,
+    /// Caller: fs::Squashfs::open, SquashfsInode::lookup_impl. Callee: InodeHeader::decode,
     /// RegInode::decode, DirInode::decode, InodeKind::from_inode_type.
     pub(in squashfs) fn read(
-        cursor: &mut MetadataCursor<'_>,
+        reader: &mut MetadataReader<'_>,
         super_block: &SuperBlock,
     ) -> Result<Self> {
         todo!()
@@ -65,7 +65,7 @@ impl InodeRecord {
 
     /// Caller: SquashfsInode::metadata_impl, mode_impl, atime_impl, mtime_impl,
     /// ctime_impl. Callee: none.
-    pub(in squashfs) fn base(&self) -> &BaseInode {
+    pub(in squashfs) fn header(&self) -> &InodeHeader {
         todo!()
     }
 
@@ -75,17 +75,17 @@ impl InodeRecord {
     }
 
     /// Caller: SquashfsInode::read_page_async, size_impl. Callee: none.
-    pub(in squashfs) fn file(&self) -> (&RegInode, MetadataPosition) {
+    pub(in squashfs) fn file(&self) -> (&RegInode, MetadataRef) {
         todo!()
     }
 
-    /// Caller: SquashfsInode::type_impl. Callee: BaseInode::inode_type.
+    /// Caller: SquashfsInode::type_impl. Callee: InodeHeader::inode_type.
     pub(in squashfs) fn kind(&self) -> InodeKind {
         todo!()
     }
 
     /// Caller: SquashfsInode::ino_impl, fs::Squashfs::root_inode_impl.
-    /// Callee: BaseInode::inode_number.
+    /// Callee: InodeHeader::inode_number.
     pub(in squashfs) fn inode_number(&self) -> u64 {
         todo!()
     }

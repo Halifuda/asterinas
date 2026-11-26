@@ -16,7 +16,8 @@
 #![expect(unused_variables, reason = "every body here is still `todo!()`")]
 #![short_vis_path::add(squashfs)]
 
-/// Users: MetadataCache::fetch, MetaIndex::fill, MetadataPosition::new.
+/// Users: MetadataCache::fetch, MetaIndexClaim::fill, MetadataBlockHeader::decode,
+/// MetadataRef::new.
 pub(in squashfs) const METADATA_BLOCK_SIZE: usize = 8192;
 
 /// Users: MetadataBlockHeader::decode.
@@ -25,7 +26,8 @@ const METADATA_UNCOMPRESSED_BIT: u16 = 1 << 15;
 /// Users: MetadataBlockHeader::decode.
 const METADATA_STORED_LEN_MASK: u16 = !METADATA_UNCOMPRESSED_BIT;
 
-/// Produced by: MetadataBlockHeader::decode. Users: MetadataCache::fetch, MetaIndex::fill.
+/// Produced by: MetadataBlockHeader::decode, which rejects a stored length of 0 or above
+/// METADATA_BLOCK_SIZE. Users: MetadataCache::fetch, MetaIndexClaim::fill.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct MetadataBlockHeader {
     /// Owner: MetadataBlockHeader. Users: stored_len.
@@ -35,10 +37,10 @@ pub(in squashfs) struct MetadataBlockHeader {
 }
 
 impl MetadataBlockHeader {
-    /// Users: MetadataCache::fetch, MetaIndex::fill.
+    /// Users: MetadataCache::fetch, MetaIndexClaim::fill.
     pub(in squashfs) const SIZE: usize = 2;
 
-    /// Caller: MetadataCache::fetch, MetaIndex::fill. Callee: none.
+    /// Caller: MetadataCache::fetch, MetaIndexClaim::fill. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
@@ -55,7 +57,7 @@ impl MetadataBlockHeader {
 }
 
 /// Produced by: BlockListEntry::decode. Users: BlockListCursor::next_block,
-/// MetaIndex::fill.
+/// MetaIndexClaim::fill.
 #[derive(Clone, Copy, Debug)]
 pub(in squashfs) struct BlockListEntry {
     /// Owner: BlockListEntry. Users: stored_len.
@@ -65,7 +67,7 @@ pub(in squashfs) struct BlockListEntry {
 }
 
 impl BlockListEntry {
-    /// Users: MetaIndex::fill.
+    /// Users: MetaIndexClaim::fill.
     pub(in squashfs) const SIZE: usize = 4;
 
     /// Users: BlockListEntry::decode.
@@ -74,7 +76,7 @@ impl BlockListEntry {
     /// Users: BlockListEntry::decode.
     const UNCOMPRESSED_BIT: u32 = 1 << Self::STORED_LEN_BITS;
 
-    /// Caller: BlockListCursor::next_block, MetaIndex::fill. Callee: none.
+    /// Caller: BlockListCursor::next_block, MetaIndexClaim::fill. Callee: none.
     pub(in squashfs) fn decode(bytes: &[u8]) -> Option<Self> {
         todo!()
     }
